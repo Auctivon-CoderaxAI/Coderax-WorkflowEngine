@@ -417,6 +417,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
+    // Report events are synchronous to the adapter but their persistence writes
+    // are asynchronous. Keep them visible to shutdown so a Mongo client is never
+    // closed while a fenced checkpoint write is still in flight.
+    const pendingWrites = new Set<Promise<void>>();
+    const trackWrite = (operation: Promise<unknown>): void => {
+      const tracked = operation.then(
+        () => undefined,
+        () => undefined,
+      ).finally(() => {
+        pendingWrites.delete(tracked);
+      });
+      pendingWrites.add(tracked);
+    };
     let text = '';
     let visible = text;
     const emitText = (next: string, replace = false): void => {
@@ -432,11 +445,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'running';
         else steps.push({ id: event.stepId, title: event.title, state: 'running' });
         publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
-        });
+        trackWrite(
+          deps.tasks.updateFenced({
+            taskId,
+            token,
+            patch: { steps, updatedAt: deps.clock.iso() },
+          }),
+        );
         return;
       }
       if (event.type === 'step.completed') {
@@ -444,15 +459,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'completed';
         completed.push(event.stepId);
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            checkpoint: { completedSteps: [...completed], text: visible },
-            updatedAt: deps.clock.iso(),
-          },
-        });
+        trackWrite(
+          deps.tasks.updateFenced({
+            taskId,
+            token,
+            patch: {
+              steps,
+              checkpoint: { completedSteps: [...completed], text: visible },
+              updatedAt: deps.clock.iso(),
+            },
+          }),
+        );
         return;
       }
       if (event.type === 'text.delta' || event.type === 'text.replace') {
@@ -520,6 +537,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
       report,
     });
+    // A report can have started a checkpoint write while the adapter was
+    // returning. Drain those writes before the terminal settle or shutdown.
+    await Promise.allSettled([...pendingWrites]);
     if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
 

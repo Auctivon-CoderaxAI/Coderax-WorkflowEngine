@@ -5,9 +5,9 @@
 - Repository: `Auctivon-CoderaxAI/Coderax-WorkflowEngine`
 - Base: `main` at `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd`
 - Branch: `ci/permanent-quality-gates`
-- Exact verified code head: `c6e022ea40122e47f3804cb825a0747a06404427`
-- Final branch head: the docs/record commit containing this file (docs-only
-  after the verified code head)
+- Exact verified head: the branch head at the time of each clean-lockfile run;
+  the remote SHA is recorded in the final handoff. Later docs-only commits do
+  not change the verified code.
 - Compare: https://github.com/Auctivon-CoderaxAI/Coderax-WorkflowEngine/compare/main...ci/permanent-quality-gates
 - The branch is 5 commits ahead and 0 behind. The parallel
   `ci/permanent-quality-gate` branch remains at `21015a7f7484dda8a6b9951e52782a8bd8921d01`
@@ -36,6 +36,11 @@ at the final branch head (a docs-only commit) with the same result.
 Gate manifest: 34 test files assigned, none unclaimed. The live gate forces
 `CODERAX_REQUIRE_MONGO=1`; with no URI it exits 1 with six explicit
 `CODERAX_TEST_MONGO_URI must name a reachable MongoDB` failures and zero skips.
+
+Shutdown stability: the fixed live suite was run 16 times consecutively after
+the drain change (plus the preceding 8-run check), with 6/6 passing every time.
+The change tracks fenced checkpoint writes in `execute()` and drains them before
+shutdown, so a Mongo client is not closed under an in-flight write.
 
 Additional cross-branch evidence: the durable-artifacts branch at
 `fd5edef2a2cfc83850fa43b19a813676c352bb92` ran its five real-Mongo concurrency

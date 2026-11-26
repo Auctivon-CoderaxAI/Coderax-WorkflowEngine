@@ -374,11 +374,15 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       await service.recoverInterrupted();
       return { url };
     },
-    stop: async () => {
-      await service.shutdown();
-      await server.close();
-      await persistence.close();
-    },
+            stop: async () => {
+          await service.shutdown();
+          // Aborting controllers wakes running jobs; close persistence only after
+          // their final writes settle. Otherwise a shutdown can race a Mongo
+          // operation and surface a spurious MongoClientClosedError.
+          await scheduler.idle();
+          await server.close();
+          await persistence.close();
+        },
   };
 }
 
