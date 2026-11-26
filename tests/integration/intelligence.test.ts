@@ -8,7 +8,7 @@ import { startTestApp, waitFor } from '../helpers.js';
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
 /**
- * A scripted zero-cost model. It answers the plan prompt, acts once with the real
+ * A scripted zero-cost model. It answers the plan prompt, acts with the real
  * fs.write tool, then finishes. It is a test double for the provider wire, not a
  * mock of the engine: the tool, permission store, fence and task record all run.
  */
@@ -22,7 +22,7 @@ function scriptedGateway() {
       if (request.prompt.includes('Return ONLY a JSON array')) {
         return { text: '["Write the report", "Confirm completion"]', usage: { inputTokens: 5, outputTokens: 5 } };
       }
-      if (request.prompt.includes('Current step (step-2):')) return { text: '{"final":"Confirmed."}' };
+      if (request.prompt.includes('Current step (step-2):') && request.prompt.includes('Tool fs.write succeeded')) return { text: '{"final":"Confirmed."}' };
       if (!request.prompt.includes('Tool fs.write succeeded')) {
         return {
           text: JSON.stringify({
@@ -80,6 +80,21 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
       awaiting.generation,
     );
     assert.equal(resumed.ok && resumed.value.outcome, 'accepted');
+
+    // Step two requests the identical write. It needs its own owner decision.
+    const again = await waitFor(async () => {
+      const status = await started.app.service.task(principal, submitted.value.taskId);
+      return status.ok && status.value.state === 'awaiting_approval' &&
+        status.value.generation > awaiting.generation ? status.value : null;
+    });
+    const permissions = await started.app.service.permissions(principal, submitted.value.taskId);
+    assert.ok(permissions.ok);
+    const next = permissions.value.requests.find(entry => entry.decision === 'pending');
+    assert.ok(next);
+    assert.notEqual(next.requestId, request.requestId);
+    assert.ok((await started.app.service.decidePermission(principal, submitted.value.taskId,
+      { requestId: next.requestId, decision: 'approved' })).ok);
+    assert.ok((await started.app.service.resumeTask(principal, submitted.value.taskId, again.generation)).ok);
 
     const completed = await waitFor(async () => {
       const status = await started.app.service.task(principal, submitted.value.taskId);
