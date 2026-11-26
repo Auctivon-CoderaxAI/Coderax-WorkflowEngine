@@ -51,7 +51,7 @@ export type StagedArtifact = {
    * creating a second artifact, so history stays on one identity and a
    * concurrent edit is refused rather than overwritten.
    */
-  versionOf?: { artifactId: string; expectedVersion: number };
+  versionOf?: { artifactId: string; expectedVersion?: number };
 };
 
 /** One previously produced artifact of a document being revised. */
@@ -108,7 +108,7 @@ export type ProducedDeliverable = {
   document?: {
     model: StoredDocument;
     filename: string;
-    versionOf?: { artifactId: string; expectedVersion: number };
+    versionOf?: { artifactId: string; expectedVersion?: number };
   };
   /**
    * A software tree. The manifest names artifact ids, so the persistence adapter

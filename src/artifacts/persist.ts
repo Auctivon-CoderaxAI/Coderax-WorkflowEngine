@@ -120,7 +120,9 @@ export async function persistProduced(
     if (file.versionOf) {
       const appended = await input.artifacts.addVersion(input.principal, file.versionOf.artifactId, {
         ...request,
-        expectedVersion: file.versionOf.expectedVersion,
+        ...(file.versionOf.expectedVersion !== undefined
+          ? { expectedVersion: file.versionOf.expectedVersion }
+          : {}),
       });
       if (!appended.ok) return appended;
       return ok({ staged: file, descriptor: appended.value.artifact, created: false });

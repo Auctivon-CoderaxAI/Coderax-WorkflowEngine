@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';
 import { createFakeDatabase } from '../fakes/mongo.js';
-import { fakeGateway, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
+import { fakeGateway, OWNER_ID, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
+import { createArtifactToolkit } from '../../src/artifacts/toolkit.js';
+import { createDeliverableService } from '../../src/artifacts/deliver.js';
+import type { ArtifactService } from '../../src/artifacts/service.js';
 
 function client(url: string): CoderaxClient {
   return new CoderaxClient({ baseUrl: url, token: OWNER_TOKEN });
@@ -113,7 +116,9 @@ test('a deliverable is stored, revised by artifact id, versioned, restarted and 
         mode: 'cloud',
         version: 2,
       });
-      assert.equal(afterRestart.artifact.sha256, revisedDocx.sha256);
+      // `artifact` is the current descriptor; `version` is the one asked for.
+      assert.equal(afterRestart.version.version, 2);
+      assert.equal(afterRestart.version.sha256, revisedDocx.sha256);
       assert.ok(Buffer.from(afterRestart.contentBase64, 'base64').length > 0);
 
       // The other data-mode partition reports the artifact as absent.
@@ -306,6 +311,132 @@ test('a deliverable requires the owner token and validates its request', async (
       }),
       (error: unknown) => error instanceof CoderaxApiError && error.code === 'validation_failed',
     );
+  } finally {
+    await first.close();
+  }
+});
+
+test('an edit that fails after the output appends leaves the stored source on its old versions', async () => {
+  const first = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database: createFakeDatabase() },
+  });
+  try {
+    const api = client(first.url);
+    const created = await api.deliver({
+      kind: 'document',
+      mode: 'cloud',
+      filename: 'memo',
+      title: 'Memo',
+      blocks: BLOCKS,
+      formats: ['docx', 'markdown'],
+    });
+    const sourceId = created.source!.artifactId;
+    const docxId = created.artifacts.find((artifact) => artifact.filename === 'memo.docx')!.artifactId;
+    const originalDocx = created.artifacts.find((artifact) => artifact.filename === 'memo.docx')!;
+    const originalSource = JSON.parse(
+      Buffer.from(
+        (await api.downloadArtifact(sourceId, { mode: 'cloud' })).contentBase64,
+        'base64',
+      ).toString('utf8'),
+    ) as { outputs: Array<{ format: string; artifactId: string; version: number }> };
+
+    // The real durable service, with exactly one write refused: the source
+    // version. The output appends before it go through untouched, which is the
+    // interleaving this test is about.
+    const dependencies = first.app.dependencies;
+    const artifacts = Object.create(dependencies.artifactService) as ArtifactService;
+    const append = dependencies.artifactService.addVersion.bind(dependencies.artifactService);
+    artifacts.addVersion = async (principal, artifactId, request) => {
+      if (artifactId === sourceId) {
+        return {
+          ok: false as const,
+          code: 'storage_unavailable' as const,
+          detail: 'injected: the source write failed after the outputs were appended',
+          retryable: true,
+        };
+      }
+      return append(principal, artifactId, request);
+    };
+    const service = createDeliverableService({
+      toolkit: createArtifactToolkit(),
+      artifacts,
+      audit: dependencies.audit,
+      clock: dependencies.clock,
+      ids: dependencies.ids,
+      roots: {
+        private: dependencies.config.workspaces.privateRoot,
+        cloud: dependencies.config.workspaces.cloudRoot,
+      },
+    });
+
+    const failed = await service.deliver(
+      { ownerId: OWNER_ID, isOwner: true },
+      {
+        kind: 'document',
+        mode: 'cloud',
+        filename: 'memo',
+        title: 'Memo (revision that must not become visible)',
+        edits: [
+          { op: 'append', blocks: [{ type: 'paragraph', text: 'Written after the outputs were stored.' }] },
+        ],
+        formats: ['docx', 'markdown'],
+        base: { artifactId: sourceId, mode: 'cloud', expectedVersion: 1 },
+      },
+    );
+    if (failed.ok) throw new Error('the edit was expected to fail');
+    assert.equal(failed.code, 'storage_unavailable', failed.detail);
+
+    // The output really did get a new version before the failure...
+    const docxNow = await api.downloadArtifact(docxId, { mode: 'cloud' });
+    assert.equal(docxNow.version.version, 2);
+    assert.notEqual(docxNow.version.sha256, originalDocx.sha256);
+    assert.equal(
+      Buffer.from(docxNow.contentBase64, 'base64').subarray(0, 2).toString(),
+      'PK',
+      'the appended version is a real DOCX, not a placeholder',
+    );
+
+    // ...while the stored source is still version 1 and still names the old
+    // output versions, so nothing reads the orphaned append.
+    const sourceNow = await api.downloadArtifact(sourceId, { mode: 'cloud' });
+    assert.equal(sourceNow.version.version, 1);
+    const sourceBody = JSON.parse(
+      Buffer.from(sourceNow.contentBase64, 'base64').toString('utf8'),
+    ) as { outputs: Array<{ format: string; artifactId: string; version: number }> };
+    assert.deepEqual(
+      sourceBody.outputs.map((output) => [output.format, output.version]).sort(),
+      originalSource.outputs.map((output) => [output.format, output.version]).sort(),
+    );
+
+    // The failed edit created nothing and deleted nothing.
+    const listed = await api.artifacts({ mode: 'cloud' });
+    assert.equal(listed.artifacts.length, created.artifacts.length);
+    for (const artifact of created.artifacts) {
+      const current = listed.artifacts.find((entry) => entry.artifactId === artifact.artifactId);
+      assert.ok(current, `${artifact.filename} still exists`);
+    }
+
+    // The pointer never moved, so the same expected version wins a retry.
+    const retried = await api.deliver({
+      kind: 'document',
+      mode: 'cloud',
+      filename: 'memo',
+      title: 'Memo (retried)',
+      edits: [
+        { op: 'append', blocks: [{ type: 'paragraph', text: 'The retry after the failed write.' }] },
+      ],
+      formats: ['docx', 'markdown'],
+      base: { artifactId: sourceId, mode: 'cloud', expectedVersion: 1 },
+    });
+    assert.equal(retried.source!.version, 2);
+    const retriedSource = JSON.parse(
+      Buffer.from(
+        (await api.downloadArtifact(sourceId, { mode: 'cloud' })).contentBase64,
+        'base64',
+      ).toString('utf8'),
+    ) as { outputs: Array<{ format: string; version: number }> };
+    assert.ok(retriedSource.outputs.every((output) => output.version === 3));
   } finally {
     await first.close();
   }
