@@ -17,7 +17,7 @@ content-addressed bytes in the database the engine already uses.
 | --- | --- | --- |
 | Artifact descriptor | `artifact` collection | One authoritative row per artifact |
 | Immutable versions | `artifact_versions` collection | History is auditable; a version is never rewritten |
-| Content descriptor | `artifact_blobs` collection | Commit marker for one digest and its reference count |
+| Content descriptor | `artifact_blobs` collection | Commit marker, reference count and expiring read leases for one digest |
 | Content chunks | `artifact_chunks` collection | 1 MiB chunks keep each document under MongoDB's 16 MiB limit |
 | Quota capacity | `artifact_capacity` collection | Atomic available bytes and artifacts per owner and mode |
 | Admissions | `artifact_reservations` collection | Expiring, recoverable in-flight quota |
@@ -42,18 +42,39 @@ content-addressed bytes in the database the engine already uses.
   released after it is removed. Deletion is a conditional delete at count zero,
   so a version that appears while a delete is in flight wins and keeps the
   bytes.
+- **Reads use expiring leases, not permanent references.** A download or export
+  takes a lease in one atomic update (`leaseCount` plus a `readLeases` entry),
+  releases it in `finally`, and a process that dies leaves only a lease that
+  expires. Expired leases are pruned by the conditional delete and by
+  maintenance, so a crashed reader cannot pin a blob forever.
+- **Leaked references are recoverable.** A reference with no version row and no
+  reference change for a grace period is reclaimed by `reclaimLeaked`. That is
+  the recovery path for a crash between metadata removal and reference release;
+  an upload in flight updates its reference timestamp, so it is never mistaken
+  for a leak.
 
 ## Data model
 
-An `ArtifactDescriptor` carries `artifactId`, `kind`, `filename`, `mediaType`,
-`bytes`, `sha256`, `mode`, current `version`, retained `versions`, optional
-`projectId` / `conversationId` / `taskId`, timestamps, optional `expiresAt`, and
-`inferenceExposure: "none"`.
+An `ArtifactDescriptor` carries `artifactId`, `kind`, `filename`, optional
+`relativePath`, `mediaType`, `bytes`, `sha256`, `mode`, current `version`,
+retained `versions`, optional `projectId` / `conversationId` / `taskId`,
+timestamps, optional `expiresAt`, and `inferenceExposure: "none"`.
 
 `kind` is one of `document`, `pdf`, `spreadsheet`, `presentation`, `image`,
-`audio`, `video`, `source`, `project`, `game`, `visualization`, `execution`,
-`data`. `project` and `game` require a `projectId`; a project is a namespace of
-individual files, not an archive.
+`audio`, `video`, `source`, `software`, `project`, `game`, `visualization`,
+`execution`, `data`, `dataset`, `other`. `project` and `game` require a
+`projectId`; a project is a namespace of individual files, not an archive.
+`software` is a source-tree file, `dataset` is tabular or JSON data, and `other`
+is the escape hatch for an accepted media type with no closer kind. It never
+widens the media allowlist.
+
+`relativePath` is optional metadata for a file inside a multi-file project. It
+is validated as a relative path: no absolute path, drive prefix, backslash, dot
+segment, empty segment, control or bidirectional character, reserved device
+name, leading or trailing dot/space, or more than 64 segments. Its final segment
+must equal `filename`. It is never opened; storage keys remain digests. Combined
+with `projectId`, it lets a generated source tree be listed and reconstructed by
+artifact ID without giving the server a workspace path.
 
 ### Accepted media types
 
@@ -107,6 +128,30 @@ const bytes = Buffer.from(
 );
 ```
 
+For a generated tree, upload each file with its `relativePath` and the same
+`projectId`, then list by project to reconstruct the manifest:
+
+```ts
+await client.uploadArtifact({
+  filename: 'index.ts',
+  relativePath: 'src/index.ts',
+  mediaType: 'text/plain',
+  kind: 'software',
+  contentBase64: source.toString('base64'),
+  mode: 'cloud',
+  projectId: 'proj_generated',
+});
+
+const manifest = await client.artifacts({
+  mode: 'cloud',
+  projectId: 'proj_generated',
+});
+// manifest.artifacts: [{ relativePath: 'src/index.ts', sha256, artifactId, … }]
+```
+
+Edits address the `artifactId`, never a workspace path. A new version is an
+immutable compare-and-set; two replicas cannot silently overwrite each other.
+
 Every response is parsed with the contract schema. A task's `result.artifacts`
 is projected from the artifact service at read time, so a completed execution
 result is downloadable without a second metadata copy in the fenced task row.
@@ -124,7 +169,9 @@ result is downloadable without a second metadata copy in the fenced task row.
 - **Path traversal has no path to traverse.** Filenames are metadata only. A name
   containing `/`, `\`, a control character, a bidirectional override, a leading
   dot, a trailing dot or space, a reserved device name, or no extension is
-  refused. Storage keys are digests.
+  refused. `relativePath` is validated separately: it must stay relative, use
+  forward slashes, contain no dot or empty segment, and end in exactly the
+  descriptor's `filename`. Storage keys are digests.
 - **Archives are never expanded.** A generic archive is rejected. Only an
   opaque OOXML/ODF container is accepted, and only when its internal marker
   matches the declared type. A zip bomb is therefore inert: no inflate, no
@@ -159,6 +206,9 @@ usage read followed by a write. The filter requires enough available bytes and
 artifacts and the increment spends them in the same server-side operation, so
 two replicas racing the last slot cannot both be admitted. A refusal is
 `507 quota_exceeded`, and a refusal never leaves a blob or a reservation behind.
+A thrown metadata write releases the blob reference and the admission before the
+error is returned; the failure-injection e2e test asserts that no artifact,
+version, blob or chunk row survives and the full quota remains.
 
 Every admission also writes an expiring reservation before the capacity moves.
 The sweep resolves an expired reservation against its claimed version: if the
@@ -214,10 +264,11 @@ container, so the real-database lane cannot silently disappear. Hosted execution
 is evidence only when the `verify` workflow has actually run at the exact head;
 a local green run does not imply a hosted run.
 
-At the artifact branch head, `npm run verify` passed **147/147 tests with zero
+At the artifact branch head, `npm run verify` passed **155/155 tests with zero
 skips** against a real mongod, and `openapi:check` passed. The durable restart
-test and the five concurrency tests are the evidence for the claims above; no
-production database has been exercised.
+test, the seven real-Mongo concurrency/recovery tests and the failure-injection
+test are the evidence for the claims above; no production database has been
+exercised.
 
 ### Concurrency and recovery
 
@@ -233,13 +284,44 @@ against one real deployment and proves:
   version exists is committed rather than refunded;
 - a deleted chunk makes download and export fail as corruption, never return
   reconstructed bytes;
-- deleting an artifact while a reader holds a temporary reference keeps the
-  bytes readable until that reference is released.
+- deleting an artifact while a reader holds a read lease keeps the bytes
+  readable and blocks the delete until the lease is released;
+- a reader that takes a lease and then never returns does not pin the blob:
+  once the lease expires, the conditional delete succeeds;
+- concurrent version creation across two replicas never loses or renumbers a
+  committed version, and the capacity ledger equals the retained version bytes;
+- a thrown metadata write releases its blob reference and admission, as the
+  e2e failure-injection test proves.
 
 Startup maintenance also removes chunk rows whose descriptor never committed
 and zero-reference descriptors older than a grace period. A crash between a
 chunk write and its descriptor leaves an inert, reclaimable chunk rather than a
 read that promises missing bytes.
+
+## Artifact intelligence integration
+
+`feat/artifact-intelligence` generates documents, workbooks, decks, PDFs and
+source trees into a workspace folder. The stable contract for that generator is:
+
+1. Persist every generated file through `POST /v1/artifacts` with `projectId`
+   and `relativePath` (for example `src/index.ts`, `package.json`). Do not copy
+   the workspace path into a descriptor.
+2. Use `kind: "software"` for source files, `"dataset"` for CSV/JSON data, and
+   `"other"` only for an accepted media type that has no closer kind. The media
+   allowlist is unchanged: HTML, SVG and archives are still refused.
+3. List by `projectId` to reconstruct the manifest. `relativePath` plus
+   `sha256` is the file identity; the artifact ID is the edit handle.
+4. Edit by uploading a new version to the existing artifact ID. Versions are
+   immutable and compared-and-set, so two replicas cannot overwrite each other;
+   a conflict is retried or reported, never merged silently.
+5. A task result projects `relativePath ?? filename`, so a completed generation
+   reports the tree it produced without a second metadata copy.
+
+The branch's local `Artifact` type is a generation-time shape. It maps to this
+contract at the adapter boundary; it must not become a second store, a second
+descriptor or a second quota ledger. This repository does not modify another
+branch, and the generator still needs its files uploaded by a client or the
+engine.
 
 ## Limits that remain
 
@@ -255,6 +337,12 @@ read that promises missing bytes.
 - The ledger and the metadata write are separate documents, not one transaction.
   A crash between them under-admits until the expiry sweep or startup reconcile;
   it never over-admits.
+- A read lease expires after 60 seconds. A download that exceeded that could lose
+  its protection from a concurrent delete; the 10 MiB cap and in-process read
+  make that unlikely, and the failure is a storage error, never partial bytes.
+- A crash between metadata removal and reference release leaves a blob and its
+  quota until `reclaimLeaked` runs after a one-day grace. It is recovered, not
+  corrupted, but it is not immediate.
 - Coderax Web and CoderaxCLI live in other repositories. They can use the shared
   SDK's artifact methods, but no client change or cross-client test was made in
   this repository.

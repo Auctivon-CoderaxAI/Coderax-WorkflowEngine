@@ -1,3 +1,4 @@
+import type { DataMode } from '@coderax/contracts';
 import type { ArtifactRecord, ArtifactVersionRecord } from '../domain.js';
 import type {
   AppendVersionOutcome,
@@ -10,6 +11,7 @@ import type {
 } from './artifacts.js';
 import { blobKey, BlobIntegrityError, verifyContent, type BlobStore } from './blobs.js';
 import { isDuplicateKey, type MongoCollectionLike } from './mongo.js';
+import { randomUUID } from 'node:crypto';
 import type { Clock } from '../support/clock.js';
 
 /**
@@ -187,6 +189,7 @@ export function createMongoArtifactRepository(
                 bytes: current.bytes,
                 sha256: current.sha256,
                 filename: current.filename,
+                relativePath: current.relativePath ?? null,
                 mediaType: current.mediaType,
                 kind: current.kind,
                 updatedAt: current.updatedAt,
@@ -340,6 +343,29 @@ export function createMongoBlobStore(input: {
     return index;
   }
 
+  /**
+   * Expired leases are removed one by one with a conditional update. Removing
+   * the lease row and decrementing the count is one atomic document update, so
+   * a crash between them is impossible. A lease whose process died is therefore
+   * reclaimed as soon as it expires, never pinned forever.
+   */
+  async function pruneExpiredLeases(document: Document): Promise<void> {
+    const nowMs = input.clock.now().getTime();
+    const rows = Array.isArray(document.readLeases) ? document.readLeases : [];
+    if (typeof document.key !== 'string' || rows.length === 0) return;
+    for (const row of rows) {
+      if (row === null || typeof row !== 'object') continue;
+      const lease = row as Document;
+      if (typeof lease.id !== 'string') continue;
+      if (typeof lease.expiresAtMs !== 'number' || lease.expiresAtMs > nowMs) continue;
+      await blobs.updateOne(
+        { key: document.key, 'readLeases.id': lease.id },
+        { $inc: { leaseCount: -1 }, $pull: { readLeases: { id: lease.id } } },
+        { upsert: false },
+      );
+    }
+  }
+
   return {
     durable: true,
     backend: 'mongodb',
@@ -369,6 +395,9 @@ export function createMongoBlobStore(input: {
           bytes,
           chunks: chunkCount,
           refCount: 0,
+          leaseCount: 0,
+          readLeases: [],
+          referencedAtMs: Date.parse(createdAt),
           createdAt,
           createdAtMs: Date.parse(createdAt),
         });
@@ -405,7 +434,7 @@ export function createMongoBlobStore(input: {
       const key = blobKey({ ownerId, mode, sha256 });
       const acquired = await blobs.updateOne(
         { key },
-        { $inc: { refCount: 1 } },
+        { $inc: { refCount: 1 }, $set: { referencedAtMs: input.clock.now().getTime() } },
         { upsert: false },
       );
       return (acquired.matchedCount ?? 0) === 1;
@@ -415,18 +444,55 @@ export function createMongoBlobStore(input: {
       const key = blobKey({ ownerId, mode, sha256 });
       const updated = await blobs.findOneAndUpdate(
         { key, refCount: { $gt: 0 } },
-        { $inc: { refCount: -1 } },
+        {
+          $inc: { refCount: -1 },
+          $set: { referencedAtMs: input.clock.now().getTime() },
+        },
         { returnDocument: 'after', includeResultMetadata: false },
       );
       return updated && typeof updated.refCount === 'number' ? updated.refCount : 0;
     },
 
+    lease: async ({ ref: { ownerId, mode, sha256 }, ttlMs }) => {
+      const key = blobKey({ ownerId, mode, sha256 });
+      const leaseId = randomUUID();
+      const expiresAtMs = input.clock.now().getTime() + Math.max(1, Math.floor(ttlMs));
+      // The count and the lease row are one atomic update on the blob document.
+      // A crash can therefore leave neither, never a count without a lease or a
+      // lease without a count.
+      const updated = await blobs.findOneAndUpdate(
+        { key },
+        {
+          $inc: { leaseCount: 1 },
+          $push: { readLeases: { id: leaseId, expiresAtMs } },
+        },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      return updated ? leaseId : null;
+    },
+
+    releaseLease: async ({ ref: { ownerId, mode, sha256 }, leaseId }) => {
+      const key = blobKey({ ownerId, mode, sha256 });
+      await blobs.updateOne(
+        { key, 'readLeases.id': leaseId },
+        { $inc: { leaseCount: -1 }, $pull: { readLeases: { id: leaseId } } },
+        { upsert: false },
+      );
+    },
+
     deleteIfUnreferenced: async ({ ownerId, mode, sha256 }) => {
       const key = blobKey({ ownerId, mode, sha256 });
-      // The condition is in the delete itself. If an acquire wins the race the
-      // delete matches nothing; if the delete wins the acquire finds no document
-      // and the writer re-puts the bytes. Neither ordering can lose a reference.
-      const removed = await blobs.deleteOne({ key, refCount: { $lte: 0 } });
+      const document = await blobs.findOne({ key });
+      if (!document) return false;
+      await pruneExpiredLeases(document);
+      // The condition is in the delete itself. If an acquire or lease wins the
+      // race the delete matches nothing; if the delete wins they find no
+      // document. Neither ordering can lose a live reference or a live read.
+      const removed = await blobs.deleteOne({
+        key,
+        refCount: { $lte: 0 },
+        $or: [{ leaseCount: { $exists: false } }, { leaseCount: { $lte: 0 } }],
+      });
       if ((removed.deletedCount ?? 0) !== 1) return false;
       await chunks.deleteMany({ key });
       return true;
@@ -444,8 +510,17 @@ export function createMongoBlobStore(input: {
     maintain: async ({ graceMs, limit }) => {
       const boundedLimit = Math.max(1, Math.floor(limit));
       const cutoff = Date.parse(input.clock.iso()) - Math.max(0, graceMs);
+      // Reclaim expired read leases first, including on live blobs, so a crashed
+      // download cannot make its blob permanently undeletable.
+      const sampleForLeases = await blobs.find({}).limit(boundedLimit * 4).toArray();
+      for (const document of sampleForLeases) await pruneExpiredLeases(document);
+
       const stale = await blobs
-        .find({ refCount: { $lte: 0 }, createdAtMs: { $lt: cutoff } })
+        .find({
+          refCount: { $lte: 0 },
+          createdAtMs: { $lt: cutoff },
+          $or: [{ leaseCount: { $exists: false } }, { leaseCount: { $lte: 0 } }],
+        })
         .limit(boundedLimit)
         .toArray();
       let unreferencedBlobs = 0;
@@ -454,6 +529,7 @@ export function createMongoBlobStore(input: {
         const removed = await blobs.deleteOne({
           key: document.key,
           refCount: { $lte: 0 },
+          $or: [{ leaseCount: { $exists: false } }, { leaseCount: { $lte: 0 } }],
         });
         if ((removed.deletedCount ?? 0) === 1) {
           await chunks.deleteMany({ key: document.key });
@@ -478,6 +554,50 @@ export function createMongoBlobStore(input: {
         orphanChunks += removed.deletedCount ?? 0;
       }
       return { orphanChunks, unreferencedBlobs };
+    },
+
+    reclaimLeaked: async ({ graceMs, limit, referenced }) => {
+      const boundedLimit = Math.max(1, Math.floor(limit));
+      const cutoff = input.clock.now().getTime() - Math.max(0, graceMs);
+      const candidates = await blobs
+        .find({
+          refCount: { $gt: 0 },
+          $or: [
+            { referencedAtMs: { $lt: cutoff } },
+            { referencedAtMs: { $exists: false }, createdAtMs: { $lt: cutoff } },
+          ],
+        })
+        .limit(boundedLimit)
+        .toArray();
+      let removed = 0;
+      for (const document of candidates) {
+        if (
+          typeof document.key !== 'string' ||
+          typeof document.ownerId !== 'string' ||
+          typeof document.mode !== 'string' ||
+          typeof document.sha256 !== 'string' ||
+          typeof document.refCount !== 'number'
+        ) {
+          continue;
+        }
+        const ref = {
+          ownerId: document.ownerId,
+          mode: document.mode as DataMode,
+          sha256: document.sha256,
+        };
+        if (await referenced(ref)) continue;
+        // The exact count makes a concurrent acquire win: it changes the count
+        // between the read and this conditional delete, so nothing is removed.
+        const deleted = await blobs.deleteOne({
+          key: document.key,
+          refCount: document.refCount,
+        });
+        if ((deleted.deletedCount ?? 0) === 1) {
+          await chunks.deleteMany({ key: document.key });
+          removed += 1;
+        }
+      }
+      return removed;
     },
 
     check: async () => {

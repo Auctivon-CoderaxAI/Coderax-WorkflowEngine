@@ -26,6 +26,9 @@ export type MongoUpdate = {
   $set?: Record<string, unknown>;
   $setOnInsert?: Record<string, unknown>;
   $inc?: Record<string, number>;
+  /** Used by the blob read leases: the array and its count change together. */
+  $push?: Record<string, unknown>;
+  $pull?: Record<string, unknown>;
 };
 
 /** A lazily executed query; the subset of the driver cursor these stores use. */

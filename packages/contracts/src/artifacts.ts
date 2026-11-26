@@ -49,6 +49,9 @@ export const ArtifactKind = z.enum([
   'visualization',
   'execution',
   'data',
+  'software',
+  'dataset',
+  'other',
 ]);
 export type ArtifactKind = z.infer<typeof ArtifactKind>;
 
@@ -95,6 +98,12 @@ export const ArtifactDescriptor = z
     artifactId: ArtifactId,
     kind: ArtifactKind,
     filename: ArtifactFilename,
+    /**
+     * A validated workspace-relative path for a file inside a multi-file
+     * project. It is metadata only: storage keys are digests, and no path is
+     * ever opened. The basename always equals `filename`.
+     */
+    relativePath: z.string().min(1).max(1024).optional(),
     mediaType: ArtifactMediaType,
     bytes: z.number().int().nonnegative().max(MAX_ARTIFACT_BYTES),
     /** Lowercase hex SHA-256 of the current version's exact bytes. */
@@ -123,6 +132,7 @@ export const ArtifactVersionDescriptor = z
     artifactId: ArtifactId,
     version: z.number().int().positive(),
     filename: ArtifactFilename,
+    relativePath: z.string().min(1).max(1024).optional(),
     mediaType: ArtifactMediaType,
     kind: ArtifactKind,
     bytes: z.number().int().nonnegative().max(MAX_ARTIFACT_BYTES),
@@ -162,6 +172,7 @@ export type ArtifactVersionList = z.infer<typeof ArtifactVersionList>;
 export const ArtifactUploadRequest = z
   .object({
     filename: ArtifactFilename,
+    relativePath: z.string().min(1).max(1024).optional(),
     mediaType: ArtifactMediaType,
     contentBase64: z.string().min(1).max(MAX_ARTIFACT_BASE64_CHARS),
     sha256: Sha256.optional(),
@@ -180,6 +191,7 @@ export type ArtifactUploadRequest = z.infer<typeof ArtifactUploadRequest>;
 export const ArtifactVersionRequest = z
   .object({
     filename: ArtifactFilename,
+    relativePath: z.string().min(1).max(1024).optional(),
     mediaType: ArtifactMediaType,
     contentBase64: z.string().min(1).max(MAX_ARTIFACT_BASE64_CHARS),
     sha256: Sha256.optional(),

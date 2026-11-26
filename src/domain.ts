@@ -138,6 +138,8 @@ export type ArtifactRecord = {
   mode: DataMode;
   kind: ArtifactKind;
   filename: string;
+  /** Metadata only; never a filesystem path. Basename equals `filename`. */
+  relativePath?: string;
   mediaType: ArtifactMediaType;
   bytes: number;
   sha256: string;
@@ -159,6 +161,7 @@ export type ArtifactVersionRecord = {
   artifactId: string;
   version: number;
   filename: string;
+  relativePath?: string;
   mediaType: ArtifactMediaType;
   /** Immutable per version, so a rollback restores the kind that version had. */
   kind: ArtifactKind;

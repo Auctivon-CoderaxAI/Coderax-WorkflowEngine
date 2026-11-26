@@ -362,16 +362,26 @@ const COMPATIBLE_KINDS: Readonly<Record<ArtifactMediaType, readonly ArtifactKind
     'text/plain': [
       'document',
       'source',
+      'software',
       'data',
       'execution',
       'visualization',
       'project',
       'game',
     ],
-    'text/markdown': ['document', 'source', 'execution'],
-    'text/csv': ['spreadsheet', 'data', 'execution'],
-    'text/tab-separated-values': ['spreadsheet', 'data', 'execution'],
-    'application/json': ['data', 'visualization', 'execution', 'project', 'game', 'source'],
+    'text/markdown': ['document', 'source', 'software', 'execution'],
+    'text/csv': ['spreadsheet', 'data', 'dataset', 'execution'],
+    'text/tab-separated-values': ['spreadsheet', 'data', 'dataset', 'execution'],
+    'application/json': [
+      'data',
+      'dataset',
+      'software',
+      'visualization',
+      'execution',
+      'project',
+      'game',
+      'source',
+    ],
     'application/pdf': ['pdf', 'document', 'visualization', 'execution'],
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['document'],
     'application/vnd.oasis.opendocument.text': ['document'],
@@ -501,7 +511,9 @@ export function validateContent(input: {
 
   const allowed = compatibleKinds(mediaType);
   const kind = input.requestedKind ?? defaultKindFor(mediaType, extension);
-  if (!allowed.includes(kind)) {
+  // `other` is a deliberate escape hatch used by deliverable generators; it
+  // never widens the media allowlist, which is what prevents active content.
+  if (kind !== 'other' && !allowed.includes(kind)) {
     return failure(
       'validation_failed',
       `A ${mediaType} artifact cannot be stored as kind ${String(kind)}.`,
@@ -517,4 +529,79 @@ export function validateContent(input: {
 /** Exposed so a caller can reject an unsupported media type before decoding. */
 export function acceptedMediaTypes(): readonly ArtifactMediaType[] {
   return ARTIFACT_MEDIA_TYPES;
+}
+
+const RESERVED_SEGMENTS: ReadonlySet<string> = new Set([
+  'CON',
+  'PRN',
+  'AUX',
+  'NUL',
+  ...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`),
+]);
+
+/**
+ * Validates a workspace-relative path used only as artifact metadata.
+ *
+ * It exists so a generated software tree can be persisted file by file and
+ * reconstructed from a project listing, without giving any component a path it
+ * could open. Every segment is checked for traversal, separators that differ by
+ * platform, control and bidirectional characters, reserved device names and
+ * leading or trailing dots/spaces. The final segment must equal `filename`, so
+ * a descriptor can never report two different leaf names.
+ */
+export function validateRelativePath(input: {
+  path: string;
+  filename: string;
+}): ValidationResult<string> {
+  const normalized = input.path.normalize('NFC');
+  if (normalized.length < 1 || normalized.length > 1024) {
+    return failure('validation_failed', 'A relative path must be between 1 and 1024 characters.');
+  }
+  if (
+    normalized.startsWith('/') ||
+    normalized.endsWith('/') ||
+    normalized.includes('\\') ||
+    /^[A-Za-z]:/.test(normalized)
+  ) {
+    return failure(
+      'validation_failed',
+      'A relative path must use forward slashes, must not be absolute and must not name a drive.',
+    );
+  }
+  if (/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(normalized)) {
+    return failure('validation_failed', 'A relative path must not contain control characters.');
+  }
+
+  const segments = normalized.split('/');
+  if (segments.length > 64) {
+    return failure('validation_failed', 'A relative path may contain at most 64 segments.');
+  }
+  for (const segment of segments) {
+    if (segment.length < 1 || segment.length > 255) {
+      return failure('validation_failed', 'Each path segment must be between 1 and 255 characters.');
+    }
+    if (segment === '.' || segment === '..') {
+      return failure('validation_failed', 'A relative path must not contain dot segments.');
+    }
+    if (segment.startsWith('.') || segment.endsWith('.')) {
+      return failure('validation_failed', 'A path segment must not start or end with a dot.');
+    }
+    if (segment.startsWith(' ') || segment.endsWith(' ')) {
+      return failure('validation_failed', 'A path segment must not start or end with a space.');
+    }
+    if (/[<>:"|?*]/.test(segment)) {
+      return failure('validation_failed', 'A path segment contains a reserved character.');
+    }
+    const device = (segment.split('.')[0] ?? '').toUpperCase();
+    if (RESERVED_SEGMENTS.has(device)) {
+      return failure('validation_failed', 'A path segment uses a reserved device name.');
+    }
+  }
+
+  const leaf = segments[segments.length - 1] ?? '';
+  if (leaf !== input.filename.normalize('NFC')) {
+    return failure('validation_failed', 'The relative path basename must equal filename.');
+  }
+  return { ok: true, value: normalized };
 }

@@ -724,7 +724,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         status.result = {
           ...(status.result ?? {}),
           artifacts: listed.value.artifacts.map((artifact) => ({
-            path: artifact.filename,
+            // A generated source tree keeps its directory-relative path; a flat
+            // artifact falls back to its file name. Neither is a host path.
+            path: artifact.relativePath ?? artifact.filename,
             bytes: artifact.bytes,
             digest: artifact.sha256,
           })),

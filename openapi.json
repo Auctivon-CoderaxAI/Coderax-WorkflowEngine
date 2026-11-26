@@ -2420,13 +2420,21 @@
                               "game",
                               "visualization",
                               "execution",
-                              "data"
+                              "data",
+                              "software",
+                              "dataset",
+                              "other"
                             ]
                           },
                           "filename": {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 200
+                          },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
                           },
                           "mediaType": {
                             "type": "string",
@@ -2620,7 +2628,10 @@
                 "game",
                 "visualization",
                 "execution",
-                "data"
+                "data",
+                "software",
+                "dataset",
+                "other"
               ]
             }
           },
@@ -2708,13 +2719,21 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "filename": {
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -2833,6 +2852,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -2878,7 +2902,10 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "bytes": {
@@ -2953,6 +2980,11 @@
                     "minLength": 1,
                     "maxLength": 200
                   },
+                  "relativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
                   "mediaType": {
                     "type": "string",
                     "enum": [
@@ -3006,7 +3038,10 @@
                       "game",
                       "visualization",
                       "execution",
-                      "data"
+                      "data",
+                      "software",
+                      "dataset",
+                      "other"
                     ]
                   },
                   "mode": {
@@ -3179,13 +3214,21 @@
                         "game",
                         "visualization",
                         "execution",
-                        "data"
+                        "data",
+                        "software",
+                        "dataset",
+                        "other"
                       ]
                     },
                     "filename": {
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 200
+                    },
+                    "relativePath": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
                     },
                     "mediaType": {
                       "type": "string",
@@ -3380,13 +3423,21 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "filename": {
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -3505,6 +3556,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -3550,7 +3606,10 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "bytes": {
@@ -3637,6 +3696,11 @@
                     "minLength": 1,
                     "maxLength": 200
                   },
+                  "relativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
                   "mediaType": {
                     "type": "string",
                     "enum": [
@@ -3690,7 +3754,10 @@
                       "game",
                       "visualization",
                       "execution",
-                      "data"
+                      "data",
+                      "software",
+                      "dataset",
+                      "other"
                     ]
                   },
                   "mode": {
@@ -3764,6 +3831,11 @@
                             "minLength": 1,
                             "maxLength": 200
                           },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
                           "mediaType": {
                             "type": "string",
                             "enum": [
@@ -3809,7 +3881,10 @@
                               "game",
                               "visualization",
                               "execution",
-                              "data"
+                              "data",
+                              "software",
+                              "dataset",
+                              "other"
                             ]
                           },
                           "bytes": {
@@ -3942,13 +4017,21 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "filename": {
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -4067,6 +4150,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -4112,7 +4200,10 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "bytes": {
@@ -4258,13 +4349,21 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "filename": {
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -4385,6 +4484,11 @@
                             "minLength": 1,
                             "maxLength": 200
                           },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
                           "mediaType": {
                             "type": "string",
                             "enum": [
@@ -4430,7 +4534,10 @@
                               "game",
                               "visualization",
                               "execution",
-                              "data"
+                              "data",
+                              "software",
+                              "dataset",
+                              "other"
                             ]
                           },
                           "bytes": {
@@ -4480,6 +4587,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -4525,7 +4637,10 @@
                             "game",
                             "visualization",
                             "execution",
-                            "data"
+                            "data",
+                            "software",
+                            "dataset",
+                            "other"
                           ]
                         },
                         "bytes": {

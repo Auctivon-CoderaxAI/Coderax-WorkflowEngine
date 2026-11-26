@@ -6,6 +6,7 @@ import { composeApplication, type Application } from '../../src/bootstrap/compos
 import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
 import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 import { createMongoCapacityStore } from '../../src/persistence/capacity.js';
+import { blobKey } from '../../src/persistence/blobs.js';
 import { createMongoBlobStore } from '../../src/persistence/mongo-artifacts.js';
 import { createClock } from '../../src/support/clock.js';
 import { artifactSettings, base64, pngBytes } from '../fixtures/artifacts.js';
@@ -361,6 +362,155 @@ test('an abandoned admission returns its quota and a materialized one is committ
   }
 });
 
+test('a crashed reader lease expires instead of pinning the blob forever', { skip }, async () => {
+  const real = maybeMongo as RealMongo;
+  const databaseName = uniqueName('crashed-lease');
+  const workspace = createWorkspaces();
+  const content = Buffer.from('reader never returned');
+  let a: Replica | undefined;
+  let observer: MongoDatabase | undefined;
+
+  try {
+    a = await boot({ real, databaseName, workspace });
+    observer = await observerFor(real, databaseName);
+    const uploaded = await (a as Replica).api.uploadArtifact({
+      filename: 'crashed.txt',
+      mediaType: 'text/plain',
+      contentBase64: base64(content),
+      mode: 'cloud',
+    });
+    const blobs = createMongoBlobStore({
+      collections: {
+        blobs: observer.collection('artifact_blobs'),
+        chunks: observer.collection('artifact_chunks'),
+      },
+      clock: createClock(),
+      chunkBytes: 1_048_576,
+    });
+    const ref = {
+      ownerId: OWNER_ID,
+      mode: 'cloud' as const,
+      sha256: uploaded.artifact.sha256,
+    };
+
+    // The reader takes a long lease and then "crashes": it never calls
+    // releaseLease. Deleting the artifact drops the version reference, but the
+    // lease still protects the bytes.
+    assert.ok(await blobs.lease({ ref, ttlMs: 60_000 }));
+    await (a as Replica).api.deleteArtifact(uploaded.artifact.artifactId, 'cloud');
+    assert.equal((await observer.collection('artifact_versions').find({}).toArray()).length, 0);
+    assert.equal(await blobs.deleteIfUnreferenced(ref), false);
+    assert.ok(await blobs.get(ref));
+
+    // Simulate the clock crossing the lease expiry. A real crashed reader is
+    // reclaimed by the maintenance sweep the same way, without waiting a minute.
+    await observer.collection('artifact_blobs').updateOne(
+      { key: blobKey(ref) },
+      { $set: { 'readLeases.0.expiresAtMs': 0 } },
+      { upsert: false },
+    );
+    assert.equal(await blobs.deleteIfUnreferenced(ref), true);
+    assert.equal(await blobs.get(ref), null);
+    assert.equal(
+      (await observer.collection('artifact_chunks').find({}).toArray()).length,
+      0,
+    );
+  } finally {
+    await a?.app.stop().catch(() => undefined);
+    await observer?.close().catch(() => undefined);
+    workspace.cleanup();
+  }
+});
+
+test('concurrent version creation is serialized and keeps byte accounting exact', { skip }, async () => {
+  const real = maybeMongo as RealMongo;
+  const databaseName = uniqueName('versions');
+  const workspaceA = createWorkspaces();
+  const workspaceB = createWorkspaces();
+  let a: Replica | undefined;
+  let b: Replica | undefined;
+  let observer: MongoDatabase | undefined;
+
+  try {
+    a = await boot({ real, databaseName, workspace: workspaceA });
+    b = await boot({ real, databaseName, workspace: workspaceB });
+    observer = await observerFor(real, databaseName);
+    const base = await (a as Replica).api.uploadArtifact({
+      filename: 'v1.txt',
+      mediaType: 'text/plain',
+      contentBase64: base64(Buffer.from('version one')),
+      mode: 'cloud',
+    });
+
+    const writers = [
+      { replica: a as Replica, body: 'version two' },
+      { replica: b as Replica, body: 'version three' },
+      { replica: a as Replica, body: 'version four' },
+    ];
+    const results = await Promise.allSettled(
+      writers.map((writer) =>
+        writer.replica.api.uploadArtifactVersion(base.artifact.artifactId, {
+          filename: writer.body.replaceAll(' ', '-') + '.txt',
+          mediaType: 'text/plain',
+          contentBase64: base64(Buffer.from(writer.body)),
+          mode: 'cloud',
+        }),
+      ),
+    );
+    const fulfilled = results.filter(
+      (entry): entry is PromiseFulfilledResult<ArtifactUploadResult> =>
+        entry.status === 'fulfilled',
+    );
+    // At least two writers win after the service retries a lost compare-and-set.
+    assert.ok(fulfilled.length >= 2, `only ${fulfilled.length} of 3 versions committed`);
+    const numbers = fulfilled.map((entry) => entry.value.artifact.version);
+    assert.equal(new Set(numbers).size, numbers.length);
+
+    const versions = await observer.collection('artifact_versions').find({}).toArray();
+    const artifact = await observer
+      .collection('artifacts')
+      .findOne({ artifactId: base.artifact.artifactId });
+    assert.equal(versions.length, fulfilled.length + 1);
+    assert.equal(artifact?.version, fulfilled.length + 1);
+    assert.equal(artifact?.versions, versions.length);
+
+    const used = versions.reduce((total, row) => total + (row.bytes as number), 0);
+    const capacity = await observer
+      .collection('artifact_capacity')
+      .findOne({ mode: 'cloud' });
+    assert.equal(capacity?.availableBytes, artifactSettings().maxBytesPerOwner - used);
+
+    // Every reported version is readable by its exact number, including the
+    // one written by the other replica.
+    const expected = new Map<string, string>([
+      ['v1.txt', 'version one'],
+      ['version-two.txt', 'version two'],
+      ['version-three.txt', 'version three'],
+      ['version-four.txt', 'version four'],
+    ]);
+    const initial = await (b as Replica).api.downloadArtifact(base.artifact.artifactId, {
+      mode: 'cloud',
+      version: 1,
+    });
+    assert.equal(initial.contentBase64, base64(Buffer.from('version one')));
+    for (const entry of fulfilled) {
+      const downloaded = await (b as Replica).api.downloadArtifact(
+        base.artifact.artifactId,
+        { mode: 'cloud', version: entry.value.version.version },
+      );
+      const body = expected.get(entry.value.version.filename);
+      assert.ok(body, entry.value.version.filename);
+      assert.equal(downloaded.contentBase64, base64(Buffer.from(body)));
+    }
+  } finally {
+    await a?.app.stop().catch(() => undefined);
+    await b?.app.stop().catch(() => undefined);
+    await observer?.close().catch(() => undefined);
+    workspaceA.cleanup();
+    workspaceB.cleanup();
+  }
+});
+
 test('a missing chunk is reported as corruption, never reconstructed', { skip }, async () => {
   const real = maybeMongo as RealMongo;
   const databaseName = uniqueName('integrity');
@@ -449,8 +599,9 @@ test('a delete during a read cannot remove the bytes under the reader', { skip }
       sha256: uploaded.artifact.sha256,
     };
 
-    // Stand in for a download that has already taken its temporary reference.
-    assert.equal(await blobs.acquire(ref), true);
+    // Stand in for a download that has already taken its expiring read lease.
+    const leaseId = await blobs.lease({ ref, ttlMs: 60_000 });
+    assert.ok(leaseId);
     await (a as Replica).api.deleteArtifact(uploaded.artifact.artifactId, 'cloud');
     assert.equal(
       (await observer.collection('artifact_versions').find({}).toArray()).length,
@@ -465,7 +616,9 @@ test('a delete during a read cannot remove the bytes under the reader', { skip }
       1,
     );
 
-    assert.equal(await blobs.release(ref), 0);
+    // The live lease still protects the bytes after the version row is gone.
+    assert.equal(await blobs.deleteIfUnreferenced(ref), false);
+    await blobs.releaseLease({ ref, leaseId });
     assert.equal(await blobs.deleteIfUnreferenced(ref), true);
     assert.equal(await blobs.get(ref), null);
     assert.equal(
