@@ -11,5 +11,6 @@ export * from './artifacts.js';
 export * from './events.js';
 export * from './permissions.js';
 export * from './routes.js';
+export * from './ownership.js';
 export * from './json-schema.js';
 export * from './openapi.js';
