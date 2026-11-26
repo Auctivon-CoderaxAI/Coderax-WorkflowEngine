@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import type { BrowserAction, BrowserSessionCreateRequest } from '@coderax/contracts';
-import { startTestApp } from '../helpers.js';
+import { baseConfig, createWorkspaces, startTestApp } from '../helpers.js';
+import { composeApplication, StartupError } from '../../src/bootstrap/compose.js';
 import { createHttpBrowserProvider } from '../../src/browser/remote.js';
 import { fakeBrowserProvider, PNG_1X1 } from '../fakes/browser.js';
 
@@ -340,19 +341,28 @@ test('malformed, redirected and unauthorized providers fail closed', async () =>
   }
 });
 
-test('an unattested endpoint is never contacted', async () => {
+test('an unattested endpoint is refused at startup and never contacted', async () => {
   const provider = await startProvider('ready');
-  const started = await startTestApp({
-    config: browserConfig(provider.url, { zeroCostAttested: false }),
-    env: { CODERAX_TEST_BROWSER_TOKEN: TOKEN },
-  });
+  const workspace = createWorkspaces();
   try {
-    const capabilities = await started.app.service.browserCapabilities();
-    assert.equal(capabilities.operational, false);
-    assert.equal(capabilities.reason, 'unverified');
+    const config = baseConfig(
+      workspace,
+      browserConfig(provider.url, { zeroCostAttested: false }),
+    );
+    await assert.rejects(
+      composeApplication({
+        config,
+        env: { CODERAX_TEST_BROWSER_TOKEN: TOKEN },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof StartupError);
+        assert.match(error.issues.join(' '), /zeroCostAttested/);
+        return true;
+      },
+    );
     assert.equal(provider.requests.length, 0);
   } finally {
-    await started.close();
+    workspace.cleanup();
     await provider.close();
   }
 });

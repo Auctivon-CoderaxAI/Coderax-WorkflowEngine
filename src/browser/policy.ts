@@ -77,20 +77,18 @@ export function sensitivityFor(
   action: BrowserAction,
   context: { passwordTarget: boolean; targetRole?: string },
 ): Sensitivity | null {
+  // Intrinsic requirements come first. A declared purchase must never replace
+  // the file-transfer approval for an upload/download or the authentication
+  // approval for a password fill.
   if (action.type === 'upload' || action.type === 'download') {
     return sensitivity('file_transfer');
+  }
+  if (action.type === 'fill' && context.passwordTarget) {
+    return sensitivity('authentication');
   }
   const declared = 'intent' in action ? action.intent?.category : undefined;
   if (declared && SENSITIVE_CATEGORIES.includes(declared as BrowserSensitiveCategory)) {
     return sensitivity(declared as BrowserSensitiveCategory);
-  }
-
-  if (
-    action.type === 'fill' &&
-    context.passwordTarget &&
-    declared !== 'authentication'
-  ) {
-    return sensitivity('authentication');
   }
   // `form_input` is safe only for filling a field. A click, even one declared
   // as form input, can submit a form; only an observed link with an explicit

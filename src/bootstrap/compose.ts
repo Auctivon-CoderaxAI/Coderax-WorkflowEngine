@@ -10,8 +10,10 @@ import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
 import { createBrowserService } from '../orchestration/browser.js';
+import { createBrowserStore } from '../browser/store.js';
 import type { BrowserProvider } from '../browser/types.js';
 import { buildBrowserProvider } from './browser.js';
+import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
@@ -134,6 +136,12 @@ function modelDescriptors(input: {
 export async function composeApplication(input: ComposeInput): Promise<Application> {
   const env = input.env ?? process.env;
   const { config } = input;
+  // `loadConfig` validates this for the normal entry point. Programmatic
+  // callers must not be able to bypass the same fail-closed invariants.
+  const invariantIssues = validateInvariants(config);
+  if (invariantIssues.length > 0) {
+    throw new StartupError(invariantIssues);
+  }
   const clock = createClock();
   const ids = createIdGenerator();
 
@@ -220,6 +228,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     permissions,
     audit,
     provider: browserProvider,
+    store: createBrowserStore(),
   });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,

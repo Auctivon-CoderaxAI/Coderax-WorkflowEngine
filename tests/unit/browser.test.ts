@@ -16,6 +16,7 @@ import {
 } from '../helpers.js';
 import { fakeBrowserProvider, PNG_1X1 } from '../fakes/browser.js';
 import { createBrowserService } from '../../src/orchestration/browser.js';
+import { createBrowserStore } from '../../src/browser/store.js';
 import { createPermissionStore } from '../../src/permissions/store.js';
 import { createAuditLog } from '../../src/observability/audit.js';
 import { createIdGenerator, type Clock } from '../../src/support/clock.js';
@@ -544,6 +545,22 @@ test('file upload and retrieval require a transfer approval and keep exact bytes
     assert.equal(refused.ok, false);
     assert.equal(refused.ok === false && refused.code, 'permission_required');
 
+    // A purchase declaration must not replace the intrinsic transfer gate.
+    const purchaseOnly = await act(started, session.sessionId, {
+      ...upload,
+      intent: { category: 'purchase', description: 'Not a transfer approval' },
+    });
+    assert.equal(purchaseOnly.ok, false);
+    assert.equal(purchaseOnly.ok === false && purchaseOnly.code, 'permission_required');
+    const purchaseApproval = await approve(started, session.sessionId, 'purchase');
+    const stillRefused = await act(started, session.sessionId, {
+      ...upload,
+      intent: { category: 'purchase', description: 'Not a transfer approval' },
+      approvalId: purchaseApproval,
+    });
+    assert.equal(stillRefused.ok, false);
+    assert.equal(stillRefused.ok === false && stillRefused.code, 'permission_required');
+
     const authorization = await must(
       started.app.service.authorizeBrowserSession(principal, session.sessionId, {
         category: 'file_transfer',
@@ -780,6 +797,91 @@ test('the configured live-session limit is enforced', async () => {
   }
 });
 
+test('concurrent creations cannot exceed the configured live-session limit', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({
+    browser: fake,
+    config: { browsers: { enabled: true, maxSessionsPerOwner: 1 } },
+  });
+  try {
+    const request = {
+      label: 'Concurrent session',
+      purpose: 'research' as const,
+      origins: ['https://example.test'],
+    };
+    const results = await Promise.all([
+      started.app.service.createBrowserSession(principal, request),
+      started.app.service.createBrowserSession(principal, request),
+    ]);
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(results.filter((result) => !result.ok).length, 1);
+    assert.equal(fake.createInputs.length, 1);
+    assert.equal((await started.app.service.browserSessions(principal)).sessions.length, 1);
+  } finally {
+    await started.close();
+  }
+});
+
+test('creation refuses a provider page outside the allowlist', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({
+    browser: fake,
+    config: { browsers: { enabled: true } },
+  });
+  try {
+    fake.setInitialUrl('https://outside.test/');
+    const created = await started.app.service.createBrowserSession(principal, {
+      label: 'Outside session',
+      purpose: 'research',
+      origins: ['https://example.test'],
+    });
+    assert.equal(created.ok, false);
+    assert.equal(created.ok === false && created.code, 'protocol_error');
+    assert.equal(fake.closed.length, 1);
+    // The provider did create a remote session; it is retained as failed so the
+    // owner can see what happened rather than losing the only handle silently.
+    const sessions = (await started.app.service.browserSessions(principal)).sessions;
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0]?.state, 'failed');
+  } finally {
+    await started.close();
+  }
+});
+
+test('a lifecycle response cannot revive a session closed while it was in flight', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({
+    browser: fake,
+    config: { browsers: { enabled: true } },
+  });
+  try {
+    const session = await open(started);
+    fake.holdNextPause();
+    const pendingPause = started.app.service.pauseBrowserSession(
+      principal,
+      session.sessionId,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fake.paused.length, 1);
+
+    const closed = await must(
+      started.app.service.closeBrowserSession(principal, session.sessionId, {}),
+    );
+    assert.equal(closed.state, 'closed');
+
+    fake.releasePause();
+    const stale = await pendingPause;
+    assert.equal(stale.ok, false);
+    assert.equal(stale.ok === false && stale.code, 'conflict');
+    const current = await must(
+      started.app.service.browserSession(principal, session.sessionId),
+    );
+    assert.equal(current.state, 'closed');
+  } finally {
+    await started.close();
+  }
+});
+
 test('a provider failure is reported and leaves the session usable', async () => {
   const fake = fakeBrowserProvider();
   const started = await startTestApp({
@@ -879,6 +981,7 @@ test('an expired session is retired and its cloud browser is released', async ()
       permissions,
       audit,
       provider: fake,
+      store: createBrowserStore(),
     });
 
     const created = await must(

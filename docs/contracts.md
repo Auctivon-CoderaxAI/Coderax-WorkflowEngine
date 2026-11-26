@@ -29,7 +29,7 @@ the successful response; failures use the shared `Problem` body.
 
 | Surface | Version | Where |
 | --- | --- | --- |
-| HTTP contracts | `CONTRACT_VERSION = '1.1.0'`, served at `/v1` | `primitives.ts` |
+| HTTP contracts | `CONTRACT_VERSION = '1.0.0'`, served at `/v1` | `primitives.ts` |
 | Execution events | `EVENT_SCHEMA_VERSION = 1` | `events.ts` |
 | SDK | matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
 
@@ -85,8 +85,9 @@ Every event is an envelope plus a payload:
   `browser:<sessionId>:<category>`.
 - Screenshots, uploads and downloads are returned as artifacts whose SHA-256 is
   computed by the engine; page observations carry `trust: "untrusted"`.
-- Receipts are a separate append-only record of what was attempted, refused or
-  performed. They are not execution events and do not enter a Work task stream.
+- Receipts are a separate, bounded append-only window of what was attempted,
+  refused or performed. Retention is per session; they are not execution events
+  and do not enter a Work task stream.
 
 `docs/browser.md` documents the provider protocol, the safety model and the
 verification evidence required before the capability may be called operational.

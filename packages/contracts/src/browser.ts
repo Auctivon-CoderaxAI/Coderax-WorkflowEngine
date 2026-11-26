@@ -168,6 +168,8 @@ export const BrowserSessionCreateRequest = z
   })
   .strict();
 export type BrowserSessionCreateRequest = z.infer<typeof BrowserSessionCreateRequest>;
+/** SDK input: fields with schema defaults may be omitted by the caller. */
+export type BrowserSessionCreateInput = z.input<typeof BrowserSessionCreateRequest>;
 
 export const BrowserCloseRequest = z
   .object({ reason: z.string().max(500).optional() })
@@ -373,6 +375,8 @@ export const BrowserAction = z
     }
   });
 export type BrowserAction = z.infer<typeof BrowserAction>;
+/** SDK input: defaulted action fields may be omitted by the caller. */
+export type BrowserActionInput = z.input<typeof BrowserAction>;
 
 export const BrowserElement = z
   .object({

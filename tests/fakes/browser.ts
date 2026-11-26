@@ -46,6 +46,9 @@ export type FakeBrowserProvider = BrowserProvider & {
   setNextArtifacts: (artifacts: ProviderArtifact[] | null) => void;
   setNextUrl: (url: string | null) => void;
   setNextTabs: (tabs: BrowserTab[] | null) => void;
+  setInitialUrl: (url: string) => void;
+  holdNextPause: () => void;
+  releasePause: () => void;
   setScreenshot: (data: Buffer, contentType?: string) => void;
   setDownload: (data: Buffer, contentType?: string) => void;
   failNextAct: () => void;
@@ -105,6 +108,9 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
   let nextArtifacts: ProviderArtifact[] | null = null;
   let nextUrl: string | null = null;
   let nextTabs: BrowserTab[] | null = null;
+  let initialUrl = 'about:blank';
+  let pauseGate: Promise<void> | null = null;
+  let releasePauseGate: (() => void) | null = null;
   let failNext = false;
   let failNextClose = false;
   let tabCounter = 1;
@@ -144,6 +150,18 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
     setNextTabs: (tabs) => {
       nextTabs = tabs;
     },
+    setInitialUrl: (url) => {
+      initialUrl = url;
+    },
+    holdNextPause: () => {
+      pauseGate = new Promise((resolve) => {
+        releasePauseGate = resolve;
+      });
+    },
+    releasePause: () => {
+      releasePauseGate?.();
+      releasePauseGate = null;
+    },
     setScreenshot: (data, contentType = 'image/png') => {
       screenshot = { data, contentType };
     },
@@ -161,10 +179,10 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
       fake.createInputs.push(input);
       const providerSessionId = `ps_${fake.createInputs.length}`;
       const tabs: BrowserTab[] = [
-        { tabId: 'tab-1', url: 'about:blank', title: '', active: true },
+        { tabId: 'tab-1', url: initialUrl, title: '', active: true },
       ];
-      sessions.set(providerSessionId, { url: 'about:blank', title: '', tabs });
-      return { ok: true, value: { providerSessionId, url: 'about:blank', title: '', tabs } };
+      sessions.set(providerSessionId, { url: initialUrl, title: '', tabs });
+      return { ok: true, value: { providerSessionId, url: initialUrl, title: '', tabs } };
     },
 
     act: async (input) => {
@@ -265,6 +283,11 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
 
     pause: async (providerSessionId) => {
       fake.paused.push(providerSessionId);
+      if (pauseGate) {
+        const gate = pauseGate;
+        pauseGate = null;
+        await gate;
+      }
       return { ok: true, value: undefined };
     },
     resume: async (providerSessionId) => {
@@ -289,6 +312,7 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
           detail: 'The fake provider could not confirm termination.',
         };
       }
+      sessions.delete(providerSessionId);
       return { ok: true, value: undefined };
     },
   };

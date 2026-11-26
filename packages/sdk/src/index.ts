@@ -26,9 +26,10 @@ import {
 } from '@coderax/contracts';
 import type {
   BrowserAction,
+  BrowserActionInput,
   BrowserAuthorizationRequest,
   BrowserCloseRequest,
-  BrowserSessionCreateRequest,
+  BrowserSessionCreateInput,
   BrowserTakeoverRequest,
   ChatRequest,
   DataMode,
@@ -248,7 +249,7 @@ export class CoderaxClient {
     });
   }
 
-  createBrowserSession(request: BrowserSessionCreateRequest): Promise<BrowserSession> {
+  createBrowserSession(request: BrowserSessionCreateInput): Promise<BrowserSession> {
     return this.request<BrowserSession>(BrowserSession, {
       method: 'POST',
       path: '/v1/browser/sessions',
@@ -256,7 +257,7 @@ export class CoderaxClient {
     });
   }
 
-  browserAction(sessionId: string, action: BrowserAction): Promise<BrowserActionResult> {
+  browserAction(sessionId: string, action: BrowserActionInput): Promise<BrowserActionResult> {
     return this.request<BrowserActionResult>(BrowserActionResult, {
       method: 'POST',
       path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/actions`,
@@ -461,9 +462,10 @@ export class CoderaxClient {
 
 export type {
   BrowserAction,
+  BrowserActionInput,
   BrowserAuthorizationRequest,
   BrowserCloseRequest,
-  BrowserSessionCreateRequest,
+  BrowserSessionCreateInput,
   BrowserTakeoverRequest,
   ChatRequest,
   DataMode,

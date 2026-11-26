@@ -17,6 +17,8 @@ type Def = {
   options?: z.ZodTypeAny[];
   innerType?: z.ZodTypeAny;
   schema?: z.ZodTypeAny;
+  minLength?: { value: number };
+  maxLength?: { value: number };
   values?: unknown[];
   value?: unknown;
   defaultValue?: unknown;
@@ -50,6 +52,7 @@ function stringBounds(checks: Def['checks']): JsonSchema {
     if (check.kind === 'min' && typeof check.value === 'number') out.minLength = check.value;
     if (check.kind === 'max' && typeof check.value === 'number') out.maxLength = check.value;
     if (check.kind === 'datetime') out.format = 'date-time';
+    if (check.kind === 'url') out.format = 'uri';
   }
   return out;
 }
@@ -74,7 +77,10 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       return { type: 'string', enum: [...(d.values ?? [])] };
     case 'ZodArray': {
       const item = d.type ? toJsonSchema(d.type) : {};
-      return { type: 'array', items: item };
+      const out: JsonSchema = { type: 'array', items: item };
+      if (typeof d.minLength?.value === 'number') out.minItems = d.minLength.value;
+      if (typeof d.maxLength?.value === 'number') out.maxItems = d.maxLength.value;
+      return out;
     }
     case 'ZodRecord':
       return {

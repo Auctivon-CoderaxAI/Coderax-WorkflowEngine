@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Coderax WorkflowEngine API",
-    "version": "1.1.0",
+    "version": "1.0.0",
     "description": "Authoritative HTTP surface for Coderax Native intelligence, agent orchestration and durable Work execution. Every operation is generated from the versioned route catalogue."
   },
   "servers": [
@@ -2379,7 +2379,7 @@
     "/v1/browser/capabilities": {
       "get": {
         "operationId": "browserCapabilities",
-        "summary": "Truthful cloud browser availability; not_configured when unverified.",
+        "summary": "Truthful cloud browser availability; unverified when not attested.",
         "tags": [
           "browser"
         ],
@@ -2670,7 +2670,8 @@
                                 "active"
                               ],
                               "additionalProperties": false
-                            }
+                            },
+                            "maxItems": 20
                           },
                           "allowedOrigins": {
                             "type": "array",
@@ -2678,7 +2679,9 @@
                               "type": "string",
                               "minLength": 1,
                               "maxLength": 300
-                            }
+                            },
+                            "minItems": 1,
+                            "maxItems": 20
                           },
                           "createdAt": {
                             "type": "string",
@@ -2859,7 +2862,8 @@
                           "active"
                         ],
                         "additionalProperties": false
-                      }
+                      },
+                      "maxItems": 20
                     },
                     "allowedOrigins": {
                       "type": "array",
@@ -2867,7 +2871,9 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 300
-                      }
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
                     },
                     "createdAt": {
                       "type": "string",
@@ -2971,7 +2977,9 @@
                       "type": "string",
                       "minLength": 3,
                       "maxLength": 300
-                    }
+                    },
+                    "minItems": 1,
+                    "maxItems": 20
                   },
                   "ttlSeconds": {
                     "type": "integer",
@@ -3106,7 +3114,8 @@
                           "active"
                         ],
                         "additionalProperties": false
-                      }
+                      },
+                      "maxItems": 20
                     },
                     "allowedOrigins": {
                       "type": "array",
@@ -3114,7 +3123,9 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 300
-                      }
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
                     },
                     "createdAt": {
                       "type": "string",
@@ -3322,7 +3333,8 @@
                               "focused"
                             ],
                             "additionalProperties": false
-                          }
+                          },
+                          "maxItems": 200
                         },
                         "tabs": {
                           "type": "array",
@@ -3353,7 +3365,8 @@
                               "active"
                             ],
                             "additionalProperties": false
-                          }
+                          },
+                          "maxItems": 20
                         },
                         "trust": {
                           "const": "untrusted"
@@ -3487,6 +3500,7 @@
                       },
                       "url": {
                         "type": "string",
+                        "format": "uri",
                         "maxLength": 2048
                       },
                       "intent": {
@@ -3893,6 +3907,7 @@
                       },
                       "url": {
                         "type": "string",
+                        "format": "uri",
                         "maxLength": 2048
                       },
                       "intent": {
@@ -4176,7 +4191,8 @@
                           "active"
                         ],
                         "additionalProperties": false
-                      }
+                      },
+                      "maxItems": 20
                     },
                     "allowedOrigins": {
                       "type": "array",
@@ -4184,7 +4200,9 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 300
-                      }
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
                     },
                     "createdAt": {
                       "type": "string",
@@ -4372,7 +4390,8 @@
                           "active"
                         ],
                         "additionalProperties": false
-                      }
+                      },
+                      "maxItems": 20
                     },
                     "allowedOrigins": {
                       "type": "array",
@@ -4380,7 +4399,9 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 300
-                      }
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
                     },
                     "createdAt": {
                       "type": "string",
@@ -4571,7 +4592,8 @@
                               "active"
                             ],
                             "additionalProperties": false
-                          }
+                          },
+                          "maxItems": 20
                         },
                         "allowedOrigins": {
                           "type": "array",
@@ -4579,7 +4601,9 @@
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 300
-                          }
+                          },
+                          "minItems": 1,
+                          "maxItems": 20
                         },
                         "createdAt": {
                           "type": "string",
@@ -4796,7 +4820,8 @@
                           "active"
                         ],
                         "additionalProperties": false
-                      }
+                      },
+                      "maxItems": 20
                     },
                     "allowedOrigins": {
                       "type": "array",
@@ -4804,7 +4829,9 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 300
-                      }
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
                     },
                     "createdAt": {
                       "type": "string",
@@ -5263,7 +5290,7 @@
     "/v1/browser/sessions/{sessionId}/receipts": {
       "get": {
         "operationId": "listBrowserReceipts",
-        "summary": "Append-only execution receipts for a browser session.",
+        "summary": "Bounded execution-receipt history for a browser session.",
         "tags": [
           "browser"
         ],

@@ -58,7 +58,7 @@ Every route is owner-authenticated and declared in
 | `closeBrowserSession` | `POST .../close` | Cancel and release the cloud browser |
 | `authorizeBrowserSession` | `POST .../authorize` | Request a single-use sensitive-action approval |
 | `decideBrowserAuthorization` | `POST .../authorize/decision` | Approve or deny that request |
-| `listBrowserReceipts` | `GET .../receipts` | Append-only action evidence |
+| `listBrowserReceipts` | `GET .../receipts` | Bounded action-evidence history |
 | `getBrowserArtifact` | `GET /v1/browser/artifacts/{artifactId}` | Retrieve exact screenshot or file bytes |
 
 The SDK exposes every operation on `CoderaxClient`.

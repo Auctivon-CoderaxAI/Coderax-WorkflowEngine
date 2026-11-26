@@ -31,10 +31,7 @@ import type { ServiceFailure, ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { redactText } from '../observability/redact.js';
 import type { BrowserProvider, ProviderFailure } from '../browser/types.js';
-import {
-  createBrowserStore,
-  type StoredBrowserSession,
-} from '../browser/store.js';
+import type { BrowserStore, StoredBrowserSession } from '../browser/store.js';
 import { unavailableCapabilities } from '../browser/capabilities.js';
 import {
   decodeBase64,
@@ -117,6 +114,7 @@ export type BrowserServiceDeps = {
   permissions: PermissionStore;
   audit: AuditLog;
   provider: BrowserProvider;
+  store: BrowserStore;
 };
 
 type AuditOutcome = 'accepted' | 'completed' | 'failed' | 'cancelled' | 'refused';
@@ -151,9 +149,20 @@ function toContract(record: StoredBrowserSession): BrowserSession {
 }
 
 export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
-  const store = createBrowserStore();
-  const pendingCreates = new Map<string, number>();
+  const store = deps.store;
   const consumedApprovals = new Set<string>();
+  const pendingCreates = new Map<string, number>();
+  let closing = false;
+
+  function reserveCreate(ownerId: string): void {
+    pendingCreates.set(ownerId, (pendingCreates.get(ownerId) ?? 0) + 1);
+  }
+
+  function releaseCreate(ownerId: string): void {
+    const remaining = (pendingCreates.get(ownerId) ?? 1) - 1;
+    if (remaining <= 0) pendingCreates.delete(ownerId);
+    else pendingCreates.set(ownerId, remaining);
+  }
 
   function nowMs(): number {
     return deps.clock.now().getTime();
@@ -454,6 +463,9 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     },
 
     create: async (ownerId, request) => {
+      if (closing) {
+        return fail('conflict', 'The browser service is shutting down.');
+      }
       const origins = normalizeOrigins(request.origins);
       if (!origins) {
         return fail(
@@ -469,20 +481,31 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       }
 
       await sweep(ownerId);
-      const live = store.sessions(ownerId).filter((record) => isLive(record.session) || record.session.state === 'quarantined');
+      if (closing) {
+        return fail('conflict', 'The browser service is shutting down.');
+      }
+      const live = store.sessions(ownerId).filter(
+        (record) => isLive(record.session) || record.session.state === 'quarantined',
+      );
       const pending = pendingCreates.get(ownerId) ?? 0;
-      if (pending + live.length >= deps.config.browsers.maxSessionsPerOwner) {
+      if (live.length + pending >= deps.config.browsers.maxSessionsPerOwner) {
         return fail(
           'conflict',
           'The owner already has the maximum number of live browser sessions.',
         );
       }
 
-      pendingCreates.set(ownerId, pending + 1);
+      const configuredTtl = Math.floor(deps.config.browsers.sessionTtlMs / 1000);
+      // The provider handshake may advertise a shorter maximum than the engine
+      // configuration. Never report a session live past the remote TTL.
+      const ttlSeconds = Math.min(
+        request.ttlSeconds ?? configuredTtl,
+        configuredTtl,
+        capabilities.limits.maxSessionTtlSeconds,
+      );
+      const started = nowMs();
+      reserveCreate(ownerId);
       try {
-        const configuredTtl = Math.floor(deps.config.browsers.sessionTtlMs / 1000);
-        const ttlSeconds = Math.min(request.ttlSeconds ?? configuredTtl, configuredTtl);
-        const started = nowMs();
         const created = await deps.provider.create({
           ttlSeconds,
           allowedOrigins: origins,
@@ -494,10 +517,23 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           audit(ownerId, 'browser.session.create', 'failed', created.detail);
           return providerFailure(created);
         }
+        if (closing) {
+          try {
+            await deps.provider.close(created.value.providerSessionId);
+          } catch {
+            // Shutdown is already in progress; never store a session now.
+          }
+          audit(ownerId, 'browser.session.create', 'refused', 'shutdown');
+          return fail('conflict', 'The browser service is shutting down.');
+        }
 
         const url = sanitizePageUrl(created.value.url);
         const tabs = sanitizeTabs(created.value.tabs);
-        const usable = url !== null && tabs !== null && tabsWithinOrigins(tabs, origins);
+        const usable =
+          url !== null &&
+          (url === 'about:blank' || originAllowed(url, origins)) &&
+          tabs !== null &&
+          tabsWithinOrigins(tabs, origins);
         const now = deps.clock.iso();
         const session: BrowserSession = {
           sessionId: deps.ids.browserSessionId(),
@@ -508,7 +544,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           provider: deps.provider.kind,
           url: url ?? 'about:blank',
           title: sanitizeLabel(created.value.title, 300),
-          tabs: usable ? tabs : [],
+          tabs: usable && tabs ? tabs : [],
           allowedOrigins: origins,
           createdAt: now,
           updatedAt: now,
@@ -524,15 +560,18 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         };
         store.putSession(record);
         if (!usable) {
-          return protocolViolation(record, 'session.create', 'The browser provider returned an unusable session or tab list.', started);
+          return protocolViolation(
+            record,
+            'session.create',
+            'The browser provider returned an unusable page or tab outside the allowlist.',
+            started,
+          );
         }
         addReceipt({ record, action: 'session.create', outcome: 'succeeded', started });
         audit(ownerId, 'browser.session.created', 'accepted', 'provider');
         return ok(toContract(record));
       } finally {
-        const remaining = pendingCreates.get(ownerId)! - 1;
-        if (remaining) pendingCreates.set(ownerId, remaining);
-        else pendingCreates.delete(ownerId);
+        releaseCreate(ownerId);
       }
     },
 
@@ -692,6 +731,20 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         action: normalizedAction,
         allowedOrigins: record.session.allowedOrigins,
       });
+      if (record.session.state !== 'ready') {
+        addReceipt({
+          record,
+          action: actionName,
+          outcome: 'failed',
+          started,
+          ...(approvalId ? { approvalId } : {}),
+          detail: 'The session changed while the action was in flight; its result was discarded.',
+        });
+        return fail(
+          'conflict',
+          'The session changed while the action was in flight; its result was discarded.',
+        );
+      }
       if (!outcome.ok) {
         addReceipt({
           record,
@@ -835,6 +888,9 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         observedElements = elements;
       }
 
+      const previousUrl = record.session.url;
+      const previousActiveTab = record.session.tabs.find((tab) => tab.active)?.tabId;
+      const activeTab = tabs.find((tab) => tab.active)?.tabId;
       record.session = {
         ...record.session,
         url,
@@ -844,11 +900,9 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       };
       if (observedElements !== undefined) {
         record.lastElements = observedElements;
-      }
-      if (
-        action.type === 'navigate' ||
-        (action.type === 'tab' && (action.input === 'open' || action.input === 'activate'))
-      ) {
+      } else if (url !== previousUrl || activeTab !== previousActiveTab) {
+        // A click, key or tab close can change the document even when the
+        // action did not name a navigation. Old element ids are not targets.
         record.lastElements = [];
       }
       store.updateSession(record);
@@ -892,6 +946,15 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         addReceipt({ record, action: 'pause', outcome: 'failed', started, detail: result.detail });
         return providerFailure(result);
       }
+      if (record.session.state !== 'ready') {
+        return refusal(
+          record,
+          'pause',
+          'conflict',
+          'The session changed while pause was in flight.',
+          started,
+        );
+      }
       record.session = { ...record.session, state: 'paused', updatedAt: deps.clock.iso() };
       store.updateSession(record);
       addReceipt({ record, action: 'pause', outcome: 'succeeded', started });
@@ -917,6 +980,15 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       if (!result.ok) {
         addReceipt({ record, action: 'resume', outcome: 'failed', started, detail: result.detail });
         return providerFailure(result);
+      }
+      if (record.session.state !== 'paused') {
+        return refusal(
+          record,
+          'resume',
+          'conflict',
+          'The session changed while resume was in flight.',
+          started,
+        );
       }
       record.session = { ...record.session, state: 'ready', updatedAt: deps.clock.iso() };
       store.updateSession(record);
@@ -945,6 +1017,15 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         if (!result.ok) {
           addReceipt({ record, action: 'takeover', outcome: 'failed', started, detail: result.detail });
           return providerFailure(result);
+        }
+        if (record.session.state !== 'ready') {
+          return refusal(
+            record,
+            'takeover',
+            'conflict',
+            'The session changed while takeover was in flight.',
+            started,
+          );
         }
         const interactiveUrl = sanitizePageUrl(result.value.interactiveUrl, {
           allowAboutBlank: false,
@@ -982,6 +1063,15 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       if (!result.ok) {
         addReceipt({ record, action: 'release', outcome: 'failed', started, detail: result.detail });
         return providerFailure(result);
+      }
+      if (record.session.state !== 'owner_controlled') {
+        return refusal(
+          record,
+          'release',
+          'conflict',
+          'The session changed while release was in flight.',
+          started,
+        );
       }
       record.session = { ...record.session, state: 'ready', updatedAt: deps.clock.iso() };
       store.updateSession(record);
@@ -1087,6 +1177,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     },
 
     shutdown: async () => {
+      closing = true;
       for (const record of store.liveSessions()) {
         const released = await closeProvider(record);
         const now = deps.clock.iso();

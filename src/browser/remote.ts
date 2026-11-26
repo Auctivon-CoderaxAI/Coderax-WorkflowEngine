@@ -12,6 +12,7 @@ import type {
   ProviderResult,
   ProviderSession,
 } from './types.js';
+import { decodeBase64 } from './policy.js';
 import {
   ProviderActionResponse,
   ProviderCapabilitiesResponse,
@@ -161,7 +162,11 @@ export function createHttpBrowserProvider(input: {
             if (bytes > MAX_PROVIDER_RESPONSE) {
               controller.abort();
               void reader.cancel().catch(() => {});
-              return { ok: false, code: 'protocol_error', detail: 'The browser provider response exceeded the protocol limit.' };
+              return {
+                ok: false,
+                code: 'protocol_error',
+                detail: 'The browser provider response exceeded the protocol limit.',
+              };
             }
             text += decoder.decode(chunk.value, { stream: true });
           }
@@ -355,6 +360,22 @@ export function createHttpBrowserProvider(input: {
     return { ok: true, value: undefined };
   }
 
+  async function cleanupOnly(path: string): Promise<ProviderResult<void>> {
+    // Cancellation must reach an authenticated session endpoint even when the
+    // capability endpoint is down or has changed its cost/feature advertisement.
+    // The token still goes only to the attested provider origin.
+    if (!input.trusted) {
+      return {
+        ok: false,
+        code: 'not_configured',
+        detail: 'The browser provider endpoint is not owner-attested.',
+      };
+    }
+    const result = await request(path, 'POST', {}, ProviderOkResponse);
+    if (!result.ok) return result;
+    return { ok: true, value: undefined };
+  }
+
   return {
     kind: providerName,
     describe,
@@ -409,11 +430,26 @@ export function createHttpBrowserProvider(input: {
       );
       if (!result.ok) return result;
       const observation = result.value.observation;
-      const artifacts = (result.value.artifacts ?? []).map((artifact) => ({
-        kind: artifact.kind,
-        contentType: artifact.contentType,
-        data: Buffer.from(artifact.dataBase64, 'base64'),
-      }));
+      const artifacts: Array<{
+        kind: 'screenshot' | 'download' | 'upload';
+        contentType: string;
+        data: Buffer;
+      }> = [];
+      for (const artifact of result.value.artifacts ?? []) {
+        const data = decodeBase64(artifact.dataBase64, MAX_PROVIDER_RESPONSE);
+        if (!data) {
+          return {
+            ok: false,
+            code: 'protocol_error',
+            detail: 'The browser provider returned malformed artifact base64.',
+          };
+        }
+        artifacts.push({
+          kind: artifact.kind,
+          contentType: artifact.contentType,
+          data,
+        });
+      }
       const outcome: ProviderActionOutcome = {
         url: result.value.url,
         title: result.value.title,
@@ -454,13 +490,9 @@ export function createHttpBrowserProvider(input: {
     },
 
     release: (providerSessionId) =>
-      okOnly(`/v1/sessions/${encodeURIComponent(providerSessionId)}/release`, 'takeover'),
+      cleanupOnly(`/v1/sessions/${encodeURIComponent(providerSessionId)}/release`),
 
-    close: async (providerSessionId) => {
-      if (!input.trusted) {
-        return { ok: false, code: 'not_configured', detail: 'The browser endpoint is not owner-attested.' };
-      }
-      return acknowledge(`/v1/sessions/${encodeURIComponent(providerSessionId)}/close`);
-    },
+    close: (providerSessionId) =>
+      cleanupOnly(`/v1/sessions/${encodeURIComponent(providerSessionId)}/close`),
   };
 }
