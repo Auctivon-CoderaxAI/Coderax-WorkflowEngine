@@ -94,5 +94,5 @@ billing restriction. See `docs/quality-gate.md`.
 | Reviewers installed | None |
 | Approvals on PR #1 | 0 |
 | Hosted CI | Active; 52 completed runs. Green at PR #2/#3/#4/#5/#7/#8/#9 heads, but those runs used `main`'s older workflow. The consolidated gate runs at `ci/**` pushes and PRs after merge |
-| Local verification at this change | build 0, 190/190 tests, eleven static gates clean, real MongoDB 6/6 against mongod 7.0.14 |
+| Local verification at this change | build 0, 239/239 tests, eleven static gates clean, real MongoDB 6/6 against mongod 7.0.14 |
 | Dependency audit | Clean at the high/critical threshold after the zod 4.6.7 correction |

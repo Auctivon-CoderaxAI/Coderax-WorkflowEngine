@@ -101,7 +101,7 @@ Two competing gate branches existed. Exact heads were fetched and compared:
 | Branch | Head inspected | Verdict |
 | --- | --- | --- |
 | `ci/permanent-quality-gate` | `21015a7` (this branch before this document) | **surviving implementation** |
-| `ci/permanent-quality-gates` | `c6baf77` (was `7ce5cd6` when first compared) | superseded after its unique work was adopted |
+| `ci/permanent-quality-gates` | `b571ad9` (was `d00156a` at the previous audit) | superseded after its compatible unique work was adopted |
 
 The surviving branch already had the broader suites (180 compiled tests), explicit
 per-concern gates, fail-closed reachability, OpenAPI/SDK/registration/artifact
@@ -118,12 +118,29 @@ components, all now incorporated and verified here:
    (index bootstrap, restart persistence, recovery, notifications), merged into
    the existing lane.
 
-No third gate branch was created. The superseded branch advanced again after this
-consolidation, from `a43acc9` to `d00156a`, adding shutdown/network/gateway changes
-and new test layers that are **not** in this branch. It must not merge as a second
-gate, and it must not be closed as superseded until those post-adoption commits are
-reconciled here or shown to be duplicates. That reconciliation is a follow-up, not
-a claim of this change.
+No third gate branch was created.
+
+### Post-adoption reconciliation at `b571ad9`
+
+Both heads were fetched again before this change: the designated branch was
+`a1f2319` and `ci/permanent-quality-gates` was `b571ad9`, a descendant that had
+already merged `a1f2319`. Its unique post-adoption commits were reviewed one at a
+time. Only coverage that compiles and passes unchanged against this gate, or that
+exposed a real defect here, was adopted:
+
+| From `ci/permanent-quality-gates` | Disposition |
+| --- | --- |
+| Provider egress guard (`validateProviderBaseURL`, `redirect: 'error'`) | adopted with its three network regressions |
+| Security regression matrix `[SEC-F1..F11]` | adopted; it found `defaultTtlMs` was accepted but ignored in `src/permissions/store.ts`, fixed here |
+| Adversarial approval, cost, fencing and replay suites | adopted unchanged |
+| Scheduler and Zod 4 unit suites | adopted unchanged |
+| Idempotent shutdown and refusal before the drain | adopted as memoised `stop()` plus `beginShutdown()`, keeping this branch's `scheduler.idle()` ordering |
+| Competing gate implementation (`scripts/architecture.ts`, `check-audit.ts`, `gates.ts`, `run-gates.ts`) | rejected: a second gate, and it replaces this branch's fail-closed audit classifier |
+| Contract route test and its `SDK_OPERATIONS` export | rejected: needs the competing SDK surface; this branch's contract suite already covers the catalogue |
+| Live-Mongo migrations, the `mongodb` 7 upgrade, `docs/acceptance.md` and `docs/quality-gates.md` | rejected: separate lane and dependency change, and the live shutdown variant would be reported as skipped by `npm run verify` |
+
+The gate implementation, the audit classifier and its eight fail-closed tests are
+unchanged. Neither branch was modified or closed, and no merge was performed.
 
 ## Dependency advisory resolution
 
@@ -153,8 +170,9 @@ Verified result at this head:
 
 ```text
 npm run verify                          exit 0
-tests 190, pass 190, fail 0, skipped 0
+tests 239, pass 239, fail 0, skipped 0
 unit audit fail-closed tests        8/8
+reconciled coverage suites         49 tests
 gate:openapi                            clean (openapi.json byte-identical)
 gate:authority                          clean
 gate:audit                              clean (critical=0 high=0 moderate=0 low=0)

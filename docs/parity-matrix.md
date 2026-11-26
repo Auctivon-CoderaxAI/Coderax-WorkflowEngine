@@ -102,7 +102,7 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 190/190 tests, OpenAPI drift and all eleven
+- `npm run verify` at the pushed head: 239/239 tests, OpenAPI drift and all eleven
   static gates clean. This includes the security, adversarial, architecture,
   semantic-authority, recovery, fencing, replay, release-compatibility and
   capability-registry suites.

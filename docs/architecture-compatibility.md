@@ -52,7 +52,7 @@ removed on rebase, **S** superseded, **U** unavailable.
 
 | Area | Ref | Head | PR | Status | Gate interaction | Decision |
 | --- | --- | --- | --- | --- | --- | --- |
-| Quality gate | `ci/permanent-quality-gate` | this branch | none yet | **A** | all controls | merge first; `ci/permanent-quality-gates` advanced to `d00156a` after adoption and is not reconciled: do not close or merge it as a second gate |
+| Quality gate | `ci/permanent-quality-gate` | this branch | none yet | **A** | all controls | merge first; `ci/permanent-quality-gates` at `b571ad9` is reconciled: its compatible post-adoption coverage is adopted here, its competing gate implementation is rejected. Do not close or merge it as a second gate |
 | Authoritative router | `feat/zero-cost-model-router` | `ade0a292258ae2451e0bfe5678a91989798f22b8` | #4 | **A** | supplies the one model-routing authority | merge after gate |
 | Intelligence core | `feat/intelligence-core` | `c1bcf66e2c6ddc8c71e0ce61efae3de065a2d2a5` | #2 | **D** router, **A** tools/MCP/retrieval/approvals/quota | duplicate model router + `ModelCatalog` selector; durable budget/approval need live cases | rebase on #4, delete `src/models/router.ts` and selector, keep durable budget/approvals |
 | Native reasoning planner | `feat/native-reasoning-planner` | `072c4371ed0190993468660e00fd20cf4827fccd` | #3 | **A** planner | planner cardinality; contract rebase | rebase on #4/#7; keep one planner |
