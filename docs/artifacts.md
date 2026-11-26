@@ -367,3 +367,19 @@ the durable service accepts a bounded filename, not a path.
 
 Generated HTML is staged for verification but stored as `text/plain`: the
 durable media list deliberately excludes active content.
+
+## Source-tree restoration
+
+A generated software project is stored as individual artifacts that share one
+`projectId` and carry a validated `relativePath`; `MANIFEST.json` records each
+file's `artifactId`, digest and retained version. `src/artifacts/tree.ts`
+reconstructs the tree by artifact identity.
+
+Restoration is hostile-input safe: every path is revalidated (no absolute path,
+drive prefix, backslash, dot segment, control character, reserved device name or
+duplicate), each directory component is checked with `lstat` and a symlinked
+component is refused, the resolved parent must remain inside the root, and the
+final file is opened with `O_CREAT|O_EXCL|O_NOFOLLOW` after its SHA-256 is
+verified. An existing file or dangling symlink is never overwritten. Node has no
+`openat`, so a directory swapped for a symlink between the check and the write is
+a residual race, not an accepted path.

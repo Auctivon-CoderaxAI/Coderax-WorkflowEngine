@@ -11,6 +11,8 @@ import type {
   Deliverable,
   DeliverableRequest,
   MemoryList,
+  MediaIntakeRequest,
+  MediaIntakeResult,
   ModelList,
   NotificationList,
   PermissionDecisionRequest,
@@ -57,6 +59,7 @@ import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.j
 import { buildTranscript } from './transcript.js';
 import type { ArtifactToolkit } from '../artifacts/types.js';
 import { ArtifactPersistError } from '../artifacts/types.js';
+import { intakeMedia as validateMediaAttachments } from '../media/intake.js';
 import type { CapabilityRegistry } from '../capabilities/registry.js';
 
 export type ApplicationServiceDeps = {
@@ -97,6 +100,11 @@ export type ApplicationService = {
   agents: () => AgentList;
   models: () => ModelList;
   capabilities: () => CapabilityReport;
+  /** Validates media before any provider transfer; returns metadata only. */
+  intakeMedia: (
+    principal: Principal,
+    request: MediaIntakeRequest,
+  ) => Promise<ServiceResult<MediaIntakeResult>>;
   deliver: (
     principal: Principal,
     request: DeliverableRequest,
@@ -689,6 +697,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
     capabilities: () => deps.capabilities.report(),
+
+    intakeMedia: async (principal, request) => {
+      // The owner is the only principal; validation is independent of identity.
+      void principal;
+      const validated = validateMediaAttachments(request.attachments);
+      if (!validated.ok) return validated;
+      return ok({ media: validated.value.map((entry) => entry.reference) });
+    },
 
     deliver: async (principal, request) => {
       const workspace = await resolveEngineWorkspace({

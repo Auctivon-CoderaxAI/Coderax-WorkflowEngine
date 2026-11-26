@@ -35,6 +35,7 @@ import {
   ArtifactVersionRequest,
 } from './artifacts.js';
 import { z as zod } from 'zod';
+import { MediaIntakeRequest, MediaIntakeResult } from './media.js';
 import { ArtifactId, ConversationId, DataMode, ProjectId, TaskId } from './primitives.js';
 
 /**
@@ -141,6 +142,18 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['discovery'],
     auth: 'owner',
     response: { status: 200, description: 'Capability report', schema: CapabilityReport },
+  },
+  {
+    operationId: 'intakeMedia',
+    method: 'POST',
+    path: '/v1/media',
+    summary: 'Validate an image attachment set and return immutable media references.',
+    tags: ['media'],
+    auth: 'owner',
+    body: MediaIntakeRequest,
+    response: { status: 200, description: 'Validated media references', schema: MediaIntakeResult },
+    // Six MiB of JSON covers the published 4 MiB decoded attachment total.
+    maxBodyBytes: 6 * 1024 * 1024,
   },
   {
     operationId: 'generateDeliverable',

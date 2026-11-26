@@ -1,6 +1,8 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  MediaIntakeRequest,
+  MediaIntakeResult,
   ArtifactContent,
   ArtifactDeleteResult,
   ArtifactDescriptor,
@@ -236,6 +238,14 @@ export class CoderaxClient {
   }
 
   /** Produces a real, verified artifact inside the request's workspace mode. */
+  intakeMedia(request: MediaIntakeRequest): Promise<MediaIntakeResult> {
+    return this.request<MediaIntakeResult>(MediaIntakeResult, {
+      method: 'POST',
+      path: '/v1/media',
+      body: request,
+    });
+  }
+
   deliver(request: DeliverableRequestInput): Promise<Deliverable> {
     return this.request<Deliverable>(Deliverable, {
       method: 'POST',

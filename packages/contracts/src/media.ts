@@ -58,6 +58,23 @@ export const MediaReference = z
   .strict();
 export type MediaReference = z.infer<typeof MediaReference>;
 
+/** One intake call validates a whole attachment set atomically. */
+export const MediaIntakeRequest = z
+  .object({
+    attachments: z.array(MediaAttachmentInput).min(1).max(MEDIA_LIMITS.maxAttachments),
+  })
+  .strict();
+export type MediaIntakeRequest = z.infer<typeof MediaIntakeRequest>;
+
+/** The response carries metadata only; the bytes are never echoed back. */
+export const MediaIntakeResult = z
+  .object({
+    media: z.array(MediaReference).min(1).max(MEDIA_LIMITS.maxAttachments),
+  })
+  .strict();
+export type MediaIntakeResult = z.infer<typeof MediaIntakeResult>;
+
+
 /**
  * Creative output is text-shaped by design: Markdown, an HTML fragment or an
  * SVG document. A text model can produce it at zero cost, and the engine can

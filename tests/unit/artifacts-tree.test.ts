@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -138,4 +138,39 @@ test('a manifest is rebuilt from descriptors listed by project identity', () => 
   });
   assert.equal(rebuilt.files.length, 4);
   assert.equal(rebuilt.files[2]?.artifactId, 'art_index');
+});
+
+test('restoration refuses symlinked components and never writes outside the root', async () => {
+  const tree = manifest();
+  const root = mkdtempSync(path.join(tmpdir(), 'coderax-tree-root-'));
+  const outside = mkdtempSync(path.join(tmpdir(), 'coderax-tree-outside-'));
+  const contents = new Map(files.map((file) => [file.artifactId, Buffer.from(file.content, 'utf8')]));
+  try {
+    symlinkSync(outside, path.join(root, 'src'), 'dir');
+    await assert.rejects(
+      restoreTree({ root, manifest: tree, read: async (id) => contents.get(id) as Buffer }),
+      /symbolic link/,
+    );
+    assert.equal(existsSync(path.join(outside, 'index.ts')), false);
+    assert.equal(existsSync(path.join(outside, 'lib')), false);
+
+    // A rejected restore may have written earlier entries; start clean.
+    for (const entry of readdirSync(root)) rmSync(path.join(root, entry), { recursive: true, force: true });
+    symlinkSync(path.join(outside, 'target.txt'), path.join(root, 'README.md'));
+    await assert.rejects(
+      restoreTree({ root, manifest: tree, read: async (id) => contents.get(id) as Buffer }),
+      /already exists/,
+    );
+    assert.equal(existsSync(path.join(outside, 'target.txt')), false);
+
+    for (const entry of readdirSync(root)) rmSync(path.join(root, entry), { recursive: true, force: true });
+    symlinkSync('/nonexistent-coderax-target', path.join(root, 'src'), 'dir');
+    await assert.rejects(
+      restoreTree({ root, manifest: tree, read: async (id) => contents.get(id) as Buffer }),
+      /symbolic link/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });

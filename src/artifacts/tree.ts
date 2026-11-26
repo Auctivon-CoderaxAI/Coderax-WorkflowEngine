@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { ArtifactDescriptor } from '@coderax/contracts';
 
@@ -128,7 +129,12 @@ export async function restoreTree(input: {
   if (!input.manifest.projectId) {
     throw new TreePathError('The tree manifest is missing its project identity.');
   }
-  const root = path.resolve(input.root);
+  let root: string;
+  try {
+    root = await realpath(path.resolve(input.root));
+  } catch {
+    throw new TreePathError('The restoration root does not exist.');
+  }
   const seen = new Set<string>();
   let files = 0;
   let bytes = 0;
@@ -149,16 +155,74 @@ export async function restoreTree(input: {
     if (digest !== entry.sha256) {
       throw new TreePathError(`The artifact digest does not match for ${relativePath}.`);
     }
-    const destination = path.resolve(root, ...relativePath.split('/'));
-    if (destination !== root && !destination.startsWith(root + path.sep)) {
+
+    const segments = relativePath.split('/');
+    const filename = segments.pop() as string;
+    const parent = await safeParent(root, segments);
+    const resolvedParent = await realpath(parent);
+    if (resolvedParent !== root && !resolvedParent.startsWith(root + path.sep)) {
       throw new TreePathError('A tree path escapes the restoration root.');
     }
-    await mkdir(path.dirname(destination), { recursive: true });
-    await writeFile(destination, content, { flag: 'wx' });
+    const destination = path.join(resolvedParent, filename);
+    await assertVacant(destination);
+
+    // `wx` refuses an existing entry; O_NOFOLLOW refuses a symlink that appeared
+    // after the lstat. Node has no openat, so a directory swapped for a symlink
+    // between these calls is a residual race, not an accepted path.
+    const handle = await open(
+      destination,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await handle.writeFile(content);
+    } finally {
+      await handle.close();
+    }
     files += 1;
     bytes += content.length;
   }
   return { files, bytes };
+}
+
+/**
+ * Creates and validates each directory component. A symlinked component is
+ * refused even when it points inside the root: a restored tree never traverses
+ * a link, so a later replacement cannot redirect a write.
+ */
+async function safeParent(root: string, segments: string[]): Promise<string> {
+  let current = root;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    let stat;
+    try {
+      stat = await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await mkdir(current).catch((mkdirError: NodeJS.ErrnoException) => {
+        if (mkdirError.code !== 'EEXIST') throw mkdirError;
+      });
+      stat = await lstat(current);
+    }
+    if (stat.isSymbolicLink()) {
+      throw new TreePathError('A tree path crosses a symbolic link.');
+    }
+    if (!stat.isDirectory()) {
+      throw new TreePathError('A tree path crosses a non-directory entry.');
+    }
+  }
+  return current;
+}
+
+/** Refuses an existing destination, including a dangling symlink. */
+async function assertVacant(destination: string): Promise<void> {
+  try {
+    await lstat(destination);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  throw new TreePathError('A tree entry already exists at its destination.');
 }
 
 /** Rebuilds a manifest from durable descriptors listed by project. */
