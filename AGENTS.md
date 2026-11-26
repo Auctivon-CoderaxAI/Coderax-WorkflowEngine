@@ -45,9 +45,10 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
 2. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security,
    adversarial, architecture and end-to-end suites.
 3. `npm run gate` — OpenAPI drift, route registration, SDK compatibility,
-   architecture boundaries and single ownership, unreachable modules, dependency
-   manifests and lockfile integrity, package artifact integrity, and release
-   manifest compatibility.
+   architecture boundaries, semantic capability authority, gate coverage,
+   unreachable modules, dependency manifests and lockfile integrity, package
+   artifact integrity, release manifest compatibility, and the high/critical
+   dependency audit.
 
 The fake MongoDB collection suite is explicitly not live database evidence.
 `npm run test:mongo:live` requires `CODERAX_TEST_MONGO_URI` and fails without it.

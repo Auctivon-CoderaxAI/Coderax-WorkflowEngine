@@ -35,13 +35,15 @@
     "gate:dependencies": "node dist/scripts/gate/run.js dependencies",
     "gate:artifacts": "node dist/scripts/gate/run.js artifacts",
     "gate:release": "node dist/scripts/gate/run.js release",
-    "gate:audit": "npm audit --audit-level=high",
-    "gate": "npm run gate:openapi && npm run gate:registration && npm run gate:sdk && npm run gate:structure && npm run gate:reachability && npm run gate:dependencies && npm run gate:artifacts && npm run gate:release",
+    "gate:authority": "node dist/scripts/gate/run.js authority",
+    "gate:coverage": "node dist/scripts/gate/run.js coverage",
+    "gate:audit": "node dist/scripts/gate/run.js audit",
+    "gate": "npm run gate:openapi && npm run gate:registration && npm run gate:sdk && npm run gate:structure && npm run gate:authority && npm run gate:reachability && npm run gate:coverage && npm run gate:dependencies && npm run gate:artifacts && npm run gate:release && npm run gate:audit",
     "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && npm run gate"
   },
   "dependencies": {
     "@coderax/contracts": "*",
-    "zod": "^3.25.67"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

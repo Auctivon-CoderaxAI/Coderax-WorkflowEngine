@@ -81,10 +81,10 @@ seven static gates; one for real MongoDB against a free `mongo:7` service
 container; one for `npm audit` at high and critical. No larger runner, paid action
 or purchased minute is used.
 
-If the account's hosted billing restriction persists, these jobs do not start.
-That is a limitation of the platform, not permission to weaken a check: the pull
-request reports the local command and result, and the audit finding stays visible.
-See `docs/quality-gate.md`.
+Hosted Actions are active and have completed runs at open PR heads; a branch push
+alone does not trigger a run unless its branch is `main` or matches `ci/**`. A
+missing run is therefore diagnosed as an absent trigger, not assumed to be a
+billing restriction. See `docs/quality-gate.md`.
 
 ## Current state
 
@@ -93,6 +93,6 @@ See `docs/quality-gate.md`.
 | `main` protection | Not enforceable (Pro-only); equivalent policy documented above |
 | Reviewers installed | None |
 | Approvals on PR #1 | 0 |
-| Hosted CI | Workflow configured on standard hosted runners; no hosted run observed (account billing restriction) |
-| Local verification at this change | build 0, 175/175 tests, eight static gates clean; real MongoDB and hosted CI not run here |
-| Dependency audit | One high advisory (`zod < 4.6.6`); enforcing and reported, not ignored |
+| Hosted CI | Active; 52 completed runs. Green at PR #2/#3/#4/#5/#7/#8/#9 heads, but those runs used `main`'s older workflow. The consolidated gate runs at `ci/**` pushes and PRs after merge |
+| Local verification at this change | build 0, 182/182 tests, eleven static gates clean, real MongoDB 6/6 against mongod 7.0.14 |
+| Dependency audit | Clean at the high/critical threshold after the zod 4.6.7 correction |

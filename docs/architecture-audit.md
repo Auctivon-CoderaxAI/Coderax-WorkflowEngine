@@ -173,7 +173,10 @@ dependency direction is one-way and documented in `AGENTS.md`.
 
 ## 12. Broken or incomplete integrations found
 
-- Hosted GitHub Actions cannot start jobs on Coderax (account billing restriction).
+- Superseded 2026-11-26: hosted GitHub Actions are active and have completed
+  runs at open PR heads. A branch push alone does not trigger one unless it is
+  `main` or `ci/**`; see `docs/quality-gate.md`. The original audit recorded the
+  earlier billing restriction.
 - The swarm coordination layer was removed on 2026-11-20 because no runtime
   constructed it; there is no swarm runtime.
 - OpenHands returns `not_configured` by design: no Python runtime is bundled.

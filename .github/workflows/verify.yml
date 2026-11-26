@@ -4,16 +4,18 @@ name: verify
 # runs on every push to a pull request and on main after merge.
 #
 # Every job uses a standard GitHub-hosted runner (ubuntu-latest). No larger
-# runner, paid action, matrix expansion or purchased minute is used. If the
-# account's hosted billing restriction persists, the jobs do not start; that is
-# reported in the pull request instead of being worked around (see
-# docs/governance.md and docs/quality-gate.md).
+# runner, paid action, matrix expansion or purchased minute is used. Runs are
+# triggered by a pull request, a push to main, or a push to a ci/** gate branch;
+# a feature-branch push alone does not start one. See docs/quality-gate.md.
 
 on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    # Gate branches verify on push so a change to the gate itself is proven at
+    # its exact head before it starts rejecting other branches. A feature-branch
+    # push alone is not a request for acceptance; its pull request is.
+    branches: [main, 'ci/**']
 
 permissions:
   contents: read
@@ -77,6 +79,12 @@ jobs:
 
       - name: Architecture boundaries and single ownership
         run: npm run gate:structure
+
+      - name: Capability authority (TypeScript semantic analysis)
+        run: npm run gate:authority
+
+      - name: Gate coverage (every compiled test is executed)
+        run: npm run gate:coverage
 
       - name: Unused and disconnected capability detection
         run: npm run gate:reachability
@@ -159,9 +167,10 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       # High and critical advisories fail the gate. A documented exception is
-      # not used: an advisory is fixed by upgrading, not by ignoring it.
+      # not used: an advisory is fixed by upgrading, not by ignoring it. The
+      # machine-readable gate refuses to pass when the registry is unavailable.
       - name: Audit runtime dependencies
         run: npm audit --audit-level=high --omit=dev
 
-      - name: Audit development dependencies
-        run: npm audit --audit-level=high
+      - name: Audit the complete installed tree
+        run: npm run gate:audit

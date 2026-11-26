@@ -1,4 +1,7 @@
 import { checkArtifacts } from './artifacts.js';
+import { checkAudit } from './audit.js';
+import { checkAuthorities } from './authority.js';
+import { checkCoverage } from './coverage.js';
 import { checkDependencies } from './dependencies.js';
 import { checkOpenApi } from './openapi.js';
 import { checkReachability } from './reachability.js';
@@ -17,7 +20,10 @@ import type { Report } from './files.js';
 
 const CHECKS: Record<string, () => Report | Promise<Report>> = {
   structure: checkStructure,
+  authority: checkAuthorities,
   reachability: checkReachability,
+  coverage: checkCoverage,
+  audit: checkAudit,
   registration: checkRegistration,
   sdk: checkSdk,
   openapi: checkOpenApi,

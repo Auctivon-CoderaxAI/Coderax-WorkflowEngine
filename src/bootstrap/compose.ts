@@ -369,6 +369,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     },
     stop: async () => {
       await service.shutdown();
+      // Aborting controllers wakes running jobs; close persistence only after
+      // their final writes settle. Otherwise shutdown races a database write and
+      // surfaces a spurious closed-client error.
+      await scheduler.idle();
       await server.close();
       await persistence.close();
     },

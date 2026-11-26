@@ -29,12 +29,12 @@ Status vocabulary:
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |
 | 15 | Lease TTL / retention / sweep bound | 30 s / 24 h / 100 | same constants | Preserved |
-| 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap, selected at startup by `persistence.driver` | Preserved (verified against a fake; no live DB) |
+| 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap, selected at startup by `persistence.driver` | Preserved (verified against real MongoDB 7.0.14 and the fake) |
 | 17 | Fenced terminal write for the task record | `fenceWorkRun` on the conversation row | `TaskRepository.updateFenced` on the task row | Preserved |
 | 18 | Fenced conversation write | `fenceWorkRun` | not implemented; conversations are written after settlement | Missing |
-| 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
-| 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
-| 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
+| 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (verified against real MongoDB 7.0.14) |
+| 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (verified against real MongoDB 7.0.14) |
+| 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (verified against real MongoDB 7.0.14) |
 | 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
@@ -102,15 +102,19 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 175/175 tests, OpenAPI drift and all eight
+- `npm run verify` at the pushed head: 182/182 tests, OpenAPI drift and all eleven
   static gates clean. This includes the security, adversarial, architecture,
-  recovery, fencing, replay, release-compatibility and capability-registry suites.
+  semantic-authority, recovery, fencing, replay, release-compatibility and
+  capability-registry suites.
 - Durable stores are verified against a semantics-faithful collection fake that
-  enforces unique indexes and cursor semantics. A **real MongoDB** check now exists
-  (`npm run test:mongo:live`, run by the `real MongoDB integration` job against a
-  `mongo:7` service container) but it was not executed from this environment, which
-  has neither Docker nor `mongod`. No live row was stored here.
-- No hosted CI run exists: the GitHub Actions job is blocked by account billing.
-  The local run above is the only executed evidence.
-- The dependency vulnerability scan reports one high advisory (`zod < 4.6.6`); it is
-  enforcing, not ignored. `docs/quality-gate.md` records the blocking follow-up.
+  enforces unique indexes and cursor semantics **and** against a real `mongod`
+  7.0.14 through `npm run test:mongo:live`: six tests covering index arbitration,
+  two-replica leases, fencing/reissue, idempotency and conversation isolation,
+  restart persistence, crash recovery and notification durability. The CI job uses
+  a free `mongo:7` service container and an ephemeral database.
+- Hosted CI is active (52 completed runs; green at the open PR heads), but those
+  runs used `main`'s older workflow. The consolidated gate is the local run above
+  plus the `ci/**` push and the PR after merge.
+- The dependency vulnerability scan is clean at the high/critical threshold: zod
+  `^4.6.7` resolves GHSA-mrhx-c7xc-m3w5. The transport body cap remains as defence
+  in depth.
