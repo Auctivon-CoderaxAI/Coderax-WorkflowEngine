@@ -171,6 +171,14 @@ The archive is byte-reproducible: sorted entries, zero mtime/uid/gid, fixed mode
 and a zeroed gzip timestamp. `npm run sdk:check` rebuilds it in memory and fails
 when the committed bytes, the manifest, or a package version has drifted.
 
+The artifact must be produced from a **clean** build. TypeScript prints inferred
+union members in a different order when it reuses an incremental `.tsbuildinfo`,
+so a `.d.ts` emitted from an incremental build carries the same types but
+different bytes. `sdk:bundle`, `sdk:check` and `verify` therefore run
+`tsc -b --clean` before building. An artifact built from incremental output
+passes a local check and fails a clean CI checkout; that is exactly the drift
+these scripts now make impossible.
+
 `SDK_OPERATION_COVERAGE` maps every published `operationId` to the client method
 that serves it. `tests/contract/sdk-coverage.test.ts` fails when an operation has
 no method or a method has no operation, and

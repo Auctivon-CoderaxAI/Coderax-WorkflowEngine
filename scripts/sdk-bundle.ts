@@ -19,6 +19,12 @@ import { gzipSync } from 'node:zlib';
  * the same digest, which is what makes a committed tarball verifiable rather
  * than merely attached.
  *
+ * The caller must have built from clean. `tsc -b` reusing an incremental
+ * `.tsbuildinfo` prints inferred union members in a different order, which
+ * changes the emitted `.d.ts` bytes without changing the types. The npm scripts
+ * run `tsc -b --clean` first; building incrementally here produces an artifact
+ * that no clean checkout can reproduce.
+ *
  * `--check` is the drift gate: it rebuilds in memory and fails when the committed
  * artifact or its manifest no longer match the source, the same way
  * `openapi:check` guards the HTTP document.

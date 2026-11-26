@@ -33,6 +33,10 @@ manifest also lists a digest per file. Regenerate both with `npm run sdk:bundle`
 `npm run sdk:check` fails when the committed artifact differs from the source, so
 a stale tarball cannot be shipped.
 
+Both scripts run `tsc -b --clean` first. An incremental TypeScript build emits the
+same declarations with a different union-member order, which changes the digest
+without changing the types, so only a clean build can reproduce the shipped bytes.
+
 The tarball vendors `@coderax/contracts` inside its own `node_modules`, which is
 why installing it needs only `zod` from the registry.
 
