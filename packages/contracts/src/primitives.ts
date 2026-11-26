@@ -5,7 +5,7 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-export const CONTRACT_VERSION = '1.1.0' as const;
+export const CONTRACT_VERSION = '1.2.0' as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -72,6 +72,7 @@ export const EngineFailureCode = z.enum([
   'budget_exhausted',
   'paid_model_refused',
   'model_missing',
+  'verification_failed',
   'approval_required',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;

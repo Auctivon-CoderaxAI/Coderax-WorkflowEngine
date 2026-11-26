@@ -151,13 +151,17 @@ export function createRoutedGateway(input: {
           return { ...completion, usage };
         } catch (error) {
           const failedAt = at();
-          input.router.settle(candidate, {}, failedAt, reserved.value.reservedTokens);
+          // The request reached the gateway, so whether the provider billed it is
+          // unknown. Charge the reservation conservatively instead of refunding
+          // it; a timeout or a 5xx is not proof that no tokens were spent.
+          const unaccountedUsage = { inputTokens: estimate.total, outputTokens: 0 };
+          input.router.settle(candidate, unaccountedUsage, failedAt, reserved.value.reservedTokens);
           if (input.budget && request.ownerId && budgetReservation > 0) {
             await input.budget.settle({
               ownerId: request.ownerId,
               at: failedAt,
               reservedTokens: budgetReservation,
-              usage: {},
+              usage: unaccountedUsage,
             });
           }
           if (request.signal.aborted) throw error;

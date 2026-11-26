@@ -4,6 +4,7 @@ import { createRouterCatalog } from '../../src/models/catalog.js';
 import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 import type { ProviderDescriptor, ProviderModel } from '../../src/models/router.js';
 import { createRouter } from '../../src/models/router.js';
+import { createRoutedGateway } from '../../src/models/routed.js';
 
 const ready = { available: true as const, reason: 'ready' as const, detail: 'ready' };
 
@@ -99,6 +100,36 @@ test('an unknown model is refused with a stable failure', () => {
 test('discovery never advertises paid routing', () => {
   const catalog = createRouterCatalog(createRouter({ providers: [provider('openrouter', [free])] }));
   assert.equal(catalog.list().allowPaid, false);
+});
+
+test('a failed provider call charges the reservation instead of refunding unknown usage', async () => {
+  const router = createRouter({ providers: [provider('openrouter', [free])] });
+  const budget = createBudgetLedger({
+    store: createMemoryBudgetStore(),
+    maxRequestsPerDay: 10,
+    maxTokensPerDay: 100_000,
+  });
+  const gateway = createRoutedGateway({
+    router,
+    gateways: new Map([[
+      'openrouter',
+      { id: 'failing', complete: async () => { throw new Error('HTTP 500'); } },
+    ]]),
+    maxFallbacks: 0,
+    budget,
+  });
+  await assert.rejects(() => gateway.complete({
+    model: free.ref,
+    ownerId: 'owner',
+    system: 'system',
+    prompt: 'prompt',
+    signal: new AbortController().signal,
+  }));
+  const used = await budget.snapshot('owner', new Date());
+  // The provider may have processed the request before failing, so the
+  // reservation becomes a conservative input charge, never a refund.
+  assert.ok(used.inputTokens > 0);
+  assert.equal(used.reservedTokens, 0);
 });
 
 test('an exhausted daily budget fails closed', async () => {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -26,13 +27,17 @@ function context(root: string): ToolContext {
 
 const gate = (decision: ApprovalDecision) => ({ ensure: async () => ({ decision }) });
 
-function runtime(networkEnabled = false) {
+function runtime(
+  networkEnabled = false,
+  options: { allowedHosts?: string[]; allowInsecureLoopback?: boolean } = {},
+) {
   return createToolRuntime({
     tools: createBuiltinTools({
       shellEnabled: false,
       allowedCommands: [],
       networkEnabled,
-      allowedHosts: ['allowed.example'],
+      allowedHosts: options.allowedHosts ?? ['allowed.example'],
+      ...(options.allowInsecureLoopback ? { allowInsecureLoopback: true } : {}),
       maxOutputBytes: 10_000,
       commandTimeoutMs: 1_000,
       maxSearchFiles: 100,
@@ -149,26 +154,39 @@ test('cancellation during approval prevents an approved write', async () => {
   }
 });
 
-test('the HTTP tool rejects plaintext before approval and dispatches approved HTTPS', async (t) => {
+test('the HTTP tool rejects plaintext before approval and dispatches an approved loopback request', async (t) => {
   const space = workspace();
+  let hits = 0;
+  const server = createServer((_request, response) => {
+    hits += 1;
+    response.end('verified');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   try {
-    const tools = runtime(true);
-    const fetch = t.mock.method(globalThis, 'fetch', async () => new Response('verified'));
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const tools = runtime(true, {
+      allowedHosts: ['127.0.0.1'],
+      allowInsecureLoopback: true,
+    });
     const ensure = t.mock.fn(async () => ({ decision: 'granted' as const }));
     const call = (url: string) => tools.call({
       name: 'http.fetch', arguments: { url },
       context: context(space.root), gate: { ensure },
     });
 
+    // Non-loopback plaintext is refused by schema validation before the owner
+    // is asked, so no durable request can be created for an unapprovable URL.
     const refused = await call('http://allowed.example/resource');
     assert.equal(!refused.result.ok && refused.result.code, 'validation_failed');
     assert.equal(ensure.mock.callCount(), 0);
-    assert.equal(fetch.mock.callCount(), 0);
+    assert.equal(hits, 0);
 
-    const approved = await call('https://allowed.example/resource');
+    const approved = await call(`http://127.0.0.1:${address.port}/resource`);
     assert.equal(approved.result.ok, true);
     assert.equal(ensure.mock.callCount(), 1);
-    assert.equal(fetch.mock.callCount(), 1);
+    assert.equal(hits, 1);
   } finally {
     space.cleanup();
   }

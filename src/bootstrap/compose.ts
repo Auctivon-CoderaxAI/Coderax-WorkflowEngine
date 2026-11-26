@@ -26,6 +26,7 @@ import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledg
 import { createBuiltinTools } from '../tools/builtin.js';
 import { createToolRuntime } from '../tools/runtime.js';
 import { attachMcpServers } from '../mcp/client.js';
+import { loadPlugins } from '../plugins/manifest.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionStore } from '../permissions/store.js';
 import { createAuditLog } from '../observability/audit.js';
@@ -301,6 +302,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     enabled: config.engines.native.enabled,
     gateway: routedGateway,
     planner: createNativePlanner(),
+    maxActionsPerRun: config.engines.native.maxActionsPerRun,
+    maxRunMs: config.engines.native.maxRunMs,
   });
 
   const opencodePassword = config.engines.opencode.passwordEnv
@@ -364,11 +367,24 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const permissions = createPermissionStore({ clock, ids, ...(persistence.permissionCollection ? { collection: persistence.permissionCollection } : {}) });
   const notifications = persistence.notifications;
 
-  const mcp = await attachMcpServers(config.mcp.servers);
+  const plugins = await loadPlugins(
+    config.plugins.enabled ? config.plugins.directory ?? null : null,
+  );
+  const approved = new Set(config.mcp.approvedServers);
+  const mcpServers = [
+    ...config.mcp.servers,
+    // A plugin-contributed server executes only when the owner names it; a
+    // plugin cannot widen the MCP surface by being installed.
+    ...plugins.servers.filter((server) => approved.has(server.name)),
+  ].filter((server) => server.transport !== 'stdio' || config.mcp.allowStdio);
+  const mcp = await attachMcpServers(mcpServers);
   const embeddingBase = env.CODERAX_INFERENCE_BASE_URL;
   const embeddingKey = env.CODERAX_INFERENCE_KEY;
   const embeddings =
-    config.knowledge.embeddingModel && embeddingBase && embeddingKey
+    config.knowledge.embeddingVerifiedFree &&
+    config.knowledge.embeddingModel &&
+    embeddingBase &&
+    embeddingKey
       ? createOpenAiEmbeddingProvider({
           baseURL: embeddingBase,
           apiKey: embeddingKey,
@@ -388,6 +404,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         allowedCommands: config.tools.allowedCommands,
         networkEnabled: config.tools.networkEnabled,
         allowedHosts: config.tools.allowedHosts,
+        allowInsecureLoopback: config.tools.allowInsecureLoopback,
         maxOutputBytes: config.tools.maxOutputBytes,
         commandTimeoutMs: config.tools.commandTimeoutMs,
         maxSearchFiles: config.tools.maxSearchFiles,
@@ -395,7 +412,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         knowledge: config.knowledge.enabled ? knowledge : null,
       })
     : [];
-  const tools = createToolRuntime({ tools: [...builtinTools, ...mcp.tools] });
+  const tools = createToolRuntime({
+    tools: [...builtinTools, ...mcp.tools],
+    catalogueMaxChars: config.tools.catalogueMaxChars,
+  });
 
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({

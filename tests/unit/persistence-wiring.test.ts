@@ -289,7 +289,7 @@ test('a second replica can decide a stored approval and exactly one replica cons
   const second = await composeApplication(options);
   try {
     const args = { ownerId: 'owner', taskId: 'task', scope: 'browser.use' as const,
-      resource: 'browser', binding: 'action-A', consume: true };
+      resource: 'browser', binding: 'action-A', callId: 'call-1', consume: true };
     const store = first.dependencies.permissions;
     const other = second.dependencies.permissions;
     const request = await store.request({ ...args, agent: 'coderax', description: 'One action' });

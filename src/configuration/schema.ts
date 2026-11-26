@@ -37,6 +37,10 @@ export const NativeConfig = z
   .object({
     enabled: z.boolean().default(true),
     maxSteps: z.number().int().min(1).max(64).default(12),
+    /** Bounds every tool action in one run, independent of the per-step budget. */
+    maxActionsPerRun: z.number().int().min(1).max(200).default(24),
+    /** Wall-clock ceiling; a run that exceeds it fails instead of looping. */
+    maxRunMs: z.number().int().min(1_000).max(3_600_000).default(600_000),
   })
   .strict();
 
@@ -149,6 +153,12 @@ export const ToolsConfig = z
     allowedCommands: z.array(z.string().min(1).max(120)).max(50).default([]),
     networkEnabled: z.boolean().default(false),
     allowedHosts: z.array(z.string().min(1).max(255)).max(50).default([]),
+    /** Loopback plaintext is a local-development concession, never a default. */
+    allowInsecureLoopback: z.boolean().default(false),
+    /** Native function calling is attempted; `json` forces the compatibility protocol. */
+    nativeFunctionCalling: z.enum(['auto', 'json']).default('auto'),
+    /** Aggregate size of the rendered tool catalogue in the action prompt. */
+    catalogueMaxChars: z.number().int().min(1_000).max(200_000).default(12_000),
     maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(65_536),
     commandTimeoutMs: z.number().int().min(100).max(60_000).default(15_000),
     maxSearchFiles: z.number().int().min(1).max(20_000).default(2_000),
@@ -161,6 +171,12 @@ export const KnowledgeConfig = z
     maxDocuments: z.number().int().min(1).max(10_000).default(500),
     /** Set together with an inference endpoint to enable semantic retrieval. */
     embeddingModel: z.string().min(1).max(160).optional(),
+    /**
+     * Semantic retrieval spends the embedding provider's quota. It is enabled
+     * only when the owner has recorded an explicit zero-cost verdict; otherwise
+     * lexical retrieval stays in place.
+     */
+    embeddingVerifiedFree: z.boolean().default(false),
   })
   .strict();
 
@@ -185,7 +201,24 @@ export const McpServerConfig = z.discriminatedUnion('transport', [
 ]);
 
 export const McpConfig = z
-  .object({ servers: z.array(McpServerConfig).max(10).default([]) })
+  .object({
+    servers: z.array(McpServerConfig).max(10).default([]),
+    /** stdio starts a process on the engine host, so it is opt-in. */
+    allowStdio: z.boolean().default(false),
+    /**
+     * Empty approves only the owner-configured `servers`; a server contributed
+     * by a plugin must be named explicitly here.
+     */
+    approvedServers: z.array(z.string().min(1).max(60)).max(50).default([]),
+  })
+  .strict();
+
+export const PluginsConfig = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** Directory whose child directories contain a data-only plugin.json. */
+    directory: z.string().min(1).max(4096).optional(),
+  })
   .strict();
 
 export const RoutingConfig = z
@@ -248,6 +281,7 @@ export const EngineConfigSchema = z
     tools: ToolsConfig.default({}),
     knowledge: KnowledgeConfig.default({}),
     mcp: McpConfig.default({}),
+    plugins: PluginsConfig.default({}),
     routing: RoutingConfig.default({}),
   })
   .strict();

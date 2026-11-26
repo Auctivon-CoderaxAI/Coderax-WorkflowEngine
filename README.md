@@ -35,12 +35,12 @@ are clients of the same versioned API.
 | Zero-cost model gate (verified terms, unknown cost refused, durable budget) | Implemented | `src/models/eligibility.ts`, `src/models/budget.ts`, `src/persistence/budgets.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
-| Coderax Native agent: plan, tool actions, reflection, recovery | Implemented | `src/agents/native` |
+| Coderax Native agent: dependency-aware DAG plan, native/JSON tool actions, verification, bounded recovery | Implemented | `src/agents/native` |
 | Provider-independent zero-cost router with ranked modes + bounded fallback | Implemented | `src/models/router.ts`, `src/models/routed.ts` |
-| Built-in tools behind exact-resource permission gates | Implemented | `src/tools`, `tests/unit/tools.test.ts` |
-| Durable approval suspension and resume | Implemented | `src/agents/native/agent.ts`, `src/execution/runner.ts`, `tests/integration/intelligence.test.ts` |
-| MCP tools over HTTP and stdio | Implemented; scripted-server verified | `src/mcp/client.ts` |
-| Retrieval with semantic embeddings or honest lexical fallback | Implemented | `src/knowledge/store.ts` |
+| Built-in tools behind call-bound, single-use exact-resource approvals; SSRF, shell and symlink hardening | Implemented | `src/tools`, `src/security`, `tests/unit` |
+| Durable approval suspension and resume, durable plan/execution ledger and terminal execution receipts | Implemented | `src/agents/native/agent.ts`, `src/execution/receipt.ts`, `tests/integration/intelligence.test.ts` |
+| MCP tools over HTTP and stdio, destination policy and approved plugin servers | Implemented; scripted-server verified | `src/mcp/client.ts`, `src/plugins/manifest.ts` |
+| Retrieval with evidence-gated semantic embeddings or honest lexical fallback | Implemented | `src/knowledge/store.ts` |
 | OpenCode HTTP/SSE transport | Implemented; not live-verified | `src/agents/adapters/opencode.ts` |
 | FreeBuff transport | Injection only — no authorized endpoint | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
@@ -60,7 +60,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 125 tests: unit, contract, integration, security, e2e
+npm test                          # 187 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
