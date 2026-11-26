@@ -92,6 +92,13 @@ merge it separately.
 - **PR creation.** No GitHub authoring integration is available in this
   environment. The compare links below are retained instead of inventing a
   push or token.
+- **Dependency advisory.** `npm audit --omit=dev` reports one high-severity
+  issue: `zod <4.6.6` can exhaust memory on oversized constrained collections
+  (GHSA-mrhx-c7xc-m3w5). The offered fix is the semver-major `zod@4.6.7`, which
+  changes the schema API used throughout the contract package. It was not forced
+  into this change. The engine is owner-only, has no public endpoint and caps
+  request bodies, which limits but does not remove the exposure. Track the zod 4
+  migration separately.
 
 ## Compare links
 
