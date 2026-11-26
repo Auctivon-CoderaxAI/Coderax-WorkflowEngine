@@ -208,9 +208,10 @@ node --test dist/tests/integration/artifacts-durable.test.js
 
 When neither is available the test **skips with that reason**. A skip is not
 evidence of durability and is reported as a skip, not as a pass. Setting
-`CODERAX_REQUIRE_MONGODB=1` turns a missing server into a failure; the required
-`verify` workflow sets it and runs against a pinned `mongo:7.0` service
-container, so the real-database lane cannot silently disappear. Hosted execution
+`CODERAX_REQUIRE_MONGODB=1` turns a missing server into a failure; the
+`mongodb` job in the `verify` workflow sets it and runs the whole suite against
+a pinned `mongo:8.0` service container, so the real-database lane cannot
+silently disappear. Hosted execution
 is evidence only when the `verify` workflow has actually run at the exact head;
 a local green run does not imply a hosted run.
 

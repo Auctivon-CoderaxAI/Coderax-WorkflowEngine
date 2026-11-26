@@ -65,3 +65,43 @@ jobs:
             exit 1
           fi
           echo "No committed secret values found."
+
+  # Durability and concurrency are only proven by a real server, and a skipped
+  # test is not a pass. This lane supplies a pinned MongoDB and sets
+  # CODERAX_REQUIRE_MONGODB=1, which turns "no real server" into a failure, so
+  # the real-database tests cannot silently disappear from the gate.
+  mongodb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
+      CODERAX_REQUIRE_MONGODB: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (TypeScript project references)
+        run: npm run build
+
+      - name: SDK distribution artifacts (deterministic)
+        run: node dist/scripts/pack-sdk.js
+
+      - name: Tests against a real MongoDB (skips are failures)
+        run: node --test "dist/tests/**/*.test.js"
