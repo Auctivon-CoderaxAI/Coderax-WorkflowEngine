@@ -34,11 +34,12 @@ are clients of the same versioned API.
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
-| MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
+| MongoDB runtime driver, lease table and index bootstrap | Implemented; verified against a live MongoDB restart suite | `src/persistence/mongo.ts`, `tests/integration/mongo-restart.test.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
-| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
-| Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
+| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; live-verified | `src/bootstrap/compose.ts` |
+| Task, conversation, message, event, memory, notification, permission, receipt, checkpoint and idempotency persistence | MongoDB when `persistence.driver=mongo`; live restart test | `src/persistence/*`, `tests/integration/mongo-restart.test.ts` |
+| Retention and authorized deletion | Bounded sweeps and owner-scoped store deletes | `src/persistence/retention.ts` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |
 

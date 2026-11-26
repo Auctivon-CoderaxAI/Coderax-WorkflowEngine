@@ -5,6 +5,7 @@ import type {
   EngineId,
   IsoDateTime,
   ModelRef,
+  TaskAccepted,
   TaskState,
   Usage,
 } from '@coderax/contracts';
@@ -113,6 +114,42 @@ export type MemoryRecord = {
   updatedAt: IsoDateTime;
 };
 
+export type CheckpointRecord = {
+  checkpointId: string;
+  taskId: string;
+  ownerId: string;
+  conversationId: string;
+  generation: number;
+  /** Steps whose work was durably complete at this point. */
+  completedSteps: string[];
+  /** Assistant text emitted so far, scrubbed before it is stored. */
+  text: string;
+  /** `step` records progress; `settled` is the checkpoint the run ended with. */
+  kind: 'step' | 'settled';
+  createdAt: IsoDateTime;
+};
+
+export type IdempotencyState = 'pending' | 'completed';
+
+/**
+ * One Work submission identity.
+ *
+ * The key is scoped to an owner and the request digest, so a retry of the same
+ * request replays the original acceptance while a different request reusing the
+ * key is refused instead of silently creating a second task.
+ */
+export type IdempotencyRecord = {
+  ownerId: string;
+  key: string;
+  requestHash: string;
+  state: IdempotencyState;
+  /** Present once the submission completed; never recomputed from a guess. */
+  response: TaskAccepted | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  expiresAt: IsoDateTime;
+};
+
 export type NotificationRecord = {
   taskId: string;
   ownerId: string;
@@ -127,6 +164,7 @@ export type NotificationRecord = {
 
 export type AuditRecord = {
   at: IsoDateTime;
+  /** The owner the evidence belongs to; `actor` is kept for the wire contract. */
   actor: string;
   action: string;
   taskId?: string;
@@ -134,4 +172,7 @@ export type AuditRecord = {
   outcome: 'accepted' | 'completed' | 'failed' | 'cancelled' | 'refused';
   receipt: string;
   detail?: string;
+  /** Correlation with the HTTP request that caused the evidence. */
+  requestId?: string;
+  mode?: DataMode;
 };

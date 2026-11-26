@@ -13,8 +13,6 @@ import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionStore } from '../permissions/store.js';
-import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
@@ -35,6 +33,7 @@ import {
   type InfrastructureDependencies,
 } from './container.js';
 import { buildPersistence } from './persistence.js';
+import { createRetentionService } from '../persistence/retention.js';
 import { StartupError } from './startup-error.js';
 
 export { StartupError } from './startup-error.js';
@@ -45,7 +44,7 @@ export type Application = {
   router: Router;
   server: HttpServer;
   /** Which lease table the validated persistence setting selected. */
-  persistence: { driver: 'memory' | 'mongo' };
+  persistence: { driver: 'memory' | 'mongo'; durable: boolean };
   /** Everything is validated before this resolves. */
   start: () => Promise<{ url: string }>;
   stop: () => Promise<void>;
@@ -193,15 +192,27 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     config,
     env,
     clock,
+    ids,
     ...(input.persistence ?? {}),
   });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = persistence.permissions;
   const notifications = persistence.notifications;
-  const audit = createAuditLog({ clock, ids });
+  const audit = persistence.audit;
+  const checkpoints = persistence.checkpoints;
+  const idempotency = persistence.idempotency;
+  const retention = createRetentionService({
+    clock,
+    config: config.retention,
+    notifications,
+    audit,
+    permissions,
+    checkpoints,
+    idempotency,
+  });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -268,13 +279,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       {
         name: 'persistence',
         required: true,
-        check: async () => ({
-          status: 'ok' as const,
-          detail:
-            persistence.driver === 'mongo'
-              ? `Tasks, conversations, memory and leases are stored in MongoDB (${config.persistence.database}).`
-              : 'Tasks, conversations, memory and leases are process-local; a restart loses them.',
-        }),
+        check: async () => {
+          const health = await persistence.ping();
+          return {
+            status: health.ok ? ('ok' as const) : ('failed' as const),
+            detail: `${health.detail} Round trip ${health.latencyMs} ms.`,
+          };
+        },
       },
       {
         name: 'engine',
@@ -340,6 +351,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     scheduler,
     health,
     quarantine,
+    checkpoints,
+    idempotency,
+    retention,
+    persistencePing: persistence.ping,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -400,15 +415,20 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     service,
     router,
     server,
-    persistence: { driver: persistence.driver },
+    persistence: { driver: persistence.driver, durable: persistence.driver === 'mongo' },
     start: async () => {
       const { url } = await server.listen();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // Retention runs at startup and then on a bounded interval, so a database
+      // that has been offline for a week is trimmed without an operator.
+      await retention.run().catch(() => undefined);
+      retention.start();
       return { url };
     },
     stop: async () => {
+      retention.stop();
       await service.shutdown();
       await server.close();
       await persistence.close();

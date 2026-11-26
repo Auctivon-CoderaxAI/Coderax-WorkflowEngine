@@ -7,8 +7,17 @@ import type {
   TaskRecord,
 } from '../domain.js';
 import type { ConversationRepository } from './conversations.js';
-import type { NotificationStore } from './notifications.js';
-import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
+import { toConversationSummary } from './conversations.js';
+import type { NotificationPageInput, NotificationStore } from './notifications.js';
+import type {
+  CreateTaskResult,
+  FencedWriteResult,
+  TaskPageInput,
+  TaskRepository,
+  TaskStateCounts,
+} from './tasks.js';
+import { STATES } from './tasks.js';
+import { clampLimit, decodeCursor, encodeCursor } from './pagination.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { Clock } from '../support/clock.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
@@ -105,6 +114,15 @@ export async function ensureTaskIndexes(collection: MongoCollectionLike): Promis
     { name: 'task_conversation_state' },
   );
   await collection.createIndex({ ownerId: 1 }, { name: 'task_owner' });
+  await collection.createIndex(
+    { ownerId: 1, updatedAt: -1, taskId: -1 },
+    { name: 'task_owner_updated' },
+  );
+  await collection.createIndex({ state: 1 }, { name: 'task_state' });
+  await collection.createIndex(
+    { conversationId: 1, updatedAt: -1, taskId: -1 },
+    { name: 'task_conversation_updated' },
+  );
 }
 
 export async function ensureConversationIndexes(input: {
@@ -116,8 +134,12 @@ export async function ensureConversationIndexes(input: {
     { unique: true, name: 'conversation_id' },
   );
   await input.conversations.createIndex(
-    { ownerId: 1, updatedAt: -1 },
+    { ownerId: 1, updatedAt: -1, conversationId: -1 },
     { name: 'conversation_owner_updated' },
+  );
+  await input.conversations.createIndex(
+    { ownerId: 1, mode: 1, isWork: 1, updatedAt: -1 },
+    { name: 'conversation_owner_filters' },
   );
   await input.messages.createIndex({ messageId: 1 }, { unique: true, name: 'message_id' });
   await input.messages.createIndex(
@@ -136,9 +158,14 @@ export async function ensureMemoryIndexes(collection: MongoCollectionLike): Prom
 export async function ensureNotificationIndexes(collection: MongoCollectionLike): Promise<void> {
   await collection.createIndex({ taskId: 1 }, { unique: true, name: 'notification_task' });
   await collection.createIndex(
-    { ownerId: 1, createdAt: -1 },
+    { ownerId: 1, createdAt: -1, taskId: -1 },
     { name: 'notification_owner_created' },
   );
+  await collection.createIndex(
+    { ownerId: 1, read: 1 },
+    { name: 'notification_owner_read' },
+  );
+  await collection.createIndex({ createdAt: 1 }, { name: 'notification_created' });
 }
 
 export function createMongoTaskRepository(collection: MongoCollectionLike): TaskRepository {
@@ -240,6 +267,57 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       const documents = await collection.find({ ownerId }).toArray();
       return documents.map(toTask);
     },
+
+    listPage: async (input: TaskPageInput) => {
+      const limit = clampLimit(input.limit);
+      const cursor = input.cursor ? decodeCursor(input.cursor) : null;
+      const base = {
+        ownerId: input.ownerId,
+        ...(input.state ? { state: input.state } : {}),
+        ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+        ...(input.agent ? { agent: input.agent } : {}),
+        ...(input.mode ? { mode: input.mode } : {}),
+      };
+      const filter = {
+        ...base,
+        ...(cursor
+          ? {
+              $or: [
+                { updatedAt: { $lt: cursor.at } },
+                { updatedAt: cursor.at, taskId: { $lt: cursor.id } },
+              ],
+            }
+          : {}),
+      };
+      const [documents, total] = await Promise.all([
+        collection.find(filter).sort({ updatedAt: -1, taskId: -1 }).limit(limit + 1).toArray(),
+        collection.countDocuments(base),
+      ]);
+      const page = documents.slice(0, limit).map(toTask);
+      const hasMore = documents.length > limit;
+      return {
+        tasks: page,
+        total,
+        ...(hasMore && page.length > 0
+          ? { nextCursor: encodeCursor(page[page.length - 1]!.updatedAt, page[page.length - 1]!.taskId) }
+          : {}),
+      };
+    },
+
+    countByState: async () => {
+      const counts = Object.fromEntries(STATES.map((state) => [state, 0])) as TaskStateCounts;
+      await Promise.all(
+        STATES.map(async (state) => {
+          counts[state] = await collection.countDocuments({ state });
+        }),
+      );
+      return counts;
+    },
+
+    deleteByConversation: async (ownerId, conversationId) => {
+      const result = await collection.deleteMany({ ownerId, conversationId });
+      return result.deletedCount;
+    },
   };
 }
 
@@ -285,13 +363,52 @@ export function createMongoConversationRepository(input: {
     list: async (ownerId) => {
       const documents = await conversations.find({ ownerId }).sort({ updatedAt: -1 }).toArray();
       return {
-        conversations: documents.map(toConversation).map((record) => ({
-          conversationId: record.conversationId,
-          ...(record.title ? { title: record.title } : {}),
-          isWork: record.isWork,
-          agent: record.agent,
-          updatedAt: record.updatedAt,
-        })),
+        conversations: documents.map(toConversation).map(toConversationSummary),
+        total: documents.length,
+      };
+    },
+
+    listPage: async (input) => {
+      const limit = clampLimit(input.limit);
+      const cursor = input.cursor ? decodeCursor(input.cursor) : null;
+      const base = {
+        ownerId: input.ownerId,
+        ...(input.mode ? { mode: input.mode } : {}),
+        ...(input.isWork === undefined ? {} : { isWork: input.isWork }),
+        ...(input.agent ? { agent: input.agent } : {}),
+      };
+      const filter = {
+        ...base,
+        ...(cursor
+          ? {
+              $or: [
+                { updatedAt: { $lt: cursor.at } },
+                { updatedAt: cursor.at, conversationId: { $lt: cursor.id } },
+              ],
+            }
+          : {}),
+      };
+      const [documents, total] = await Promise.all([
+        conversations
+          .find(filter)
+          .sort({ updatedAt: -1, conversationId: -1 })
+          .limit(limit + 1)
+          .toArray(),
+        conversations.countDocuments(base),
+      ]);
+      const page = documents.slice(0, limit).map(toConversation).map(toConversationSummary);
+      const hasMore = documents.length > limit;
+      return {
+        conversations: page,
+        total,
+        ...(hasMore && page.length > 0
+          ? {
+              nextCursor: encodeCursor(
+                page[page.length - 1]!.updatedAt,
+                page[page.length - 1]!.conversationId,
+              ),
+            }
+          : {}),
       };
     },
 
@@ -348,6 +465,13 @@ export function createMongoConversationRepository(input: {
     updateAgent: async (conversationId, agent) => {
       await conversations.updateOne({ conversationId }, { $set: { agent } }, { upsert: false });
     },
+
+    delete: async (ownerId, conversationId) => {
+      const removed = await conversations.deleteOne({ ownerId, conversationId });
+      if (removed.deletedCount !== 1) return { deleted: false, messages: 0 };
+      const messagesRemoved = await messages.deleteMany({ conversationId });
+      return { deleted: true, messages: messagesRemoved.deletedCount };
+    },
   };
 }
 
@@ -371,18 +495,29 @@ export function createMongoMemoryStore(input: {
       );
     },
 
-    list: async ({ ownerId, mode }) => {
+    list: async ({ ownerId, mode, limit, cursor }) => {
+      const bounded = clampLimit(limit, 100);
       const documents = await input.collection
-        .find({ ownerId, mode })
+        .find({
+          ownerId,
+          mode,
+          ...(cursor ? { key: { $gt: cursor } } : {}),
+        })
         .sort({ key: 1 })
+        .limit(bounded + 1)
         .toArray();
+      const page = documents.slice(0, bounded).map(toMemory);
+      const hasMore = documents.length > bounded;
       return {
-        entries: documents.map(toMemory).map((entry) => ({
+        entries: page.map((entry) => ({
           key: entry.key,
           value: entry.value,
           mode: entry.mode,
           updatedAt: entry.updatedAt,
         })),
+        ...(hasMore && page.length > 0
+          ? { nextCursor: page[page.length - 1]!.key }
+          : {}),
       };
     },
 
@@ -390,10 +525,37 @@ export function createMongoMemoryStore(input: {
       const document = await input.collection.findOne({ ownerId, mode, key });
       return document ? toMemory(document) : null;
     },
+
+    delete: async ({ ownerId, mode, key }) => {
+      const result = await input.collection.deleteOne({ ownerId, mode, key });
+      return result.deletedCount === 1;
+    },
   };
 }
 
 export function createMongoNotificationStore(collection: MongoCollectionLike): NotificationStore {
+  function contract(entry: NotificationRecord): {
+    taskId: string;
+    conversationId: string;
+    agent: NotificationRecord['agent'];
+    mode: NotificationRecord['mode'];
+    state: NotificationRecord['state'];
+    summary?: string;
+    createdAt: string;
+    read: boolean;
+  } {
+    return {
+      taskId: entry.taskId,
+      conversationId: entry.conversationId,
+      agent: entry.agent,
+      mode: entry.mode,
+      state: entry.state,
+      ...(entry.summary ? { summary: entry.summary } : {}),
+      createdAt: entry.createdAt,
+      read: entry.read,
+    };
+  }
+
   return {
     record: async (notification) => {
       await collection.updateOne(
@@ -403,26 +565,79 @@ export function createMongoNotificationStore(collection: MongoCollectionLike): N
       );
     },
 
-    list: async (ownerId) => {
-      const documents = await collection.find({ ownerId }).sort({ createdAt: -1 }).toArray();
-      const owned = documents.map(toNotification);
+    list: async (input) => {
+      const query: NotificationPageInput =
+        typeof input === 'string' ? { ownerId: input } : input;
+      const limit = clampLimit(query.limit);
+      const cursor = query.cursor ? decodeCursor(query.cursor) : null;
+      const base = {
+        ownerId: query.ownerId,
+        ...(query.unreadOnly ? { read: false } : {}),
+      };
+      const filter = {
+        ...base,
+        ...(cursor
+          ? {
+              $or: [
+                { createdAt: { $lt: cursor.at } },
+                { createdAt: cursor.at, taskId: { $lt: cursor.id } },
+              ],
+            }
+          : {}),
+      };
+      const [documents, total, unread] = await Promise.all([
+        collection
+          .find(filter)
+          .sort({ createdAt: -1, taskId: -1 })
+          .limit(limit + 1)
+          .toArray(),
+        collection.countDocuments(base),
+        collection.countDocuments({ ownerId: query.ownerId, read: false }),
+      ]);
+      const page = documents.slice(0, limit).map(toNotification);
+      const hasMore = documents.length > limit;
       return {
-        notifications: owned.map((entry) => ({
-          taskId: entry.taskId,
-          conversationId: entry.conversationId,
-          agent: entry.agent,
-          mode: entry.mode,
-          state: entry.state,
-          ...(entry.summary ? { summary: entry.summary } : {}),
-          createdAt: entry.createdAt,
-          read: entry.read,
-        })),
-        unread: owned.filter((entry) => !entry.read).length,
+        notifications: page.map(contract),
+        unread,
+        total,
+        ...(hasMore && page.length > 0
+          ? {
+              nextCursor: encodeCursor(
+                page[page.length - 1]!.createdAt,
+                page[page.length - 1]!.taskId,
+              ),
+            }
+          : {}),
       };
     },
 
-    markRead: async (ownerId, taskId) => {
-      await collection.updateOne({ taskId, ownerId }, { $set: { read: true } }, { upsert: false });
+    markRead: async (ownerId, taskIds) => {
+      const unique = [...new Set(taskIds)];
+      if (unique.length === 0) return 0;
+      const result = await collection.updateMany(
+        { ownerId, taskId: { $in: unique }, read: false },
+        { $set: { read: true } },
+      );
+      return result.modifiedCount ?? 0;
+    },
+
+    deleteByConversation: async (ownerId, conversationId) => {
+      const result = await collection.deleteMany({ ownerId, conversationId });
+      return result.deletedCount;
+    },
+
+    prune: async (before, limit) => {
+      if (limit <= 0) return 0;
+      const expired = await collection
+        .find({ createdAt: { $lte: before } })
+        .limit(limit)
+        .toArray();
+      const taskIds = expired
+        .map((document) => document.taskId)
+        .filter((taskId): taskId is string => typeof taskId === 'string');
+      if (taskIds.length === 0) return 0;
+      const result = await collection.deleteMany({ taskId: { $in: taskIds } });
+      return result.deletedCount;
     },
   };
 }

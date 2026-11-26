@@ -16,6 +16,10 @@ import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { QuarantineRegistry } from '../execution/quarantine.js';
+import type { CheckpointStore } from '../persistence/checkpoints.js';
+import type { IdempotencyStore } from '../persistence/idempotency.js';
+import type { RetentionService } from '../persistence/retention.js';
+import type { PersistenceHealth } from './persistence.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { Router } from '../api/router.js';
 
@@ -47,6 +51,10 @@ export type InfrastructureDependencies = {
   scheduler: TaskScheduler;
   health: HealthService;
   quarantine: QuarantineRegistry;
+  checkpoints: CheckpointStore;
+  idempotency: IdempotencyStore;
+  retention: RetentionService;
+  persistencePing: () => Promise<PersistenceHealth>;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -69,6 +77,10 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'scheduler',
   'health',
   'quarantine',
+  'checkpoints',
+  'idempotency',
+  'retention',
+  'persistencePing',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

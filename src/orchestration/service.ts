@@ -37,6 +37,11 @@ import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
 import type { QuarantineRegistry } from '../execution/quarantine.js';
+import type { CheckpointStore } from '../persistence/checkpoints.js';
+import type { IdempotencyStore } from '../persistence/idempotency.js';
+import type { RetentionService } from '../persistence/retention.js';
+import type { PersistenceHealth } from '../bootstrap/persistence.js';
+import { createHash } from 'node:crypto';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
@@ -65,6 +70,10 @@ export type ApplicationServiceDeps = {
   scheduler: TaskScheduler;
   health: HealthService;
   quarantine: QuarantineRegistry;
+  checkpoints: CheckpointStore;
+  idempotency: IdempotencyStore;
+  retention: RetentionService;
+  persistencePing: () => Promise<PersistenceHealth>;
 };
 
 export type EventStream = {
@@ -135,8 +144,74 @@ function scopeOf(task: TaskRecord): RunScope {
   };
 }
 
+function digestRequest(request: WorkSubmitRequest): string {
+  const canonical = JSON.stringify({
+    objective: request.objective,
+    conversationId: request.conversationId ?? null,
+    agent: request.agent ?? null,
+    model: request.model ?? null,
+    mode: request.mode,
+    budget: request.budget ?? null,
+    requireApproval: request.requireApproval,
+  });
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+
+  function checkpointFor(
+    task: TaskRecord,
+    kind: 'step' | 'settled',
+    completedSteps: string[],
+    text: string,
+  ) {
+    return {
+      checkpointId: deps.ids.checkpointId(),
+      taskId: task.taskId,
+      ownerId: task.ownerId,
+      conversationId: task.conversationId,
+      generation: task.generation,
+      completedSteps: [...completedSteps],
+      text,
+      kind,
+      createdAt: deps.clock.iso(),
+    };
+  }
+
+  async function audit(input: Parameters<AuditLog['record']>[0]): Promise<void> {
+    try {
+      await deps.audit.record(input);
+    } catch {
+      // A settled task must not be stranded by an evidence write failure; the
+      // failure is visible to health and must never be turned into a second
+      // terminal write. Acceptance still awaits the receipt below.
+    }
+  }
+
+  /**
+   * A conversation a caller names must already exist, belong to the owner, and
+   * carry the same data mode. Creating it implicitly would let a guessed id
+   * adopt a conversation, and a mode mismatch would cross the private/cloud
+   * boundary the engine exists to enforce.
+   */
+  async function existingConversation(
+    principal: Principal,
+    conversationId: string,
+    mode: DataMode,
+  ): Promise<ServiceResult<TaskRecord['conversationId']>> {
+    const record = await deps.conversations.get(principal.ownerId, conversationId);
+    if (!record) {
+      return fail('not_found', 'That conversation does not exist for this owner.');
+    }
+    if (record.mode !== mode) {
+      return fail(
+        'forbidden',
+        `That conversation belongs to ${record.mode} data and cannot be used from ${mode} data.`,
+      );
+    }
+    return ok(record.conversationId);
+  }
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -311,6 +386,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const settled = applied.task;
     try {
+      if (checkpoint) {
+        await deps.checkpoints
+          .append(checkpointFor(settled, 'settled', checkpoint.completedSteps, checkpoint.text))
+          .catch(() => undefined);
+      }
       if (outcome.kind === 'completed') {
         publish(settled, 'task.completed', {
           summary: outcome.summary.slice(0, 20_000),
@@ -347,12 +427,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const detail = outcome.kind === 'completed' ? outcome.summary
         : outcome.kind === 'failed' ? outcome.detail : undefined;
       await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
-      deps.audit.record({
+      await audit({
         actor: task.ownerId,
         action: `work.${outcome.kind}`,
         taskId: task.taskId,
         conversationId: task.conversationId,
         outcome: outcome.kind,
+        mode: task.mode,
         ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
       // The terminal event must be durable before the lease can be reissued.
@@ -485,6 +566,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: deps.clock.iso(),
           },
         });
+        void deps.checkpoints
+          .append(checkpointFor(started.task, 'step', completed, visible))
+          .catch(() => undefined);
         return;
       }
       if (event.type === 'text.delta' || event.type === 'text.replace') {
@@ -640,12 +724,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
         await deps.events.flush(applied.task.taskId).catch(() => undefined);
         await notifyTerminal(applied.task, 'interrupted');
-        deps.audit.record({
+        await audit({
           actor: task.ownerId,
           action: 'work.interrupted',
           taskId: task.taskId,
           conversationId: task.conversationId,
           outcome: 'failed',
+          mode: task.mode,
         });
         return applied.task;
       }
@@ -667,8 +752,59 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
-      if (!reservation.allowed) {
+      const idempotencyKey = request.idempotencyKey;
+      const requestHash = digestRequest(request);
+      const reservedAt = deps.clock.now();
+      const idempotencyExpiry = new Date(
+        reservedAt.getTime() + deps.config.retention.idempotencyMs,
+      ).toISOString();
+
+      const releaseReservation = async (): Promise<void> => {
+        if (!idempotencyKey) return;
+        await deps.idempotency
+          .release({ ownerId: principal.ownerId, key: idempotencyKey })
+          .catch(() => undefined);
+      };
+
+      if (idempotencyKey) {
+        const reservation = await deps.idempotency.reserve({
+          ownerId: principal.ownerId,
+          key: idempotencyKey,
+          requestHash,
+          now: reservedAt.toISOString(),
+          expiresAt: idempotencyExpiry,
+        });
+        if (reservation.kind === 'replay') return ok(reservation.response);
+        if (reservation.kind === 'conflict') {
+          return fail(
+            'conflict',
+            'That idempotency key was already used for a different Work submission.',
+          );
+        }
+        if (reservation.kind === 'pending') {
+          return fail(
+            'conflict',
+            'A submission with that idempotency key is still in progress; retry it.',
+            true,
+          );
+        }
+      }
+
+      if (request.conversationId) {
+        const existing = await existingConversation(
+          principal,
+          request.conversationId,
+          request.mode,
+        );
+        if (!existing.ok) {
+          await releaseReservation();
+          return existing;
+        }
+      }
+
+      const budgetReservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      if (!budgetReservation.allowed) {
+        await releaseReservation();
         return fail(
           'budget_exhausted',
           'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -740,6 +876,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         expiresAt: new Date(claimedAt.getTime() + deps.config.execution.leaseTtlMs),
       });
       if (!claimed) {
+        await releaseReservation();
         return fail('busy', 'This conversation already has a live Work run.');
       }
 
@@ -752,6 +889,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!created.ok) {
         await deps.lease.release({ key, token }).catch(() => false);
+        await releaseReservation();
         return fail(
           'busy',
           created.reason === 'conversation_busy'
@@ -762,24 +900,40 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       await deps.events.hydrate(task.taskId).catch(() => 0);
       publish(created.task, 'task.queued');
-      deps.audit.record({
+      await audit({
         actor: principal.ownerId,
         action: 'work.accepted',
         taskId: task.taskId,
         conversationId,
         outcome: 'accepted',
+        mode: task.mode,
         detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
       });
 
-      deps.scheduler.enqueue(() => execute(task.taskId, token));
-
-      return ok({
+      const accepted: TaskAccepted = {
         taskId: task.taskId,
         conversationId,
         state: 'queued',
         generation: 1,
         eventsPath: `/v1/work/${task.taskId}/events`,
-      });
+      };
+      if (idempotencyKey) {
+        await deps.idempotency
+          .complete({
+            ownerId: principal.ownerId,
+            key: idempotencyKey,
+            response: accepted,
+            now: deps.clock.iso(),
+            expiresAt: new Date(
+              deps.clock.now().getTime() + deps.config.retention.idempotencyMs,
+            ).toISOString(),
+          })
+          .catch(() => undefined);
+      }
+
+      deps.scheduler.enqueue(() => execute(task.taskId, token));
+
+      return ok(accepted);
     },
 
     task: async (principal, taskId) => {
@@ -984,6 +1138,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         );
       }
 
+      if (request.conversationId) {
+        const existing = await existingConversation(
+          principal,
+          request.conversationId,
+          request.mode,
+        );
+        if (!existing.ok) return existing;
+      }
+
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
       const conversation = await deps.conversations.ensure({
@@ -1078,13 +1241,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    notifications: (principal) => deps.notifications.list(principal.ownerId),
+    notifications: (principal) => deps.notifications.list({ ownerId: principal.ownerId }),
 
     markNotificationsRead: async (principal, taskIds) => {
-      for (const taskId of new Set(taskIds)) {
-        await deps.notifications.markRead(principal.ownerId, taskId);
-      }
-      return deps.notifications.list(principal.ownerId);
+      await deps.notifications.markRead(principal.ownerId, taskIds);
+      return deps.notifications.list({ ownerId: principal.ownerId });
     },
 
     events: async (principal, taskId, after) => {
@@ -1101,20 +1262,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     budget: (principal) => {
-      const used = deps.budget.snapshot(principal.ownerId, deps.clock.now());
+      const now = deps.clock.now();
+      const used = deps.budget.snapshot(principal.ownerId, now);
       const budget = {
         maxRequests: deps.config.models.dailyRequestBudget,
         maxInputTokens: deps.config.models.dailyTokenBudget,
         maxOutputTokens: deps.config.models.dailyTokenBudget,
       };
+      const resets = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+      );
       return {
         budget,
         used: {
           requests: used.requests,
           usage: { inputTokens: used.inputTokens, outputTokens: used.outputTokens },
         },
-        remaining: { requests: Math.max(0, budget.maxRequests - used.requests) },
+        remaining: {
+          requests: Math.max(0, budget.maxRequests - used.requests),
+          inputTokens: Math.max(0, budget.maxInputTokens - used.inputTokens),
+          outputTokens: Math.max(0, budget.maxOutputTokens - used.outputTokens),
+        },
         exhausted: used.requests >= budget.maxRequests,
+        period: 'day',
+        resetsAt: resets.toISOString(),
       };
     },
 

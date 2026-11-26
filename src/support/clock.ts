@@ -21,6 +21,7 @@ export type IdGenerator = {
   runToken: () => string;
   requestId: () => string;
   receipt: () => string;
+  checkpointId: () => string;
 };
 
 export function createIdGenerator(): IdGenerator {
@@ -32,5 +33,6 @@ export function createIdGenerator(): IdGenerator {
     runToken: () => `run_${randomUUID()}`,
     requestId: () => `req_${randomUUID()}`,
     receipt: () => `rcpt_${randomUUID()}`,
+    checkpointId: () => `ckpt_${randomUUID()}`,
   };
 }

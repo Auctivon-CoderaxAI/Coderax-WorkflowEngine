@@ -1,6 +1,7 @@
 import type { DataMode, MemoryList } from '@coderax/contracts';
 import type { MemoryRecord } from '../domain.js';
 import type { Clock } from '../support/clock.js';
+import { clampLimit } from '../persistence/pagination.js';
 
 /**
  * Memory is partitioned by owner and by data mode.
@@ -18,16 +19,31 @@ export type MemoryStore = {
     key: string;
     value: string;
   }) => Promise<void>;
-  list: (input: { ownerId: string; mode: DataMode }) => Promise<MemoryList>;
+  list: (input: {
+    ownerId: string;
+    mode: DataMode;
+    limit?: number;
+    cursor?: string;
+  }) => Promise<MemoryList>;
   get: (input: {
     ownerId: string;
     mode: DataMode;
     key: string;
   }) => Promise<MemoryRecord | null>;
+  delete: (input: { ownerId: string; mode: DataMode; key: string }) => Promise<boolean>;
 };
 
 function partition(ownerId: string, mode: DataMode, key: string): string {
   return JSON.stringify([ownerId, mode, key]);
+}
+
+function entry(record: MemoryRecord) {
+  return {
+    key: record.key,
+    value: record.value,
+    mode: record.mode,
+    updatedAt: record.updatedAt,
+  };
 }
 
 export function createMemoryStore(input: { clock: Clock; maxValueLength: number }): MemoryStore {
@@ -47,17 +63,20 @@ export function createMemoryStore(input: { clock: Clock; maxValueLength: number 
         updatedAt: input.clock.iso(),
       });
     },
-    list: async ({ ownerId, mode }) => ({
-      entries: [...entries.values()]
-        .filter((entry) => entry.ownerId === ownerId && entry.mode === mode)
-        .sort((left, right) => left.key.localeCompare(right.key))
-        .map((entry) => ({
-          key: entry.key,
-          value: entry.value,
-          mode: entry.mode,
-          updatedAt: entry.updatedAt,
-        })),
-    }),
+    list: async ({ ownerId, mode, limit, cursor }) => {
+      const bounded = clampLimit(limit, 100);
+      const owned = [...entries.values()]
+        .filter((record) => record.ownerId === ownerId && record.mode === mode)
+        .sort((left, right) => left.key.localeCompare(right.key));
+      const after = cursor ? owned.filter((record) => record.key > cursor) : owned;
+      const page = after.slice(0, bounded);
+      const hasMore = after.length > bounded;
+      return {
+        entries: page.map(entry),
+        ...(hasMore && page.length > 0 ? { nextCursor: page[page.length - 1]!.key } : {}),
+      };
+    },
     get: async ({ ownerId, mode, key }) => entries.get(partition(ownerId, mode, key)) ?? null,
+    delete: async ({ ownerId, mode, key }) => entries.delete(partition(ownerId, mode, key)),
   };
 }

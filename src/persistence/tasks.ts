@@ -1,6 +1,8 @@
-import { isTerminalState } from '@coderax/contracts';
+import { TERMINAL_TASK_STATES, isTerminalState } from '@coderax/contracts';
+import type { AgentId, DataMode, TaskState } from '@coderax/contracts';
 import type { TaskPatch, TaskRecord } from '../domain.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
+import { clampLimit, decodeCursor, encodeCursor } from './pagination.js';
 
 export type CreateTaskResult =
   | { ok: true; task: TaskRecord }
@@ -9,6 +11,24 @@ export type CreateTaskResult =
 export type FencedWriteResult =
   | { applied: true; task: TaskRecord }
   | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' };
+
+export type TaskPageInput = {
+  ownerId: string;
+  limit?: number;
+  cursor?: string;
+  state?: TaskState;
+  conversationId?: string;
+  agent?: AgentId;
+  mode?: DataMode;
+};
+
+export type TaskPage = {
+  tasks: TaskRecord[];
+  total: number;
+  nextCursor?: string;
+};
+
+export type TaskStateCounts = Record<TaskState, number>;
 
 /**
  * The only writer of task state.
@@ -40,7 +60,42 @@ export type TaskRepository = {
   /** Tasks that are not terminal, used by startup ownership verification. */
   listUnsettled: () => Promise<TaskRecord[]>;
   listByOwner: (ownerId: string) => Promise<TaskRecord[]>;
+  /** Owner-scoped, newest first, bounded, with an opaque cursor. */
+  listPage: (input: TaskPageInput) => Promise<TaskPage>;
+  /** Engine-wide counters for the operational read model. */
+  countByState: () => Promise<TaskStateCounts>;
+  /** Authorized cascade for deleting one conversation. */
+  deleteByConversation: (ownerId: string, conversationId: string) => Promise<number>;
 };
+
+const STATES: readonly TaskState[] = [
+  'queued',
+  'running',
+  'awaiting_approval',
+  ...TERMINAL_TASK_STATES,
+];
+
+function emptyCounts(): TaskStateCounts {
+  return {
+    queued: 0,
+    running: 0,
+    awaiting_approval: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    interrupted: 0,
+  };
+}
+
+function matches(task: TaskRecord, input: TaskPageInput): boolean {
+  return (
+    task.ownerId === input.ownerId &&
+    (input.state === undefined || task.state === input.state) &&
+    (input.conversationId === undefined || task.conversationId === input.conversationId) &&
+    (input.agent === undefined || task.agent === input.agent) &&
+    (input.mode === undefined || task.mode === input.mode)
+  );
+}
 
 export function createTaskRepository(): TaskRepository {
   const tasks = new Map<string, TaskRecord>();
@@ -130,5 +185,49 @@ export function createTaskRepository(): TaskRepository {
       [...tasks.values()].filter((task) => !isTerminalState(task.state)).map((t) => ({ ...t })),
     listByOwner: async (ownerId) =>
       [...tasks.values()].filter((task) => task.ownerId === ownerId).map((t) => ({ ...t })),
+    listPage: async (input) => {
+      const limit = clampLimit(input.limit);
+      const cursor = input.cursor ? decodeCursor(input.cursor) : null;
+      const matching = [...tasks.values()]
+        .filter((task) => matches(task, input))
+        .sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            right.taskId.localeCompare(left.taskId),
+        );
+      const after = cursor
+        ? matching.filter(
+            (task) =>
+              task.updatedAt < cursor.at || (task.updatedAt === cursor.at && task.taskId < cursor.id),
+          )
+        : matching;
+      const page = after.slice(0, limit);
+      const hasMore = after.length > limit;
+      return {
+        tasks: page.map((task) => ({ ...task })),
+        total: matching.length,
+        ...(hasMore && page.length > 0
+          ? { nextCursor: encodeCursor(page[page.length - 1]!.updatedAt, page[page.length - 1]!.taskId) }
+          : {}),
+      };
+    },
+    countByState: async () => {
+      const counts = emptyCounts();
+      for (const task of tasks.values()) counts[task.state] += 1;
+      return counts;
+    },
+    deleteByConversation: async (ownerId, conversationId) => {
+      let deleted = 0;
+      for (const [taskId, task] of tasks) {
+        if (task.ownerId === ownerId && task.conversationId === conversationId) {
+          tasks.delete(taskId);
+          settle(task);
+          deleted += 1;
+        }
+      }
+      return deleted;
+    },
   };
 }
+
+export { STATES };

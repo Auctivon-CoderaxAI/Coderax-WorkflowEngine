@@ -16,6 +16,8 @@ import type { MongoCollectionLike } from './mongo.js';
 
 export type MongoDatabase = {
   collection: (name: string) => MongoCollectionLike;
+  /** A bounded round trip used by the persistence health probe. */
+  ping: () => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -113,6 +115,9 @@ export function createMongoConnector(load: () => Promise<MongoDriverModule> = lo
       await db.command({ ping: 1 });
       return {
         collection: (name) => db.collection(name),
+        ping: async () => {
+          await db.command({ ping: 1 });
+        },
         close: async () => {
           await client.close();
         },

@@ -108,6 +108,31 @@ export const ExecutionConfig = z
   })
   .strict();
 
+const DAY = 86_400_000;
+
+/**
+ * Retention is a data-lifecycle setting, not a performance knob. Every window
+ * is bounded and every sweep is batched, so a deployment cannot grow a table
+ * without limit or delete an unbounded amount in one request.
+ */
+export const RetentionConfig = z
+  .object({
+    /** Read completion notifications older than this are swept. */
+    notificationMs: z.number().int().min(3_600_000).max(365 * DAY).default(30 * DAY),
+    /** Execution receipts are operational evidence and are kept longer. */
+    auditMs: z.number().int().min(3_600_000).max(2_000 * DAY).default(90 * DAY),
+    /** Expired or decided permission requests older than this are swept. */
+    permissionMs: z.number().int().min(3_600_000).max(365 * DAY).default(7 * DAY),
+    /** Append-only checkpoint history is bounded independently of the task row. */
+    checkpointMs: z.number().int().min(3_600_000).max(365 * DAY).default(30 * DAY),
+    /** An idempotency identity is replayable for at least this long. */
+    idempotencyMs: z.number().int().min(3_600_000).max(30 * DAY).default(DAY),
+    sweepIntervalMs: z.number().int().min(60_000).max(DAY).default(3_600_000),
+    /** Maximum rows one store removes per sweep batch. */
+    batchSize: z.number().int().min(1).max(5_000).default(1_000),
+  })
+  .strict();
+
 export const PersistenceConfig = z
   .object({
     /**
@@ -141,9 +166,11 @@ export const EngineConfigSchema = z
     models: ModelsConfig,
     execution: ExecutionConfig.default({}),
     persistence: PersistenceConfig.default({}),
+    retention: RetentionConfig.default({}),
   })
   .strict();
 
+export type RetentionConfig = z.infer<typeof RetentionConfig>;
 export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;

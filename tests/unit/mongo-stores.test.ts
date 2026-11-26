@@ -288,9 +288,9 @@ test('notifications are written once per task and marked read per owner', async 
   assert.equal(listed.unread, 1);
 
   // Another owner cannot mark this notification read.
-  await notifications.markRead('someone-else', 'task_1');
+  await notifications.markRead('someone-else', ['task_1']);
   assert.equal((await notifications.list('owner-test')).unread, 1);
 
-  await notifications.markRead('owner-test', 'task_1');
+  await notifications.markRead('owner-test', ['task_1']);
   assert.equal((await notifications.list('owner-test')).unread, 0);
 });

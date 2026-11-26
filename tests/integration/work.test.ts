@@ -49,7 +49,7 @@ test('Work runs to completion, persists its transcript and notifies once', async
     assert.equal(types.at(-1), 'task.completed');
     assert.ok(types.includes('text.delta'));
 
-    const receipts = started.app.dependencies.audit.list();
+    const receipts = (await started.app.dependencies.audit.list()).receipts;
     assert.ok(receipts.some((entry) => entry.action === 'work.accepted'));
     assert.ok(receipts.some((entry) => entry.action === 'work.completed'));
   } finally {
@@ -269,7 +269,7 @@ test('failed transcript and notification writes do not strand a settled run', as
     assert.ok(task.ok);
     await deps.scheduler.idle();
     assert.ok(publishedBeforeAppend && notificationAttempted);
-    assert.ok(deps.audit.list().some(entry => entry.action === 'work.completed'));
+    assert.ok((await deps.audit.list()).receipts.some(entry => entry.action === 'work.completed'));
     deps.conversations.appendMessage = append;
     assert.ok((await submit(task.value.conversationId)).ok);
     await deps.scheduler.idle();

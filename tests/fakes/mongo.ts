@@ -9,12 +9,18 @@ type Index = {
 
 function matches(document: Document, filter: MongoFilter): boolean {
   return Object.entries(filter).every(([field, condition]) => {
+    if (field === '$or') {
+      return (condition as MongoFilter[]).some((candidate) => matches(document, candidate));
+    }
     const value = document[field];
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
       const compare = (bound: unknown): number => {
         if (value instanceof Date && bound instanceof Date) return value.getTime() - bound.getTime();
         if (typeof value === 'number' && typeof bound === 'number') return value - bound;
+        if (typeof value === 'string' && typeof bound === 'string') {
+          return value < bound ? -1 : value > bound ? 1 : 0;
+        }
         return Number.NaN;
       };
       if ('$lte' in operators) {
@@ -92,13 +98,17 @@ export function createFakeCollection(): FakeCollection {
     let limit = Number.POSITIVE_INFINITY;
     const self: MongoCursor = {
       sort: (spec) => {
-        const [field, direction] = Object.entries(spec)[0] ?? ['key', 1];
+        const keys = Object.entries(spec);
         result = [...result].sort((left, right) => {
-          const a = left[field];
-          const b = right[field];
-          const leftValue = a instanceof Date ? a.getTime() : String(a);
-          const rightValue = b instanceof Date ? b.getTime() : String(b);
-          return leftValue < rightValue ? -direction : leftValue > rightValue ? direction : 0;
+          for (const [field, direction] of keys) {
+            const a = left[field];
+            const b = right[field];
+            const leftValue = a instanceof Date ? a.getTime() : (a as string | number);
+            const rightValue = b instanceof Date ? b.getTime() : (b as string | number);
+            if (leftValue < rightValue) return -direction;
+            if (leftValue > rightValue) return direction;
+          }
+          return 0;
         });
         return self;
       },
@@ -184,6 +194,28 @@ export function createFakeCollection(): FakeCollection {
       documents.splice(index, 1);
       return { deletedCount: 1 };
     },
+    updateMany: async (filter, update, options) => {
+      let matchedCount = 0;
+      for (const [index, document] of documents.entries()) {
+        if (!matches(document, filter)) continue;
+        matchedCount += 1;
+        const next = { ...document, ...update.$set };
+        assertUnique(next, index);
+        documents[index] = next;
+      }
+      if (matchedCount === 0 && options?.upsert) {
+        const equality = Object.fromEntries(
+          Object.entries(filter).filter(
+            ([, condition]) => condition === null || typeof condition !== 'object',
+          ),
+        );
+        const candidate = { ...equality, ...update.$set };
+        assertUnique(candidate, -1);
+        documents.push(candidate);
+        return { matchedCount: 0, modifiedCount: 0, upsertedCount: 1 };
+      }
+      return { matchedCount, modifiedCount: matchedCount, upsertedCount: 0 };
+    },
     deleteMany: async (filter) => {
       const kept = documents.filter((document) => !matches(document, filter));
       const deletedCount = documents.length - kept.length;
@@ -191,6 +223,8 @@ export function createFakeCollection(): FakeCollection {
       documents.push(...kept);
       return { deletedCount };
     },
+    countDocuments: async (filter) =>
+      documents.filter((document) => matches(document, filter)).length,
     find: cursor,
   };
 }
@@ -210,6 +244,7 @@ export function createFakeDatabase(): FakeDatabase {
       collections.set(name, created);
       return created;
     },
+    ping: async () => undefined,
     close: async () => undefined,
   };
 }

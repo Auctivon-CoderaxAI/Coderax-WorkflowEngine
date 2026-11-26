@@ -29,14 +29,14 @@ Status vocabulary:
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |
 | 15 | Lease TTL / retention / sweep bound | 30 s / 24 h / 100 | same constants | Preserved |
-| 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap, selected at startup by `persistence.driver` | Preserved (verified against a fake; no live DB) |
+| 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap, selected at startup by `persistence.driver` | Preserved (live MongoDB restart suite) |
 | 17 | Fenced terminal write for the task record | `fenceWorkRun` on the conversation row | `TaskRepository.updateFenced` on the task row | Preserved |
 | 18 | Fenced conversation write | `fenceWorkRun` | not implemented; conversations are written after settlement | Missing |
-| 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
-| 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
-| 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
-| 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
+| 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (live MongoDB restart suite) |
+| 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (live MongoDB restart suite) |
+| 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (live MongoDB restart suite) |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/persistence/mongo-events.ts` + event head, bounded pending queue, restart hydration | Strengthened (live MongoDB restart suite) |
+| 23 | Completion notifications | client polling of conversation state | durable notification store, unread total, bounded page and mark-read operation | Preserved (live MongoDB restart suite) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
@@ -52,11 +52,11 @@ Status vocabulary:
 | 36 | Private/cloud mode denial for providers | `cloud/mode.ts` | workspace + memory partitioning only | Simplified |
 | 37 | Durable cancellation | lease flag | lease flag + service cancel | Preserved |
 | 38 | Resume / retry of an interrupted task | partial (retry of start failures) | `resume` and `retry` on the service, with checkpoints | Strengthened |
-| 39 | Checkpoints | none | `checkpoint.completedSteps` + accumulated text | Strengthened |
+| 39 | Checkpoints | none | `checkpoint.completedSteps` + accumulated text + append-only durable history | Strengthened |
 | 40 | Approval records bound to an exact resource | approvals store | permission store; adapter does not create the record | Simplified (review F5) |
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
-| 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
+| 43 | Audit trail of execution receipts | none | durable, owner/task-scoped `audit_receipts` with bounded retention | Strengthened |
 | 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
 | 45 | Cloud browser orchestration | none | none | Not started (both) |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
@@ -70,9 +70,9 @@ Status vocabulary:
 | Status | Count |
 | --- | --- |
 | Preserved | 22 |
-| Strengthened | 10 |
+| Strengthened | 11 |
 | Simplified | 5 |
-| Missing | 10 |
+| Missing | 9 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 1 |
 
@@ -83,7 +83,7 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
+capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 44, 46 and 47
 are closed, migrating a client would remove functionality, which the brief
 forbids.
 

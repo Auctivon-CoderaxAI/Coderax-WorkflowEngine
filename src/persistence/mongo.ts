@@ -49,8 +49,14 @@ export type MongoCollectionLike = {
     },
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
+  updateMany: (
+    filter: MongoFilter,
+    update: { $set: Record<string, unknown> },
+    options?: { upsert?: boolean },
+  ) => Promise<{ matchedCount?: number; modifiedCount?: number; upsertedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
   deleteMany: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
+  countDocuments: (filter: MongoFilter) => Promise<number>;
   find: (filter: MongoFilter) => MongoCursor;
 };
 

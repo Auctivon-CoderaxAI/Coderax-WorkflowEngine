@@ -38,7 +38,7 @@ test('the default persistence driver is memory', async () => {
       env: ENV,
       gateway: fakeGateway(),
     });
-    assert.deepEqual(app.persistence, { driver: 'memory' });
+    assert.deepEqual(app.persistence, { driver: 'memory', durable: false });
     await app.stop();
   } finally {
     workspace.cleanup();
@@ -55,7 +55,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
       gateway: fakeGateway(),
       persistence: { database },
     });
-    assert.deepEqual(first.persistence, { driver: 'mongo' });
+    assert.deepEqual(first.persistence, { driver: 'mongo', durable: true });
 
     // Every store was bootstrapped with its own indexes at startup.
     assert.ok(
@@ -169,7 +169,7 @@ test('the connection string is read from the configured variable name', async ()
       },
     });
     assert.deepEqual(seen, [{ uri: 'mongodb://127.0.0.1:27017', database: 'engine_test' }]);
-    assert.deepEqual(app.persistence, { driver: 'mongo' });
+    assert.deepEqual(app.persistence, { driver: 'mongo', durable: true });
     assert.ok(database.collections.has('test_work_runs'));
     assert.ok(database.collections.has('test_tasks'));
     await app.stop();

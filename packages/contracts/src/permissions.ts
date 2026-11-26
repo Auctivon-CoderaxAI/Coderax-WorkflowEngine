@@ -77,9 +77,22 @@ export type CompletionNotification = z.infer<typeof CompletionNotification>;
 export const NotificationList = z
   .object({
     notifications: z.array(CompletionNotification),
+    /** Total unread for this owner, independent of the current page. */
     unread: z.number().int().nonnegative(),
+    /** Rows matching the filter, independent of the current page. */
+    total: z.number().int().nonnegative(),
+    nextCursor: z.string().min(1).max(1024).optional(),
   })
   .strict();
+
+export const NotificationListQuery = z
+  .object({
+    unreadOnly: z.enum(['true', 'false']).optional(),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+    cursor: z.string().min(1).max(1024).optional(),
+  })
+  .strict();
+export type NotificationListQuery = z.infer<typeof NotificationListQuery>;
 export type NotificationList = z.infer<typeof NotificationList>;
 
 /**

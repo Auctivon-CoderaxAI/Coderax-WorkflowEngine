@@ -1001,6 +1001,11 @@
                   },
                   "requireApproval": {
                     "type": "boolean"
+                  },
+                  "idempotencyKey": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 128
                   }
                 },
                 "required": [
@@ -1748,6 +1753,17 @@
                               "freebuff"
                             ]
                           },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "cloud"
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
                           "updatedAt": {
                             "type": "string",
                             "format": "date-time"
@@ -1757,14 +1773,26 @@
                           "conversationId",
                           "isWork",
                           "agent",
+                          "mode",
+                          "createdAt",
                           "updatedAt"
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
                     }
                   },
                   "required": [
-                    "conversations"
+                    "conversations",
+                    "total"
                   ],
                   "additionalProperties": false
                 }
@@ -2005,6 +2033,11 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
                     }
                   },
                   "required": [
@@ -2457,11 +2490,21 @@
                     "unread": {
                       "type": "integer",
                       "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
                     }
                   },
                   "required": [
                     "notifications",
-                    "unread"
+                    "unread",
+                    "total"
                   ],
                   "additionalProperties": false
                 }
@@ -2577,11 +2620,21 @@
                     "unread": {
                       "type": "integer",
                       "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
                     }
                   },
                   "required": [
                     "notifications",
-                    "unread"
+                    "unread",
+                    "total"
                   ],
                   "additionalProperties": false
                 }

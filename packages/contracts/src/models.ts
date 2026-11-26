@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Availability, EngineCapabilities } from './capabilities.js';
-import { CostClass, ModelRef, Usage } from './primitives.js';
+import { CostClass, IsoDateTime, ModelRef, Usage } from './primitives.js';
 
 export const ModelDescriptor = z
   .object({
@@ -44,8 +44,17 @@ export const BudgetState = z
   .object({
     budget: Budget,
     used: z.object({ requests: z.number().int().nonnegative(), usage: Usage }).strict(),
-    remaining: z.object({ requests: z.number().int().nonnegative() }).strict(),
+    remaining: z
+      .object({
+        requests: z.number().int().nonnegative(),
+        inputTokens: z.number().int().nonnegative(),
+        outputTokens: z.number().int().nonnegative(),
+      })
+      .strict(),
     exhausted: z.boolean(),
+    period: z.literal('day'),
+    /** UTC midnight at which the local ledger starts a new day. */
+    resetsAt: IsoDateTime,
   })
   .strict();
 export type BudgetState = z.infer<typeof BudgetState>;
