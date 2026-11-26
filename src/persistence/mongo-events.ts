@@ -127,6 +127,16 @@ export function createMongoEventLog(input: EventCollections): EventLog {
       return current ?? { seq: 0, generation: 0 };
     },
 
+    latest: async (taskId, limit) => {
+      const bounded = Math.max(1, Math.floor(limit));
+      const documents = await events
+        .find({ taskId })
+        .sort({ seq: -1 })
+        .limit(bounded)
+        .toArray();
+      return documents.map(toEvent).reverse();
+    },
+
     prune: async ({ before, limit }) => {
       const bounded = Math.max(1, Math.floor(limit));
       const candidates = await events

@@ -180,6 +180,10 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  // Runs this process accepted, whether queued or executing. Shutdown may only
+  // reclaim these: another replica's live run has its own token, and writing an
+  // interrupt under that token would stop work this process does not own.
+  const localRuns = new Map<string, string>();
   /** Bounded repair window: the most recent settled tasks checked at startup. */
   const REPAIR_WINDOW = 100;
   const PRUNE_BOUND = 100;
@@ -467,9 +471,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const checkpoint = task.checkpoint ?? { completedSteps: [], text: '' };
 
     try {
-      await deps.events.hydrate(task.taskId);
-      const existing = await deps.events.read(task.taskId, 0, deps.config.execution.eventBufferSize);
-      if (!existing.events.some((event) => isTerminalEvent(event.type))) {
+      await deps.events.hydrate(task.taskId, task.generation);
+      // The ending is the newest event. Inspecting the first page would miss a
+      // terminal event on a stream longer than one page and append a duplicate.
+      const existing = await deps.events.tail(task.taskId, 1);
+      if (!existing.some((event) => isTerminalEvent(event.type))) {
         const base = {
           taskId: task.taskId,
           agent: task.agent,
@@ -729,13 +735,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   }
 
   async function execute(taskId: string, token: string): Promise<void> {
+    try {
+      await executeClaimed(taskId, token);
+    } finally {
+      if (localRuns.get(taskId) === token) localRuns.delete(taskId);
+    }
+  }
+
+  async function executeClaimed(taskId: string, token: string): Promise<void> {
     const task = await deps.tasks.get(taskId);
     if (!task || task.runToken !== token) return;
 
     // Sequence numbers continue the durable watermark, so a run that starts after
-    // a restart cannot reset a client's cursor to one.
+    // a restart cannot reset a client's cursor to one. The generation is part of
+    // the read: another replica may have advanced the sequence in between.
     try {
-      await deps.events.hydrate(taskId);
+      await deps.events.hydrate(taskId, task.generation);
     } catch {
       await settle(task, token, {
         kind: 'failed',
@@ -825,6 +840,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!started.applied) return;
     publish(started.task, 'task.started');
 
+    localRuns.set(taskId, token);
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
     const outputs = [...(started.task.checkpoint.outputs ?? (started.task.checkpoint.text
@@ -1132,7 +1148,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
     if (!applied.applied) return task;
 
-    await deps.events.hydrate(applied.task.taskId).catch(() => undefined);
+    await deps.events.hydrate(applied.task.taskId, applied.task.generation).catch(() => undefined);
     publish(applied.task, 'task.interrupted', {
       detail: 'Execution ownership was lost; the task is safe to resume.',
     });
@@ -1307,6 +1323,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
       });
 
+      localRuns.set(task.taskId, token);
       deps.scheduler.enqueue(() => execute(task.taskId, token));
 
       return ok({
@@ -1472,9 +1489,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await releaseLease(task, token);
         return fail('conflict', 'That task cannot be resumed.');
       }
-      await deps.events.hydrate(taskId).catch(() => undefined);
+      await deps.events.hydrate(taskId, applied.task.generation).catch(() => undefined);
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
+      localRuns.set(taskId, token);
       deps.scheduler.enqueue(() => execute(taskId, token));
       return ok({
         taskId,
@@ -1544,9 +1562,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await releaseLease(task, token);
         return fail('conflict', 'That task cannot be retried.');
       }
-      await deps.events.hydrate(taskId).catch(() => undefined);
+      await deps.events.hydrate(taskId, applied.task.generation).catch(() => undefined);
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
+      localRuns.set(taskId, token);
       deps.scheduler.enqueue(() => execute(taskId, token));
       return ok({
         taskId,
@@ -1749,6 +1768,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     shutdown: async () => {
       stopping = true;
       deps.scheduler.stop();
+      // Snapshot the runs this process owns before aborting them. A graceful stop
+      // settles its own work; it must never enumerate the shared database and
+      // interrupt a run another replica is executing.
+      const owned = [...localRuns.entries()];
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
 
@@ -1763,15 +1786,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         }),
       ]);
 
-      // Anything still non-terminal cannot be resumed here: retire it under its
-      // own fence and release the lease, so a restart sees `interrupted` rather
-      // than a task stuck in `running`. Approval-suspended work is intentionally
-      // left alone; it is waiting for the owner, not for this process.
-      for (const task of await deps.tasks.listUnsettled()) {
-        if (task.state === 'awaiting_approval') continue;
+      // Anything still non-terminal cannot be resumed here: retire it under the
+      // token this process was given and release the lease, so a restart sees
+      // `interrupted` rather than a task stuck in `running`. The token check is
+      // what keeps this pass local: a task a newer generation now owns, or one
+      // another replica is running, is left untouched. Approval-suspended work
+      // is left alone too; it is waiting for the owner, not for this process.
+      for (const [taskId, token] of owned) {
+        const task = await deps.tasks.get(taskId);
+        if (!task || task.runToken !== token) continue;
+        if (isTerminalState(task.state) || task.state === 'awaiting_approval') continue;
         const applied = await deps.tasks.updateFenced({
-          taskId: task.taskId,
-          token: task.runToken ?? '',
+          taskId,
+          token,
           patch: {
             state: 'interrupted',
             updatedAt: deps.clock.iso(),
@@ -1788,8 +1815,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
         await deps.events.flush(applied.task.taskId).catch(() => undefined);
         await notifyTerminal(applied.task, 'interrupted').catch(() => undefined);
-        await releaseLease(applied.task, task.runToken ?? '');
+        await releaseLease(applied.task, token);
       }
+      localRuns.clear();
       await deps.events.close();
     },
   };

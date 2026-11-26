@@ -65,8 +65,14 @@ export type EventBus = {
   open: (taskId: string, after: number, limit?: number) => Promise<OpenedStream>;
   subscribe: (taskId: string, after: number, listener: (event: ExecutionEvent) => void) => Unsubscribe;
   lastSeq: (taskId: string) => number;
-  /** Loads the durable watermark once per task; required before publishing. */
-  hydrate: (taskId: string) => Promise<void>;
+  /** The newest events, oldest first; used to inspect how a stream ends. */
+  tail: (taskId: string, limit: number) => Promise<ExecutionEvent[]>;
+  /**
+   * Loads the durable watermark before publishing. Pass the generation this
+   * process is about to run: a newer generation re-reads the watermark, because
+   * another replica may have advanced the sequence while this one was idle.
+   */
+  hydrate: (taskId: string, generation?: number) => Promise<void>;
   /** Waits for every append queued so far and rethrows the first failure. */
   flush: (taskId: string) => Promise<void>;
   /** Bounded retention sweep over the durable log. */
@@ -89,7 +95,8 @@ type Stream = {
   /** Serialized durable appends; the tail is the flush barrier. */
   appends: Promise<void>;
   failure: Error | null;
-  hydrating: Promise<void> | null;
+  /** Cached watermark load, tagged with the generation it was read for. */
+  hydrating: { generation: number; promise: Promise<void> } | null;
 };
 
 export function createEventBus(input: {
@@ -143,14 +150,21 @@ export function createEventBus(input: {
     state.appends = state.appends
       .then(async () => {
         const outcome = await log.append(event);
-        // A stale generation was refused by the store. The event stays out of
-        // the durable stream, which is the guarantee that matters; the local
-        // delivery already happened and a live client may have seen it, so the
-        // caller is told through `flush` only when the store actually failed.
-        if (!outcome.appended && outcome.reason === 'stale_generation') {
-          state.failure ??= new Error(
-            `event ${event.eventId} was refused as a stale generation`,
-          );
+        if (outcome.appended) return;
+        // A redelivery is already durable, so it is not a failure. Anything else
+        // means this event will be missing from replay, and `flush` must report
+        // it rather than let settlement announce a stream without its ending.
+        if (outcome.reason === 'duplicate') return;
+        state.failure ??= new Error(
+          `event ${event.eventId} was not persisted (${outcome.reason})`,
+        );
+        if (outcome.reason === 'out_of_order') {
+          // Another replica advanced the sequence past this process's cache.
+          // Resynchronize so the remaining events of this generation are not
+          // refused one after another, and force the next run to re-read.
+          const watermark = await log.watermark(event.taskId).catch(() => null);
+          if (watermark && watermark.seq > state.seq) state.seq = watermark.seq;
+          state.hydrating = null;
         }
       })
       .catch((error: unknown) => {
@@ -158,10 +172,16 @@ export function createEventBus(input: {
       });
   }
 
-  async function hydrate(taskId: string): Promise<void> {
+  async function hydrate(taskId: string, generation?: number): Promise<void> {
     const state = stream(taskId);
     if (!input.log) return;
-    if (state.hydrating) return state.hydrating;
+    // A cached load is only valid for the generation it was read for. Without
+    // this, a replica that hydrated before another replica advanced the stream
+    // would reuse sequence numbers its successor already owns.
+    const needed = generation ?? 0;
+    if (state.hydrating && state.hydrating.generation >= needed) {
+      return state.hydrating.promise;
+    }
     const running = (async () => {
       const watermark = await input.log?.watermark(taskId);
       if (!watermark) return;
@@ -175,8 +195,41 @@ export function createEventBus(input: {
       state.hydrating = null;
       throw error;
     });
-    state.hydrating = running;
+    state.hydrating = { generation: needed, promise: running };
     return running;
+  }
+
+  /**
+   * Drain a backlog larger than one page.
+   *
+   * `read` returns the earliest page so a cursor advances, and a fresh process
+   * has no local buffer to supply the rest; stopping after one page would skip
+   * the interval before the current watermark — including the terminal event.
+   * Pages are bounded, and past the bound the newest window is kept so the
+   * ending is always present and `truncated` says the head was dropped.
+   */
+  const MAX_REPLAY_PAGES = 64;
+  async function readBacklog(
+    taskId: string,
+    after: number,
+    pageSize: number,
+  ): Promise<Replay> {
+    let cursor = after;
+    let events: ExecutionEvent[] = [];
+    let dropped = false;
+    for (let pages = 0; ; pages += 1) {
+      const page = await readDurable(taskId, cursor, pageSize);
+      const fresh = page.events.filter((event) => event.seq > cursor);
+      if (fresh.length === 0) return { events, truncated: dropped || page.truncated };
+      if (pages < MAX_REPLAY_PAGES) {
+        events = [...events, ...fresh];
+      } else {
+        dropped = true;
+        events = [...events, ...fresh].slice(-pageSize);
+      }
+      cursor = fresh[fresh.length - 1]?.seq ?? cursor;
+      if (!page.truncated) return { events, truncated: dropped };
+    }
   }
 
   async function readDurable(taskId: string, after: number, limit?: number): Promise<Replay> {
@@ -274,11 +327,15 @@ export function createEventBus(input: {
       state.listeners.add(subscriber);
       let replay: Replay;
       try {
-        replay = await readDurable(taskId, after, limit);
+        replay = await readBacklog(taskId, after, limit ?? input.bufferSize);
       } catch (error) {
         state.listeners.delete(subscriber);
         throw error;
       }
+      // The replay already delivered everything up to its last sequence, so the
+      // subscription must not deliver any of it a second time.
+      const lastReplayed = replay.events[replay.events.length - 1]?.seq ?? 0;
+      if (lastReplayed > subscriber.cursor) subscriber.cursor = lastReplayed;
       return {
         replay,
         subscribe: (listener) => {
@@ -304,6 +361,16 @@ export function createEventBus(input: {
     },
 
     lastSeq: (taskId) => streams.get(taskId)?.seq ?? 0,
+
+    tail: async (taskId, limit) => {
+      const state = stream(taskId);
+      await hydrate(taskId);
+      const bounded = Math.max(1, limit);
+      const stored = input.log ? await input.log.latest(taskId, bounded) : [];
+      const newest = stored[stored.length - 1]?.seq ?? 0;
+      const local = state.events.filter((event) => event.seq > newest);
+      return [...stored, ...local].sort((left, right) => left.seq - right.seq).slice(-bounded);
+    },
 
     hydrate,
 
