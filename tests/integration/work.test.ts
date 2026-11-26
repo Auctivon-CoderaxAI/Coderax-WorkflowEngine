@@ -277,3 +277,62 @@ test('failed transcript and notification writes do not strand a settled run', as
     await started.close();
   }
 });
+
+test('an unacknowledged committed create remains pending until scheduled', async () => {
+  const started = await startTestApp();
+  const deps = started.app.dependencies;
+  const create = deps.tasks.create;
+  let signalCommit!: () => void;
+  let unblock!: () => void;
+  const committed = new Promise<void>((resolve) => { signalCommit = resolve; });
+  const resume = new Promise<void>((resolve) => { unblock = resolve; });
+  deps.tasks.create = async (task) => {
+    await create(task);
+    signalCommit();
+    await resume;
+    throw new Error('lost acknowledgement');
+  };
+  const request = { objective: 'one run', mode: 'cloud' as const, requireApproval: false, idempotencyKey: 'retry-commit' };
+  try {
+    const first = started.app.service.submitWork(principal, request);
+    await committed;
+    const pending = await started.app.service.submitWork(principal, request);
+    assert.ok(!pending.ok && pending.retryable);
+    unblock();
+    const accepted = await first;
+    assert.ok(accepted.ok);
+    await deps.scheduler.idle();
+    const replay = await started.app.service.submitWork(principal, request);
+    assert.ok(replay.ok);
+    assert.equal(replay.value.taskId, accepted.value.taskId);
+    assert.equal((await deps.tasks.get(accepted.value.taskId))?.state, 'completed');
+    assert.equal((await deps.tasks.listByOwner(principal.ownerId)).length, 1);
+  } finally {
+    unblock();
+    await started.close();
+  }
+});
+
+test('a rejected completion fence never publishes a transcript', async () => {
+  const started = await startTestApp();
+  const deps = started.app.dependencies;
+  const update = deps.tasks.updateFenced;
+  let rejected = false;
+  deps.tasks.updateFenced = async (input) => {
+    if (input.patch.state !== 'completed') return update(input);
+    assert.deepEqual(await deps.artifacts.list(input.taskId), []);
+    rejected = true;
+    return { applied: false, reason: 'superseded' };
+  };
+  try {
+    const result = await started.app.service.submitWork(principal, {
+      objective: 'superseded completion', mode: 'cloud', requireApproval: false,
+    });
+    assert.ok(result.ok);
+    await deps.scheduler.idle();
+    assert.ok(rejected);
+    assert.deepEqual(await deps.artifacts.list(result.value.taskId), []);
+  } finally {
+    await started.close();
+  }
+});

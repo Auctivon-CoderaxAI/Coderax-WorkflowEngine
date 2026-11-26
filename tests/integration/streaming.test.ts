@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ChatStreamEvent, ExecutionEvent } from '@coderax/contracts';
-import { CoderaxApiError } from '@coderax/sdk';
-import { clientFor, startTestApp } from '../helpers.js';
+import { CoderaxApiError, CoderaxClient, CoderaxContractError } from '@coderax/sdk';
+import { clientFor, startTestApp, waitFor } from '../helpers.js';
 
 test('Chat streams typed frames that end at a terminal frame', async () => {
   const started = await startTestApp();
@@ -128,6 +128,66 @@ test('a cursor older than the retained window starts with stream.truncated', asy
     assert.equal(frames.length - 1, 16, 'the retained window must stay bounded');
     assert.equal(frames.at(-1)?.type, 'task.completed');
   } finally {
+    await started.close();
+  }
+});
+
+test('a successful HTTP response without terminal chat data is incomplete', async () => {
+  const client = new CoderaxClient({
+    baseUrl: 'http://localhost', token: 'test',
+    fetchImpl: async () => new Response('{}'),
+  });
+  await assert.rejects(client.chatStream({ message: 'incomplete' }).next(), CoderaxContractError);
+});
+
+test('assistant persistence failure emits one safe terminal failure', async () => {
+  const started = await startTestApp();
+  const conversations = started.app.dependencies.conversations;
+  const append = conversations.appendMessage;
+  let attempts = 0;
+  conversations.appendMessage = async (message) => {
+    if (message.role !== 'assistant') return append(message);
+    attempts++;
+    throw new Error('private storage diagnostic');
+  };
+  try {
+    const frames: ChatStreamEvent[] = [];
+    for await (const frame of clientFor(started.url).chatStream({ message: 'save reply' })) frames.push(frame);
+    assert.equal(frames[0]?.type, 'chat.started');
+    assert.equal(frames.at(-1)?.type, 'chat.failed');
+    assert.ok(!JSON.stringify(frames).includes('private storage diagnostic'));
+    assert.equal(attempts, 1);
+  } finally {
+    await started.close();
+  }
+});
+
+test('disconnecting during Chat still persists the redacted assistant summary', async () => {
+  const started = await startTestApp();
+  const client = clientFor(started.url);
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => { finish = resolve; });
+  try {
+    const adapter = started.app.dependencies.agents.get('coderax');
+    assert.ok(adapter);
+    adapter.run = async (_request, report) => {
+      await gate;
+      report({ type: 'text.delta', text: 'an intermediate delta ' });
+      return { ok: true, summary: 'api_key=syntheticcredential' };
+    };
+    const controller = new AbortController();
+    const stream = client.chatStream({ message: 'disconnect' }, { signal: controller.signal });
+    const first = await stream.next();
+    assert.ok(!first.done && first.value.type === 'chat.started');
+    const conversationId = first.value.conversationId;
+    controller.abort();
+    await stream.return(undefined);
+    finish();
+    const reply = await waitFor(async () => (await client.conversation(conversationId))
+      .messages.find((message) => message.role === 'assistant'));
+    assert.equal(reply.text, 'api_key=[redacted]');
+  } finally {
+    finish();
     await started.close();
   }
 });

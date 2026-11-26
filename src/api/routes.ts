@@ -261,7 +261,7 @@ export function registerRoutes(
     if (acceptsEventStream(context.accept)) {
       const streamed = await service.chatStream(context.principal, request);
       if (!streamed.ok) return fromFailure(streamed, context.requestId);
-      return { kind: 'sse', status: 200, events: toChatStream(streamed.value) };
+      return { kind: 'sse', status: 200, drainOnDisconnect: true, events: toChatStream(streamed.value) };
     }
     const result = await service.chat(context.principal, request);
     if (!result.ok) return fromFailure(result, context.requestId);

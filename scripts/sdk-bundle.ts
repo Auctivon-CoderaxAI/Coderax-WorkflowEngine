@@ -153,7 +153,11 @@ function sdkPackageJson(): Buffer {
     main: manifest.main,
     types: manifest.types,
     exports: manifest.exports,
-    dependencies: { zod: (readJson(path.join(SDK_ROOT, 'package.json')).dependencies as Record<string, string> | undefined)?.zod ?? '^3.25.67' },
+    dependencies: {
+      '@coderax/contracts': readJson(path.join(CONTRACTS_ROOT, 'package.json')).version,
+      zod: (manifest.dependencies as Record<string, string>).zod,
+    },
+    bundleDependencies: ['@coderax/contracts'],
     coderaxSdk: {
       contractVersion: (readJson(path.join(CONTRACTS_ROOT, 'package.json')) as { version?: string }).version,
     },

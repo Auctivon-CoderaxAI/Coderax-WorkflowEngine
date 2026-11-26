@@ -13,15 +13,19 @@ import { fail, ok } from '../support/result.js';
  * same ceiling as an HTTP body: an artifact is not a way to smuggle a large file
  * past the transport limit.
  */
-export type ArtifactStore = {
-  write: (input: {
+type ArtifactInput = {
     taskId: string;
     conversationId: string;
     path: string;
     mediaType: string;
     content: Buffer;
     origin: 'engine' | 'owner';
-  }) => Promise<ServiceResult<ArtifactBlob>>;
+};
+type Staged = { blob: ArtifactBlob; finish: (publish: boolean) => void };
+
+export type ArtifactStore = {
+  stage: (input: ArtifactInput) => ServiceResult<Staged>;
+  write: (input: ArtifactInput) => Promise<ServiceResult<ArtifactBlob>>;
   list: (taskId: string) => Promise<ArtifactBlob[]>;
   get: (taskId: string, artifactId: string) => Promise<ArtifactBlob | null>;
 };
@@ -63,53 +67,61 @@ export function createArtifactStore(input: {
   maxBytes: number;
   maxPerTask: number;
 }): ArtifactStore {
-  const byTask = new Map<string, Map<string, ArtifactBlob>>();
+  type Slot = { id: string; pending: number; visible?: ArtifactBlob };
+  const byTask = new Map<string, Map<string, Slot>>();
 
-  function bucket(taskId: string): Map<string, ArtifactBlob> {
-    const existing = byTask.get(taskId);
-    if (existing) return existing;
-    const created = new Map<string, ArtifactBlob>();
-    byTask.set(taskId, created);
-    return created;
+  function stage({ taskId, conversationId, path, mediaType, content, origin }: ArtifactInput): ServiceResult<Staged> {
+    if (content.length > input.maxBytes) {
+      return fail(
+        'validation_failed',
+        `An artifact may not exceed ${input.maxBytes} bytes.`,
+      );
+    }
+    const entries = byTask.get(taskId) ?? new Map<string, Slot>();
+    // The same path replaces the earlier bytes: a retried run must not leave
+    // two artifacts claiming to be the same file.
+    const existing = entries.get(path);
+    if (!existing && entries.size >= input.maxPerTask) {
+      return fail('conflict', `A task may hold at most ${input.maxPerTask} artifacts.`);
+    }
+    const slot = existing ?? { id: `art_${randomUUID()}`, pending: 0 };
+    entries.set(path, slot);
+    byTask.set(taskId, entries);
+    slot.pending++;
+    const blob: ArtifactBlob = {
+      artifactId: slot.id,
+      taskId,
+      conversationId,
+      path,
+      mediaType,
+      bytes: content.length,
+      digest: digestOf(content),
+      origin,
+      createdAt: input.clock.iso(),
+      content,
+    };
+    let finished = false;
+    return ok({ blob, finish: (publish) => {
+      if (finished) return;
+      finished = true;
+      if (publish) slot.visible = blob;
+      slot.pending--;
+      if (!slot.visible && !slot.pending) entries.delete(path);
+      if (!entries.size) byTask.delete(taskId);
+    } });
   }
 
+  const visible = (taskId: string) => [...(byTask.get(taskId)?.values() ?? [])]
+    .flatMap((slot) => slot.visible ? [{ ...slot.visible }] : []);
   return {
-    write: async ({ taskId, conversationId, path, mediaType, content, origin }) => {
-      if (content.length > input.maxBytes) {
-        return fail(
-          'validation_failed',
-          `An artifact may not exceed ${input.maxBytes} bytes.`,
-        );
-      }
-      const entries = bucket(taskId);
-      // The same path replaces the earlier bytes: a retried run must not leave
-      // two artifacts claiming to be the same file.
-      const existing = [...entries.values()].find((entry) => entry.path === path);
-      if (!existing && entries.size >= input.maxPerTask) {
-        return fail('conflict', `A task may hold at most ${input.maxPerTask} artifacts.`);
-      }
-      const blob: ArtifactBlob = {
-        artifactId: existing?.artifactId ?? `art_${randomUUID()}`,
-        taskId,
-        conversationId,
-        path,
-        mediaType,
-        bytes: content.length,
-        digest: digestOf(content),
-        origin,
-        createdAt: input.clock.iso(),
-        content,
-      };
-      entries.set(blob.artifactId, blob);
-      return ok(blob);
+    stage,
+    write: async (request) => {
+      const staged = stage(request);
+      if (!staged.ok) return staged;
+      staged.value.finish(true);
+      return ok(staged.value.blob);
     },
-    list: async (taskId) =>
-      [...bucket(taskId).values()]
-        .sort((left, right) => left.path.localeCompare(right.path))
-        .map((entry) => ({ ...entry })),
-    get: async (taskId, artifactId) => {
-      const found = bucket(taskId).get(artifactId);
-      return found ? { ...found } : null;
-    },
+    list: async (taskId) => visible(taskId).sort((a, b) => a.path.localeCompare(b.path)),
+    get: async (taskId, id) => visible(taskId).find((entry) => entry.artifactId === id) ?? null,
   };
 }

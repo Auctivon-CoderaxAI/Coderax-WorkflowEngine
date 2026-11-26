@@ -372,6 +372,7 @@ export class CoderaxClient {
       yield parsed.data;
       if (isTerminalChatEvent(parsed.data.type)) return;
     }
+    throw new CoderaxContractError('the chat stream ended without a terminal frame');
   }
 
   submitWork(request: WorkSubmitRequestInput): Promise<TaskAccepted> {

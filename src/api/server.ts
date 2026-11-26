@@ -116,7 +116,10 @@ export function createHttpServer(input: {
           connection: 'keep-alive',
         });
         for await (const event of result.events) {
-          if (response.destroyed || response.writableEnded) break;
+          if (response.destroyed || response.writableEnded) {
+            if (result.drainOnDisconnect) continue;
+            break;
+          }
           response.write(`data: ${JSON.stringify(event)}\n\n`);
         }
         response.end();

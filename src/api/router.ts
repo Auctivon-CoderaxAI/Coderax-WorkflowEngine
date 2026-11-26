@@ -16,7 +16,7 @@ export type RequestContext = {
 
 export type HandlerResult =
   | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | { kind: 'sse'; status: number; drainOnDisconnect?: boolean; events: AsyncIterable<unknown> };
 
 export type RouteHandler = (context: RequestContext) => Promise<HandlerResult>;
 
@@ -32,7 +32,7 @@ export type RawRequest = {
 
 export type RouterResult =
   | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | { kind: 'sse'; status: number; drainOnDisconnect?: boolean; events: AsyncIterable<unknown> };
 
 export type RouteRegistry = {
   register: (operationId: string, handler: RouteHandler) => void;
@@ -244,7 +244,7 @@ export function createRouter(input: {
           }
           return { kind: 'json', status: result.status, body: parsed.data };
         }
-        return { kind: 'sse', status: result.status, events: result.events };
+        return result;
       }
 
       return problem('not_found', 'No operation matches that method and path.', requestId);

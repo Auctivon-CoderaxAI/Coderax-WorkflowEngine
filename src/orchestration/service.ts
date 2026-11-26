@@ -411,23 +411,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    * completion with no text produces no artifact rather than an empty one.
    * A store failure costs the artifact, never the settlement.
    */
-  async function completedArtifacts(
-    task: TaskRecord,
-    text: string,
-  ): Promise<Array<{ path: string; bytes: number; digest: string }>> {
-    if (text.length === 0) return [];
-    const stored = await deps.artifacts
-      .write({
-        taskId: task.taskId,
-        conversationId: task.conversationId,
-        path: 'result.md',
-        mediaType: 'text/markdown; charset=utf-8',
-        content: Buffer.from(text, 'utf8'),
-        origin: 'engine',
-      })
-      .catch(() => null);
-    if (!stored || !stored.ok) return [];
-    return [{ path: stored.value.path, bytes: stored.value.bytes, digest: stored.value.digest }];
+  function stageTranscript(task: TaskRecord, text: string) {
+    if (!text) return null;
+    const staged = deps.artifacts.stage({
+      taskId: task.taskId,
+      conversationId: task.conversationId,
+      path: 'result.md',
+      mediaType: 'text/markdown; charset=utf-8',
+      content: Buffer.from(text, 'utf8'),
+      origin: 'engine',
+    });
+    return staged.ok ? staged.value : null;
   }
 
   /**
@@ -445,6 +439,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const now = deps.clock.iso();
+    const staged = outcome.kind === 'completed' ? stageTranscript(task, checkpoint?.text ?? '') : null;
     let patch: Parameters<TaskRepository['updateFenced']>[0]['patch'];
     if (outcome.kind === 'completed') {
       const summary = outcome.summary.slice(0, 20_000);
@@ -453,7 +448,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         updatedAt: now,
         result: {
           summary,
-          artifacts: await completedArtifacts(task, checkpoint?.text ?? ''),
+          artifacts: staged ? [{ path: staged.blob.path, bytes: staged.blob.bytes, digest: staged.blob.digest }] : [],
         },
         ...(outcome.usage ? { usage: outcome.usage } : {}),
       };
@@ -475,7 +470,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       taskId: task.taskId,
       token,
       patch: checkpoint ? { ...patch, checkpoint } : patch,
+    }).catch((error: unknown) => {
+      staged?.finish(false);
+      throw error;
     });
+    staged?.finish(applied.applied);
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
         await releaseLease(task, token);
@@ -986,9 +985,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const finalText = redactContent(outcome.summary);
     if (finalText !== sent && finalText.startsWith(sent) && finalText.length > sent.length) {
       push({ v: CHAT_STREAM_VERSION, type: 'chat.delta', text: finalText.slice(sent.length) });
-      sent = finalText;
+    } else if (finalText !== sent) {
+      push({ v: CHAT_STREAM_VERSION, type: 'chat.replace', text: finalText });
     }
-    const finishedReply = await finishChat(prepared, principal, request, outcome);
+    for (const frame of queue) yield frame;
+    const finishedReply = await finishChat(prepared, principal, request, {
+      ...outcome, summary: finalText,
+    }).catch(() => fail('internal_error', 'The reply could not be saved.'));
     if (!finishedReply.ok) {
       yield {
         v: CHAT_STREAM_VERSION,
@@ -1022,31 +1025,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // A key is checked before a budget slot is spent: a retried submission is
       // the same intent, and charging it twice would let a network retry exhaust
       // the owner's daily budget.
-      let reservedKey = false;
-      if (idempotencyKey) {
-        const existing = await deps.idempotency.lookup(principal.ownerId, idempotencyKey);
-        if (existing) {
-          const prior = await deps.tasks.get(existing);
-          if (prior && prior.ownerId === principal.ownerId) return ok(acceptedFor(prior, true));
-          await deps.idempotency.release(principal.ownerId, idempotencyKey);
-        }
-        const reservation = await deps.idempotency.reserve({
-          ownerId: principal.ownerId,
-          key: idempotencyKey,
-          taskId,
-        });
+      const intent = idempotencyKey ? { ownerId: principal.ownerId, key: idempotencyKey, taskId } : null;
+      if (intent) {
+        const reservation = await deps.idempotency.reserve(intent);
         if (!reservation.ok) {
-          const prior = await deps.tasks.get(reservation.taskId);
-          if (prior && prior.ownerId === principal.ownerId) return ok(acceptedFor(prior, true));
-          await deps.idempotency.release(principal.ownerId, idempotencyKey);
-        } else {
-          reservedKey = true;
+          const prior = reservation.completedTaskId ? await deps.tasks.get(reservation.completedTaskId) : null;
+          if (prior?.ownerId === principal.ownerId) return ok(acceptedFor(prior, true));
+          return fail('busy', 'The submission has not yet been confirmed.', true);
         }
       }
       const releaseKey = async (): Promise<void> => {
-        if (reservedKey && idempotencyKey) {
-          await deps.idempotency.release(principal.ownerId, idempotencyKey);
-        }
+        if (intent) await deps.idempotency.release(intent);
       };
 
       const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
@@ -1060,24 +1049,29 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
-      await deps.conversations.ensure({
-        conversationId,
-        ownerId: principal.ownerId,
-        tenantId: null,
-        title: request.objective.slice(0, 120),
-        mode: request.mode,
-        isWork: true,
-        agent: agentId,
-        createdAt: now,
-        updatedAt: now,
-      });
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId,
-        role: 'user',
-        text: request.objective,
-        createdAt: now,
-      });
+      try {
+        await deps.conversations.ensure({
+          conversationId,
+          ownerId: principal.ownerId,
+          tenantId: null,
+          title: request.objective.slice(0, 120),
+          mode: request.mode,
+          isWork: true,
+          agent: agentId,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await deps.conversations.appendMessage({
+          messageId: deps.ids.messageId(),
+          conversationId,
+          role: 'user',
+          text: request.objective,
+          createdAt: now,
+        });
+      } catch (error) {
+        await releaseKey();
+        throw error;
+      }
 
       const task: TaskRecord = {
         taskId,
@@ -1121,6 +1115,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         now: claimedAt,
         expiresAt: new Date(claimedAt.getTime() + deps.config.execution.leaseTtlMs),
+      }).catch(async (error: unknown) => {
+        await releaseKey();
+        throw error;
       });
       if (!claimed) {
         await releaseKey();
@@ -1133,6 +1130,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         leaseExpiresAt: new Date(
           claimedAt.getTime() + deps.config.execution.leaseTtlMs,
         ).toISOString(),
+      }).catch(async (error: unknown) => {
+        // An insert can commit before its acknowledgement is lost.
+        const stored = await deps.tasks.get(taskId);
+        if (stored?.runToken === token) return { ok: true as const, task: stored };
+        // The write may still be in flight. Keep the reservation pending.
+        throw error;
       });
       if (!created.ok) {
         await deps.lease.release({ key, token }).catch(() => false);
@@ -1157,6 +1160,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       deps.scheduler.enqueue(() => execute(task.taskId, token));
 
+      if (intent) deps.idempotency.complete(intent);
       return ok(acceptedFor(created.task));
     },
 

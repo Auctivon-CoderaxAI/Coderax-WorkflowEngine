@@ -6,8 +6,8 @@
   "eventSchemaVersion": 1,
   "chatStreamVersion": 1,
   "path": "artifacts/coderax-sdk-1.2.0.tgz",
-  "sha256": "995e1f0b255845ba19caddb147e138bc08469a9440a0bf1a221294636ab4ec69",
-  "bytes": 33864,
+  "sha256": "e76998feb3fede0b12ecd6022f8ad0324ef9111bfb0d2a2c186b0372c29d20f5",
+  "bytes": 33903,
   "reproducible": true,
   "files": [
     {
@@ -27,8 +27,8 @@
     },
     {
       "path": "package/dist/index.js",
-      "sha256": "f3c58e8a3309820b3a5f835ac47f86f1572d8520ddecbbc7d45927bf6b18dfd8",
-      "bytes": 18058
+      "sha256": "cd4597604a6d1323312118791d515594b842ede3395d7ea9f80ec439fa377d83",
+      "bytes": 18148
     },
     {
       "path": "package/dist/version.d.ts",
@@ -207,8 +207,8 @@
     },
     {
       "path": "package/package.json",
-      "sha256": "8cfbb8dc354007cbe2fd45a7832b35a8d5df6401bf139020afd16015b2b192ef",
-      "bytes": 770
+      "sha256": "7713ea3fa8777be364437058723edcf06d343114158289d02039aad01ef23cfa",
+      "bytes": 861
     }
   ],
   "install": "npm install packages/sdk/artifacts/coderax-sdk-1.2.0.tgz"
