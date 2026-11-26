@@ -66,7 +66,7 @@ exact dependency and the narrow ports the game code exposes for that migration.
 ```bash
 npm install
 npm run build
-npm test                          # 128 tests: unit, contract, integration, security, e2e
+npm test                          # 132 tests: unit, contract, integration, security, e2e
 npm run game:evidence             # regenerates the playable game evidence frames
 npm run openapi:check             # fails if the published contract drifted
 ```

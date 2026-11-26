@@ -9,9 +9,10 @@ import { createRaster } from './frame.js';
  * with the DOM surface `main.js` uses, then drives its `requestAnimationFrame`
  * loop. That catches the class of defect a source-only check misses: a preview
  * that references files the endpoint never serves, a module that throws before
- * the first paint, or a HUD that never updates. Real-browser and mobile
- * verification remains a separate capability and is reported as blocked when no
- * zero-cost cloud browser is available.
+ * the first paint, or a HUD that never updates. It also shrinks the observed
+ * canvas box after the HUD grows, so a bitmap sized once at boot cannot pass.
+ * Real-browser and mobile verification remains a separate capability and is
+ * reported as blocked when no zero-cost cloud browser is available.
  */
 
 export type BrowserBoot = {
@@ -23,6 +24,9 @@ export type BrowserBoot = {
   touchDelta: number;
   jumpVy: number;
   hud: string;
+  bitmap: { width: number; height: number };
+  css: { width: number; height: number };
+  bitmapMatchesLayout: boolean;
 };
 
 type Listener = (event: Record<string, unknown>) => void;
@@ -43,7 +47,7 @@ type FakeCanvas = {
 
 export function bootGeneratedDocument(
   html: string,
-  options: { frames?: number } = {},
+  options: { frames?: number; deviceScaleFactor?: number } = {},
 ): BrowserBoot {
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
   if (scripts.length === 0) {
@@ -56,12 +60,22 @@ export function bootGeneratedDocument(
       touchDelta: 0,
       jumpVy: 0,
       hud: '',
+      bitmap: { width: 0, height: 0 },
+      css: { width: 0, height: 0 },
+      bitmapMatchesLayout: false,
     };
   }
 
   const width = 320;
   const height = 180;
-  const raster = createRaster({ width, height });
+  const deviceScaleFactor = options.deviceScaleFactor ?? 1;
+  const resizeObservers: Array<(entries: unknown[]) => void> = [];
+  // The backing store is device pixels, not CSS pixels; a scaled run must draw
+  // into a correspondingly larger raster or the image is cropped.
+  const raster = createRaster({
+    width: Math.round(width * deviceScaleFactor),
+    height: Math.round(height * deviceScaleFactor),
+  });
   const frameQueue: { next: ((timestamp: number) => void) | null } = { next: null };
   const actions = [...html.matchAll(/data-action="([^"]+)"/g)].map((match) => match[1]);
   const buttons = new Map<string, FakeButton>();
@@ -99,6 +113,18 @@ export function bootGeneratedDocument(
 
   const sandbox: Record<string, unknown> = {
     console,
+    devicePixelRatio: deviceScaleFactor,
+    ResizeObserver: class {
+      private readonly notify: (entries: unknown[]) => void;
+      constructor(notify: (entries: unknown[]) => void) {
+        this.notify = notify;
+      }
+      observe(target: unknown): void {
+        if (target === canvas) resizeObservers.push(this.notify);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    },
     document: {
       getElementById: (id: string) => elements.get(id) ?? null,
       querySelectorAll: (selector: string) =>
@@ -157,12 +183,33 @@ export function bootGeneratedDocument(
     const jumpVy = jump ? hook().state.player.vy : 0;
     jump?.fire('mouseup');
 
+    // A narrow HUD wraps after the first paint and shrinks the stage. Simulate
+    // that box change and require the bitmap to follow it.
+    canvas.clientHeight = Math.max(1, Math.round(height * 0.9));
+    const entries = [
+      { target: canvas, contentRect: { width: canvas.clientWidth, height: canvas.clientHeight } },
+    ];
+    for (const notify of resizeObservers) notify(entries);
+    stepFrames(1);
+
+    const css = { width: canvas.clientWidth, height: canvas.clientHeight };
+    const bitmap = { width: canvas.width, height: canvas.height };
+    const bitmapMatchesLayout =
+      bitmap.width === Math.round(css.width * deviceScaleFactor) &&
+      bitmap.height === Math.round(css.height * deviceScaleFactor);
+
     const colors = raster.distinctColors();
     const hudText = hud.textContent;
     const healthReported = /Health 3\b/.test(hudText);
     const jumpPassed = jump ? jumpVy < 0 : true;
     const passed =
-      frames >= 4 && colors >= 4 && hudText.includes('Level') && touchDelta > 2 && healthReported && jumpPassed;
+      frames >= 4 &&
+      colors >= 4 &&
+      hudText.includes('Level') &&
+      touchDelta > 2 &&
+      healthReported &&
+      jumpPassed &&
+      bitmapMatchesLayout;
     return {
       passed,
       detail:
@@ -178,13 +225,18 @@ export function bootGeneratedDocument(
                   ? 'The on-screen control did not move the player.'
                   : !jumpPassed
                     ? 'The on-screen jump control did not apply an upward impulse.'
-                    : `The document booted ${scripts.length} inline scripts, moved ${Math.round(touchDelta)} units from an on-screen control and painted ${frames} frames.`,
+                    : !bitmapMatchesLayout
+                      ? 'The canvas bitmap did not follow its CSS box after the HUD wrapped.'
+                      : `The document booted ${scripts.length} inline scripts, moved ${Math.round(touchDelta)} units from an on-screen control, painted ${frames} frames and kept its bitmap aligned after the HUD wrapped.`,
       scripts: scripts.length,
       frames,
       distinctColors: colors,
       touchDelta: Math.round(touchDelta * 100) / 100,
       jumpVy: Math.round(jumpVy),
       hud: hudText.slice(0, 120),
+      bitmap,
+      css,
+      bitmapMatchesLayout,
     };
   } catch (error) {
     return {
@@ -198,6 +250,9 @@ export function bootGeneratedDocument(
       touchDelta: 0,
       jumpVy: 0,
       hud: hud.textContent.slice(0, 120),
+      bitmap: { width: canvas.width, height: canvas.height },
+      css: { width: canvas.clientWidth, height: canvas.clientHeight },
+      bitmapMatchesLayout: false,
     };
   }
 }

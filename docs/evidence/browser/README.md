@@ -62,6 +62,17 @@ are in `report.json`.
 - There is no zero-cost browser CI; the default `npm run verify` uses the DOM boot
   harness, not this browser run.
 
+## Defect this capture revealed
+
+The mobile platformer capture recorded a 390×713 canvas bitmap against a 390×698
+CSS box (`platformerMobile` in `report.json`). The HUD wrapped to a second line
+after boot, the stage shrank, and the bitmap was never resized, so the browser
+stretched the image. The generated template now tracks the canvas box with a
+`ResizeObserver` and sizes the bitmap in device pixels (capped at 2×). The DOM
+boot harness shrinks the box in the same way and `browser.boot` fails if the
+bitmap does not follow it. This report remains the pre-fix capture; the real
+browser was not re-run after the fix.
+
 The capability report keeps these distinctions explicit: `native.game-studio` is
 operational for deterministic generation, `native.game-studio.browser` is
 degraded (two reference builds verified, not a per-build guarantee),

@@ -210,7 +210,7 @@ reference builds, not a claim that every genre or browser is verified.
   and a real MongoDB 8.0.4 restart/lease-race run. The game project store itself
   remains file-backed; the Mongo evidence covers the engine's durable Work,
   transcript, notification and lease path, not multi-replica game artifacts.
-- `npm run verify` at the delivery head: **128/128 tests**, OpenAPI drift clean.
+- `npm run verify` at the delivery head: **132/132 tests**, OpenAPI drift clean.
   No hosted CI run exists at the pushed head because the workflow triggers on a
   pull request or `main` push and no PR could be opened from this environment;
   the local gate is the executed evidence.

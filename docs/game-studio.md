@@ -51,8 +51,10 @@ operational.
    `require`, `process`, `fetch` or filesystem access and is played by a
    deterministic bot. The exact preview document is also booted through its
    inlined scripts and `requestAnimationFrame` loop in a bounded DOM harness, so
-   a preview that cannot paint is a failed build. Playability is measured, not
-   asserted.
+   a preview that cannot paint is a failed build. The harness also shrinks the
+   canvas box to emulate a wrapped HUD and requires the bitmap to track it, at
+   the configured device scale, so a canvas sized once at boot does not pass.
+   Playability is measured, not asserted.
 5. **Preview and export** — `GET /preview` returns one self-contained HTML
    document: every generated module is inlined, so the CSP permits it and the
    endpoint needs to serve no other file. `GET /export` returns a deterministic

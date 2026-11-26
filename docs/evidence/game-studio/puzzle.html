@@ -1150,8 +1150,16 @@ globalThis.CoderaxLevels = [
   var advanceAt = 0;
 
   function resize() {
-    canvas.width = canvas.clientWidth;
-    canvas.height = canvas.clientHeight;
+    // The bitmap must match the CSS box at every layout, including the HUD
+    // wrapping to a second line on a narrow viewport. A bitmap sized once at
+    // boot is stretched by the browser when the stage shrinks. Cap the device
+    // scale so a phone cannot allocate an unbounded bitmap.
+    var scale = Math.min(globalThis.devicePixelRatio || 1, 2);
+    var width = Math.max(1, Math.round(canvas.clientWidth * scale));
+    var height = Math.max(1, Math.round(canvas.clientHeight * scale));
+    if (width === canvas.width && height === canvas.height) return;
+    canvas.width = width;
+    canvas.height = height;
   }
 
   function currentInput() {
@@ -1233,6 +1241,8 @@ globalThis.CoderaxLevels = [
     keys[event.key] = false;
   });
   window.addEventListener('resize', resize);
+  // The HUD can wrap without a window resize, so observe the canvas box itself.
+  if (typeof ResizeObserver === 'function') new ResizeObserver(resize).observe(canvas);
 
   var buttons = document.querySelectorAll('[data-action]');
   for (var i = 0; i < buttons.length; i += 1) {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { GAME_GENRES, type GameCamera } from '@coderax/contracts';
 import { applyInstruction, interpretPrompt, validateBuildableSpec } from '../../src/games/spec.js';
+import { bootGeneratedDocument } from '../../src/games/browser.js';
 import { generateGame } from '../../src/games/generate.js';
 import { verifyGeneration } from '../../src/games/verify.js';
 
@@ -255,6 +256,19 @@ test('a corrupted generated script fails verification instead of becoming playab
   const parse = outcome.verification.checks.find((check) => check.id === 'code.parse');
   assert.ok(parse);
   assert.equal(parse.passed, false);
+});
+
+test('the canvas bitmap follows its CSS box after the HUD wraps on a narrow viewport', () => {
+  const { generation } = build(PLATFORMER);
+  const html = generation.files.find((file) => file.path === 'index.html');
+  assert.ok(html);
+  // The harness boots at 320x180, then shrinks the observed box to emulate a
+  // HUD that wrapped to a second line, and uses a device scale of 2.
+  const boot = bootGeneratedDocument(html.content, { deviceScaleFactor: 2 });
+  assert.equal(boot.passed, true, boot.detail);
+  assert.equal(boot.bitmapMatchesLayout, true);
+  assert.equal(boot.css.height, 162);
+  assert.deepEqual(boot.bitmap, { width: 640, height: 324 });
 });
 
 test('an edit changes only the stated fields and stays buildable', () => {

@@ -108,7 +108,7 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the delivery head: **128/128 tests**, OpenAPI drift clean.
+- `npm run verify` at the delivery head: **132/132 tests**, OpenAPI drift clean.
 - Durable stores are verified against a semantics-faithful collection fake in
   the default suite, and separately against a real MongoDB 8.0.4 server: a
   completed task and transcript survived a server restart, and two clients

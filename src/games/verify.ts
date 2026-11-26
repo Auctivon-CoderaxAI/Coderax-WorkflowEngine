@@ -229,6 +229,9 @@ export function verifyGeneration(input: {
         distinctColors: boot.distinctColors,
         onScreenControlDelta: boot.touchDelta,
         onScreenJumpVy: boot.jumpVy,
+        canvasBitmapTracksCss: boot.bitmapMatchesLayout,
+        canvasBitmap: `${boot.bitmap.width}x${boot.bitmap.height}`,
+        canvasCss: `${boot.css.width}x${boot.css.height}`,
         hud: boot.hud,
       },
     };
