@@ -107,9 +107,10 @@ Every build must pass all checks that apply to its mechanics:
 | Rendering | the shipped renderer paints distinct colours |
 
 Evidence is written per level: a real PNG rendered by the generated game's own
-renderer plus `verification.json`. `docs/evidence/game-studio/` contains the
-same artifacts for the two reference builds, and `npm run game:evidence`
-regenerates them.
+renderer plus `verification.json`. `docs/evidence/game-studio/` also contains
+the exact playable entry documents (`platformer.html`, `puzzle.html`) and a
+landing `index.html`, so the reviewed bytes can be opened and played directly.
+`npm run game:evidence` regenerates all of it.
 
 ## Gaming Agent sessions
 

@@ -54,6 +54,12 @@ for (const entry of cases) {
     return filename;
   });
 
+  // The playable document is the exact entry the preview endpoint serves.
+  const playable = generation.files.find((file) => file.path === 'index.html');
+  if (!playable) throw new Error(`${entry.id} generated no entry document`);
+  const playableFile = `${entry.id}.html`;
+  writeFileSync(path.join(outDir, playableFile), playable.content);
+
   summary.push({
     id: entry.id,
     title: entry.title,
@@ -73,6 +79,7 @@ for (const entry of cases) {
     })),
     levelResults: outcome.verification.levels,
     frames,
+    playable: playableFile,
   });
 
   process.stdout.write(

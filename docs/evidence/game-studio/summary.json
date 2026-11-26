@@ -252,7 +252,8 @@
       "platformer-level1.png",
       "platformer-level2.png",
       "platformer-level3.png"
-    ]
+    ],
+    "playable": "platformer.html"
   },
   {
     "id": "puzzle",
@@ -459,6 +460,7 @@
       "puzzle-level1.png",
       "puzzle-level2.png",
       "puzzle-level3.png"
-    ]
+    ],
+    "playable": "puzzle.html"
   }
 ]
