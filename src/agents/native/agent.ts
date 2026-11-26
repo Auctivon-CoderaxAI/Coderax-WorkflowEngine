@@ -302,6 +302,7 @@ export function createNativeAgent(input: {
             workspaceRoot: request.workspaceRoot,
             signal: request.signal,
             callId,
+            ...(context.tools?.guard ? { guard: context.tools.guard } : {}),
           };
           if (replay) {
             if (context.savePendingAction && !(await context.savePendingAction(null))) return cancelled();

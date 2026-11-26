@@ -51,6 +51,15 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
     if (request.context.signal.aborted) {
       return { result: failure('cancelled', 'The run was cancelled.'), approval: 'not_required' };
     }
+    // The supervisor's guard is the authority gate that survives an adapter
+    // ignoring its abort: once the execution is revoked, no tool call starts.
+    const guard = request.context.guard;
+    if (guard && !guard.live()) {
+      return {
+        result: failure('cancelled', 'The execution is no longer authorized.'),
+        approval: 'not_required',
+      };
+    }
 
     const parsed = tool.schema.safeParse(request.arguments ?? {});
     if (!parsed.success) {
@@ -60,9 +69,23 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
       };
     }
 
+    const resource = bounded(String(tool.resource(parsed.data, request.context)), 1024);
+    if (guard) {
+      for (const scope of tool.scopes) {
+        if (!guard.permits(scope, resource)) {
+          return {
+            result: failure(
+              'permission_required',
+              `The execution is not authorized for ${scope} on ${resource}.`,
+            ),
+            approval: 'not_required',
+          };
+        }
+      }
+    }
+
     let approval: ToolCallOutcome['approval'] = 'not_required';
     if (tool.approval !== 'never') {
-      const resource = bounded(String(tool.resource(parsed.data, request.context)), 1024);
       for (const scope of tool.scopes) {
         const decision = await request.gate.ensure({
           scope,
@@ -92,6 +115,12 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
           };
         }
         approval = 'granted';
+      }
+    }
+
+    if (guard) {
+      for (const scope of tool.scopes) {
+        guard.recordUse({ scope, resource, spawnsProcesses: tool.spawnsProcesses === true });
       }
     }
 

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { scopedChildEnvironment } from '../security/environment.js';
 import { z } from 'zod';
 import type { Tool } from '../tools/types.js';
 import { bounded, failure, success } from '../tools/types.js';
@@ -191,11 +192,8 @@ async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' 
 }
 
 function connectStdio(config: Extract<McpServerConfig, { transport: 'stdio' }>) {
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '' };
-  for (const name of config.envFrom ?? []) {
-    const value = process.env[name];
-    if (value) env[name] = value;
-  }
+  // Explicit allow-list only; a server never inherits the engine's credentials.
+  const env = scopedChildEnvironment({ allow: config.envFrom ?? [] });
   const child: ChildProcessWithoutNullStreams = spawn(config.command, config.args ?? [], {
     shell: false,
     windowsHide: true,
@@ -307,6 +305,7 @@ export function createMcpTools(input: {
             ? ['command.execute']
             : ['network.access'],
         approval: browser ? 'always' : 'once',
+        spawnsProcesses: input.connection.transport === 'stdio',
         parameters: { input: 'object' },
         schema: z.record(z.unknown()),
         resource: () => `mcp:${input.connection.name}/${listedTool.name}`,

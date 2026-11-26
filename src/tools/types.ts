@@ -6,6 +6,7 @@ import type {
   ToolDescriptor,
   ToolSource,
 } from '@coderax/contracts';
+import type { ToolExecutionGuard } from '../execution/guard.js';
 
 /**
  * A tool is data plus one function. It never owns authorization: the runtime
@@ -23,6 +24,8 @@ export type ToolContext = {
   workspaceRoot: string;
   signal: AbortSignal;
   callId: string;
+  /** Supplied by the supervisor for every Chat and Work tool call. */
+  guard?: ToolExecutionGuard;
 };
 
 export type ToolFailureCode =
@@ -43,6 +46,8 @@ export type Tool = {
   source: ToolSource;
   scopes: PermissionScope[];
   approval: 'never' | 'once' | 'always';
+  /** True when the tool can create a process the engine cannot reap. */
+  spawnsProcesses?: boolean;
   parameters: Record<string, string>;
   schema: ZodTypeAny;
   /** Exact resource named to the owner; never derived from a grant. */

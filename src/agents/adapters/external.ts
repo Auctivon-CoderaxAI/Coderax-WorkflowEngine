@@ -65,6 +65,8 @@ export function createExternalAgentAdapter(options: ExternalAdapterOptions): Age
   return {
     agent: options.agent,
     engine: options.engine,
+    // The process tree is not ours, so the supervisor never infers termination.
+    workload: 'external',
     capabilities: options.capabilities,
     isolation: {
       workspace: 'isolated',

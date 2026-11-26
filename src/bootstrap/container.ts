@@ -14,6 +14,7 @@ import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { Router } from '../api/router.js';
@@ -46,6 +47,7 @@ export type InfrastructureDependencies = {
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
+  supervisor: ExecutionSupervisor;
   scheduler: TaskScheduler;
   health: HealthService;
   tools: ToolRuntime;
@@ -70,6 +72,7 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'audit',
   'events',
   'runner',
+  'supervisor',
   'scheduler',
   'health',
   'tools',

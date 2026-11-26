@@ -176,6 +176,12 @@ export const ExecutionConfig = z
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */
     cancelGraceMs: z.number().int().min(100).max(30_000).default(5_000),
+    /**
+     * How long a workspace root stays held after an execution whose termination
+     * could not be verified. A new run is refused in that root rather than
+     * writing alongside code this process can no longer observe.
+     */
+    containmentHoldMs: z.number().int().min(1_000).max(600_000).default(60_000),
   })
   .strict();
 

@@ -23,6 +23,7 @@ import type {
   RoutingMode,
   RoutingReport,
   ToolList,
+  PermissionScope,
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
@@ -33,6 +34,9 @@ import type { NotificationStore } from '../persistence/notifications.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
+import type { ExecutionIdentity } from '../execution/identity.js';
+import type { ToolExecutionGuard } from '../execution/guard.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type {
   AgentAdapter,
@@ -76,6 +80,7 @@ export type ApplicationServiceDeps = {
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
+  supervisor: ExecutionSupervisor;
   scheduler: TaskScheduler;
   health: HealthService;
   tools: ToolRuntime;
@@ -160,8 +165,35 @@ function scopeOf(task: TaskRecord): RunScope {
   };
 }
 
+/**
+ * Scopes a Chat turn may use. A Chat turn has no task, so a tool that needs a
+ * durable owner approval is still refused; these are the read-only capabilities
+ * that previously ran with no execution identity at all.
+ */
+const CHAT_SCOPES: readonly PermissionScope[] = [
+  'workspace.read',
+  'memory.read',
+  'knowledge.read',
+];
+
+/** Everything a Work run's configured tool runtime can expose. */
+const WORK_SCOPES: readonly PermissionScope[] = [
+  'workspace.read',
+  'workspace.write',
+  'command.execute',
+  'network.access',
+  'memory.read',
+  'memory.write',
+  'knowledge.read',
+  'knowledge.write',
+  'conversation.read',
+  'credential.use',
+  'browser.use',
+];
+
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
-  const controllers = new Map<string, AbortController>();
+  /** Which attempt currently represents each task, for a same-replica cancel. */
+  const executionsByTask = new Map<string, string>();
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -192,9 +224,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     ownerId: string;
     taskId: string | null;
     requireApproval: boolean;
+    guard?: ToolExecutionGuard;
   }): ApprovalGate {
     return {
       ensure: async ({ scope, resource, description, tool, binding, consume }) => {
+        if (input.guard && !input.guard.live()) return { decision: 'denied' as const };
         if (input.taskId === null) return { decision: 'denied' as const };
         if (!input.requireApproval) return { decision: 'denied' };
         const prior = await deps.permissions.lookup({
@@ -225,6 +259,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     ownerId: string;
     mode: DataMode;
     task?: TaskRecord;
+    guard?: ToolExecutionGuard;
   }): Promise<AgentContext> {
     return {
       taskId: input.task?.taskId ?? null,
@@ -234,7 +269,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           ownerId: input.ownerId,
           taskId: input.task?.taskId ?? null,
           requireApproval: input.task?.requireApproval ?? false,
+          ...(input.guard ? { guard: input.guard } : {}),
         }),
+        ...(input.guard ? { guard: input.guard } : {}),
       },
       memory: {
         list: async () =>
@@ -552,9 +589,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!started.applied) return;
     publish(started.task, 'task.started');
 
-    const controller = new AbortController();
-    controllers.set(taskId, controller);
-
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
     let text = '';
@@ -565,8 +599,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       visible = next;
     };
 
+    // The supervisor drops events once the execution loses authority, so this
+    // sink no longer needs its own controller check.
     const report = (event: AgentReportEvent): void => {
-      if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
       if (event.type === 'step.started') {
         const existing = steps.find((step) => step.id === event.stepId);
         if (existing) existing.state = 'running';
@@ -641,55 +676,108 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
 
     const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
-    const result = await deps.runner.run({
-      scope: scopeOf(started.task),
+    const identity: ExecutionIdentity = {
+      executionId: deps.ids.executionId(),
+      kind: 'work',
+      taskId,
+      conversationId: task.conversationId,
+      ownerId: task.ownerId,
+      tenantId: task.tenantId,
+      agent: started.task.agent,
+      mode: task.mode,
+      generation: started.task.generation,
       token,
-      adapter: adapter.value as AgentAdapter,
-      request: {
-        ownerId: task.ownerId,
-        tenantId: task.tenantId,
-        conversationId: task.conversationId,
-        objective: task.objective,
-        history,
-        model: model.value.ref,
-        mode: task.mode,
-        workspaceRoot: workspace.value.root,
-        maxSteps: deps.config.engines.native.maxSteps,
-        budget: task.budget,
-        signal: controller.signal,
-        ...(started.task.agent === 'coderax'
-          ? {
-              context: {
-                ...await nativeContext({ ownerId: task.ownerId, mode: task.mode, task: started.task }),
-                pendingAction: started.task.pendingAction ?? null,
-                savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
-                  taskId, token, patch: { pendingAction },
-                })).applied,
-                savePlan: async (plan) => {
-                  const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
-                  const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
-                  if (saved.applied) steps.splice(0, steps.length, ...planned);
-                  return saved.applied;
-                },
-              },
-            }
-          : {}),
-      },
-      report,
-    });
-    if (controllers.get(taskId) !== controller) return;
-    controllers.delete(taskId);
+    };
+    executionsByTask.set(taskId, identity.executionId);
 
-    if (result.ownershipLost) {
+    // Work and Chat now share one execution path. The runner keeps its lease
+    // heartbeat and bounded cancellation; the supervisor owns the identity, the
+    // capability grant, revocation and the termination record around it.
+    const supervised = await deps.supervisor.run({
+      identity,
+      adapter: adapter.value,
+      workspaceRoot: workspace.value.root,
+      scopes: WORK_SCOPES,
+      report,
+      launch: async (execution) => {
+        const result = await deps.runner.run({
+          scope: scopeOf(started.task),
+          token,
+          adapter: adapter.value as AgentAdapter,
+          request: {
+            ownerId: task.ownerId,
+            tenantId: task.tenantId,
+            conversationId: task.conversationId,
+            objective: task.objective,
+            history,
+            model: model.value.ref,
+            mode: task.mode,
+            workspaceRoot: execution.workspaceRoot,
+            maxSteps: deps.config.engines.native.maxSteps,
+            budget: task.budget,
+            signal: execution.signal,
+            ...(started.task.agent === 'coderax'
+              ? {
+                  context: {
+                    ...await nativeContext({
+                      ownerId: task.ownerId,
+                      mode: task.mode,
+                      task: started.task,
+                      guard: execution.guard,
+                    }),
+                    pendingAction: started.task.pendingAction ?? null,
+                    savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
+                      taskId, token, patch: { pendingAction },
+                    })).applied,
+                    savePlan: async (plan) => {
+                      const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
+                      const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
+                      if (saved.applied) steps.splice(0, steps.length, ...planned);
+                      return saved.applied;
+                    },
+                  },
+                }
+              : {}),
+          },
+          report: execution.report,
+        });
+        return {
+          outcome: result.outcome,
+          ownershipLost: result.ownershipLost,
+          abandoned: result.outcome.kind === 'cancelled' && result.outcome.abandoned === true,
+        };
+      },
+    });
+    // Only the attempt that still owns this mapping may remove it: a superseded
+    // run can finish after its replacement has already registered itself.
+    if (executionsByTask.get(taskId) === identity.executionId) {
+      executionsByTask.delete(taskId);
+    }
+
+    if (!supervised.admitted) {
+      await settle(started.task, token, {
+        kind: 'failed',
+        code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
+        detail: supervised.detail,
+        retryable: supervised.code !== 'workspace_denied',
+      });
+      return;
+    }
+    if (supervised.ownershipLost || supervised.cause === 'interrupted') {
       // Deliberately no terminal write and no notification: this run no longer
       // owns the task, and the new owner is the only writer of its state.
       return;
     }
+    if (supervised.cause === 'shutdown') {
+      // The process is stopping; the task is left for startup reconciliation and
+      // this generation does not settle it.
+      return;
+    }
     const safeText = redactContent(text);
     emitText(safeText);
-    const outcome = result.outcome.kind === 'completed'
-      ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
-      : result.outcome;
+    const outcome = supervised.outcome.kind === 'completed'
+      ? { ...supervised.outcome, summary: redactContent(supervised.outcome.summary) }
+      : supervised.outcome;
     await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
   }
 
@@ -923,7 +1011,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           token: task.runToken ?? '',
           patch: { cancelRequested: true, updatedAt: deps.clock.iso() },
         });
-        controllers.get(task.taskId)?.abort();
+        const executionId = executionsByTask.get(task.taskId);
+        if (executionId) deps.supervisor.cancel(executionId, reason);
         return ok({
           taskId: task.taskId,
           state: task.state,
@@ -1109,31 +1198,89 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
 
       const history = request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
-      const controller = new AbortController();
-      const outcome = await adapter.value.run(
-        {
-          ownerId: principal.ownerId,
-          tenantId: conversation.tenantId,
-          conversationId,
-          objective: request.message,
-          history,
-          model: model.value.ref,
-          mode: request.mode,
-          workspaceRoot: workspace.value.root,
-          maxSteps: 1,
-          budget: null,
-          signal: controller.signal,
-          ...(request.agent === 'coderax'
-            ? { context: await nativeContext({ ownerId: principal.ownerId, mode: request.mode }) }
-            : {}),
+      const identity: ExecutionIdentity = {
+        executionId: deps.ids.executionId(),
+        kind: 'chat',
+        taskId: null,
+        conversationId,
+        ownerId: principal.ownerId,
+        tenantId: conversation.tenantId,
+        agent: request.agent,
+        mode: request.mode,
+        generation: 0,
+        token: null,
+      };
+
+      // A Chat turn is supervised for the same reasons a Work run is: it can call
+      // tools, it needs a revocable identity, and it must not keep acting after
+      // it has lost authority. It is not a task, so there is no lease and no
+      // terminal write.
+      const supervised = await deps.supervisor.run({
+        identity,
+        adapter: adapter.value,
+        workspaceRoot: workspace.value.root,
+        scopes: CHAT_SCOPES,
+        launch: async (execution) => {
+          const outcome = await adapter.value.run(
+            {
+              ownerId: principal.ownerId,
+              tenantId: conversation.tenantId,
+              conversationId,
+              objective: request.message,
+              history,
+              model: model.value.ref,
+              mode: request.mode,
+              workspaceRoot: execution.workspaceRoot,
+              maxSteps: 1,
+              budget: null,
+              signal: execution.signal,
+              ...(request.agent === 'coderax'
+                ? {
+                    context: await nativeContext({
+                      ownerId: principal.ownerId,
+                      mode: request.mode,
+                      guard: execution.guard,
+                    }),
+                  }
+                : {}),
+            },
+            execution.report,
+          );
+          return {
+            outcome: outcome.ok
+              ? {
+                  kind: 'completed' as const,
+                  summary: outcome.summary,
+                  ...(outcome.usage ? { usage: outcome.usage } : {}),
+                }
+              : outcome.code === 'cancelled'
+                ? { kind: 'cancelled' as const }
+                : outcome.code === 'approval_required'
+                  ? { kind: 'suspended' as const, detail: outcome.detail }
+                  : {
+                      kind: 'failed' as const,
+                      code: outcome.code,
+                      detail: outcome.detail,
+                      retryable: outcome.retryable,
+                    },
+          };
         },
-        () => undefined,
-      );
-      if (!outcome.ok) {
+      });
+      if (!supervised.admitted) {
+        return fail('engine_unavailable', supervised.detail, supervised.code !== 'workspace_denied');
+      }
+      const outcome = supervised.outcome;
+      if (outcome.kind !== 'completed') {
         return fail(
-          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          outcome.detail,
-          outcome.retryable,
+          outcome.kind === 'cancelled' ? 'cancelled' : 'engine_unavailable',
+          outcome.kind === 'cancelled'
+            ? 'The chat turn was cancelled.'
+            : outcome.kind === 'failed'
+              ? outcome.detail
+              : outcome.kind === 'suspended'
+                ? outcome.detail
+                : 'The chat turn lost execution authority.',
+          outcome.kind === 'failed' ? outcome.retryable : false,
         );
       }
       deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
@@ -1216,6 +1363,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     recoverInterrupted: async () => {
+      // Retire attempts whose owning process stopped heartbeating before the
+      // task sweep, so an old execution record cannot look live.
+      await deps.supervisor.retireStale(deps.config.execution.leaseTtlMs);
       const unsettled = await deps.tasks.listUnsettled();
       let interrupted = 0;
       for (const task of unsettled) {
@@ -1229,9 +1379,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     shutdown: async () => {
+      // Stop admitting, abort every supervised attempt with the `shutdown` cause
+      // (not `cancelled`), and give them a bounded window to unwind before the
+      // scheduler is stopped. Unsettled tasks are reconciled on next startup.
+      await deps.supervisor.shutdown();
       deps.scheduler.stop();
-      for (const controller of controllers.values()) controller.abort();
-      controllers.clear();
+      executionsByTask.clear();
     },
   };
 

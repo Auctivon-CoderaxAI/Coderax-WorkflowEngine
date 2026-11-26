@@ -7,6 +7,7 @@ import type { DataMode, KnowledgeSearchResult, MemoryList } from '@coderax/contr
 import type { Tool, ToolResult } from './types.js';
 import { bounded, failure, success } from './types.js';
 import { confinePath } from './paths.js';
+import { scopedChildEnvironment } from '../security/environment.js';
 
 /**
  * Built-in tools are the capabilities Coderax Native owns directly. File access
@@ -201,6 +202,10 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
       source: 'builtin',
       scopes: ['command.execute'],
       approval: 'always',
+      // The engine cannot reap a descendant that leaves the process group, so a
+      // run that uses this tool is never reported as verified-terminated by
+      // inference alone.
+      spawnsProcesses: true,
       parameters: { command: 'string', args: 'string[]' },
       schema: z
         .object({
@@ -229,11 +234,12 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
             cwd: context.workspaceRoot,
             shell: false,
             windowsHide: true,
-            env: {
-              PATH: process.env.PATH ?? '',
-              HOME: process.env.HOME ?? process.env.USERPROFILE ?? '',
-              LANG: 'C.UTF-8',
-            },
+            // A child gets an allow-listed environment, never the engine's own:
+            // an inference key or database URI must not be readable via `env`.
+            env: scopedChildEnvironment(),
+            // Its own process group, so a cancel can signal descendants that the
+            // command started rather than only the direct child.
+            detached: process.platform !== 'win32',
             stdio: ['ignore', 'pipe', 'pipe'],
           });
           let timer: NodeJS.Timeout | null = null;
@@ -245,6 +251,14 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
             resolve(result);
           };
           const kill = (): void => {
+            if (child.pid !== undefined && process.platform !== 'win32') {
+              try {
+                process.kill(-child.pid, 'SIGKILL');
+                return;
+              } catch {
+                // The group may already be gone; fall through to the direct child.
+              }
+            }
             child.kill('SIGKILL');
           };
           const onAbort = (): void => {

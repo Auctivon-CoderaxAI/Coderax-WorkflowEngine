@@ -26,6 +26,9 @@ import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { createExecutionSupervisor } from '../execution/supervisor.js';
+import { createCapabilityBroker } from '../execution/capabilities.js';
+import { createUnavailableIsolationProvider } from '../execution/termination.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
@@ -329,6 +332,23 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     cleanupGraceMs: config.execution.cancelGraceMs,
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
+  // There is no workload-isolation integration in this deployment. The provider
+  // says so instead of pretending an adapter promise proves a workload stopped;
+  // the supervisor then records such executions as unverified and holds their
+  // workspace rather than claiming containment.
+  const isolation = createUnavailableIsolationProvider(
+    'No deployment workload-isolation provider is configured, so a running workload cannot be verified as terminated.',
+  );
+  const supervisor = createExecutionSupervisor({
+    clock,
+    ids,
+    executions: persistence.executions,
+    capabilities: createCapabilityBroker(),
+    isolation,
+    containmentHoldMs: config.execution.containmentHoldMs,
+    shutdownGraceMs: config.execution.cancelGraceMs,
+    heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
+  });
 
   const health = createHealthService({
     clock,
@@ -400,6 +420,14 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
       {
+        name: 'isolation',
+        required: false,
+        check: async () => {
+          const report = supervisor.isolation();
+          return { status: report.status, detail: report.detail };
+        },
+      },
+      {
         name: 'intelligence',
         required: false,
         check: async () => ({
@@ -429,6 +457,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     audit,
     events,
     runner,
+    supervisor,
     scheduler,
     health,
     tools,

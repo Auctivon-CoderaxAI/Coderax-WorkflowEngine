@@ -12,6 +12,7 @@ import type {
   Usage,
 } from '@coderax/contracts';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
+import type { ToolExecutionGuard } from '../execution/guard.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -37,7 +38,7 @@ export type AgentHistoryTurn = {
  */
 export type AgentContext = {
   taskId?: string | null;
-  tools?: { runtime: ToolRuntime; gate: ApprovalGate };
+  tools?: { runtime: ToolRuntime; gate: ApprovalGate; guard?: ToolExecutionGuard };
   memory?: { list: () => Promise<string[]> };
   knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
   /** Persisted plan and finished steps, so a resume does not re-plan or re-run. */
@@ -93,9 +94,17 @@ export type AgentRunOutcome =
   | { ok: true; summary: string; usage?: Usage }
   | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
 
+export type AgentWorkload = 'in-process' | 'external';
+
 export type AgentAdapter = {
   agent: AgentId;
   engine: EngineId;
+  /**
+   * Where the workload executes. The supervisor uses this to decide whether it
+   * can verify termination locally; an external workload always needs a
+   * workload-isolation provider, because its process tree is not ours.
+   */
+  workload?: AgentWorkload;
   capabilities: EngineCapabilities;
   isolation: AgentIsolation;
   availability: () => Availability;
