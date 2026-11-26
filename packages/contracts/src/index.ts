@@ -5,6 +5,7 @@ export * from './models.js';
 export * from './health.js';
 export * from './tasks.js';
 export * from './artifacts.js';
+export * from './deliverables.js';
 export * from './events.js';
 export * from './permissions.js';
 export * from './routes.js';

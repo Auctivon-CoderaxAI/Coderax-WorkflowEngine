@@ -33,6 +33,7 @@ import {
   ArtifactVersionList,
   ArtifactVersionRequest,
 } from './artifacts.js';
+import { Deliverable, DeliverableRequest } from './deliverables.js';
 import { z as zod } from 'zod';
 import { ArtifactId, ConversationId, DataMode, ProjectId, TaskId } from './primitives.js';
 
@@ -355,6 +356,18 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     params: ArtifactParams,
     body: ArtifactModeRequest,
     response: { status: 200, description: 'Delete result', schema: ArtifactDeleteResult },
+  },
+  {
+    operationId: 'generateDeliverable',
+    method: 'POST',
+    path: '/v1/deliverables',
+    summary:
+      'Generate, verify and durably persist a document, workbook, deck, analysis or software project.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: DeliverableRequest,
+    maxBodyBytes: 8_388_608,
+    response: { status: 201, description: 'Created deliverable', schema: Deliverable },
   },
   {
     operationId: 'listNotifications',
