@@ -192,7 +192,7 @@ The package is distributed as a deterministic tarball committed at a versioned
 path (`packages/sdk/artifacts/coderax-sdk-<version>.tgz`), with per-file and
 whole-archive sha256 digests in `packages/sdk/sdk-artifact.json`. It is not
 published to a registry, so installation costs nothing and resolves no mutable
-tag. The tarball vendors `@coderax/contracts`, so only `zod` comes from a
+tag. The tarball vendors `@coderax/contracts`, so only `zod` and `@noble/hashes` come from a
 registry.
 
 The archive is byte-reproducible: sorted entries, zero mtime/uid/gid, fixed mode

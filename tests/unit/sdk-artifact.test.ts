@@ -77,12 +77,12 @@ test('the artifact installs into a clean layout and its runtime entrypoint loads
       assert.equal(content.length, file.bytes);
     }
 
-    // Only `zod` is expected from a registry: contracts are vendored. Copying it
-    // from this repository keeps the check hermetic and spends nothing.
-    mkdirSync(path.join(app, 'node_modules'), { recursive: true });
-    cpSync(path.join(REPO_ROOT, 'node_modules', 'zod'), path.join(app, 'node_modules', 'zod'), {
-      recursive: true,
-    });
+    // Recreate the registry dependencies without network access.
+    for (const dep of ['zod', '@noble/hashes']) {
+      cpSync(path.join(REPO_ROOT, 'node_modules', dep), path.join(app, 'node_modules', dep), {
+        recursive: true,
+      });
+    }
 
     const probe = path.join(workdir, 'probe.mjs');
     writeFileSync(

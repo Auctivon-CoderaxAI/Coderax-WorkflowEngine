@@ -984,6 +984,59 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     yield { v: CHAT_STREAM_VERSION, type: 'chat.completed', reply: finishedReply.value };
   }
 
+  let ticking = false;
+  async function tick() {
+    const due = deps.schedules.due(deps.clock.now());
+    let started = 0;
+    let skipped = 0;
+    for (const schedule of due) {
+      // `due()` hands back copies, and an owner can pause or delete a schedule
+      // while an earlier submission in this same tick is awaiting. Re-read the
+      // record so a stale slot is never fired.
+      const current = deps.schedules.get(schedule.ownerId, schedule.scheduleId);
+      if (!current || !current.enabled || current.nextRunAt !== schedule.nextRunAt) {
+        skipped += 1;
+        continue;
+      }
+      const principal: Principal = { ownerId: schedule.ownerId, isOwner: true };
+      // The firing time is part of the idempotency key, so a tick that overlaps
+      // another tick cannot submit the same slot twice.
+      const submitted = await service.submitWork(principal, {
+        objective: schedule.objective,
+        agent: schedule.agent,
+        mode: schedule.mode,
+        requireApproval: true,
+        ...(schedule.conversationId ? { conversationId: schedule.conversationId } : {}),
+        idempotencyKey: `schedule:${schedule.scheduleId}:${schedule.nextRunAt ?? ''}`,
+      });
+      const at = deps.clock.iso();
+      const nextRunAt = new Date(
+        deps.clock.now().getTime() + schedule.intervalMs,
+      ).toISOString();
+      if (submitted.ok) {
+        deps.schedules.markRun({
+          scheduleId: schedule.scheduleId,
+          at,
+          taskId: submitted.value.taskId,
+          nextRunAt,
+        });
+        started += 1;
+      } else {
+        // Busy or refused: move to the next slot instead of hammering the
+        // conversation every tick.
+        deps.schedules.markSkipped({ scheduleId: schedule.scheduleId, at, nextRunAt });
+        deps.audit.record({
+          actor: schedule.ownerId,
+          action: 'schedule.skipped',
+          outcome: 'refused',
+          detail: submitted.code,
+        });
+        skipped += 1;
+      }
+    }
+    return { started, skipped };
+  }
+
   const service: ApplicationService = {
     health: () => deps.health.report(),
     readiness: () => deps.health.readiness(),
@@ -1555,55 +1608,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     tickSchedules: async () => {
-      const due = deps.schedules.due(deps.clock.now());
-      let started = 0;
-      let skipped = 0;
-      for (const schedule of due) {
-        // `due()` hands back copies, and an owner can pause or delete a schedule
-        // while an earlier submission in this same tick is awaiting. Re-read the
-        // record so a stale slot is never fired.
-        const current = deps.schedules.get(schedule.ownerId, schedule.scheduleId);
-        if (!current || !current.enabled || current.nextRunAt !== schedule.nextRunAt) {
-          skipped += 1;
-          continue;
-        }
-        const principal: Principal = { ownerId: schedule.ownerId, isOwner: true };
-        // The firing time is part of the idempotency key, so a tick that overlaps
-        // another tick cannot submit the same slot twice.
-        const submitted = await service.submitWork(principal, {
-          objective: schedule.objective,
-          agent: schedule.agent,
-          mode: schedule.mode,
-          requireApproval: true,
-          ...(schedule.conversationId ? { conversationId: schedule.conversationId } : {}),
-          idempotencyKey: `schedule:${schedule.scheduleId}:${schedule.nextRunAt ?? ''}`,
-        });
-        const at = deps.clock.iso();
-        const nextRunAt = new Date(
-          deps.clock.now().getTime() + schedule.intervalMs,
-        ).toISOString();
-        if (submitted.ok) {
-          deps.schedules.markRun({
-            scheduleId: schedule.scheduleId,
-            at,
-            taskId: submitted.value.taskId,
-            nextRunAt,
-          });
-          started += 1;
-        } else {
-          // Busy or refused: move to the next slot instead of hammering the
-          // conversation every tick.
-          deps.schedules.markSkipped({ scheduleId: schedule.scheduleId, at, nextRunAt });
-          deps.audit.record({
-            actor: schedule.ownerId,
-            action: 'schedule.skipped',
-            outcome: 'refused',
-            detail: submitted.code,
-          });
-          skipped += 1;
-        }
+      if (ticking) return { started: 0, skipped: 0 };
+      ticking = true;
+      try {
+        return await tick();
+      } finally {
+        ticking = false;
       }
-      return { started, skipped };
     },
 
     events: async (principal, taskId, after) => {
@@ -1627,14 +1638,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           : null;
       const lastSeq = deps.events.lastSeq(taskId);
       const terminalInReplay =
-        replay.truncated || replay.events.some((event) => isTerminalEvent(event.type));
+        replay.events.some((event) => event.generation === found.value.generation && isTerminalEvent(event.type));
       return ok({
         replay,
-        subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
+        subscribe: (listener) => {
+          // Replay delivery can yield to the runner before the route starts tailing.
+          const cursor = Math.max(after, lastSeq);
+          for (const event of deps.events.replay(taskId, cursor).events) listener(event);
+          return deps.events.subscribe(taskId, cursor, listener);
+        },
         lastSeq,
         truncatedEvent,
         closedAfterReplay:
-          terminalInReplay || (isTerminalState(found.value.state) && after >= lastSeq),
+          terminalInReplay || (isTerminalState(found.value.state) && (after >= lastSeq || replay.truncated)),
       });
     },
 

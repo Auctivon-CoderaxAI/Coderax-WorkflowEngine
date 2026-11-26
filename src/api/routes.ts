@@ -101,7 +101,6 @@ async function* toEventStream(stream: EventStream): AsyncIterable<unknown> {
   for (const event of stream.replay.events) {
     seen.add(eventId(event));
     yield event;
-    if (isTerminalPayload(event)) return;
   }
   // A task that already finished will never publish again, so a cursor past the
   // terminal frame must close the stream instead of holding it open.

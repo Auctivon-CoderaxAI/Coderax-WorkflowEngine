@@ -134,7 +134,8 @@ test('schedules create, list, pause, resume, fire and delete over HTTP', async (
 
     // Move time past the interval: the engine's own ticker submits ordinary Work.
     deps.clock.now = () => new Date(Date.now() + 61_000);
-    const tick = await started.app.service.tickSchedules();
+    const [tick, overlap] = await Promise.all([started.app.service.tickSchedules(), started.app.service.tickSchedules()]);
+    assert.deepEqual(overlap, { started: 0, skipped: 0 });
     assert.equal(tick.started, 1);
 
     const afterTick = (await client.schedules()).schedules.find(

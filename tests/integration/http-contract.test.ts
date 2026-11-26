@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CoderaxApiError } from '@coderax/sdk';
+import { checkCompatibility, CoderaxApiError } from '@coderax/sdk';
 import { CONTRACT_VERSION } from '@coderax/contracts';
 import { clientFor, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
 
@@ -64,6 +64,10 @@ test('contract negotiation and the capability handshake agree with the server', 
     });
     assert.equal(mismatched.compatible, false);
     assert.equal(mismatched.negotiation, 'fingerprint_mismatch');
+    const rejected = checkCompatibility({ handshake: mismatched });
+    assert.equal(rejected.compatible, false);
+    assert.match(rejected.problems.join('; '), /fingerprint_mismatch/);
+    assert.equal(checkCompatibility({ handshake: { ...exact, contractFingerprint: 'different' } }).compatible, false);
 
     const ahead = await client.handshake({ contract: '1.3.0' });
     assert.equal(ahead.compatible, false);

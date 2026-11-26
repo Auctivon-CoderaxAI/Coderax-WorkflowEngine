@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "clean": "tsc -b --clean",
+    "clean": "tsc -b --clean && node --input-type=module -e \"import {rmSync} from 'node:fs'; for (const dir of ['packages/sdk/dist', 'packages/contracts/dist']) rmSync(dir, {recursive:true, force:true})\"",
     "typecheck": "tsc -b",
     "start": "node dist/src/main.js",
     "test": "npm run build && node --test \"dist/tests/**/*.test.js\"",

@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { CONTRACT_VERSION } from './primitives.js';
 import { ROUTES } from './routes.js';
 
@@ -23,7 +24,7 @@ export function contractFingerprint(routes: readonly {
     `contract ${CONTRACT_VERSION}`,
     ...routes.map((route) => `${route.operationId} ${route.method} ${route.path}`),
   ].join('\n');
-  return `sha256:${createHash('sha256').update(manifest).digest('hex')}`;
+  return `sha256:${bytesToHex(sha256(new TextEncoder().encode(manifest)))}`;
 }
 
 /** The fingerprint of the catalogue this build ships. */

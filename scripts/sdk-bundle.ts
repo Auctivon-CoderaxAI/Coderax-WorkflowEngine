@@ -154,6 +154,8 @@ function sdkPackageJson(): Buffer {
     types: manifest.types,
     exports: manifest.exports,
     dependencies: {
+      // npm does not install transitive dependencies of a bundled workspace.
+      ...(readJson(path.join(CONTRACTS_ROOT, 'package.json')).dependencies as Record<string, string>),
       '@coderax/contracts': readJson(path.join(CONTRACTS_ROOT, 'package.json')).version,
       zod: (manifest.dependencies as Record<string, string>).zod,
     },

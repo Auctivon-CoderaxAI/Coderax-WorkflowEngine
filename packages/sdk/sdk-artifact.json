@@ -6,19 +6,19 @@
   "eventSchemaVersion": 1,
   "chatStreamVersion": 1,
   "path": "artifacts/coderax-sdk-1.2.0.tgz",
-  "sha256": "a8a210ea538cfd71420ee5ced10c3b7795783fac3aa95f554650fe3b367ffc95",
-  "bytes": 39866,
+  "sha256": "5d4b196d560117cdaa5541424ef7c2c5c21a008c379191b426ca3caaa8a15350",
+  "bytes": 39975,
   "reproducible": true,
   "files": [
     {
       "path": "package/dist/compat.d.ts",
-      "sha256": "41f06cf14f8a0226ad8d5f991feb1fc0898bf661f8dfdd4cdd22a2d50a267e75",
+      "sha256": "72d091480dbd9df38a74d941526a0ece23e8b90b96e1a936f8a239a62723fc24",
       "bytes": 1025
     },
     {
       "path": "package/dist/compat.js",
-      "sha256": "f2f0841b6d5ec1710c5feeda245e0b774d326e0908301de554f1e2741f6215df",
-      "bytes": 1768
+      "sha256": "13ac7e456f74c5dff5a9c0babe33ca6bd14b55de60c9ad0be7448ed403601bf2",
+      "bytes": 2157
     },
     {
       "path": "package/dist/index.d.ts",
@@ -87,8 +87,8 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/fingerprint.js",
-      "sha256": "644b47cdcf4d3eac4b74aae0994ad8b6a6f2d08ad367527d06f994ace12666f3",
-      "bytes": 1201
+      "sha256": "4098ff996f4174c426e4054dcfe0dec09ff7b3eb272f40a82d566be386aa0040",
+      "bytes": 1263
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/handshake.d.ts",
@@ -97,8 +97,8 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/handshake.js",
-      "sha256": "cc8346a6e7123bdc3c600269234cf3c820119526a9cc065f83349a08899e4dc4",
-      "bytes": 6993
+      "sha256": "f80bc0a442776a732bdc3d5bd81abccec11458d67260b57bc6bde6cacfa9695d",
+      "bytes": 7012
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/health.d.ts",
@@ -202,13 +202,13 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/package.json",
-      "sha256": "aeb764d8ef5e872ccd963d84c0199f2a285b6c0a004b0c98976b917137a99400",
-      "bytes": 388
+      "sha256": "58f5362ad4f8dcbfb77530f7f1c4e1b3e84837c7ffb10914a5e61795350f7580",
+      "bytes": 419
     },
     {
       "path": "package/package.json",
-      "sha256": "7713ea3fa8777be364437058723edcf06d343114158289d02039aad01ef23cfa",
-      "bytes": 861
+      "sha256": "416517d8e69bded68e0e985a76bd5ea99928088accf7bcfe75a7b8431a17b70a",
+      "bytes": 892
     }
   ],
   "install": "npm install packages/sdk/artifacts/coderax-sdk-1.2.0.tgz"

@@ -32,6 +32,10 @@ test('a catalogue that shares the version string but not the wire is refused', (
   assert.equal(agreed.compatible, true);
   assert.equal(agreed.negotiation, 'exact');
 
+  assert.equal(negotiateContract('1.02.0', {
+    provided: 'different', expected: CONTRACT_FINGERPRINT,
+  }).negotiation, 'fingerprint_mismatch');
+
   const different = negotiateContract(CONTRACT_VERSION, {
     provided: `sha256:${'0'.repeat(64)}`,
     expected: CONTRACT_FINGERPRINT,

@@ -118,7 +118,7 @@ export function createEventBus(input: {
       // The consumer's next needed sequence is `after + 1`; if that predates the
       // retained window, some events are gone and the caller must be told.
       if (oldest > 1 && after + 1 < oldest) {
-        return { events: state.events, truncated: true };
+        return { events: [...state.events], truncated: true };
       }
       return {
         events: state.events.filter((event) => event.seq > after),

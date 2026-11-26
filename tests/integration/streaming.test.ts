@@ -106,18 +106,28 @@ test('a cursor older than the retained window starts with stream.truncated', asy
   try {
     const agent = deps.agents.get('coderax');
     assert.ok(agent);
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    let ready = false;
     agent.run = async (_request, report) => {
       for (let index = 0; index < 40; index += 1) {
         report({ type: 'text.delta', text: `chunk ${index} ` });
       }
+      ready = true;
+      await pending;
       return { ok: true, summary: 'chatty run' };
     };
 
     const accepted = await client.submitWork({ objective: 'produce many events' });
-    await deps.scheduler.idle();
+    await waitFor(async () => ready || null);
+    deps.events.publish({ taskId: accepted.taskId, agent: 'coderax', generation: 0,
+      type: 'task.completed', payload: {} });
 
     const frames: ExecutionEvent[] = [];
-    for await (const event of client.events(accepted.taskId, { after: 0 })) frames.push(event);
+    for await (const event of client.events(accepted.taskId, { after: 0, signal: AbortSignal.timeout(5000) })) {
+      frames.push(event);
+      if (event.type === 'stream.truncated') finish();
+    }
 
     const truncated = frames[0];
     if (!truncated || truncated.type !== 'stream.truncated') {
@@ -125,7 +135,9 @@ test('a cursor older than the retained window starts with stream.truncated', asy
     }
     assert.equal(truncated.payload.after, 0);
     assert.equal(frames[1]?.seq, truncated.payload.oldestSeq);
-    assert.equal(frames.length - 1, 16, 'the retained window must stay bounded');
+    assert.equal(frames[16]?.generation, 0, 'the old terminal ends the bounded 16-frame replay');
+    assert.equal(frames[16]?.type, 'task.completed');
+    assert.equal(frames.at(-1)?.generation, 1);
     assert.equal(frames.at(-1)?.type, 'task.completed');
   } finally {
     await started.close();

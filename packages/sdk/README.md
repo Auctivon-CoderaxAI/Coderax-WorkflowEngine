@@ -38,7 +38,7 @@ same declarations with a different union-member order, which changes the digest
 without changing the types, so only a clean build can reproduce the shipped bytes.
 
 The tarball vendors `@coderax/contracts` inside its own `node_modules`, which is
-why installing it needs only `zod` from the registry.
+why installing it needs only `zod` and `@noble/hashes` from the registry.
 
 ## Start a client
 

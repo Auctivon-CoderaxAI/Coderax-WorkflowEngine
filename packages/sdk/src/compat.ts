@@ -1,4 +1,4 @@
-import type { CapabilityHandshake } from '@coderax/contracts';
+import { CONTRACT_FINGERPRINT, type CapabilityHandshake } from '@coderax/contracts';
 import {
   SDK_CHAT_STREAM_VERSION,
   SDK_CONTRACT_MAJOR,
@@ -32,6 +32,12 @@ export function checkCompatibility(input: {
 }): CompatibilityReport {
   const { handshake } = input;
   const problems: string[] = [];
+
+  if (!handshake.compatible) problems.push(`the server rejected negotiation: ${handshake.negotiation}`);
+  if (handshake.contractVersion === SDK_CONTRACT_VERSION &&
+      handshake.contractFingerprint !== CONTRACT_FINGERPRINT) {
+    problems.push('the server catalogue fingerprint differs from this SDK');
+  }
 
   if (handshake.contractMajor !== SDK_CONTRACT_MAJOR) {
     problems.push(

@@ -34,15 +34,7 @@ export function createIdempotencyStore(input: {
           if (entry.expiresAt !== null && entry.expiresAt <= now) entries.delete(candidate);
         }
       }
-      if (entries.size >= maxEntries) {
-        for (const [candidate, entry] of entries) {
-          if (entry.expiresAt !== null) {
-            entries.delete(candidate);
-            break;
-          }
-        }
-        if (entries.size >= maxEntries) return { ok: false };
-      }
+      if (entries.size >= maxEntries) return { ok: false };
       entries.set(key, { taskId: request.taskId, expiresAt: null });
       return { ok: true };
     },

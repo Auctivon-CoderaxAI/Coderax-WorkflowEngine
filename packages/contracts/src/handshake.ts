@@ -183,7 +183,7 @@ export function negotiateContract(
       negotiation: 'client_ahead',
     };
   }
-  if (requested === CONTRACT_VERSION) {
+  if (current && compareVersions(parsed, current) === 0) {
     if (
       fingerprint?.provided !== undefined &&
       fingerprint.expected !== undefined &&
