@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Budget } from './models.js';
+import { CreativeRequest, MediaAttachmentInput, MediaReference } from './media.js';
 import {
   AgentId,
   ConversationId,
@@ -19,6 +20,8 @@ export const ChatRequest = z
     agent: AgentId.default('coderax'),
     model: ModelRef.optional(),
     mode: DataMode.default('private'),
+    /** Validated raster images; external agents never receive them. */
+    attachments: z.array(MediaAttachmentInput).max(4).optional(),
   })
   .strict();
 export type ChatRequest = z.infer<typeof ChatRequest>;
@@ -31,6 +34,8 @@ export const ChatReply = z
     agent: AgentId,
     model: ModelRef,
     usage: Usage.optional(),
+    /** Metadata for the images this turn carried; the bytes are not echoed. */
+    media: z.array(MediaReference).optional(),
     createdAt: IsoDateTime,
   })
   .strict();
@@ -52,6 +57,10 @@ export const WorkSubmitRequest = z
     budget: Budget.optional(),
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
+    /** Validated raster images; external agents never receive them. */
+    attachments: z.array(MediaAttachmentInput).max(4).optional(),
+    /** A validated text-shaped deliverable, produced at settlement. */
+    creative: CreativeRequest.optional(),
   })
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
@@ -61,6 +70,11 @@ export const Artifact = z
     path: z.string().min(1).max(1024),
     bytes: z.number().int().nonnegative().optional(),
     digest: z.string().min(1).max(128).optional(),
+    sha256: z.string().length(64).optional(),
+    mediaType: z.string().min(1).max(120).optional(),
+    title: z.string().min(1).max(200).optional(),
+    /** Validated creative text; never bytes and never written to the workspace. */
+    content: z.string().max(262_144).optional(),
   })
   .strict();
 export type Artifact = z.infer<typeof Artifact>;
@@ -90,6 +104,8 @@ export const TaskStatus = z
       .strict()
       .optional(),
     usage: Usage.optional(),
+    /** Attachment metadata for this task; bytes stay internal. */
+    media: z.array(MediaReference).optional(),
     failure: z
       .object({ code: z.string().min(1).max(60), detail: z.string().max(1000).optional() })
       .strict()
@@ -142,6 +158,8 @@ export const Message = z
     createdAt: IsoDateTime,
     unfinished: z.boolean().optional(),
     agent: AgentId.optional(),
+    /** Attachment metadata only; the transcript never embeds image bytes. */
+    media: z.array(MediaReference).optional(),
   })
   .strict();
 export type Message = z.infer<typeof Message>;

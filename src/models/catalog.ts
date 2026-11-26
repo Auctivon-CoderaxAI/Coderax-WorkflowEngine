@@ -22,6 +22,7 @@ export type ModelCatalog = {
   resolve: (
     requested: ModelRef | null | undefined,
     mode: DataMode,
+    requirements?: { requireVision?: boolean; requireTools?: boolean },
   ) => ServiceResult<ModelDescriptor>;
 };
 
@@ -37,10 +38,12 @@ export function createRouterCatalog(router: Router): ModelCatalog {
   return {
     list: () => router.list(),
     route: (_mode: DataMode) => router.report('auto').route,
-    resolve: (requested, _mode) => {
+    resolve: (requested, _mode, requirements) => {
       const selected = router.select({
         mode: 'auto' as RoutingMode,
         ...(requested ? { requested } : {}),
+        ...(requirements?.requireVision ? { requireVision: true } : {}),
+        ...(requirements?.requireTools ? { requireTools: true } : {}),
       });
       if (!selected.ok) {
         return fail(
@@ -57,6 +60,8 @@ export function createRouterCatalog(router: Router): ModelCatalog {
         toolCalling: model.profile.toolCalling,
         streaming: true,
         availability: model.availability,
+        inputModalities: model.profile.multimodal ? ['text', 'image'] : ['text'],
+        promptTraining: model.promptTraining ?? 'unknown',
       });
     },
   };

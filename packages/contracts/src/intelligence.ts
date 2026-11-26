@@ -40,6 +40,11 @@ export const RouterModel = z
     availability: Availability,
     requestsRemaining: z.number().int().nonnegative(),
     tokensRemaining: z.number().int().nonnegative(),
+    /** The recorded privacy term and accepted modalities, when known. */
+    promptTraining: z.enum(['prohibited', 'allowed', 'unknown']).optional(),
+    inputModalities: z.array(z.enum(['text', 'image'])).optional(),
+    /** Local in-flight requests counted against the model's concurrency cap. */
+    inFlight: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type RouterModel = z.infer<typeof RouterModel>;

@@ -1,4 +1,4 @@
-import type { CostClass, ModelRef } from '@coderax/contracts';
+import type { CostClass, ModelRef, PromptTraining } from '@coderax/contracts';
 import { modelKey } from '@coderax/contracts';
 
 /**
@@ -170,6 +170,90 @@ export function createEligibilityIndex(records: EligibilityRecord[], at: Date): 
           };
         }),
   };
+}
+
+export type InferenceEvidence = {
+  source: string;
+  observedAt: string;
+};
+
+export type InferenceReadiness = {
+  ready: boolean;
+  reason:
+    | 'ready'
+    | 'missing'
+    | 'source_not_https'
+    | 'observed_at_invalid'
+    | 'observed_at_in_future'
+    | 'observation_too_old';
+  detail: string;
+  source?: string;
+  observedAt?: string;
+};
+
+/** An inference observation older than this is not current readiness. */
+const MAX_INFERENCE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Credential readiness is not inference readiness.
+ *
+ * A configured endpoint and a successful model listing prove that a key
+ * authenticates. They do not prove that the exact model can answer, is still
+ * available, or is covered by the recorded price list. This observation is
+ * recorded separately and must be recent.
+ */
+export function evaluateInference(
+  record: InferenceEvidence | undefined,
+  at: Date,
+): InferenceReadiness {
+  if (!record) {
+    return {
+      ready: false,
+      reason: 'missing',
+      detail: 'No successful inference has been observed for this model; a configured credential is not enough.',
+    };
+  }
+  if (!isHttpsSource(record.source)) {
+    return {
+      ready: false,
+      reason: 'source_not_https',
+      detail: 'The inference evidence source is not a plain HTTPS URL.',
+    };
+  }
+  const observedAt = Date.parse(record.observedAt);
+  if (!Number.isFinite(observedAt)) {
+    return {
+      ready: false,
+      reason: 'observed_at_invalid',
+      detail: 'The inference observation time is not a valid timestamp.',
+    };
+  }
+  if (observedAt > at.getTime() + MAX_CLOCK_SKEW_MS) {
+    return {
+      ready: false,
+      reason: 'observed_at_in_future',
+      detail: 'The inference observation time is in the future and cannot be trusted.',
+    };
+  }
+  if (at.getTime() - observedAt > MAX_INFERENCE_AGE_MS) {
+    return {
+      ready: false,
+      reason: 'observation_too_old',
+      detail: 'The inference observation is older than 30 days and must be repeated.',
+    };
+  }
+  return {
+    ready: true,
+    reason: 'ready',
+    detail: 'A successful inference was observed for this model.',
+    source: record.source,
+    observedAt: new Date(observedAt).toISOString(),
+  };
+}
+
+/** The recorded privacy term, with `unknown` stated instead of assumed. */
+export function recordedPromptTraining(value: PromptTraining | undefined): PromptTraining {
+  return value ?? 'unknown';
 }
 
 /** Human-readable, user-safe explanation for a refusal. */

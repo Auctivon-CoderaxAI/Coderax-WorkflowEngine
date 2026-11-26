@@ -18,6 +18,8 @@ import { createCircuitBreakers } from '../models/circuit.js';
 import {
   createEligibilityIndex,
   describeRefusal,
+  evaluateInference,
+  recordedPromptTraining,
   type Eligibility,
 } from '../models/eligibility.js';
 import { createRouter as createModelRouter, type ProviderDescriptor } from '../models/router.js';
@@ -90,6 +92,7 @@ const EXTERNAL_CAPABILITIES: EngineCapabilities = {
   resume: false,
   modelSelection: true,
   durable: true,
+  imageInput: false,
 };
 
 const EXTERNAL_ISOLATION: AgentIsolation = {
@@ -184,6 +187,13 @@ function modelProviders(input: {
             ...(entry?.maxOutputTokens ? { maxOutputTokens: entry.maxOutputTokens } : {}),
             concurrentRequests: entry?.concurrentRequests ?? 1,
           },
+          inference: evaluateInference(
+            entry?.inferenceSource && entry?.inferenceObservedAt
+              ? { source: entry.inferenceSource, observedAt: entry.inferenceObservedAt }
+              : undefined,
+            input.at,
+          ),
+          promptTraining: recordedPromptTraining(entry?.promptTraining),
           availability: input.gateway
             ? {
                 available: true,
@@ -276,15 +286,23 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const verifiedFree = providers.flatMap((provider) =>
     provider.models.filter((model) => model.eligibility.verifiedFree),
   );
-  if (config.engines.native.enabled && verifiedFree.length === 0) {
+  const inferenceReady = verifiedFree.filter((model) => model.inference?.ready === true);
+  if (config.engines.native.enabled && inferenceReady.length === 0) {
     const reasons = refused
       .slice(0, 5)
       .map((entry) => `${entry.ref.providerId}/${entry.ref.modelId}: ${describeRefusal(entry.eligibility)}`);
+    const unready = verifiedFree
+      .filter((model) => model.inference?.ready !== true)
+      .slice(0, 5)
+      .map(
+        (model) =>
+          `${model.ref.providerId}/${model.ref.modelId}: ${model.inference?.detail ?? 'No successful inference has been observed.'}`,
+      );
     throw new StartupError([
-      'No configured model has verified zero-cost terms; Native cannot start without a verified free route.',
-      ...(reasons.length > 0
-        ? reasons
-        : ['models.route is empty or unverified: record models.evidence[].terms from the provider’s published price list.']),
+      'No configured model has both verified zero-cost terms and an observed inference; Native cannot start without a usable zero-cost route.',
+      ...(reasons.length > 0 || unready.length > 0
+        ? [...reasons, ...unready]
+        : ['models.route is empty or unverified: record models.evidence[].terms from the provider’s published price list and an inference observation.']),
     ]);
   }
 
@@ -486,7 +504,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: async () => ({
           status: 'ok' as const,
-          detail: `${tools.list().length} tool(s); ${verifiedFree.length} verified zero-cost model(s); ${
+          detail: `${tools.list().length} tool(s); ${inferenceReady.length} ready zero-cost model(s); ${
             refused.length
           } refused model(s); ${mcp.names.length} MCP server(s)${
             mcp.failures.length > 0 ? `; ${mcp.failures.length} unavailable` : ''

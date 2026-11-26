@@ -17,13 +17,25 @@ a model is free. A model is admitted only when:
 - the router-derived `costClass` is `free` **and** the verdict is verified — a
   descriptor that says `free` without evidence is refused;
 - the model reports itself available;
+- a recent successful inference was observed for this exact model — a
+  configured key or a model listing is credential readiness only, and an
+  observation older than 30 days is `not_ready`;
 - no provider retry-after cooldown and no open circuit blocks it; and
-- its local request and token quota has not been exhausted.
+- its local request and token quota has not been exhausted, and its
+  `concurrentRequests` ceiling has a free in-flight slot.
 
 Unknown pricing is `paid`, not free. A configured route, a working API key or a
 reachable endpoint proves authentication only. When Native is enabled and no
-routed model has verified terms, composition throws a `StartupError` naming each
-refused model and the reason, so the engine cannot start on an unproven route.
+routed model has both verified terms and an observed inference, composition
+throws a `StartupError` naming each refused or unready model and the reason, so
+the engine cannot start on an unproven route.
+
+`evaluateInference` is separate from `evaluateEligibility`: the first records
+whether the model was seen answering, the second records what the provider says
+it charges. `promptTraining` and `privacySource` are recorded and exposed in
+`GET /v1/models`; the engine reports a term such as `unknown` honestly but cannot
+enforce a third party's privacy policy. See `docs/multimodal.md` for the media
+path that shares these gates.
 
 `allowPaid` remains a literal `false`; there is no configuration field that can
 enable it. A requested paid or unpriced model is refused with

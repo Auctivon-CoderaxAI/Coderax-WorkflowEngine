@@ -57,7 +57,7 @@ export function createOpenAiCompatibleGateway(input: {
 
   return {
     id: 'openai-compatible',
-    complete: async ({ model, system, prompt, signal, maxOutputTokens, stream }) => {
+    complete: async ({ model, system, prompt, signal, maxOutputTokens, stream, images }) => {
       const endpoint = `${input.baseURL.replace(/\/+$/, '')}/chat/completions`;
       const controller = new AbortController();
       const onAbort = () => controller.abort();
@@ -75,7 +75,16 @@ export function createOpenAiCompatibleGateway(input: {
             model: model.modelId,
             messages: [
               { role: 'system', content: system },
-              { role: 'user', content: prompt },
+              {
+                role: 'user',
+                content:
+                  images && images.length > 0
+                    ? [
+                        { type: 'text', text: prompt },
+                        ...images.map((url) => ({ type: 'image_url', image_url: { url } })),
+                      ]
+                    : prompt,
+              },
             ],
             stream: stream === true,
             ...(stream === true ? { stream_options: { include_usage: true } } : {}),

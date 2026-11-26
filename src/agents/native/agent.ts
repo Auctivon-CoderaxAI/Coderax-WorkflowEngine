@@ -8,6 +8,7 @@ import type {
 import type { ModelGateway, Planner } from './types.js';
 import { createNativePlanner } from './planner.js';
 import { buildActionPrompt, NATIVE_ACTION_SYSTEM } from './prompt.js';
+import { creativeInstruction } from '../../media/creative.js';
 import { parseAction } from './action.js';
 import type { ToolContext } from '../../tools/types.js';
 import { isBudgetExhausted, isRouterExhausted } from '../../models/routed.js';
@@ -61,6 +62,7 @@ export function createNativeAgent(input: {
     resume: true,
     modelSelection: true,
     durable: true,
+    imageInput: true,
   };
 
   function availability(): Availability {
@@ -144,6 +146,10 @@ export function createNativeAgent(input: {
         retryable: false,
       });
       const history = request.history ?? [];
+      const images = request.media?.map(
+        (image) => `data:${image.mediaType};base64,${image.dataBase64}`,
+      );
+      const deliverable = request.creative ? creativeInstruction(request.creative) : '';
       const cancelled = (): AgentRunOutcome => ({
         ok: false,
         code: 'cancelled',
@@ -176,6 +182,9 @@ export function createNativeAgent(input: {
                           prompt,
                           signal: signalAbort,
                           routingMode: 'complex',
+                          ...(images && images.length > 0
+                            ? { images, requiresVision: true }
+                            : {}),
                         });
                         accumulate(totals, completion.usage);
                         return completion.text;
@@ -241,7 +250,7 @@ export function createNativeAgent(input: {
           try {
             completion = replay ? { text: replay.json, usage: undefined } : await gateway.complete({
               model: request.model,
-              system: NATIVE_ACTION_SYSTEM,
+              system: deliverable ? `${NATIVE_ACTION_SYSTEM} ${deliverable}` : NATIVE_ACTION_SYSTEM,
               prompt: buildActionPrompt({
                 objective: request.objective,
                 steps,
@@ -253,11 +262,13 @@ export function createNativeAgent(input: {
                 memory: memoryLines,
                 knowledge: knowledgeLines,
                 catalogue: toolCatalogue,
+                ...(deliverable ? { deliverable } : {}),
               }),
               signal: request.signal,
               ownerId: request.ownerId,
               toolSchemaText: toolCatalogue,
               routingMode: tools ? 'complex' : 'fast',
+              ...(images && images.length > 0 ? { images, requiresVision: true } : {}),
               ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
             });
           } catch (error) {

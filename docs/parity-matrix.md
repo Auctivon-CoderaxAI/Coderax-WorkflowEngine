@@ -102,7 +102,9 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head: 189/189 tests, OpenAPI drift clean. This
+  branch also adds evidence-gated multimodal input and validated creative
+  artifacts; see `docs/multimodal.md`.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a

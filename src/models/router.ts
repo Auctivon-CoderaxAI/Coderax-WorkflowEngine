@@ -4,15 +4,17 @@ import type {
   ModelDescriptor,
   ModelList,
   ModelRef,
+  PromptTraining,
   ProviderStatus,
   RouterModel,
   RoutingMode,
   RoutingReport,
 } from '@coderax/contracts';
+import { CREATIVE_FORMATS, IMAGE_GENERATION_UNAVAILABLE } from '@coderax/contracts';
 import { modelKey } from '@coderax/contracts';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
-import type { Eligibility } from './eligibility.js';
+import type { Eligibility, InferenceReadiness } from './eligibility.js';
 import type { CircuitBreakers } from './circuit.js';
 import { createCircuitBreakers } from './circuit.js';
 
@@ -62,6 +64,12 @@ export type ProviderModel = {
   profile: ModelProfile;
   limits: ProviderLimits;
   availability: Availability;
+  /**
+   * Separate from `eligibility`: the price can be proven while the model has
+   * never been observed answering. Missing evidence fails closed at selection.
+   */
+  inference?: InferenceReadiness;
+  promptTraining?: PromptTraining;
 };
 
 export type ProviderDescriptor = {
@@ -121,6 +129,7 @@ type UsageWindow = {
   requests: number;
   tokens: number;
   reserved: number;
+  inFlight: number;
 };
 
 const WEIGHTS: Readonly<Record<RoutingMode, { coding: number; reasoning: number; speed: number }>> = {
@@ -179,7 +188,7 @@ export function createRouter(input: {
       existing.minute = existing.minute.filter((stamp) => stamp > cutoff);
       return existing;
     }
-    const created: UsageWindow = { minute: [], day, requests: 0, tokens: 0, reserved: 0 };
+    const created: UsageWindow = { minute: [], day, requests: 0, tokens: 0, reserved: 0, inFlight: 0 };
     windows.set(key, created);
     return created;
   }
@@ -195,6 +204,7 @@ export function createRouter(input: {
       requests: window.requests,
       tokens: window.tokens,
       reserved: window.reserved,
+      inFlight: window.inFlight,
       requestsThisMinute: Math.max(0, model.limits.requestsPerMinute - window.minute.length),
       requestsToday: Math.max(0, provider.quota.requestsPerDay - window.requests),
       tokensToday: Math.max(0, provider.quota.tokensPerDay - window.tokens - window.reserved),
@@ -225,6 +235,11 @@ export function createRouter(input: {
             ? 'Paid models are refused by the zero-cost gate.'
             : 'This model has no verified zero-cost evidence.',
       };
+    }
+    // A price observation is not an inference. A model with no recorded,
+    // recent successful call is reported not-ready instead of being tried.
+    if (model.inference && !model.inference.ready) {
+      return { available: false, reason: 'not_ready', detail: model.inference.detail };
     }
     if (!model.availability.available) return model.availability;
     const cooling = cooldown(provider.id, at);
@@ -350,6 +365,12 @@ export function createRouter(input: {
     }
     const wanted = Math.max(0, Math.ceil(tokens));
     const quota = quotaState(provider, model, at);
+    if (quota.inFlight >= model.limits.concurrentRequests) {
+      return fail(
+        'model_missing',
+        'This model is already serving its configured concurrent-request limit.',
+      );
+    }
     if (wanted > quota.tokensToday) {
       return fail('model_missing', 'The provider daily token quota cannot cover this request.');
     }
@@ -362,6 +383,7 @@ export function createRouter(input: {
     window.minute.push(at.getTime());
     window.requests += 1;
     window.reserved += wanted;
+    window.inFlight += 1;
     return ok({ ref: model.ref, reservedTokens: wanted });
   }
 
@@ -372,6 +394,7 @@ export function createRouter(input: {
     reservedTokens: number,
   ): void {
     const window = windowFor(model, at);
+    window.inFlight = Math.max(0, window.inFlight - 1);
     window.reserved = Math.max(0, window.reserved - Math.max(0, reservedTokens));
     window.tokens += Math.max(0, usage.inputTokens ?? 0) + Math.max(0, usage.outputTokens ?? 0);
   }
@@ -403,6 +426,9 @@ export function createRouter(input: {
       availability: availabilityOf(provider, model, at),
       requestsRemaining: Math.min(quota.requestsThisMinute, quota.requestsToday),
       tokensRemaining: quota.tokensToday,
+      promptTraining: model.promptTraining ?? 'unknown',
+      inputModalities: model.profile.multimodal ? ['text', 'image'] : ['text'],
+      inFlight: quota.inFlight,
     };
   }
 
@@ -449,11 +475,23 @@ export function createRouter(input: {
           toolCalling: model.profile.toolCalling,
           streaming: true,
           availability: availabilityOf(provider, model, at),
+          inputModalities: model.profile.multimodal ? ['text', 'image'] : ['text'],
+          promptTraining: model.promptTraining ?? 'unknown',
         });
       }
     }
     const route = eligible({ mode: 'auto' }, at).slice(0, routeLimit);
-    return { models: descriptors, route: route.map((model) => model.ref), allowPaid: false };
+    const vision = eligible({ mode: 'auto', requireVision: true }, at);
+    return {
+      models: descriptors,
+      route: route.map((model) => model.ref),
+      allowPaid: false,
+      media: {
+        imageInput: { available: vision.length > 0, models: vision.map((model) => model.ref) },
+        imageGeneration: { available: false, detail: IMAGE_GENERATION_UNAVAILABLE },
+        creativeText: { available: route.length > 0, formats: [...CREATIVE_FORMATS] },
+      },
+    };
   }
 
   function health(at: Date) {

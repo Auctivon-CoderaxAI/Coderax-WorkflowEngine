@@ -146,8 +146,11 @@ test('a provider-level verified flag cannot admit an unverified model', () => {
 test('daily quota exhaustion fails closed instead of routing wider', () => {
   let now = new Date('2026-11-26T10:00:00.000Z');
   const only = provider({ quota: { requestsPerMinute: 2, requestsPerDay: 2, tokensPerDay: 100 } });
+  const model = only.models[0]!;
   const router = createRouter({
-    providers: [{ ...only, models: only.models.slice(0, 1) }],
+    // Two reservations are allowed to be in flight; this test is about the
+    // daily ceiling, not the concurrency ceiling.
+    providers: [{ ...only, models: [{ ...model, limits: { ...model.limits, concurrentRequests: 2 } }] }],
     now: () => now,
   });
   const first = router.select({ mode: 'fast' });

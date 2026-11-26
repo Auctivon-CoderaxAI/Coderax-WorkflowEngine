@@ -183,6 +183,9 @@
                               },
                               "durable": {
                                 "type": "boolean"
+                              },
+                              "imageInput": {
+                                "type": "boolean"
                               }
                             },
                             "required": [
@@ -435,6 +438,9 @@
                               },
                               "durable": {
                                 "type": "boolean"
+                              },
+                              "imageInput": {
+                                "type": "boolean"
                               }
                             },
                             "required": [
@@ -656,6 +662,24 @@
                               "detail"
                             ],
                             "additionalProperties": false
+                          },
+                          "inputModalities": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text",
+                                "image"
+                              ]
+                            }
+                          },
+                          "promptTraining": {
+                            "type": "string",
+                            "enum": [
+                              "prohibited",
+                              "allowed",
+                              "unknown"
+                            ]
                           }
                         },
                         "required": [
@@ -694,6 +718,95 @@
                     },
                     "allowPaid": {
                       "const": false
+                    },
+                    "media": {
+                      "type": "object",
+                      "properties": {
+                        "imageInput": {
+                          "type": "object",
+                          "properties": {
+                            "available": {
+                              "type": "boolean"
+                            },
+                            "models": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "providerId": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 64
+                                  },
+                                  "modelId": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 160
+                                  }
+                                },
+                                "required": [
+                                  "providerId",
+                                  "modelId"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "available",
+                            "models"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "imageGeneration": {
+                          "type": "object",
+                          "properties": {
+                            "available": {
+                              "const": false
+                            },
+                            "detail": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "available",
+                            "detail"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "creativeText": {
+                          "type": "object",
+                          "properties": {
+                            "available": {
+                              "type": "boolean"
+                            },
+                            "formats": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "markdown",
+                                  "html",
+                                  "svg"
+                                ]
+                              }
+                            }
+                          },
+                          "required": [
+                            "available",
+                            "formats"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "imageInput",
+                        "imageGeneration",
+                        "creativeText"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -1057,6 +1170,28 @@
                                   "minimum": 0
                                 },
                                 "tokensRemaining": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "promptTraining": {
+                                  "type": "string",
+                                  "enum": [
+                                    "prohibited",
+                                    "allowed",
+                                    "unknown"
+                                  ]
+                                },
+                                "inputModalities": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": [
+                                      "text",
+                                      "image"
+                                    ]
+                                  }
+                                },
+                                "inFlight": {
                                   "type": "integer",
                                   "minimum": 0
                                 }
@@ -1583,6 +1718,66 @@
                       },
                       "additionalProperties": false
                     },
+                    "media": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "mediaId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "kind": {
+                            "const": "image"
+                          },
+                          "mediaType": {
+                            "type": "string",
+                            "enum": [
+                              "image/png",
+                              "image/jpeg",
+                              "image/webp"
+                            ]
+                          },
+                          "bytes": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 2097152
+                          },
+                          "width": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 8192
+                          },
+                          "height": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 8192
+                          },
+                          "sha256": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string",
+                            "maxLength": 120
+                          },
+                          "alt": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "mediaId",
+                          "kind",
+                          "mediaType",
+                          "bytes",
+                          "width",
+                          "height",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
                     "createdAt": {
                       "type": "string",
                       "format": "date-time"
@@ -1679,6 +1874,43 @@
                       "private",
                       "cloud"
                     ]
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "const": "image"
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "image/png",
+                            "image/jpeg",
+                            "image/webp"
+                          ]
+                        },
+                        "dataBase64": {
+                          "type": "string",
+                          "minLength": 4,
+                          "maxLength": 2796204
+                        },
+                        "name": {
+                          "type": "string",
+                          "maxLength": 120
+                        },
+                        "alt": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "mediaType",
+                        "dataBase64"
+                      ],
+                      "additionalProperties": false
+                    }
                   }
                 },
                 "required": [
@@ -1856,6 +2088,65 @@
                   },
                   "requireApproval": {
                     "type": "boolean"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "const": "image"
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "image/png",
+                            "image/jpeg",
+                            "image/webp"
+                          ]
+                        },
+                        "dataBase64": {
+                          "type": "string",
+                          "minLength": 4,
+                          "maxLength": 2796204
+                        },
+                        "name": {
+                          "type": "string",
+                          "maxLength": 120
+                        },
+                        "alt": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "mediaType",
+                        "dataBase64"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "creative": {
+                    "type": "object",
+                    "properties": {
+                      "format": {
+                        "type": "string",
+                        "enum": [
+                          "markdown",
+                          "html",
+                          "svg"
+                        ]
+                      },
+                      "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 120
+                      }
+                    },
+                    "required": [
+                      "format"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -2024,6 +2315,23 @@
                                 "type": "string",
                                 "minLength": 1,
                                 "maxLength": 128
+                              },
+                              "sha256": {
+                                "type": "string"
+                              },
+                              "mediaType": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 120
+                              },
+                              "title": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              },
+                              "content": {
+                                "type": "string",
+                                "maxLength": 262144
                               }
                             },
                             "required": [
@@ -2051,6 +2359,66 @@
                         }
                       },
                       "additionalProperties": false
+                    },
+                    "media": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "mediaId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "kind": {
+                            "const": "image"
+                          },
+                          "mediaType": {
+                            "type": "string",
+                            "enum": [
+                              "image/png",
+                              "image/jpeg",
+                              "image/webp"
+                            ]
+                          },
+                          "bytes": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 2097152
+                          },
+                          "width": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 8192
+                          },
+                          "height": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 8192
+                          },
+                          "sha256": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string",
+                            "maxLength": 120
+                          },
+                          "alt": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "mediaId",
+                          "kind",
+                          "mediaType",
+                          "bytes",
+                          "width",
+                          "height",
+                          "sha256"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "failure": {
                       "type": "object",
@@ -2745,6 +3113,66 @@
                               "opencode",
                               "freebuff"
                             ]
+                          },
+                          "media": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "mediaId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                },
+                                "kind": {
+                                  "const": "image"
+                                },
+                                "mediaType": {
+                                  "type": "string",
+                                  "enum": [
+                                    "image/png",
+                                    "image/jpeg",
+                                    "image/webp"
+                                  ]
+                                },
+                                "bytes": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 2097152
+                                },
+                                "width": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 8192
+                                },
+                                "height": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 8192
+                                },
+                                "sha256": {
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "type": "string",
+                                  "maxLength": 120
+                                },
+                                "alt": {
+                                  "type": "string",
+                                  "maxLength": 500
+                                }
+                              },
+                              "required": [
+                                "mediaId",
+                                "kind",
+                                "mediaType",
+                                "bytes",
+                                "width",
+                                "height",
+                                "sha256"
+                              ],
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "required": [

@@ -53,6 +53,8 @@ export function buildActionPrompt(input: {
   memory: string[];
   knowledge: string[];
   catalogue: string;
+  /** Engine-owned creative instruction; not part of the owner's objective. */
+  deliverable?: string;
 }): string {
   const sections: string[] = [];
   if (input.history.length > 0) {
@@ -74,6 +76,7 @@ export function buildActionPrompt(input: {
     sections.push(`Relevant stored passages:\n${input.knowledge.join('\n---\n')}`);
   }
   sections.push(`Tool catalogue:\n${input.catalogue.length > 0 ? input.catalogue : '(no tools)'}`);
+  if (input.deliverable) sections.push(`Deliverable:\n${input.deliverable}`);
   if (input.observations.length > 0) {
     sections.push(
       `Observations from your actions in this step (oldest first):\n${input.observations

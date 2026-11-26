@@ -26,7 +26,7 @@ import type {
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskPatch, TaskRecord } from '../domain.js';
+import type { TaskPatch, TaskRecord, TaskResult } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -38,8 +38,11 @@ import type {
   AgentAdapter,
   AgentContext,
   AgentHistoryTurn,
+  AgentMedia,
   AgentReportEvent,
 } from '../agents/types.js';
+import { intakeMedia, type ValidatedMedia } from '../media/intake.js';
+import { validateCreativeArtifact } from '../media/creative.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
 import type { Router as ModelRouter } from '../models/router.js';
@@ -158,6 +161,14 @@ function scopeOf(task: TaskRecord): RunScope {
     tenantId: task.tenantId,
     conversationId: task.conversationId,
   };
+}
+
+function toAgentMedia(media: ValidatedMedia[]): AgentMedia[] {
+  return media.map(({ reference, dataBase64 }) => ({
+    mediaType: reference.mediaType,
+    dataBase64,
+    ...(reference.alt ? { alt: reference.alt } : {}),
+  }));
 }
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
@@ -311,6 +322,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             },
           }
         : {}),
+      ...(task.media && task.media.length > 0
+        ? { media: task.media.map((item) => item.reference) }
+        : {}),
       ...(task.usage ? { usage: task.usage } : {}),
       ...(task.failure
         ? {
@@ -354,6 +368,38 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     await deps.lease
       .release({ key: workRunKey(scopeOf(task)), token })
       .catch(() => false);
+  }
+
+  type TerminalOutcome = Extract<RunOutcome, { kind: 'completed' | 'cancelled' | 'failed' }>;
+
+  /**
+   * A completed creative step is not completed until its deliverable validates.
+   * The model's text is untrusted; a missing, malformed or active document turns
+   * the run into a protocol failure rather than being returned as an artifact.
+   */
+  function withCreativeResult(
+    task: TaskRecord,
+    outcome: TerminalOutcome,
+  ): { outcome: TerminalOutcome; artifacts: TaskResult['artifacts'] } {
+    if (outcome.kind !== 'completed' || !task.creative) {
+      return { outcome, artifacts: [] };
+    }
+    const validated = validateCreativeArtifact({
+      request: task.creative,
+      text: outcome.summary,
+    });
+    if (!validated.ok) {
+      return {
+        outcome: {
+          kind: 'failed',
+          code: 'protocol_error',
+          detail: validated.detail,
+          retryable: false,
+        },
+        artifacts: [],
+      };
+    }
+    return { outcome, artifacts: [validated.artifact] };
   }
 
   /**
@@ -406,26 +452,28 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       await releaseLease(task, token);
       return;
     }
+    const final = withCreativeResult(task, outcome as TerminalOutcome);
+    const effective = final.outcome;
     const patch =
-      outcome.kind === 'completed'
+      effective.kind === 'completed'
         ? {
             state: 'completed' as const,
             updatedAt: now,
             result: {
-              summary: outcome.summary.slice(0, 20_000),
-              artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+              summary: effective.summary.slice(0, 20_000),
+              artifacts: final.artifacts,
             },
-            ...(outcome.usage ? { usage: outcome.usage } : {}),
+            ...(effective.usage ? { usage: effective.usage } : {}),
           }
-        : outcome.kind === 'cancelled'
+        : effective.kind === 'cancelled'
           ? { state: 'cancelled' as const, updatedAt: now, failure: null }
           : {
               state: 'failed' as const,
               updatedAt: now,
               failure: {
-                code: outcome.code,
-                detail: outcome.detail,
-                retryable: outcome.retryable,
+                code: effective.code,
+                detail: effective.detail,
+                retryable: effective.retryable,
               },
             };
 
@@ -441,7 +489,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    await reportSettlement(applied.task, token, outcome, now, checkpoint);
+    await reportSettlement(applied.task, token, effective, now, checkpoint);
   }
 
   async function reportSettlement(
@@ -523,9 +571,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
+    const hasMedia = (task.media?.length ?? 0) > 0;
     const model = task.model
-      ? deps.models.resolve(task.model, task.mode)
-      : deps.models.resolve(null, task.mode);
+      ? deps.models.resolve(task.model, task.mode, { requireVision: hasMedia })
+      : deps.models.resolve(null, task.mode, { requireVision: hasMedia });
     if (!model.ok) {
       await settle(task, token, {
         kind: 'failed',
@@ -671,6 +720,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           maxSteps: deps.config.engines.native.maxSteps,
           budget: task.budget,
           signal: controller.signal,
+          ...((started.task.media?.length ?? 0) > 0
+            ? { media: toAgentMedia(started.task.media) }
+            : {}),
+          ...(started.task.creative ? { creative: started.task.creative } : {}),
           ...(started.task.agent === 'coderax'
             ? {
                 context: {
@@ -778,7 +831,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
 
-      const model = deps.models.resolve(request.model, request.mode);
+      const media = intakeMedia(request.attachments);
+      if (!media.ok) return media;
+      const creative = request.creative ?? null;
+      if (agentId !== 'coderax' && (media.value.length > 0 || creative !== null)) {
+        return fail(
+          'validation_failed',
+          'Image attachments and creative deliverables are supported only by Coderax Native.',
+        );
+      }
+
+      const model = deps.models.resolve(request.model, request.mode, {
+        requireVision: media.value.length > 0,
+      });
       if (!model.ok) return model;
 
       const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
@@ -808,6 +873,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         role: 'user',
         text: request.objective,
         createdAt: now,
+        ...(media.value.length > 0
+          ? { media: media.value.map((item) => item.reference) }
+          : {}),
       });
 
       const task: TaskRecord = {
@@ -824,6 +892,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: 1,
         runToken: null,
         steps: [],
+        media: media.value,
+        creative,
         checkpoint: { completedSteps: [], text: '' },
         createdAt: now,
         updatedAt: now,
@@ -1114,7 +1184,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model, request.mode);
+      const media = intakeMedia(request.attachments);
+      if (!media.ok) return media;
+      if (request.agent !== 'coderax' && media.value.length > 0) {
+        return fail(
+          'validation_failed',
+          'Image attachments are supported only by Coderax Native.',
+        );
+      }
+      const model = deps.models.resolve(request.model, request.mode, {
+        requireVision: media.value.length > 0,
+      });
       if (!model.ok) return model;
 
       const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
@@ -1145,6 +1225,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         role: 'user',
         text: request.message,
         createdAt: now,
+        ...(media.value.length > 0
+          ? { media: media.value.map((item) => item.reference) }
+          : {}),
       });
 
       const history = request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
@@ -1162,6 +1245,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           maxSteps: 1,
           budget: null,
           signal: controller.signal,
+          ...(media.value.length > 0 ? { media: toAgentMedia(media.value) } : {}),
           ...(request.agent === 'coderax'
             ? { context: await nativeContext({ ownerId: principal.ownerId, mode: request.mode }) }
             : {}),
@@ -1192,6 +1276,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         agent: request.agent,
         model: model.value.ref,
         ...(outcome.usage ? { usage: outcome.usage } : {}),
+        ...(media.value.length > 0
+          ? { media: media.value.map((item) => item.reference) }
+          : {}),
         createdAt: deps.clock.iso(),
       });
     },

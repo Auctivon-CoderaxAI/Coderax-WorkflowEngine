@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { Availability, EngineCapabilities } from './capabilities.js';
 import { CostClass, ModelRef, Usage } from './primitives.js';
+import { ModelMediaCapability } from './media.js';
+
+/** Recorded privacy term for a model; `unknown` is not an assurance. */
+export const PromptTraining = z.enum(['prohibited', 'allowed', 'unknown']);
+export type PromptTraining = z.infer<typeof PromptTraining>;
 
 export const ModelDescriptor = z
   .object({
@@ -16,6 +21,10 @@ export const ModelDescriptor = z
     toolCalling: z.boolean(),
     streaming: z.boolean(),
     availability: Availability,
+    /** What the model accepts on the wire; omitted means text only. */
+    inputModalities: z.array(z.enum(['text', 'image'])).optional(),
+    /** The recorded privacy term, never inferred from the provider name. */
+    promptTraining: PromptTraining.optional(),
   })
   .strict();
 export type ModelDescriptor = z.infer<typeof ModelDescriptor>;
@@ -26,6 +35,8 @@ export const ModelList = z
     /** The ordered candidates a free-inference route will consider. */
     route: z.array(ModelRef),
     allowPaid: z.literal(false),
+    /** What this deployment can actually do with media, including what it cannot. */
+    media: ModelMediaCapability.optional(),
   })
   .strict();
 export type ModelList = z.infer<typeof ModelList>;

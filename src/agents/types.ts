@@ -8,8 +8,10 @@ import type {
   EngineFailureCode,
   EngineId,
   KnowledgeSearchResult,
+  MediaType,
   ModelRef,
   Usage,
+  CreativeRequest,
 } from '@coderax/contracts';
 import type { PendingAction, StepOutput } from '../domain.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
@@ -29,6 +31,13 @@ import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 export type AgentHistoryTurn = {
   role: 'user' | 'assistant';
   text: string;
+};
+
+/** Bytes are already validated by media intake; an adapter never re-decodes them. */
+export type AgentMedia = {
+  mediaType: MediaType;
+  dataBase64: string;
+  alt?: string;
 };
 
 /**
@@ -70,6 +79,10 @@ export type AgentRunRequest = {
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
+  /** Validated images for this turn; only Coderax Native may receive them. */
+  media?: AgentMedia[];
+  /** A text-shaped deliverable the engine validates at settlement. */
+  creative?: CreativeRequest;
   context?: AgentContext;
 };
 

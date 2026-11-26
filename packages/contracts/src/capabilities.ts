@@ -9,6 +9,8 @@ export const EngineCapabilities = z
     resume: z.boolean(),
     modelSelection: z.boolean(),
     durable: z.boolean(),
+    /** The adapter accepts image content; routing still needs a vision model. */
+    imageInput: z.boolean().optional(),
   })
   .strict();
 export type EngineCapabilities = z.infer<typeof EngineCapabilities>;

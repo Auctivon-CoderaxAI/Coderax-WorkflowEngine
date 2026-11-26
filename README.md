@@ -37,6 +37,11 @@ are clients of the same versioned API.
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent: plan, tool actions, reflection, recovery | Implemented | `src/agents/native` |
 | Provider-independent zero-cost router with ranked modes + bounded fallback | Implemented | `src/models/router.ts`, `src/models/routed.ts` |
+| Inference readiness separated from credential and price readiness | Implemented | `src/models/eligibility.ts`, `src/bootstrap/compose.ts` |
+| Per-model concurrency ceiling reserved before dispatch | Implemented | `src/models/router.ts`, `tests/unit/evidence.test.ts` |
+| Validated image input (PNG/JPEG/WebP stills) | Implemented | `src/media/intake.ts`, `tests/integration/multimodal.test.ts` |
+| Creative Markdown/HTML/SVG artifacts (fail-closed) | Implemented | `src/media/creative.ts`, `tests/integration/multimodal.test.ts` |
+| Raster image generation | **Unavailable by design, reported as such** | `ModelList.media`, `docs/multimodal.md` |
 | Built-in tools behind exact-resource permission gates | Implemented | `src/tools`, `tests/unit/tools.test.ts` |
 | Durable approval suspension and resume | Implemented | `src/agents/native/agent.ts`, `src/execution/runner.ts`, `tests/integration/intelligence.test.ts` |
 | MCP tools over HTTP and stdio | Implemented; scripted-server verified | `src/mcp/client.ts` |
@@ -60,7 +65,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 125 tests: unit, contract, integration, security, e2e
+npm test                          # 189 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -77,37 +82,54 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
 ```
 
 `engine.json` carries the non-secret settings; environment variables win over it.
-A route entry alone is **not** evidence that a model is free: the engine refuses
-to start until every routed model carries `terms` recorded from the provider's
-published price list, with all prices zero and an unexpired observation window.
+A route entry alone is **not** evidence that a model is free. The engine refuses
+to start Native until a routed model carries both an unexpired `terms` record
+with every billed unit at zero **and** a recorded successful inference. A
+configured key, a model listing or a `:free` identifier proves neither. The
+`privacySource` and `promptTraining` fields record the provider's published
+term; `unknown` is reported as unknown, never as an assurance.
 
 ```json
 {
   "auth": { "ownerId": "owner" },
   "workspaces": { "privateRoot": "/srv/coderax/private", "cloudRoot": "/srv/coderax/cloud" },
   "models": {
-    "route": [{ "providerId": "openrouter", "modelId": "coderax:free" }],
+    "route": [{ "providerId": "your-provider", "modelId": "your-model" }],
     "evidence": [
       {
-        "providerId": "openrouter",
-        "modelId": "coderax:free",
+        "providerId": "your-provider",
+        "modelId": "your-model",
         "toolCalling": true,
+        "multimodal": true,
         "contextTokens": 32000,
+        "requestsPerMinute": 20,
+        "requestsPerDay": 50,
+        "tokensPerDay": 200000,
+        "maxInputTokens": 32000,
+        "concurrentRequests": 1,
         "terms": {
-          "source": "https://openrouter.ai/models/coderax:free",
+          "source": "https://provider.example/pricing",
           "observedAt": "2026-11-26T00:00:00.000Z",
           "expiresAt": "2026-12-26T00:00:00.000Z",
           "currency": "USD",
           "inputPerMillionTokens": 0,
           "outputPerMillionTokens": 0,
           "requestPerCall": 0
-        }
+        },
+        "privacySource": "https://provider.example/privacy",
+        "promptTraining": "prohibited",
+        "inferenceSource": "https://provider.example/console/usage",
+        "inferenceObservedAt": "2026-11-26T00:10:00.000Z"
       }
     ]
   },
   "engines": { "default": "native" }
 }
 ```
+
+`provider.example` is a placeholder, not a recommendation. Record the exact
+model and the evidence you actually observed; see `docs/multimodal.md` and
+`docs/evidence-free-tier.md`.
 
 The engine binds `127.0.0.1` by default and is never public-facing.
 
@@ -123,7 +145,8 @@ src/orchestration    Work lifecycle: submit, execute, cancel, resume, retry, rec
 src/execution        leases, arbitration, heartbeat runner, retry, workspace confinement
 src/persistence      task repository (fenced writes), lease tables, conversations
 src/agents           registry, Coderax Native, isolated external adapters
-src/models           verified catalogue, zero-cost route, daily budget ledger
+src/models           one evidence-gated router, readiness, quota, daily budget
+src/media            bounded image intake, fail-closed creative validation
 src/events           ordered event log with dedupe and replay
 src/permissions      scoped, single-use approval requests
 src/memory           owner- and mode-partitioned memory

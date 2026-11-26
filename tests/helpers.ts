@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ModelGateway } from '../src/agents/native/types.js';
+import type { ExternalAgentTransport } from '../src/agents/adapters/external.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -49,6 +50,14 @@ export function verifiedTerms(overrides?: Record<string, unknown>): Record<strin
   };
 }
 
+export function verifiedInference(overrides?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    source: 'https://provider.example/usage',
+    observedAt: new Date(Date.now() - 3_600_000).toISOString(),
+    ...(overrides ?? {}),
+  };
+}
+
 export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, unknown>): EngineConfig {
   return EngineConfigSchema.parse({
     server: { host: '127.0.0.1', port: 0 },
@@ -63,6 +72,10 @@ export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, 
           toolCalling: true,
           contextTokens: 32_000,
           terms: verifiedTerms(),
+          privacySource: 'https://provider.example/privacy',
+          promptTraining: 'prohibited',
+          inferenceSource: 'https://provider.example/usage',
+          inferenceObservedAt: new Date(Date.now() - 3_600_000).toISOString(),
         },
       ],
     },
@@ -133,6 +146,7 @@ export function slowGateway(delayMs: number): ModelGateway & { calls: number } {
 export async function startTestApp(options: {
   gateway?: ModelGateway;
   config?: Record<string, unknown>;
+  externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -145,6 +159,7 @@ export async function startTestApp(options: {
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
     gateway: options.gateway ?? fakeGateway(),
+    ...(options.externals ? { externals: options.externals } : {}),
   });
   const { url } = await app.start();
   return {
@@ -189,6 +204,8 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     generation: 1,
     runToken: null,
     steps: [],
+    media: [],
+    creative: null,
     checkpoint: { completedSteps: [], text: '' },
     createdAt: now,
     updatedAt: now,

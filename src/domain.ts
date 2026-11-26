@@ -1,9 +1,11 @@
 import type {
   AgentId,
   Budget,
+  CreativeRequest,
   DataMode,
   EngineId,
   IsoDateTime,
+  MediaReference,
   ModelRef,
   TaskState,
   Usage,
@@ -35,7 +37,26 @@ export type TaskCheckpoint = {
 
 export type TaskResult = {
   summary?: string;
-  artifacts: Array<{ path: string; bytes?: number; digest?: string }>;
+  artifacts: Array<{
+    path: string;
+    bytes?: number;
+    digest?: string;
+    sha256?: string;
+    mediaType?: string;
+    title?: string;
+    /** Validated creative text; never written to the workspace. */
+    content?: string;
+  }>;
+};
+
+/**
+ * A validated input image, kept with the task so a resume on another replica
+ * still has the exact bytes the owner submitted. The reference is public; the
+ * bytes are internal and never appear in a status or event.
+ */
+export type StoredMedia = {
+  reference: MediaReference;
+  dataBase64: string;
 };
 
 export type TaskFailure = {
@@ -65,6 +86,10 @@ export type TaskRecord = {
   runToken: string | null;
   steps: TaskStep[];
   pendingAction?: PendingAction | null;
+  /** Validated image input; empty for a text-only task. */
+  media: StoredMedia[];
+  /** A requested creative deliverable, produced and validated at settlement. */
+  creative: CreativeRequest | null;
   checkpoint: TaskCheckpoint;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
@@ -115,6 +140,8 @@ export type StoredMessage = {
   createdAt: IsoDateTime;
   unfinished?: boolean;
   agent?: AgentId;
+  /** Attachment metadata only; the transcript never embeds image bytes. */
+  media?: MediaReference[];
 };
 
 export type MemoryRecord = {

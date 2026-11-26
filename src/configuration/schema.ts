@@ -119,6 +119,19 @@ export const ModelEvidence = z
     /** Concurrent requests the provider's free tier allows. */
     concurrentRequests: z.number().int().min(1).max(1_000).default(1),
     terms: ModelTerms.optional(),
+    /**
+     * Where the privacy term below was observed. This is a record, not an
+     * enforcement: the engine can report the term but cannot make a third party
+     * honour it.
+     */
+    privacySource: z.string().url().max(2048).optional(),
+    promptTraining: z.enum(['prohibited', 'allowed', 'unknown']).default('unknown'),
+    /**
+     * An observed successful inference. This is separate from `terms` (price)
+     * and from a configured credential: a model listing proves neither.
+     */
+    inferenceSource: z.string().url().max(2048).optional(),
+    inferenceObservedAt: z.string().datetime({ offset: true }).optional(),
   })
   .strict();
 

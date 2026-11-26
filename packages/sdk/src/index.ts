@@ -368,4 +368,14 @@ export class CoderaxClient {
   }
 }
 
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };
+export type {
+  ChatRequest,
+  CreativeFormat,
+  CreativeRequest,
+  DataMode,
+  MediaAttachmentInput,
+  MediaReference,
+  MediaType,
+  PermissionDecisionRequest,
+  WorkSubmitRequest,
+} from '@coderax/contracts';

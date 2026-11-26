@@ -74,12 +74,18 @@ export function createRoutedGateway(input: {
         prompt: request.prompt,
         ...(request.toolSchemaText ? { toolSchemaText: request.toolSchemaText } : {}),
       });
+      // An image is not free to the provider's token counter either. Reserve a
+      // conservative flat amount per image so a visual turn cannot appear cheaper
+      // than a text-only one in the local quota.
+      const imageTokens = (request.images?.length ?? 0) * 1024;
+      const estimatedInput = estimate.total + imageTokens;
+      const needsVision = request.requiresVision === true || imageTokens > 0;
       const requested = input.router.select({
         mode: request.routingMode ?? 'auto',
         ...(request.model ? { requested: request.model } : {}),
         ...(request.requiresTools ? { requireTools: true } : {}),
-        ...(request.requiresVision ? { requireVision: true } : {}),
-        estimatedInputTokens: estimate.total,
+        ...(needsVision ? { requireVision: true } : {}),
+        estimatedInputTokens: estimatedInput,
       });
       if (!requested.ok) throw new Error(NO_ELIGIBLE_MODEL);
 
@@ -90,8 +96,8 @@ export function createRoutedGateway(input: {
           {
             mode: request.routingMode ?? 'auto',
             requireTools: request.requiresTools ?? false,
-            requireVision: request.requiresVision ?? false,
-            estimatedInputTokens: estimate.total,
+            requireVision: needsVision,
+            estimatedInputTokens: estimatedInput,
           },
           input.maxFallbacks,
         ),
@@ -105,7 +111,7 @@ export function createRoutedGateway(input: {
         const nowAt = at();
         // One reservation covers the prompt and the largest output this call may
         // produce, so a provider's daily free-quota check cannot be passed twice.
-        const reservedTokens = estimate.total + (request.maxOutputTokens ?? 0);
+        const reservedTokens = estimatedInput + (request.maxOutputTokens ?? 0);
         let budgetReservation = 0;
         if (input.budget && request.ownerId) {
           const budget = await input.budget.reserveTokens({
@@ -134,7 +140,7 @@ export function createRoutedGateway(input: {
           const completion = await gateway.complete({ ...request, model: candidate.ref });
           const usage = accountUsage({
             reported: completion.usage,
-            estimatedInputTokens: estimate.total,
+            estimatedInputTokens: estimatedInput,
             outputText: completion.text,
           });
           const settledAt = at();

@@ -15,21 +15,35 @@ function objectOf(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export function parseAction(raw: string): ModelAction {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
-  const candidate = fenced?.[1] ?? raw;
-  const start = candidate.indexOf('{');
-  const end = candidate.lastIndexOf('}');
-  if (start < 0 || end <= start) {
-    return { kind: 'invalid', reason: 'No JSON object was returned.' };
-  }
+function objectSlice(text: string): string | null {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  return start >= 0 && end > start ? text.slice(start, end + 1) : null;
+}
 
-  let parsed: unknown;
+function parseObject(text: string): { ok: true; value: unknown } | { ok: false } {
+  const slice = objectSlice(text);
+  if (!slice) return { ok: false };
   try {
-    parsed = JSON.parse(candidate.slice(start, end + 1));
+    return { ok: true, value: JSON.parse(slice) };
   } catch {
-    return { kind: 'invalid', reason: 'The returned JSON could not be parsed.' };
+    return { ok: false };
   }
+}
+
+export function parseAction(raw: string): ModelAction {
+  // The raw object is tried first. A creative deliverable is a fenced SVG or
+  // HTML block inside a JSON string; extracting the first fence before parsing
+  // would discard the object and reject a perfectly valid action.
+  let parsedResult = parseObject(raw);
+  if (!parsedResult.ok) {
+    const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
+    if (fenced?.[1]) parsedResult = parseObject(fenced[1]);
+  }
+  if (!parsedResult.ok) {
+    return { kind: 'invalid', reason: 'No JSON object was returned or it could not be parsed.' };
+  }
+  const parsed: unknown = parsedResult.value;
 
   const root = objectOf(parsed);
   if (!root) return { kind: 'invalid', reason: 'The returned JSON was not an object.' };

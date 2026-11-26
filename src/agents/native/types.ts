@@ -12,6 +12,8 @@ export type ModelCompletionRequest = {
   /** Only a tool-capable model may serve an action turn. */
   requiresTools?: boolean;
   requiresVision?: boolean;
+  /** Data URLs, already validated and bounded by media intake. */
+  images?: string[];
   /** The owner whose daily zero-cost budget this call is charged to. */
   ownerId?: string;
   /**
