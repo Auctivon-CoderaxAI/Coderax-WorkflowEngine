@@ -22,9 +22,9 @@ import type {
   RegisteredProvider,
 } from '../models/types.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionStore } from '../permissions/store.js';
 import { createMediaService } from '../media/service.js';
 import { createCreativeService } from '../creative/service.js';
+import { createArtifactStorage } from '../artifacts/store.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
@@ -383,14 +383,18 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     config,
     env,
     clock,
+    ids,
     ...(input.persistence ?? {}),
   });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = persistence.permissions;
   const notifications = persistence.notifications;
+  const schedules = persistence.schedules;
+  const artifacts = persistence.artifacts;
+  const artifactStorage = createArtifactStorage(workspaceRoots(config.workspaces));
   const media = createMediaService({
     store: persistence.media,
     clock,
@@ -517,6 +521,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     media,
     creative,
     notifications,
+    schedules,
+    artifacts,
+    artifactStorage,
     audit,
     events,
     runner,
@@ -571,6 +578,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
   health.markReady();
 
+  let scheduleTimer: NodeJS.Timeout | null = null;
   const server = createHttpServer({
     router,
     host: config.server.host,
@@ -591,9 +599,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      if (config.schedules.enabled) {
+        scheduleTimer = setInterval(() => {
+          void service.tickSchedules().catch(() => undefined);
+        }, config.schedules.tickIntervalMs);
+        scheduleTimer.unref();
+      }
       return { url };
     },
     stop: async () => {
+      if (scheduleTimer) {
+        clearInterval(scheduleTimer);
+        scheduleTimer = null;
+      }
       models.stop();
       await service.shutdown();
       await server.close();

@@ -18,7 +18,7 @@ are clients of the same versioned API.
 
 | Capability | State | Evidence |
 | --- | --- | --- |
-| Versioned HTTP + event contracts | Implemented | `packages/contracts` |
+| Versioned HTTP + event contracts, including the capability handshake | Implemented | `packages/contracts`, `docs/api-v1.1.md` |
 | OpenAPI generated from those contracts | Implemented | `openapi.json`, `npm run openapi:check` |
 | Shared SDK consumed by UI and CLI | Implemented | `packages/sdk` |
 | Centralized route registration + completion gate | Implemented | `src/api/router.ts`, contract tests |
@@ -56,7 +56,9 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # unit, contract, integration, security, e2e
+npm run verify                    # build, reproducible SDK pack, 237 tests, OpenAPI drift gate
+npm test                          # tests only: unit, contract, integration, security, e2e
+npm run sdk:pack                  # reproducible tarballs + SHA256SUMS in dist-artifacts/
 npm run openapi:check             # fails if the published contract drifted
 ```
 

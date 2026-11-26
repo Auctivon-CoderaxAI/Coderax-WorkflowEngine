@@ -1,6 +1,6 @@
 {
   "name": "coderax-workflow-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "CoderaxAI's independent cloud-native intelligence, agent orchestration, durable workflow execution, model routing, and integration engine.",
   "type": "module",
@@ -23,7 +23,9 @@
     "benchmark": "npm run build && node dist/scripts/benchmark.js",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
-    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
+    "sdk:pack": "npm run build && node dist/scripts/pack-sdk.js",
+    "sdk:verify": "node dist/scripts/pack-sdk.js --check",
+    "verify": "npm run build && node dist/scripts/pack-sdk.js && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
   },
   "dependencies": {
     "@coderax/contracts": "*",

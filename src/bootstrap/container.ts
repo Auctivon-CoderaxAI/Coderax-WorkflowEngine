@@ -8,6 +8,8 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleRepository } from '../persistence/schedules.js';
+import type { ArtifactRepository, ArtifactStorage } from '../artifacts/store.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MediaService } from '../media/service.js';
@@ -44,6 +46,9 @@ export type InfrastructureDependencies = {
   media: MediaService;
   creative: CreativeService;
   notifications: NotificationStore;
+  schedules: ScheduleRepository;
+  artifacts: ArtifactRepository;
+  artifactStorage: ArtifactStorage;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -67,6 +72,9 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'media',
   'creative',
   'notifications',
+  'schedules',
+  'artifacts',
+  'artifactStorage',
   'audit',
   'events',
   'runner',

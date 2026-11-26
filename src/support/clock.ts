@@ -15,6 +15,8 @@ export function createClock(): Clock {
 export type IdGenerator = {
   conversationId: () => string;
   taskId: () => string;
+  scheduleId: () => string;
+  artifactId: () => string;
   messageId: () => string;
   eventId: () => string;
   /** A unique fencing token per claim; never a counter that can be reused. */
@@ -27,6 +29,8 @@ export function createIdGenerator(): IdGenerator {
   return {
     conversationId: () => `conv_${randomUUID()}`,
     taskId: () => `task_${randomUUID()}`,
+    scheduleId: () => `sch_${randomUUID()}`,
+    artifactId: () => `art_${randomUUID()}`,
     messageId: () => `msg_${randomUUID()}`,
     eventId: () => `evt_${randomUUID()}`,
     runToken: () => `run_${randomUUID()}`,

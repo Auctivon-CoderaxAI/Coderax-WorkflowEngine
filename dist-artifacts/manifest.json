@@ -1,0 +1,18 @@
+{
+  "engineVersion": "0.2.0",
+  "contractVersion": "1.1.0",
+  "eventSchemaVersion": 1,
+  "sdkVersion": "1.1.0",
+  "files": [
+    {
+      "name": "coderax-contracts-1.1.0.tgz",
+      "sha256": "260243f86b314bf3cff6b98995845dab030e07c3d5a13ef802abfd915a8e67c0",
+      "bytes": 28875
+    },
+    {
+      "name": "coderax-sdk-1.1.0.tgz",
+      "sha256": "afea6120cada49d1ccdf55ef9f4dbc399e834373a1537c1a41ec76b9f7bba33f",
+      "bytes": 7530
+    }
+  ]
+}

@@ -9,6 +9,7 @@ import type {
 import type { ConversationRepository } from './conversations.js';
 import type { NotificationStore } from './notifications.js';
 import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
+import { taskIdempotencyKey } from './tasks.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { Clock } from '../support/clock.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
@@ -98,6 +99,11 @@ function toNotification(document: Record<string, unknown>): NotificationRecord {
   return strip(document) as unknown as NotificationRecord;
 }
 
+export async function ensureIdempotencyIndexes(collection: MongoCollectionLike): Promise<void> {
+  await collection.createIndex({ key: 1 }, { unique: true, name: 'idempotency_key' });
+  await collection.createIndex({ createdAt: 1 }, { name: 'idempotency_created' });
+}
+
 export async function ensureTaskIndexes(collection: MongoCollectionLike): Promise<void> {
   await collection.createIndex({ taskId: 1 }, { unique: true, name: 'task_id' });
   await collection.createIndex(
@@ -141,9 +147,44 @@ export async function ensureNotificationIndexes(collection: MongoCollectionLike)
   );
 }
 
-export function createMongoTaskRepository(collection: MongoCollectionLike): TaskRepository {
+const REPLAY_ATTEMPTS = 20;
+const REPLAY_DELAY_MS = 10;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
+}
+
+export function createMongoTaskRepository(
+  collection: MongoCollectionLike,
+  idempotency?: MongoCollectionLike,
+): TaskRepository {
+  async function taskById(taskId: unknown): Promise<TaskRecord | null> {
+    if (typeof taskId !== 'string') return null;
+    const document = await collection.findOne({ taskId });
+    return document ? toTask(document) : null;
+  }
+
+  /**
+   * The reservation is written before the task, so a concurrent duplicate can
+   * wait for the winner's task instead of creating a second one.
+   */
+  async function waitForReplay(key: string): Promise<TaskRecord | null> {
+    if (!idempotency) return null;
+    const row = await idempotency.findOne({ key });
+    if (!row) return null;
+    for (let attempt = 0; attempt < REPLAY_ATTEMPTS; attempt += 1) {
+      const task = await taskById(row.taskId);
+      if (task) return task;
+      await delay(REPLAY_DELAY_MS);
+    }
+    return null;
+  }
+
   return {
-    create: async (task): Promise<CreateTaskResult> => {
+    create: async (task, options): Promise<CreateTaskResult> => {
       // The lease already arbitrates one live run per conversation; this check
       // preserves the repository's own refusal for callers that skip the lease.
       const live = await collection.findOne({
@@ -153,10 +194,34 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       if (live && live.taskId !== task.taskId) {
         return { ok: false, reason: 'conversation_busy' };
       }
+
+      let reservation: string | null = null;
+      if (options?.idempotencyKey) {
+        if (!idempotency) {
+          throw new Error('idempotency storage is not configured');
+        }
+        reservation = taskIdempotencyKey(task.ownerId, options.idempotencyKey);
+        try {
+          await idempotency.insertOne({
+            key: reservation,
+            taskId: task.taskId,
+            createdAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          if (!isDuplicateKey(error)) throw error;
+          const existing = await waitForReplay(reservation);
+          if (existing) return { ok: false, reason: 'idempotent', task: existing };
+          return { ok: false, reason: 'exists' };
+        }
+      }
+
       try {
         await collection.insertOne({ ...task });
         return { ok: true, task };
       } catch (error) {
+        if (reservation && idempotency) {
+          await idempotency.deleteOne({ key: reservation }).catch(() => undefined);
+        }
         if (isDuplicateKey(error)) return { ok: false, reason: 'exists' };
         throw error;
       }
@@ -165,6 +230,12 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
     get: async (taskId) => {
       const document = await collection.findOne({ taskId });
       return document ? toTask(document) : null;
+    },
+
+    findByIdempotencyKey: async (ownerId, key) => {
+      if (!idempotency) return null;
+      const row = await idempotency.findOne({ key: taskIdempotencyKey(ownerId, key) });
+      return row ? taskById(row.taskId) : null;
     },
 
     updateFenced: async ({ taskId, token, patch }): Promise<FencedWriteResult> => {

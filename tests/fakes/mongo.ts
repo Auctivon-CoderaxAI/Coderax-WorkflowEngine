@@ -13,12 +13,16 @@ function matches(document: Document, filter: MongoFilter): boolean {
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
       if ('$lte' in operators) {
-        const bound = operators.$lte as Date;
-        if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
+        const bound = operators.$lte as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left > right) return false;
       }
       if ('$gt' in operators) {
-        const bound = operators.$gt as Date;
-        if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
+        const bound = operators.$gt as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left <= right) return false;
       }
       if ('$in' in operators) {
         const list = operators.$in as unknown[];

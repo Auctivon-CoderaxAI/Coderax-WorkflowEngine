@@ -8,6 +8,34 @@ import { z } from 'zod';
 export const CONTRACT_VERSION = '1.1.0' as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
+export const ENGINE_VERSION = '0.2.0' as const;
+export const SDK_VERSION = '1.1.0' as const;
+/** The oldest SDK that understands this contract. */
+export const MIN_SDK_VERSION = '1.1.0' as const;
+
+export const CONTRACT_MAJOR = Number(CONTRACT_VERSION.split('.')[0]) as 1;
+
+/**
+ * Compatibility is a major match plus the engine being at least as new as the
+ * client was built for. A client never guesses: it fetches the handshake and
+ * calls this before issuing a request.
+ */
+export function isCompatibleContract(engineVersion: string, clientMinimum: string): boolean {
+  const engine = engineVersion.split('.').map((part) => Number(part));
+  const client = clientMinimum.split('.').map((part) => Number(part));
+  if (engine.length !== 3 || client.length !== 3) return false;
+  if (engine.some((part) => !Number.isInteger(part)) || client.some((part) => !Number.isInteger(part))) {
+    return false;
+  }
+  if (engine[0] !== client[0]) return false;
+  for (let index = 0; index < 3; index += 1) {
+    const left = engine[index] ?? 0;
+    const right = client[index] ?? 0;
+    if (left > right) return true;
+    if (left < right) return false;
+  }
+  return true;
+}
 
 function identifier(label: string, max = 128) {
   return z.string().trim().min(1).max(max).describe(label);
@@ -24,6 +52,21 @@ export type ConversationId = z.infer<typeof ConversationId>;
 
 export const TaskId = identifier('task identifier');
 export type TaskId = z.infer<typeof TaskId>;
+
+export const ScheduleId = identifier('schedule identifier');
+export type ScheduleId = z.infer<typeof ScheduleId>;
+
+export const ArtifactId = identifier('artifact identifier');
+export type ArtifactId = z.infer<typeof ArtifactId>;
+
+/** An owner-scoped key that makes a repeated submission return the same task. */
+export const IdempotencyKey = z
+  .string()
+  .trim()
+  .min(8)
+  .max(200)
+  .regex(/^[A-Za-z0-9_.:-]+$/, 'an idempotency key is URL-safe');
+export type IdempotencyKey = z.infer<typeof IdempotencyKey>;
 
 export const MessageId = identifier('message identifier');
 export type MessageId = z.infer<typeof MessageId>;
