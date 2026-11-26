@@ -18,6 +18,7 @@ import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { createQuarantineRegistry } from '../execution/quarantine.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
@@ -205,6 +206,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
     iso: clock.iso,
+    log: persistence.events,
+    retain: config.execution.eventRetain,
+  });
+  const quarantine = createQuarantineRegistry({
+    ttlMs: config.execution.cancelQuarantineMs,
   });
   const runner = createTaskRunner({
     lease,
@@ -212,6 +218,18 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
+    onAbandoned: ({ scope, generation, workspaceRoot }) => {
+      // The adapter ignored its abort and may still be running. Nothing can kill
+      // it in-process, so the root it can still write is taken out of service
+      // until the quarantine expires.
+      quarantine.poison({
+        root: workspaceRoot,
+        generation,
+        taskId: scope.conversationId,
+        reason: 'A cancelled adapter did not stop within the grace period.',
+        now: clock.now().getTime(),
+      });
+    },
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -284,6 +302,21 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
+      {
+        // A quarantined workspace means an abandoned adapter may still be
+        // writing there. New work in that root is refused until it expires.
+        name: 'workspaces.quarantine',
+        required: false,
+        check: async () => {
+          const entries = quarantine.list(clock.now().getTime());
+          return entries.length === 0
+            ? { status: 'ok' as const, detail: 'No workspace is quarantined.' }
+            : {
+                status: 'degraded' as const,
+                detail: `${entries.length} workspace root(s) quarantined after an adapter ignored cancellation.`,
+              };
+        },
+      },
     ],
   });
 
@@ -306,6 +339,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     scheduler,
     health,
+    quarantine,
   });
   if (!container.dependencies) {
     throw new StartupError(
