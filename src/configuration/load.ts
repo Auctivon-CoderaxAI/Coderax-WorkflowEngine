@@ -48,13 +48,18 @@ function deepMerge(base: Record<string, unknown>, overlay: Record<string, unknow
   return out;
 }
 
-/** Environment overrides are limited to transport and secret names. */
+/**
+ * Environment overrides are limited to transport, secret names and the
+ * persistence driver selection. Every one of them still lands on a validated
+ * field below: an unknown driver is a configuration error, not a fallback.
+ */
 function fromEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const host = env.CODERAX_ENGINE_HOST;
   const port = env.CODERAX_ENGINE_PORT;
   const ownerId = env.CODERAX_OWNER_ID;
   const tokenEnv = env.CODERAX_OWNER_TOKEN_ENV;
+  const persistenceDriver = env.CODERAX_PERSISTENCE_DRIVER;
   if (host) out.server = { ...(out.server as object), host };
   if (port) out.server = { ...(out.server as object), port: Number(port) };
   if (ownerId || tokenEnv) {
@@ -63,6 +68,7 @@ function fromEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
       ...(tokenEnv ? { tokenEnv } : {}),
     };
   }
+  if (persistenceDriver) out.persistence = { driver: persistenceDriver };
   return out;
 }
 

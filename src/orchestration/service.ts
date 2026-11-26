@@ -27,7 +27,7 @@ import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
 import type { AgentRegistry } from '../agents/registry.js';
-import type { AgentAdapter, AgentReportEvent } from '../agents/types.js';
+import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactText } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
@@ -42,6 +42,7 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
+import { buildTranscript } from './transcript.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -131,6 +132,25 @@ function scopeOf(task: TaskRecord): RunScope {
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
   const textByTask = new Map<string, string>();
+
+  /**
+   * Earlier turns for this conversation, read from the store rather than from
+   * process memory, so a resume on another replica sees the same exchange.
+   * History is context, not authority: a store failure costs the agent its
+   * context instead of failing a task the owner already submitted. The current
+   * objective is excluded because it is sent separately.
+   */
+  async function historyFor(
+    conversationId: string,
+    currentText: string,
+  ): Promise<AgentHistoryTurn[]> {
+    try {
+      const messages = await deps.conversations.messages(conversationId);
+      return buildTranscript({ messages, currentText });
+    } catch {
+      return [];
+    }
+  }
 
   function publish(
     task: TaskRecord,
@@ -478,6 +498,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     };
 
+    const history = await historyFor(task.conversationId, task.objective);
     const result = await deps.runner.run({
       scope: scopeOf(started.task),
       token,
@@ -487,6 +508,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         tenantId: task.tenantId,
         conversationId: task.conversationId,
         objective: task.objective,
+        history,
         model: model.value.ref,
         mode: task.mode,
         workspaceRoot: workspace.value.root,
@@ -882,6 +904,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
+      const history = await historyFor(conversationId, request.message);
       const controller = new AbortController();
       const outcome = await adapter.value.run(
         {
@@ -889,6 +912,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           tenantId: conversation.tenantId,
           conversationId,
           objective: request.message,
+          history,
           model: model.value.ref,
           mode: request.mode,
           workspaceRoot: workspace.value.root,

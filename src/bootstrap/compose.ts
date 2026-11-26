@@ -12,6 +12,11 @@ import { createAgentRegistry } from '../agents/registry.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
+import type { WorkRunTable } from '../persistence/work-runs.js';
+import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
+import type { MongoCollectionLike } from '../persistence/mongo.js';
+import { createMongoConnector, MongoUnavailableError } from '../persistence/mongo-connect.js';
+import type { MongoConnection, MongoConnector } from '../persistence/mongo-connect.js';
 import { createTaskRepository } from '../persistence/tasks.js';
 import { createConversationRepository } from '../persistence/conversations.js';
 import { createNotificationStore } from '../persistence/notifications.js';
@@ -52,6 +57,8 @@ export type Application = {
   service: ApplicationService;
   router: Router;
   server: HttpServer;
+  /** Which lease table the validated persistence setting selected. */
+  persistence: { driver: 'memory' | 'mongo' };
   /** Everything is validated before this resolves. */
   start: () => Promise<{ url: string }>;
   stop: () => Promise<void>;
@@ -64,6 +71,15 @@ export type ComposeInput = {
   gateway?: ModelGateway | null;
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
   fetchImpl?: typeof fetch;
+  /**
+   * Persistence injection for tests and for a host that owns its own driver. A
+   * deployment that selects `mongo` without either of these still has to supply
+   * a reachable connection string; nothing here weakens the startup gate.
+   */
+  persistence?: {
+    workRuns?: MongoCollectionLike;
+    connect?: MongoConnector;
+  };
 };
 
 const EXTERNAL_CAPABILITIES: EngineCapabilities = {
@@ -113,6 +129,77 @@ function modelDescriptors(input: {
           detail: 'No zero-cost inference endpoint is configured.',
         },
   }));
+}
+
+type PersistenceRuntime = {
+  driver: 'memory' | 'mongo';
+  table: WorkRunTable;
+  close: () => Promise<void>;
+};
+
+const NO_CLOSE = async (): Promise<void> => undefined;
+
+/**
+ * Opens the Work run collection named by the validated persistence setting.
+ * Every failure here is a startup failure: a deployment that asked for durable
+ * leases must not come up on process-local ones.
+ */
+async function resolveWorkRunCollection(
+  input: ComposeInput,
+  env: NodeJS.ProcessEnv,
+): Promise<MongoConnection> {
+  const settings = input.config.persistence;
+  const injected = input.persistence?.workRuns;
+  if (injected) {
+    return { collection: injected, close: NO_CLOSE };
+  }
+
+  const uri = env[settings.uriEnv]?.trim();
+  if (!uri) {
+    throw new StartupError([
+      `persistence.driver is mongo but ${settings.uriEnv} is not set; set it or select persistence.driver=memory`,
+    ]);
+  }
+
+  const connect = input.persistence?.connect ?? createMongoConnector();
+  try {
+    return await connect({
+      uri,
+      database: settings.database,
+      collection: settings.workRunsCollection,
+    });
+  } catch (error) {
+    throw new StartupError([
+      error instanceof MongoUnavailableError
+        ? error.message
+        : `persistence.driver is mongo but ${settings.database}.${settings.workRunsCollection} could not be opened: ${(error as Error).message}`,
+    ]);
+  }
+}
+
+async function buildPersistence(
+  input: ComposeInput,
+  env: NodeJS.ProcessEnv,
+): Promise<PersistenceRuntime> {
+  const settings = input.config.persistence;
+  if (settings.driver === 'memory') {
+    return { driver: 'memory', table: createInMemoryWorkRunTable(), close: NO_CLOSE };
+  }
+
+  const connection = await resolveWorkRunCollection(input, env);
+  try {
+    await ensureWorkRunIndexes(connection.collection);
+  } catch (error) {
+    await connection.close().catch(() => undefined);
+    throw new StartupError([
+      `persistence.driver is mongo but the ${settings.workRunsCollection} collection is unusable: ${(error as Error).message}`,
+    ]);
+  }
+  return {
+    driver: 'mongo',
+    table: createMongoWorkRunTable(connection.collection),
+    close: connection.close,
+  };
 }
 
 /**
@@ -186,7 +273,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     maxTokensPerDay: config.models.dailyTokenBudget,
   });
 
-  const lease = createLeaseStore(createInMemoryWorkRunTable());
+  const persistence = await buildPersistence(input, env);
+  const lease = createLeaseStore(persistence.table);
   const tasks = createTaskRepository();
   const conversations = createConversationRepository();
   const memory = createMemoryStore({ clock, maxValueLength: 20_000 });
@@ -241,7 +329,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       {
         name: 'persistence',
         required: true,
-        check: async () => ({ status: 'ok' as const, detail: 'Task and lease stores are available.' }),
+        check: async () => ({
+          status: 'ok' as const,
+          detail:
+            persistence.driver === 'mongo'
+              ? `Work run leases are stored in MongoDB (${config.persistence.database}.${config.persistence.workRunsCollection}).`
+              : 'Work run leases are process-local; a restart loses them.',
+        }),
       },
       {
         name: 'engine',
@@ -344,6 +438,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     service,
     router,
     server,
+    persistence: { driver: persistence.driver },
     start: async () => {
       const { url } = await server.listen();
       // Startup ownership verification: a task whose lease died with a previous
@@ -354,6 +449,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     stop: async () => {
       await service.shutdown();
       await server.close();
+      await persistence.close();
     },
   };
 }

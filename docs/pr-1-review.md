@@ -66,6 +66,13 @@ release, durable cancel flag, re-checked bounded sweep — plus
 semantics-faithful collection fake (`tests/unit/mongo-work-runs.test.ts`,
 including duplicate-key arbitration and a renewed row surviving a sweep).
 
+It is no longer dead code: `persistence.driver` (`memory` | `mongo`) is a validated
+setting, and `src/bootstrap/compose.ts` builds the lease store from it, bootstraps
+the indexes, and fails startup when `mongo` is selected without the connection
+string named by `persistence.uriEnv`, without a reachable collection, or without the
+optional `mongodb` package on the host. There is no silent downgrade to
+process-local leases. Covered by `tests/unit/persistence-wiring.test.ts`.
+
 Open: tasks, conversations, memory, events and notifications are still in-memory;
 no live database has been contacted, so nothing here is "production persistence
 verified". The port is structural, so a driver `Collection` satisfies it without
@@ -112,12 +119,21 @@ runner relies on the abort signal alone; a hung `run()` keeps the lease until th
 TTL expires. Not a correctness hole — the lease still fences — but it delays
 recovery and blocks a retry.
 
-### F7 — M — No prompt construction from the conversation (open)
+### F7 — M — No prompt construction from the conversation (fixed)
 
-Coderax builds the engine prompt from the stored transcript (`workChat/prompt.ts`).
-This engine passes `objective` only, so a follow-up turn has no history and the
-Native agent answers each task in isolation. Conversation continuity is therefore
-**not** achieved, despite history endpoints existing.
+Coderax builds the engine prompt from the stored transcript (`workChat/prompt.ts`);
+this engine passed `objective` only, so a follow-up turn had no history and the
+Native agent answered each task in isolation.
+
+Fixed: `src/orchestration/transcript.ts` builds history from the stored conversation
+— completed `user`/`assistant` turns only, the current objective excluded so it is
+not answered twice, oldest turns dropped before the budget, a single oversized newest
+turn clipped rather than dropped — and `src/agents/native/prompt.ts` renders it into
+every step prompt as `Earlier in this conversation:` ahead of the objective. History
+is read from the store on each run, so a resume on another replica sees the same
+exchange. Proven by `tests/integration/transcript.test.ts`: the follow-up turn's
+prompts contain the first objective and the first answer, the current objective
+appears exactly once, and the first turn is unchanged by the feature.
 
 ### F8 — L — Event vocabulary gap (fixed)
 

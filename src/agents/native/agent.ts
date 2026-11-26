@@ -7,6 +7,7 @@ import type {
 } from '../types.js';
 import type { ModelGateway, Planner } from './types.js';
 import { createDeterministicPlanner } from './planner.js';
+import { buildStepPrompt } from './prompt.js';
 
 /**
  * Coderax Native is the default and the only engine with no external dependency.
@@ -81,6 +82,7 @@ export function createNativeAgent(input: {
       }
 
       const steps = planner.plan({ objective: request.objective, maxSteps: request.maxSteps });
+      const history = request.history ?? [];
       const completed: string[] = [];
       const sections: string[] = [];
       let usageIn: number | undefined;
@@ -96,9 +98,12 @@ export function createNativeAgent(input: {
             model: request.model,
             system:
               'You are Coderax Native, the owner’s private execution agent. Answer with the concrete result for the requested step only.',
-            prompt: `Objective:\n${request.objective}\n\nCurrent step (${step.id}): ${step.title}\n\nCompleted steps: ${
-              completed.length > 0 ? completed.join(', ') : 'none'
-            }`,
+            prompt: buildStepPrompt({
+              objective: request.objective,
+              step,
+              completed,
+              history,
+            }),
             signal: request.signal,
             ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
           });

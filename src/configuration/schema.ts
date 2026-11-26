@@ -98,6 +98,21 @@ export const ExecutionConfig = z
   })
   .strict();
 
+export const PersistenceConfig = z
+  .object({
+    /**
+     * `memory` keeps leases inside one process and loses them on restart.
+     * `mongo` is the production table: a unique index arbitrates a claim, so two
+     * replicas cannot both own one conversation.
+     */
+    driver: z.enum(['memory', 'mongo']).default('memory'),
+    /** Name of the variable holding the connection string; never the string. */
+    uriEnv: z.string().trim().min(1).default('CODERAX_MONGODB_URI'),
+    database: z.string().trim().min(1).default('coderax'),
+    workRunsCollection: z.string().trim().min(1).default('work_runs'),
+  })
+  .strict();
+
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
@@ -107,9 +122,11 @@ export const EngineConfigSchema = z
     engines: EnginesConfig.default({}),
     models: ModelsConfig,
     execution: ExecutionConfig.default({}),
+    persistence: PersistenceConfig.default({}),
   })
   .strict();
 
 export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
+export type PersistenceSettings = z.infer<typeof PersistenceConfig>;

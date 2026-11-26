@@ -29,7 +29,7 @@ Status vocabulary:
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |
 | 15 | Lease TTL / retention / sweep bound | 30 s / 24 h / 100 | same constants | Preserved |
-| 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap | Preserved (verified against a fake; no live DB) |
+| 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap, selected at startup by `persistence.driver` | Preserved (verified against a fake; no live DB) |
 | 17 | Fenced terminal write for the task record | `fenceWorkRun` on the conversation row | `TaskRepository.updateFenced` on the task row | Preserved |
 | 18 | Fenced conversation write | `fenceWorkRun` | not implemented; conversations are written after settlement | Missing |
 | 19 | Persistent task records | MongoDB (conversations + messages) | in-memory `TaskRepository` | Missing (review F2) |
@@ -37,7 +37,7 @@ Status vocabulary:
 | 21 | Persistent memory | conversation/agent files | in-memory, mode-partitioned | Missing (review F2) |
 | 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing (review F2) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint (in-memory) | Simplified |
-| 24 | Prompt built from the transcript | `workChat/prompt.ts` | none; `objective` only | Missing (review F7) |
+| 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
 | 27 | OpenCode transport (SDK, Basic auth, session, prompt, abort) | `opencode/adapter.ts`, `sdk.ts`, `auth.ts` | injected transport only | Missing (review F3) |

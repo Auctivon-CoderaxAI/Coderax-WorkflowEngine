@@ -19,11 +19,25 @@ import type {
  * runner or a path to private data.
  */
 
+/**
+ * One completed earlier turn. The engine builds these from the stored
+ * conversation, so an agent sees a follow-up in context without owning storage.
+ */
+export type AgentHistoryTurn = {
+  role: 'user' | 'assistant';
+  text: string;
+};
+
 export type AgentRunRequest = {
   ownerId: string;
   tenantId: string | null;
   conversationId: string;
   objective: string;
+  /**
+   * Earlier turns, oldest first. The current objective is not repeated here: it
+   * is passed separately so an agent never answers the same message twice.
+   */
+  history?: AgentHistoryTurn[];
   /** Already resolved by the model catalogue; never a raw provider override. */
   model: ModelRef;
   mode: DataMode;
