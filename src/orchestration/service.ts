@@ -655,7 +655,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
     try {
-      const result = await deps.runner.run({
+      await deps.runner.run({
         scope: scopeOf(started.task),
         token,
         adapter: adapter.value as AgentAdapter,
@@ -691,27 +691,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             : {}),
         },
         report,
+        settle: async (current) => {
+          acceptingReports = false;
+          if (controllers.get(taskId) !== controller || current().ownershipLost) return;
+          const safeText = redactContent(text);
+          emitText(safeText);
+          await reports;
+          const { ownershipLost, outcome } = current();
+          if (controllers.get(taskId) !== controller || ownershipLost) return;
+          await settle(started.task, token,
+            outcome.kind === 'completed' ? { ...outcome, summary: redactContent(outcome.summary) }
+              : outcome.kind === 'suspended' && controller.signal.aborted ? { kind: 'cancelled' } : outcome,
+            { completedSteps: completed, text: safeText, outputs },
+          );
+        },
       });
-      acceptingReports = false;
-      if (controllers.get(taskId) !== controller) return;
-
-      if (result.ownershipLost) {
-        // Deliberately no terminal write and no notification: this run no longer
-        // owns the task, and the new owner is the only writer of its state.
-        return;
-      }
-      const safeText = redactContent(text);
-      emitText(safeText);
-      const outcome = result.outcome.kind === 'completed'
-        ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
-        : result.outcome;
-      await reports;
-      if (controllers.get(taskId) !== controller) return;
-      await settle(
-        started.task, token,
-        outcome.kind === 'suspended' && controller.signal.aborted ? { kind: 'cancelled' } : outcome,
-        { completedSteps: completed, text: safeText, outputs },
-      );
     } finally {
       if (controllers.get(taskId) === controller) controllers.delete(taskId);
     }
@@ -930,7 +924,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           await releaseLease(task, token);
           return fail('conflict', 'The suspended task changed before cancellation.');
         }
-        await reportSettlement(claimed.task, token, { kind: 'cancelled' }, now.toISOString());
+        await reportSettlement(claimed.task, token, { kind: 'cancelled' }, now.toISOString(), claimed.task.checkpoint);
         return ok({ taskId, state: 'cancelled', generation: claimed.task.generation, outcome: 'accepted' });
       }
       const outcome = await deps.lease.cancel({

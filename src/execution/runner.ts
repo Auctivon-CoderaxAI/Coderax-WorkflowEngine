@@ -29,6 +29,8 @@ export type TaskRunner = {
     adapter: AgentAdapter;
     request: AgentRunRequest;
     report: AgentReport;
+    /** Persist the outcome under the heartbeat; recheck ownership after draining reports. */
+    settle?: (current: () => RunResult) => Promise<void>;
     /** The fencing generation this run belongs to (used when it is abandoned). */
     generation?: number;
     /** The directory the run may write, quarantined if the adapter is abandoned. */
@@ -77,6 +79,7 @@ export function createTaskRunner(input: {
       adapter,
       request,
       report,
+      settle,
       generation = 0,
       workspaceRoot = '',
     }) => {
@@ -153,80 +156,90 @@ export function createTaskRunner(input: {
             }
           : { outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) }, ownershipLost: false };
 
-      try {
-        const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
-        const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
-        if (settled === null) {
-          // The adapter ignored the abort. Its eventual rejection must not become
-          // an unhandled one, and its result must never be applied: the lease and
-          // the task record already say this run is over.
-          void running.catch(() => undefined);
-          if (!ownershipLost) {
-            input.onAbandoned?.({ scope, token, generation, workspaceRoot });
+      const runAdapter = async (): Promise<RunResult> => {
+        try {
+          const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
+          const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
+          if (settled === null) {
+            // The adapter ignored the abort. Its eventual rejection must not become
+            // an unhandled one, and its result must never be applied: the lease and
+            // the task record already say this run is over.
+            void running.catch(() => undefined);
+            if (!ownershipLost) {
+              input.onAbandoned?.({ scope, token, generation, workspaceRoot });
+            }
+            return cancelled(true);
           }
-          return cancelled(true);
-        }
-        const outcome = settled.outcome;
-        if (ownershipLost) {
+          const outcome = settled.outcome;
+          if (ownershipLost) {
+            return {
+              outcome: {
+                kind: 'interrupted',
+                detail: 'Execution ownership was superseded by another run.',
+              },
+              ownershipLost: true,
+            };
+          }
+          if (cancelRequested || (!outcome.ok && outcome.code === 'cancelled')) {
+            return { outcome: { kind: 'cancelled' }, ownershipLost: false };
+          }
+          if (outcome.ok) {
+            return {
+              outcome: {
+                kind: 'completed',
+                summary: outcome.summary,
+                ...(outcome.usage ? { usage: outcome.usage } : {}),
+              },
+              ownershipLost: false,
+            };
+          }
+          if (outcome.code === 'approval_required') {
+            return {
+              outcome: { kind: 'suspended', detail: outcome.detail },
+              ownershipLost: false,
+            };
+          }
           return {
             outcome: {
-              kind: 'interrupted',
-              detail: 'Execution ownership was superseded by another run.',
+              kind: 'failed',
+              code: outcome.code,
+              detail: outcome.detail,
+              retryable: outcome.retryable,
             },
-            ownershipLost: true,
+            ownershipLost: false,
           };
-        }
-        if (cancelRequested || (!outcome.ok && outcome.code === 'cancelled')) {
-          return { outcome: { kind: 'cancelled' }, ownershipLost: false };
-        }
-        if (outcome.ok) {
+        } catch {
+          if (ownershipLost) {
+            return {
+              outcome: {
+                kind: 'interrupted',
+                detail: 'Execution ownership was superseded by another run.',
+              },
+              ownershipLost: true,
+            };
+          }
+          // An adapter that throws on abort was cancelled, not broken. Reporting a
+          // provider failure here would tell the owner to retry something they
+          // deliberately stopped.
+          if (cancelRequested) return { outcome: { kind: 'cancelled' }, ownershipLost: false };
           return {
             outcome: {
-              kind: 'completed',
-              summary: outcome.summary,
-              ...(outcome.usage ? { usage: outcome.usage } : {}),
+              kind: 'failed',
+              code: 'provider_error',
+              detail: 'The agent failed unexpectedly.',
+              retryable: false,
             },
             ownershipLost: false,
           };
         }
-        if (outcome.code === 'approval_required') {
-          return {
-            outcome: { kind: 'suspended', detail: outcome.detail },
-            ownershipLost: false,
-          };
-        }
-        return {
-          outcome: {
-            kind: 'failed',
-            code: outcome.code,
-            detail: outcome.detail,
-            retryable: outcome.retryable,
-          },
-          ownershipLost: false,
-        };
-      } catch {
-        if (ownershipLost) {
-          return {
-            outcome: {
-              kind: 'interrupted',
-              detail: 'Execution ownership was superseded by another run.',
-            },
-            ownershipLost: true,
-          };
-        }
-        // An adapter that throws on abort was cancelled, not broken. Reporting a
-        // provider failure here would tell the owner to retry something they
-        // deliberately stopped.
-        if (cancelRequested) return { outcome: { kind: 'cancelled' }, ownershipLost: false };
-        return {
-          outcome: {
-            kind: 'failed',
-            code: 'provider_error',
-            detail: 'The agent failed unexpectedly.',
-            retryable: false,
-          },
-          ownershipLost: false,
-        };
+      };
+
+      try {
+        const result = await runAdapter();
+        const current = (): RunResult => ownershipLost ? cancelled(false)
+          : cancelRequested && result.outcome.kind === 'suspended' ? cancelled(false) : result;
+        await settle?.(current);
+        return current();
       } finally {
         clearInterval(timer);
         if (graceTimer) clearTimeout(graceTimer);

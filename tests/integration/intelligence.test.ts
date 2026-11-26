@@ -55,7 +55,7 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
     const writes: string[] = [];
     tasks.updateFenced = async (input) => {
       if (input.patch.checkpoint && !input.patch.state) {
-        await new Promise(resolve => setTimeout(resolve, 40));
+        await new Promise(resolve => setTimeout(resolve, 3_200));
         writes.push('report');
       }
       if (input.patch.state === 'awaiting_approval') writes.push('suspend');
@@ -104,6 +104,7 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
       return status.ok && status.value.state === 'awaiting_approval' &&
         status.value.generation > awaiting.generation ? status.value : null;
     });
+    assert.deepEqual((await tasks.get(submitted.value.taskId))?.checkpoint.completedSteps, ['step-1']);
     const permissions = await started.app.service.permissions(principal, submitted.value.taskId);
     assert.ok(permissions.ok);
     const next = permissions.value.requests.find(entry => entry.decision === 'pending');
@@ -189,8 +190,12 @@ test('tools, routing and retrieval are substantive and zero-cost', async () => {
   }
 });
 
-test('the owner can cancel a suspended task without executing its pending action', async () => {
-  const started = await startTestApp({ gateway: scriptedGateway() });
+for (const partial of ['', 'First step complete.']) test(`suspended cancellation preserves history (partial: ${Boolean(partial)})`, async () => {
+  const gateway = scriptedGateway();
+  const complete = gateway.complete;
+  gateway.complete = request => partial && request.prompt.includes('Current step (step-1):')
+    ? Promise.resolve({ text: JSON.stringify({ final: partial }) }) : complete(request);
+  const started = await startTestApp({ gateway });
   try {
     const submitted = await started.app.service.submitWork(principal, {
       objective: 'Write the report', mode: 'cloud', requireApproval: true,
@@ -204,6 +209,8 @@ test('the owner can cancel a suspended task without executing its pending action
     const cancelled = await started.app.service.cancelTask(principal, taskId);
     assert.ok(cancelled.ok);
     assert.equal(cancelled.value.state, 'cancelled');
+    const messages = await started.app.dependencies.conversations.messages(submitted.value.conversationId);
+    assert.deepEqual(messages.filter(m => m.role === 'assistant').map(m => m.text), partial ? [partial] : []);
     await assert.rejects(readFile(path.join(started.workspace.cloudRoot, 'report.txt')), { code: 'ENOENT' });
   } finally {
     await started.close();
@@ -238,7 +245,7 @@ test('cancellation after the runner returns wins over suspension while reports d
   const started = await startTestApp({ gateway: scriptedGateway() });
   let releaseReports = (): void => {};
   const reports = new Promise<void>(resolve => { releaseReports = resolve; });
-  let runnerReturned = false;
+  let settlementStarted = false;
   try {
     const { tasks, runner, scheduler } = started.app.dependencies;
     const update = tasks.updateFenced;
@@ -247,17 +254,16 @@ test('cancellation after the runner returns wins over suspension while reports d
       return update(input);
     };
     const run = runner.run;
-    runner.run = async (input) => {
-      const result = await run(input);
-      runnerReturned = true;
-      return result;
-    };
+    runner.run = input => run({ ...input, settle: async current => {
+      settlementStarted = true;
+      await input.settle?.(current);
+    } });
     const submitted = await started.app.service.submitWork(principal, {
       objective: 'Write the report', mode: 'cloud', requireApproval: true,
     });
     assert.ok(submitted.ok);
     const { taskId } = submitted.value;
-    await waitFor(async () => runnerReturned || null);
+    await waitFor(async () => settlementStarted || null);
     const cancelled = await started.app.service.cancelTask(principal, taskId);
     assert.equal(cancelled.ok && cancelled.value.outcome, 'accepted');
     releaseReports();
