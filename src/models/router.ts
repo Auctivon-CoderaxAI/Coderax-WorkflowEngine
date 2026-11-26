@@ -133,9 +133,6 @@ type ProviderRuntime = {
   latencyMs: number;
   verifiedFree: number;
   quotaUntil: Date | null;
-  /** The minute bucket the counter below belongs to. */
-  minuteWindow: number;
-  requestsThisMinute: number;
 };
 
 type ModelRuntime = {
@@ -170,20 +167,6 @@ function clamp(value: number, min: number, max: number): number {
 function ewma(previous: number, sample: number): number {
   if (previous <= 0) return sample;
   return previous * 0.7 + sample * 0.3;
-}
-
-/**
- * Count dispatched attempts per provider per minute. It is what the routing
- * report publishes as `requestsThisMinute`: observed traffic on this replica,
- * not a claim about the provider's own bookkeeping.
- */
-function noteRequest(provider: ProviderRuntime, at: Date): void {
-  const minute = Math.floor(at.getTime() / 60_000);
-  if (provider.minuteWindow !== minute) {
-    provider.minuteWindow = minute;
-    provider.requestsThisMinute = 0;
-  }
-  provider.requestsThisMinute += 1;
 }
 
 function sanitizeDetail(message: string): string {
@@ -257,8 +240,6 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       latencyMs: 0,
       verifiedFree: 0,
       quotaUntil: null,
-      minuteWindow: -1,
-      requestsThisMinute: 0,
     });
   }
 
@@ -791,6 +772,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
     let budgetRefusal: string | null = null;
+    let lastDispatchFailure: ProviderError | null = null;
     const executed = planned.fallbackAllowed
       ? planned.candidates.slice(0, 1 + maxFallbacks)
       : planned.candidates.slice(0, 1);
@@ -825,15 +807,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
       // Reserve the daily budget before consuming provider rate-limit capacity.
       // A request the owner cannot afford must not make the provider unusable.
-      // The task scope is reserved in the same atomic step as the owner scope:
-      // a multi-step or multi-agent task cannot spend the owner's whole day just
-      // because each individual step looks affordable.
       const reserved = await budget.reserve({
         ownerId: request.ownerId,
         at,
         inputTokens: estimated,
         outputTokens: output,
-        taskId: request.taskId ?? null,
       });
       if (!reserved.allowed) {
         if (reserved.reason === 'tokens' && planned.fallbackAllowed) {
@@ -871,16 +849,13 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         continue;
       }
 
-      noteRequest(provider, at);
       attempts.push(runtime.state.ref);
       const started = performance.now();
-      let dispatched = false;
       const signal = AbortSignal.any([
         request.signal,
         AbortSignal.timeout(provider.settings.requestTimeoutMs),
       ]);
       try {
-        dispatched = true;
         const completion = await provider.adapter.complete({
           model: runtime.state.ref,
           system: request.system,
@@ -908,12 +883,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         };
       } catch (error) {
         acquired.release();
-        // The provider may already have received this request. Charge the
-        // request slot, but return the token allowance that was not reported.
-        // The provider may have received this request. With no usage report the
-        // ledger settles at the reserved amount rather than refunding allowance
-        // that could already have been consumed.
-        await budget.release(reserved.reservation.id, { dispatched });
+        // Dispatch may have consumed tokens even though no usage was returned.
+        // Charge the reservation; never refund an attempt that left the process.
+        await budget.release(reserved.reservation.id, { dispatched: true });
         const providerError =
           error instanceof ProviderError
             ? error
@@ -931,13 +903,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           runtimeAdmission,
           providerAdmission,
         );
-        lastFailure = providerError;
+        lastDispatchFailure = providerError;
       }
     }
 
-    if (budgetRefusal !== null) {
+    if (budgetRefusal !== null && lastDispatchFailure === null) {
       throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
     }
+    lastFailure = lastDispatchFailure ?? lastFailure;
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null
@@ -957,12 +930,13 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
     let budgetRefusal: string | null = null;
+    let lastDispatchFailure: ProviderError | null = null;
 
     for (const candidate of executed) {
       if (request.signal.aborted) {
         throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
       }
-      const runtime = models.get(modelKey(candidate.model.ref));
+      let runtime = models.get(modelKey(candidate.model.ref));
       if (!runtime) continue;
       const provider = providers.get(runtime.state.ref.providerId);
       if (!provider) continue;
@@ -986,15 +960,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
       // Daily budget admission comes first so a denied request cannot consume a
       // provider request token or claim a half-open probe.
-      // The task scope is reserved in the same atomic step as the owner scope:
-      // a multi-step or multi-agent task cannot spend the owner's whole day just
-      // because each individual step looks affordable.
       const reserved = await budget.reserve({
         ownerId: request.ownerId,
         at,
         inputTokens: estimated,
         outputTokens: output,
-        taskId: request.taskId ?? null,
       });
       if (!reserved.allowed) {
         if (reserved.reason === 'tokens' && planned.fallbackAllowed) {
@@ -1028,7 +998,6 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
 
       let settled = false;
       let providerStarted = false;
-      noteRequest(provider, at);
       attempts.push(runtime.state.ref);
       let emitted = false;
       let usage: Usage | undefined;
@@ -1069,9 +1038,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           !revalidated ||
           !modelAvailability(revalidated, revalidatedAt).available ||
           revalidatedPolicy === null ||
-          !revalidatedPolicy.allowed
+          !revalidatedPolicy.allowed ||
+          output > outputBudget(request, revalidated.state) ||
+          !contextFits({ state: revalidated.state, estimatedInputTokens: estimated, maxOutputTokens: output }) ||
+          ((request.tools?.length ?? 0) > 0 && !revalidated.state.capabilities.toolCalling) ||
+          (request.messages?.some((message) => (message.images?.length ?? 0) > 0) &&
+            !revalidated.state.capabilities.vision)
         ) {
-          acquired.release();
+          acquired.release({ dispatched: false });
           await budget.release(reserved.reservation.id);
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
@@ -1083,7 +1057,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           );
           continue;
         }
+        if (signal.aborted) {
+          throw new ProviderError('cancelled', 'The inference stream was cancelled before dispatch.', { retryable: false });
+        }
         providerStarted = true;
+        runtime = revalidated;
         const events = provider.adapter.stream
           ? provider.adapter.stream(providerRequest)
           : synthesize(provider.adapter.complete(providerRequest));
@@ -1104,25 +1082,20 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         recordSuccess(runtime, provider, latencyMs, runtimeAdmission, providerAdmission);
         return;
       } catch (error) {
-        acquired.release();
+        acquired.release({ dispatched: providerStarted });
         const providerError =
           error instanceof ProviderError
             ? error
             : new ProviderError('network', 'The inference provider stream failed.', {
                 retryable: true,
               });
+        // Output can have been generated upstream even before the first local
+        // event. Only a confirmed pre-dispatch exit can return the reservation.
+        // Only a confirmed pre-dispatch exit may return the allowance; an
+        // attempt that reached the provider keeps its charge.
+        await budget.release(reserved.reservation.id, { dispatched: providerStarted });
+        settled = true;
         if (providerError.kind === 'cancelled' || request.signal.aborted) {
-          if (emitted) {
-            await budget.settle(
-              reserved.reservation.id,
-              usage ?? { inputTokens: estimated, outputTokens: output },
-            );
-          } else {
-            // The attempt may have reached the provider, so retain the request
-            // charge while returning the unused token allowance.
-            await budget.release(reserved.reservation.id, { dispatched: providerStarted });
-          }
-          settled = true;
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
           throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
@@ -1135,20 +1108,13 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         );
         if (emitted) {
           // Output already reached the caller; switching models would duplicate it.
-          await budget.settle(
-            reserved.reservation.id,
-            usage ?? { inputTokens: estimated, outputTokens: output },
-          );
-          settled = true;
           throw new ModelRoutingError(
             'engine_unavailable',
             'The provider stream failed after output started; it cannot be safely replaced.',
             false,
           );
         }
-        await budget.release(reserved.reservation.id, { dispatched: providerStarted });
-        settled = true;
-        lastFailure = providerError;
+        lastDispatchFailure = providerError;
       } finally {
         // A consumer can stop iterating before the provider finishes. Release the
         // provider slot and account for the work already started; otherwise the
@@ -1159,12 +1125,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           providerAbort.abort();
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
-          acquired.release();
+          acquired.release({ dispatched: providerStarted });
           if (providerStarted) {
-            await budget.settle(
-              reserved.reservation.id,
-              usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 },
-            );
+            await budget.settle(reserved.reservation.id, usage ?? {});
           } else {
             await budget.release(reserved.reservation.id);
           }
@@ -1172,9 +1135,10 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
     }
 
-    if (budgetRefusal !== null) {
+    if (budgetRefusal !== null && lastDispatchFailure === null) {
       throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
     }
+    lastFailure = lastDispatchFailure ?? lastFailure;
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null
@@ -1358,10 +1322,6 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             : null,
         circuit: provider.circuit.state(at),
         requestsPerMinute: provider.settings.requestsPerMinute,
-        requestsThisMinute:
-          provider.minuteWindow === Math.floor(at.getTime() / 60_000)
-            ? provider.requestsThisMinute
-            : 0,
       })),
       models: [...models.values()].map((runtime): ModelHealth => ({
         ref: runtime.state.ref,
@@ -1387,10 +1347,10 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     // and it must not require cloud authorization: a deployment approved only for
     // private processing is usable, while one with no authorized mode is not.
     const at = now();
-    const readiness = { operation: 'chat' as const, routing: 'auto' as const };
-    return (
-      eligible({ mode: 'cloud', ...readiness }, at).length > 0 ||
-      eligible({ mode: 'private', ...readiness }, at).length > 0
+    return (['chat', 'work'] as const).some((operation) =>
+      (['cloud', 'private'] as const).some((mode) =>
+        eligible({ mode, operation, routing: 'auto' }, at).length > 0,
+      ),
     );
   }
 
@@ -1414,7 +1374,6 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       if (timer !== null) clearInterval(timer);
       timer = null;
     },
-    supportsNativeTools: true,
     complete: async (request) => {
       const estimated = estimateRequest(request);
       const planned = plan({

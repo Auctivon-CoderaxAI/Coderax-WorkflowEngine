@@ -173,5 +173,10 @@ export type AgentAdapter = {
    * admission; this may contact the agent. Omitted when no honest probe exists.
    */
   probe?: () => Promise<{ ok: boolean; detail: string }>;
-  run: (request: AgentRunRequest, report: AgentReport) => Promise<AgentRunOutcome>;
+  run: (
+    request: AgentRunRequest,
+    report: AgentReport,
+    /** External adapters call this after probing and immediately before sending content. */
+    admitDispatch?: () => boolean,
+  ) => Promise<AgentRunOutcome>;
 };

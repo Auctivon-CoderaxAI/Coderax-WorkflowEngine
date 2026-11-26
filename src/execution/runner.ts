@@ -39,6 +39,11 @@ export type TaskRunner = {
     report: AgentReport;
     /** Persist the outcome under the heartbeat; recheck ownership after draining reports. */
     settle?: (current: () => RunResult) => Promise<void>;
+    /**
+     * Called by the adapter immediately before it leaves the process. False means
+     * the dispatch was refused, so its reservation must be released in full.
+     */
+    admitDispatch?: () => boolean;
     /** The fencing generation this run belongs to (used when it is abandoned). */
     generation?: number;
     /** The directory the run may write, quarantined if the adapter is abandoned. */
@@ -88,6 +93,7 @@ export function createTaskRunner(input: {
       request,
       report,
       settle,
+      admitDispatch,
       generation = 0,
       workspaceRoot = '',
     }) => {
@@ -166,7 +172,11 @@ export function createTaskRunner(input: {
 
       const runAdapter = async (): Promise<RunResult> => {
         try {
-          const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
+          const running = adapter.run(
+            { ...request, signal: controller.signal },
+            guardedReport,
+            admitDispatch,
+          );
           const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
           if (settled === null) {
             // The adapter ignored the abort. Its eventual rejection must not become

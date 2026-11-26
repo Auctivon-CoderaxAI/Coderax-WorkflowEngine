@@ -2,7 +2,15 @@ import type { ConversationRecord, StoredMessage } from '../domain.js';
 import type { Conversation, ConversationList, Message } from '@coderax/contracts';
 import type { AgentId, DataMode } from '@coderax/contracts';
 
+export class ConversationModeConflict extends Error {
+  constructor() {
+    super('That conversation belongs to a different data mode.');
+    this.name = 'ConversationModeConflict';
+  }
+}
+
 export type ConversationRepository = {
+  /** Reuse an ID only when the stored owner and data mode both match. */
   ensure: (record: ConversationRecord) => Promise<ConversationRecord>;
   get: (ownerId: string, conversationId: string) => Promise<ConversationRecord | null>;
   list: (ownerId: string) => Promise<ConversationList>;
@@ -36,7 +44,8 @@ export function createConversationRepository(): ConversationRepository {
         if (existing.ownerId !== record.ownerId) {
           throw new Error('conversation identity collision across owners');
         }
-        return existing;
+        if (existing.mode !== record.mode) throw new ConversationModeConflict();
+        return { ...existing };
       }
       conversations.set(record.conversationId, { ...record });
       messages.set(record.conversationId, []);

@@ -226,6 +226,12 @@ export function createBudgetLedger(input: {
     },
 
     settle: async (reservationId, usage) => {
+      // A settlement with no reported usage is not proof that nothing was spent.
+      // The reservation becomes the charge, exactly as a dispatched release does.
+      if (usage.inputTokens === undefined && usage.outputTokens === undefined) {
+        await input.store.release({ id: reservationId, dispatched: true, now: new Date() });
+        return;
+      }
       await input.store.settle({ id: reservationId, usage, now: new Date() });
     },
 

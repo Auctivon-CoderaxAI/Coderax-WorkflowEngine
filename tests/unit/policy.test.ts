@@ -441,3 +441,12 @@ test('a private-approved provider actually completes without leaking to the erro
   assert.equal(hosted.calls, 1);
   assert.equal(hosted.requests[0]?.prompt, 'PRIVATE-RETRIEVAL-CHUNK-4871');
 });
+
+test('a matching location grant can follow another grant for the same operation and mode', () => {
+  const policy = createProviderPolicyRegistry([
+    policyFor('fixture', { grants: [grant('chat', 'private', 'us'), grant('chat', 'private')] }),
+  ]);
+  assert.equal(policy.evaluate({
+    providerId: 'fixture', mode: 'private', operation: 'chat', at: new Date('2026-11-26T12:00:00Z'),
+  }).allowed, true);
+});

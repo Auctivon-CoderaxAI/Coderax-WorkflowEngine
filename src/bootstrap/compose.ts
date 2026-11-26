@@ -15,7 +15,11 @@ import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js'
 import { createGeminiProvider } from '../models/providers/gemini.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
 import { createModelRouter, type ModelRouter } from '../models/router.js';
-import { createProviderPolicyRegistry, type ProviderPolicy } from '../models/policy.js';
+import {
+  createProviderPolicyRegistry,
+  type ProviderPolicy,
+  type ProviderPolicyRegistry,
+} from '../models/policy.js';
 import type {
   BenchmarkScore,
   FreeTierAttestation,
@@ -62,6 +66,8 @@ export type Application = {
   server: HttpServer;
   /** The single router, exposed for the benchmark harness and health tests. */
   modelRouter: ModelRouter;
+  /** The one provider policy registry; the benchmark must ask before spending. */
+  providerPolicy: ProviderPolicyRegistry;
   /** Which lease table the validated persistence setting selected. */
   persistence: { driver: 'memory' | 'mongo' };
   /** Everything is validated before this resolves. */
@@ -668,7 +674,24 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         check: async () => {
           const available = agents
             .list()
-            .agents.filter((agent) => agent.availability.available);
+            .agents.filter((agent) => {
+              if (!agent.availability.available) return false;
+              // An external engine still needs a verified route: it answers with a
+              // model the router resolved, so a transport alone is not readiness.
+              if (agent.engine === 'native') return true;
+              return (['cloud', 'private'] as const).some(
+                (mode) =>
+                  policy.evaluate({
+                    providerId: agent.engine,
+                    operation: 'external_agent',
+                    mode,
+                    at: clock.now(),
+                  }).allowed &&
+                  (['chat', 'work'] as const).some(
+                    (operation) => models.resolve(null, mode, operation).ok,
+                  ),
+              );
+            });
           return available.length > 0
             ? {
                 status: 'ok' as const,
@@ -733,8 +756,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
   const infrastructure: InfrastructureDependencies = container.dependencies;
 
+  // An external engine is a separate processing authority: it needs its own
+  // policy grant for the exact mode, exactly like a hosted provider does.
   const service = createApplicationService({
     ...infrastructure,
+    externalPolicy: (engine, mode) =>
+      policy.evaluate({ providerId: engine, operation: 'external_agent', mode, at: clock.now() }),
   });
 
   const registry = createRouteRegistry();
@@ -786,6 +813,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     router,
     server,
     modelRouter: modelRouter,
+    providerPolicy: policy,
     persistence: { driver: persistence.driver },
     start: async () => {
       const { url } = await server.listen();
