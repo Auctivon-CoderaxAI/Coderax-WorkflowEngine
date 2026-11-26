@@ -290,7 +290,10 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
       parameters: { url: 'string', method: 'GET|POST' },
       schema: z
         .object({
-          url: z.string().url().max(2000),
+          url: z.string().url().max(2000).refine(
+            (url) => URL.canParse(url) && new URL(url).protocol === 'https:',
+            'The URL must use HTTPS.',
+          ),
           method: z.enum(['GET', 'POST']).default('GET'),
           body: z.string().max(20_000).optional(),
         })

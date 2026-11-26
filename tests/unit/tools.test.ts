@@ -26,13 +26,13 @@ function context(root: string): ToolContext {
 
 const gate = (decision: ApprovalDecision) => ({ ensure: async () => ({ decision }) });
 
-function runtime() {
+function runtime(networkEnabled = false) {
   return createToolRuntime({
     tools: createBuiltinTools({
       shellEnabled: false,
       allowedCommands: [],
-      networkEnabled: false,
-      allowedHosts: [],
+      networkEnabled,
+      allowedHosts: ['allowed.example'],
       maxOutputBytes: 10_000,
       commandTimeoutMs: 1_000,
       maxSearchFiles: 100,
@@ -144,6 +144,31 @@ test('cancellation during approval prevents an approved write', async () => {
     });
     assert.equal(!outcome.result.ok && outcome.result.code, 'cancelled');
     assert.throws(() => readFileSync(path.join(space.root, 'report.txt')), { code: 'ENOENT' });
+  } finally {
+    space.cleanup();
+  }
+});
+
+test('the HTTP tool rejects plaintext before approval and dispatches approved HTTPS', async (t) => {
+  const space = workspace();
+  try {
+    const tools = runtime(true);
+    const fetch = t.mock.method(globalThis, 'fetch', async () => new Response('verified'));
+    const ensure = t.mock.fn(async () => ({ decision: 'granted' as const }));
+    const call = (url: string) => tools.call({
+      name: 'http.fetch', arguments: { url },
+      context: context(space.root), gate: { ensure },
+    });
+
+    const refused = await call('http://allowed.example/resource');
+    assert.equal(!refused.result.ok && refused.result.code, 'validation_failed');
+    assert.equal(ensure.mock.callCount(), 0);
+    assert.equal(fetch.mock.callCount(), 0);
+
+    const approved = await call('https://allowed.example/resource');
+    assert.equal(approved.result.ok, true);
+    assert.equal(ensure.mock.callCount(), 1);
+    assert.equal(fetch.mock.callCount(), 1);
   } finally {
     space.cleanup();
   }
