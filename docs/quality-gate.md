@@ -108,32 +108,42 @@ reintroduce it only with a caller and a test.
 ## Reconciliation with the active implementation stack
 
 The gate is based on `main` at `808dfd3` and does not modify any implementation
-branch. The active branches are stacked, not independent:
+branch. The active branches are stacked, not independent, and several carry older
+router implementations at the same path. Heads inspected for this reconciliation:
 
-| PR | Branch | Relationship | Gate interaction |
-| --- | --- | --- | --- |
-| #4 | `feat/zero-cost-model-router` | base router | supplies the one model-routing authority and provider layer |
-| #2 | `feat/intelligence-core` | contains router work | supplies durable budget store; cross-replica quota lane waits for it |
-| #5 | `feat/execution-supervisor` | contains router + intelligence merge | supplies the one execution supervisor and termination evidence |
-| #3 | `feat/native-reasoning-planner` | independent | replaces `planner.ts` with `plan.ts`; one planner declaration survives |
-| — | `feat/durable-events-integration` | independent | adds the event log; only the service writes task/event state |
-| — | `feat/multimodal-creative-intelligence` | contains router work | adds media providers under the one provider boundary |
-| — | `security/remediation-808dfd3` | parallel supervisor implementation | defines `createRunSupervisor`; must reconcile with PR #5 before either merges |
-| — | release certification | adds `release-verify.yml` | runs this `verify` then the cross-repo compatibility matrix; complementary, not competing |
+| PR | Branch | Head | Relationship | Gate interaction |
+| --- | --- | --- | --- | --- |
+| #4 | `feat/zero-cost-model-router` | `b6e002b` | authoritative router (`createModelRouter`, 1435 lines) | supplies the one model-routing authority and provider layer |
+| #2 | `feat/intelligence-core` | `e14e4b7` | carries an older 473-line `createRouter` | **must rebase onto #4 and delete its router copy**; supplies durable budget store |
+| #5 | `feat/execution-supervisor` | `13d4b4f` | carries the older router **and** `createModelCatalog` | **fails `single-model-authority` until it rebases onto #4**; then supplies the one supervisor |
+| #3 | `feat/native-reasoning-planner` | `90b87db` | independent | replaces `planner.ts` with `plan.ts`; one planner declaration survives |
+| — | `security/remediation` | `4b2ea75` | defines `createRunSupervisor` | **competing supervisor**; must converge with PR #5 before either merges |
+| — | `contract/authoritative-v1.1` | `ea66028` | bumps contract/SDK to 1.1.0 and adds schedules, artifacts and memory routes | **must add SDK probes after this gate lands**; `gate:sdk` will name every missing operation |
+| — | `feat/durable-events-recovery` | `db289d2` | durable event log and quarantine | only the service may write task/event state |
+| — | `feat/persistent-records` | `b5818f4` | durable stores, retention, checkpoints | per-domain store uniqueness and wiring apply |
+| — | `feat/read-model-api` | `4626b84` | owner-scoped read models | registration, SDK and capability-registry checks apply |
+| — | `feat/multimodal-intelligence-core` | `5dd5e66` | media intake and creative artifacts | providers stay under the one provider boundary |
+| — | `feat/native-game-studio-gaming-agent` | `94a71e3` | games capability | routes and capabilities must register |
+| — | release certification | `6e70c5d` | adds `release-verify.yml` | runs this `verify` then the cross-repo matrix; complementary |
 
 Merge order that keeps every required check meaningful:
 
 1. Security remediation (including the approved Zod decision) lands first.
 2. This quality-gate PR lands; it is green on the remediated dependency tree.
-3. Router (#4), then supervisor (#5), then intelligence (#2), planner (#3),
-   durable events and multimodal.
-4. Release certification evaluates the resulting `main` commit.
+3. Router (#4) lands as the authoritative routing implementation.
+4. #2 and #5 rebase onto #4 and remove the older router/catalog; the gate rejects
+   either branch in its current shape. Security remediation and #5 converge on one
+   supervisor.
+5. Planner (#3), contract v1.1 (with SDK probes), durable events, persistent
+   records, read models, multimodal and games follow.
+6. Release certification evaluates the resulting `main` commit.
 
-A second quality-gate branch, `ci/permanent-quality-gates`, exists. It carries a
-Zod 4 major upgrade and a parallel gate implementation; this branch supersedes the
-gate portion and does **not** adopt the dependency upgrade, which belongs to the
-security owner. Two gates must not merge, and the earlier branch should be closed
-as superseded once this one is reviewed.
+A second quality-gate branch, `ci/permanent-quality-gates` (`7ce5cd6`), exists. It
+carries a Zod 4 major upgrade and a parallel gate implementation; this branch
+supersedes the gate portion and does **not** adopt the dependency upgrade, which
+belongs to the security owner. Two gates must not merge, and the earlier branch
+should be closed as superseded once this one is reviewed. Its zod 4 change is
+useful evidence for the security owner, not a competing upgrade to land here.
 
 ## Fake MongoDB versus real MongoDB
 
@@ -161,10 +171,12 @@ Every job uses `ubuntu-latest` with pinned `actions/checkout` and
 third-party paid action and no matrix expansion. The MongoDB service container is
 a standard GitHub service on the hosted runner.
 
-`docs/governance.md` records that this account's hosted jobs have previously not
-started because of a billing restriction. If that persists, the workflow definition
-is still the gate but the jobs do not run; the pull request says so and includes the
-local command and result. Purchasing minutes is prohibited by the charter.
+`docs/governance.md` records the hosted-job problem. On 2026-11-26 the public
+GitHub API reports **zero workflow runs at the head of every open PR** (#2–#5) and
+zero at this branch's head, even though the repository is public. The workflow
+definition is still the gate, but hosted jobs are not executing; the pull request
+must say so and include the local command and result. Purchasing minutes or
+enabling paid Actions is prohibited by the charter.
 
 ## Dependency vulnerability state: CVE-2023-54404 / GHSA-mrhx-c7xc-m3w5
 

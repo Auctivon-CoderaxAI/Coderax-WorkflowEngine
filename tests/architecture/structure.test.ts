@@ -57,6 +57,10 @@ test('the authority rule rejects competing model routers', () => {
       path: 'src/models/legacy.ts',
       text: 'export function createRouter(input: Options): Router { return input as never; }',
     },
+    {
+      path: 'src/models/catalog.ts',
+      text: 'export function createModelCatalog(input: Options): ModelCatalog { return input as never; }',
+    },
   ]);
   assert.equal(findings.filter((finding) => finding.rule === 'single-model-authority').length, 1);
 });
