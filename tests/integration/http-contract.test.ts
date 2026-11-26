@@ -401,50 +401,57 @@ test('a durable schedule fires one Work task and cannot be cancelled after it se
   }
 });
 
-test('artifact bytes are stored, listed and verified by digest', async () => {
+test('durable artifact versions are stored, listed and verified by sha256', async () => {
   const started = await startTestApp();
   try {
     const api = client(started.url);
-    const accepted = await api.submitWork({
-      objective: 'Artifact HTTP work',
-      mode: 'cloud',
-      agent: 'coderax',
-      requireApproval: true,
-    });
-    await waitFor(async () => {
-      const current = await api.task(accepted.taskId);
-      return current.state === 'completed' ? current : null;
-    });
-
     const content = Buffer.from('artifact bytes that must round-trip\n', 'utf8');
-    const record = await api.uploadArtifact(accepted.taskId, {
-      path: 'notes/release.txt',
+    const uploaded = await api.uploadArtifact({
+      filename: 'release.txt',
       mediaType: 'text/plain',
+      kind: 'document',
+      mode: 'cloud',
       contentBase64: content.toString('base64'),
     });
-    assert.equal(record.bytes, content.length);
-    assert.match(record.digest, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(uploaded.artifact.bytes, content.length);
+    assert.match(uploaded.artifact.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(uploaded.artifact.version, 1);
 
-    const listed = await api.artifacts(accepted.taskId);
+    const appended = await api.uploadArtifactVersion(uploaded.artifact.artifactId, {
+      filename: 'release-v2.txt',
+      mediaType: 'text/plain',
+      kind: 'document',
+      mode: 'cloud',
+      contentBase64: Buffer.from('second version\n', 'utf8').toString('base64'),
+    });
+    assert.equal(appended.artifact.version, 2);
+    assert.equal(appended.artifact.versions, 2);
+
+    const listed = await api.artifacts({ mode: 'cloud' });
     assert.equal(listed.artifacts.length, 1);
-    assert.equal(listed.artifacts[0]?.artifactId, record.artifactId);
+    assert.equal(listed.artifacts[0]?.artifactId, uploaded.artifact.artifactId);
 
-    const metadata = await api.artifact(record.artifactId);
-    assert.equal(metadata.digest, record.digest);
+    const metadata = await api.artifact(uploaded.artifact.artifactId, 'cloud');
+    assert.equal(metadata.version, 2);
+    const versions = await api.artifactVersions(uploaded.artifact.artifactId, 'cloud');
+    assert.deepEqual(versions.versions.map((entry) => entry.version), [1, 2]);
 
-    const fetched = await api.artifactContent(record.artifactId);
-    assert.equal(fetched.digest, record.digest);
-    assert.equal(Buffer.from(fetched.contentBase64, 'base64').toString('utf8'), content.toString('utf8'));
+    const fetched = await api.downloadArtifact(uploaded.artifact.artifactId, {
+      mode: 'cloud',
+      version: 1,
+    });
+    assert.equal(fetched.contentBase64, content.toString('base64'));
 
     await assert.rejects(
-      () => api.artifact('art_missing'),
+      () => api.artifact('art_missing', 'cloud'),
       (error: unknown) => error instanceof CoderaxApiError && error.status === 404,
     );
     await assert.rejects(
       () =>
-        api.uploadArtifact(accepted.taskId, {
-          path: '../escape.txt',
-          mediaType: 'text/plain',
+        api.uploadArtifact({
+          filename: 'active.html',
+          mediaType: 'text/html' as never,
+          mode: 'private',
           contentBase64: 'aGk=',
         }),
       (error: unknown) => error instanceof CoderaxApiError && error.status === 400,

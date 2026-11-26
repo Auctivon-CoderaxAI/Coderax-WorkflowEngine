@@ -170,6 +170,7 @@ export async function startTestApp(options: {
   provider?: ProviderAdapter;
   config?: Record<string, unknown>;
   externals?: Parameters<typeof composeApplication>[0]['externals'];
+  persistence?: Parameters<typeof composeApplication>[0]['persistence'];
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -177,12 +178,16 @@ export async function startTestApp(options: {
   close: () => Promise<void>;
 }> {
   const workspace = createWorkspaces();
-  const config = baseConfig(workspace, options.config);
+  const config = baseConfig(workspace, {
+    artifacts: { allowEphemeral: true },
+    ...(options.config ?? {}),
+  });
   const app = await composeApplication({
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
     providers: [{ adapter: options.provider ?? fakeProvider() }],
     ...(options.externals ? { externals: options.externals } : {}),
+    ...(options.persistence ? { persistence: options.persistence } : {}),
   });
   const { url } = await app.start();
   return {

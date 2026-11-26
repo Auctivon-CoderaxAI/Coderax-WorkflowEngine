@@ -271,12 +271,24 @@ export const ScheduleConfig = z
   })
   .strict();
 
-export const ArtifactConfig = z
+export const ArtifactsConfig = z
   .object({
-    /** Decoded bytes accepted for one artifact; the API also bounds base64. */
-    maxBytes: z.number().int().min(1).max(16_000_000).default(8_388_608),
+    maxBytesPerArtifact: z.number().int().min(1_024).max(10_485_760).default(8_388_608),
+    maxBytesPerOwner: z.number().int().min(1_024).max(1_073_741_824).default(268_435_456),
+    maxArtifactsPerOwner: z.number().int().min(1).max(10_000).default(1_000),
+    maxVersionsPerArtifact: z.number().int().min(1).max(100).default(20),
+    defaultRetentionDays: z.number().int().min(0).max(3_650).default(0),
+    maxRetentionDays: z.number().int().min(1).max(3_650).default(365),
+    chunkBytes: z.number().int().min(65_536).max(4_194_304).default(1_048_576),
+    /**
+     * Test/dev only: allow artifact and media writes through the in-memory
+     * backend, which cannot survive a restart. Production defaults to false.
+     */
+    allowEphemeral: z.boolean().default(false),
   })
   .strict();
+
+export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;
 
 export const PersistenceConfig = z
   .object({
@@ -312,7 +324,7 @@ export const EngineConfigSchema = z
     media: MediaConfig.default({}),
     execution: ExecutionConfig.default({}),
     schedules: ScheduleConfig.default({}),
-    artifacts: ArtifactConfig.default({}),
+    artifacts: ArtifactsConfig.default({}),
     persistence: PersistenceConfig.default({}),
   })
   .strict();

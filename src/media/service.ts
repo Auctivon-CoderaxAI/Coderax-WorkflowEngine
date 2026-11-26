@@ -1,18 +1,19 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type {
   Availability,
+  DataMode,
   MediaCapabilities,
   MediaDescriptor,
   MediaDownload,
   MediaUploadRequest,
   MediaUploadResult,
 } from '@coderax/contracts';
+import type { ArtifactService } from '../artifacts/service.js';
 import type { Clock } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { decodeBase64 } from './decode.js';
 import { sniffImage } from './sniff.js';
-import type { MediaRecord, MediaStore } from './store.js';
 
 /**
  * The multimodal intake boundary.
@@ -22,6 +23,10 @@ import type { MediaRecord, MediaStore } from './store.js';
  * point of use, so a private upload can never be attached to a cloud run and an
  * identifier from another principal is reported as absent. No bytes are
  * decompressed in this process.
+ *
+ * Media has no storage of its own: an image is an immutable artifact version in
+ * the durable artifact store. The media id is the artifact id, and the artifact
+ * descriptor is the single authoritative record for its bytes and retention.
  */
 
 export type MediaLimits = {
@@ -45,12 +50,19 @@ export type MediaService = {
   capabilities: (vision: { available: boolean; detail: string }) => MediaCapabilities;
   resolve: (input: {
     ownerId: string;
-    mode: MediaDescriptor['mode'];
+    mode: DataMode;
     mediaIds: readonly string[];
   }) => Promise<ServiceResult<ResolvedMedia[]>>;
 };
 
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
+
+const EXTENSIONS: Readonly<Record<(typeof IMAGE_TYPES)[number], string>> = Object.freeze({
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+});
 
 function reason(available: boolean, detail: string): Availability {
   return {
@@ -67,22 +79,65 @@ function normalizeDeclared(value: string | undefined): string | null {
 }
 
 export function createMediaService(input: {
-  store: MediaStore;
+  artifacts: ArtifactService;
   clock: Clock;
   limits: MediaLimits;
 }): MediaService {
-  function descriptor(record: MediaRecord): MediaDescriptor {
-    return {
-      mediaId: record.mediaId,
-      kind: record.kind,
-      mediaType: record.mediaType,
-      bytes: record.bytes,
-      sha256: record.sha256,
-      width: record.width,
-      height: record.height,
-      mode: record.mode,
-      createdAt: record.createdAt,
-    };
+  type StoredMedia = {
+    descriptor: MediaDescriptor;
+    data: string;
+  };
+
+  function principal(ownerId: string) {
+    return { ownerId, isOwner: true } as const;
+  }
+
+  async function read(
+    ownerId: string,
+    mediaId: string,
+    mode: DataMode,
+  ): Promise<ServiceResult<StoredMedia>> {
+    const downloaded = await input.artifacts.download(principal(ownerId), mediaId, { mode });
+    if (!downloaded.ok) return downloaded;
+    const bytes = Buffer.from(downloaded.value.contentBase64, 'base64');
+    const sniffed = sniffImage(bytes, { maxPixels: input.limits.maxPixels });
+    if (!sniffed.ok) return fail(sniffed.code, sniffed.detail);
+    return ok({
+      descriptor: {
+        mediaId: downloaded.value.artifact.artifactId,
+        kind: 'image',
+        mediaType: downloaded.value.artifact.mediaType as MediaDescriptor['mediaType'],
+        bytes: downloaded.value.artifact.bytes,
+        sha256: downloaded.value.artifact.sha256,
+        width: sniffed.width,
+        height: sniffed.height,
+        mode: downloaded.value.artifact.mode,
+        createdAt: downloaded.value.artifact.createdAt,
+      },
+      data: downloaded.value.contentBase64,
+    });
+  }
+
+  async function resolveOne(
+    ownerId: string,
+    mode: DataMode,
+    mediaId: string,
+  ): Promise<ServiceResult<StoredMedia>> {
+    const requested = await read(ownerId, mediaId, mode);
+    if (requested.ok) return requested;
+    const otherMode: DataMode = mode === 'private' ? 'cloud' : 'private';
+    const other = await read(ownerId, mediaId, otherMode);
+    if (other.ok) {
+      return fail(
+        'forbidden',
+        'Media captured in another data mode cannot be used for this request.',
+      );
+    }
+    return requested;
+  }
+
+  function descriptor(stored: StoredMedia): MediaDescriptor {
+    return stored.descriptor;
   }
 
   return {
@@ -104,27 +159,41 @@ export function createMediaService(input: {
         );
       }
 
-      const record: MediaRecord = {
-        mediaId: `media_${randomUUID()}`,
-        kind: 'image',
+      const uploaded = await input.artifacts.upload(principal(ownerId), {
+        filename: `media.${EXTENSIONS[sniffed.mediaType as keyof typeof EXTENSIONS]}`,
         mediaType: sniffed.mediaType,
-        bytes: decoded.bytes.length,
+        contentBase64: decoded.bytes.toString('base64'),
         sha256: createHash('sha256').update(decoded.bytes).digest('hex'),
+        kind: 'image',
+        mode: request.mode,
+        note: 'Multimodal image attachment.',
+      });
+      if (!uploaded.ok) return uploaded;
+
+      const descriptor: MediaDescriptor = {
+        mediaId: uploaded.value.artifact.artifactId,
+        kind: 'image',
+        mediaType: uploaded.value.artifact.mediaType as MediaDescriptor['mediaType'],
+        bytes: uploaded.value.artifact.bytes,
+        sha256: uploaded.value.artifact.sha256,
         width: sniffed.width,
         height: sniffed.height,
-        mode: request.mode,
-        createdAt: input.clock.iso(),
-        ownerId,
-        data: decoded.bytes.toString('base64'),
+        mode: uploaded.value.artifact.mode,
+        createdAt: uploaded.value.artifact.createdAt,
       };
-      await input.store.put(record);
-      return ok({ media: descriptor(record) });
+      return ok({ media: descriptor });
     },
 
     get: async (ownerId, mediaId) => {
-      const record = await input.store.get(ownerId, mediaId);
-      if (!record) return fail('not_found', 'That media does not exist for this owner.');
-      return ok({ media: descriptor(record), data: record.data });
+      const privateRead = await read(ownerId, mediaId, 'private');
+      if (privateRead.ok) {
+        return ok({ media: descriptor(privateRead.value), data: privateRead.value.data });
+      }
+      const cloudRead = await read(ownerId, mediaId, 'cloud');
+      if (!cloudRead.ok) {
+        return fail('not_found', 'That media does not exist for this owner.');
+      }
+      return ok({ media: descriptor(cloudRead.value), data: cloudRead.value.data });
     },
 
     capabilities: (vision) => ({
@@ -217,21 +286,14 @@ export function createMediaService(input: {
 
       const resolved: ResolvedMedia[] = [];
       for (const mediaId of unique) {
-        const record = await input.store.get(ownerId, mediaId);
-        if (!record) return fail('not_found', 'That media does not exist for this owner.');
-        if (record.mode !== mode) {
-          return fail(
-            'forbidden',
-            'Media captured in another data mode cannot be used for this request.',
-          );
-        }
+        const stored = await resolveOne(ownerId, mode, mediaId);
+        if (!stored.ok) return stored;
         resolved.push({
-          descriptor: descriptor(record),
-          dataUrl: `data:${record.mediaType};base64,${record.data}`,
+          descriptor: descriptor(stored.value),
+          dataUrl: `data:${stored.value.descriptor.mediaType};base64,${stored.value.data}`,
         });
       }
       return ok(resolved);
     },
   };
 }
-

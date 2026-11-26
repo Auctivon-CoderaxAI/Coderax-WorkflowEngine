@@ -434,8 +434,8 @@ test('media survives a restart when MongoDB is the configured store', async () =
     await first.stop();
 
     assert.ok(
-      database.collections.get('media')?.indexes.some(
-        (index) => index.keys.mediaId === 1 && index.options?.unique === true,
+      database.collections.get('artifacts')?.indexes.some(
+        (index) => index.keys.artifactId === 1 && index.options?.unique === true,
       ),
     );
 

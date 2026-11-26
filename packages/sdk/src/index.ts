@@ -2,9 +2,16 @@ import type { z } from 'zod';
 import {
   AgentList,
   ArtifactContent,
-  ArtifactList,
-  ArtifactRecord,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactKind,
+  ArtifactPruneResult,
   ArtifactUploadRequest,
+  ArtifactUploadResult,
+  ArtifactVersionList,
+  ArtifactVersionRequest,
   ChatReply,
   ChatStreamFrame,
   Conversation,
@@ -405,32 +412,97 @@ export class CoderaxClient {
     });
   }
 
-  artifacts(taskId: string): Promise<ArtifactList> {
-    return this.request<ArtifactList>(ArtifactList, {
+  /** Durable artifacts in one data-mode partition, with the storage quota. */
+  artifacts(
+    query: {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<ArtifactDescriptorList> {
+    return this.request<ArtifactDescriptorList>(ArtifactDescriptorList, {
       method: 'GET',
-      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
+      path: '/v1/artifacts',
+      query,
     });
   }
 
-  uploadArtifact(taskId: string, request: ArtifactUploadRequest): Promise<ArtifactRecord> {
-    return this.request<ArtifactRecord>(ArtifactRecord, {
+  artifact(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactDescriptor> {
+    return this.request<ArtifactDescriptor>(ArtifactDescriptor, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+      query: { mode },
+    });
+  }
+
+  artifactVersions(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactVersionList> {
+    return this.request<ArtifactVersionList>(ArtifactVersionList, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      query: { mode },
+    });
+  }
+
+  uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
-      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
+      path: '/v1/artifacts',
       body: request,
     });
   }
 
-  artifact(artifactId: string): Promise<ArtifactRecord> {
-    return this.request<ArtifactRecord>(ArtifactRecord, {
-      method: 'GET',
-      path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+  uploadArtifactVersion(
+    artifactId: string,
+    request: ArtifactVersionRequest,
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      body: request,
     });
   }
 
-  artifactContent(artifactId: string): Promise<ArtifactContent> {
+  downloadArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactContent> {
     return this.request<ArtifactContent>(ArtifactContent, {
       method: 'GET',
       path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  exportArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactExport> {
+    return this.request<ArtifactExport>(ArtifactExport, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  deleteArtifact(
+    artifactId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactDeleteResult> {
+    return this.request<ArtifactDeleteResult>(ArtifactDeleteResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/delete`,
+      body: { mode },
+    });
+  }
+
+  pruneArtifacts(mode: DataMode = 'private'): Promise<ArtifactPruneResult> {
+    return this.request<ArtifactPruneResult>(ArtifactPruneResult, {
+      method: 'POST',
+      path: '/v1/artifacts/prune',
+      body: { mode },
     });
   }
 

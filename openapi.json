@@ -44,6 +44,10 @@
               "forbidden",
               "not_found",
               "validation_failed",
+              "payload_too_large",
+              "unsupported_media_type",
+              "quota_exceeded",
+              "storage_unavailable",
               "conflict",
               "busy",
               "not_ready",
@@ -1005,10 +1009,10 @@
         ]
       }
     },
-    "/v1/artifacts/{artifactId}": {
-      "get": {
-        "operationId": "getArtifact",
-        "summary": "Artifact metadata, scoped to its owning task.",
+    "/v1/artifacts/{artifactId}/delete": {
+      "post": {
+        "operationId": "deleteArtifact",
+        "summary": "Delete an artifact and every retained version it owns.",
         "tags": [
           "artifacts"
         ],
@@ -1019,7 +1023,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Artifact metadata",
+            "description": "Delete result",
             "content": {
               "application/json": {
                 "schema": {
@@ -1030,41 +1034,19 @@
                       "minLength": 1,
                       "maxLength": 128
                     },
-                    "taskId": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 128
-                    },
-                    "path": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 1024
-                    },
-                    "mediaType": {
-                      "type": "string",
-                      "minLength": 3,
-                      "maxLength": 160
-                    },
-                    "bytes": {
+                    "deletedVersions": {
                       "type": "integer",
                       "minimum": 0
                     },
-                    "digest": {
-                      "type": "string"
-                    },
-                    "createdAt": {
-                      "type": "string",
-                      "format": "date-time"
+                    "releasedBytes": {
+                      "type": "integer",
+                      "minimum": 0
                     }
                   },
                   "required": [
                     "artifactId",
-                    "taskId",
-                    "path",
-                    "mediaType",
-                    "bytes",
-                    "digest",
-                    "createdAt"
+                    "deletedVersions",
+                    "releasedBytes"
                   ],
                   "additionalProperties": false
                 }
@@ -1103,13 +1085,33 @@
               "maxLength": 128
             }
           }
-        ]
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/artifacts/{artifactId}/content": {
       "get": {
-        "operationId": "getArtifactContent",
-        "summary": "Artifact bytes as base64 with the digest they were verified against.",
+        "operationId": "downloadArtifact",
+        "summary": "Exact bytes of one artifact version, integrity-verified on read.",
         "tags": [
           "artifacts"
         ],
@@ -1126,32 +1128,239 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "artifactId": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 128
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "cloud"
+                          ]
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "versions": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "projectId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "taskId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "inferenceExposure": {
+                          "const": "none"
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "kind",
+                        "filename",
+                        "mediaType",
+                        "bytes",
+                        "sha256",
+                        "mode",
+                        "version",
+                        "versions",
+                        "createdAt",
+                        "updatedAt",
+                        "inferenceExposure"
+                      ],
+                      "additionalProperties": false
                     },
-                    "mediaType": {
-                      "type": "string",
-                      "minLength": 3,
-                      "maxLength": 160
-                    },
-                    "bytes": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "digest": {
-                      "type": "string"
+                    "version": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "note": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "version",
+                        "filename",
+                        "mediaType",
+                        "kind",
+                        "bytes",
+                        "sha256",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
                     },
                     "contentBase64": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 14000000
                     }
                   },
                   "required": [
-                    "artifactId",
-                    "mediaType",
-                    "bytes",
-                    "digest",
+                    "artifact",
+                    "version",
                     "contentBase64"
                   ],
                   "additionalProperties": false
@@ -1189,6 +1398,644 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/v1/artifacts/{artifactId}/export": {
+      "get": {
+        "operationId": "exportArtifact",
+        "summary": "Portable export: descriptor, version manifest and exact bytes.",
+        "tags": [
+          "artifacts"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact export",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "cloud"
+                          ]
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "versions": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "projectId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "taskId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "inferenceExposure": {
+                          "const": "none"
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "kind",
+                        "filename",
+                        "mediaType",
+                        "bytes",
+                        "sha256",
+                        "mode",
+                        "version",
+                        "versions",
+                        "createdAt",
+                        "updatedAt",
+                        "inferenceExposure"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "versions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "artifactId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "version": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "filename": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "mediaType": {
+                            "type": "string",
+                            "enum": [
+                              "text/plain",
+                              "text/markdown",
+                              "text/csv",
+                              "text/tab-separated-values",
+                              "application/json",
+                              "application/pdf",
+                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                              "application/vnd.oasis.opendocument.text",
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                              "application/vnd.oasis.opendocument.spreadsheet",
+                              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                              "application/vnd.oasis.opendocument.presentation",
+                              "image/png",
+                              "image/jpeg",
+                              "image/gif",
+                              "image/webp",
+                              "audio/mpeg",
+                              "audio/wav",
+                              "audio/ogg",
+                              "audio/flac",
+                              "audio/mp4",
+                              "video/mp4",
+                              "video/webm",
+                              "video/ogg",
+                              "video/quicktime"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "document",
+                              "pdf",
+                              "spreadsheet",
+                              "presentation",
+                              "image",
+                              "audio",
+                              "video",
+                              "source",
+                              "project",
+                              "game",
+                              "visualization",
+                              "execution",
+                              "data"
+                            ]
+                          },
+                          "bytes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10485760
+                          },
+                          "sha256": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "note": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "artifactId",
+                          "version",
+                          "filename",
+                          "mediaType",
+                          "kind",
+                          "bytes",
+                          "sha256",
+                          "createdAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "version": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "note": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "version",
+                        "filename",
+                        "mediaType",
+                        "kind",
+                        "bytes",
+                        "sha256",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "contentBase64": {
+                      "type": "string",
+                      "maxLength": 14000000
+                    },
+                    "exportedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "artifact",
+                    "versions",
+                    "version",
+                    "contentBase64",
+                    "exportedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/v1/artifacts/{artifactId}": {
+      "get": {
+        "operationId": "getArtifact",
+        "summary": "Authoritative metadata for one artifact in the requested mode.",
+        "tags": [
+          "artifacts"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact descriptor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifactId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "document",
+                        "pdf",
+                        "spreadsheet",
+                        "presentation",
+                        "image",
+                        "audio",
+                        "video",
+                        "source",
+                        "project",
+                        "game",
+                        "visualization",
+                        "execution",
+                        "data"
+                      ]
+                    },
+                    "filename": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "mediaType": {
+                      "type": "string",
+                      "enum": [
+                        "text/plain",
+                        "text/markdown",
+                        "text/csv",
+                        "text/tab-separated-values",
+                        "application/json",
+                        "application/pdf",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "application/vnd.oasis.opendocument.text",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "application/vnd.oasis.opendocument.spreadsheet",
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "application/vnd.oasis.opendocument.presentation",
+                        "image/png",
+                        "image/jpeg",
+                        "image/gif",
+                        "image/webp",
+                        "audio/mpeg",
+                        "audio/wav",
+                        "audio/ogg",
+                        "audio/flac",
+                        "audio/mp4",
+                        "video/mp4",
+                        "video/webm",
+                        "video/ogg",
+                        "video/quicktime"
+                      ]
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10485760
+                    },
+                    "sha256": {
+                      "type": "string"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "cloud"
+                      ]
+                    },
+                    "version": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    "versions": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    "projectId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "conversationId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "taskId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "inferenceExposure": {
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "artifactId",
+                    "kind",
+                    "filename",
+                    "mediaType",
+                    "bytes",
+                    "sha256",
+                    "mode",
+                    "version",
+                    "versions",
+                    "createdAt",
+                    "updatedAt",
+                    "inferenceExposure"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
             }
           }
         ]
@@ -3193,6 +4040,1246 @@
         }
       }
     },
+    "/v1/artifacts": {
+      "get": {
+        "operationId": "listArtifacts",
+        "summary": "Owner-scoped durable artifacts in one data-mode partition.",
+        "tags": [
+          "artifacts"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact list and storage quota",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "artifactId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "document",
+                              "pdf",
+                              "spreadsheet",
+                              "presentation",
+                              "image",
+                              "audio",
+                              "video",
+                              "source",
+                              "project",
+                              "game",
+                              "visualization",
+                              "execution",
+                              "data"
+                            ]
+                          },
+                          "filename": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "mediaType": {
+                            "type": "string",
+                            "enum": [
+                              "text/plain",
+                              "text/markdown",
+                              "text/csv",
+                              "text/tab-separated-values",
+                              "application/json",
+                              "application/pdf",
+                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                              "application/vnd.oasis.opendocument.text",
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                              "application/vnd.oasis.opendocument.spreadsheet",
+                              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                              "application/vnd.oasis.opendocument.presentation",
+                              "image/png",
+                              "image/jpeg",
+                              "image/gif",
+                              "image/webp",
+                              "audio/mpeg",
+                              "audio/wav",
+                              "audio/ogg",
+                              "audio/flac",
+                              "audio/mp4",
+                              "video/mp4",
+                              "video/webm",
+                              "video/ogg",
+                              "video/quicktime"
+                            ]
+                          },
+                          "bytes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10485760
+                          },
+                          "sha256": {
+                            "type": "string"
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "cloud"
+                            ]
+                          },
+                          "version": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "versions": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "projectId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "conversationId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "taskId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "expiresAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "inferenceExposure": {
+                            "const": "none"
+                          }
+                        },
+                        "required": [
+                          "artifactId",
+                          "kind",
+                          "filename",
+                          "mediaType",
+                          "bytes",
+                          "sha256",
+                          "mode",
+                          "version",
+                          "versions",
+                          "createdAt",
+                          "updatedAt",
+                          "inferenceExposure"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "quota": {
+                      "type": "object",
+                      "properties": {
+                        "usedBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "maxBytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "artifacts": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "maxArtifacts": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "usedBytes",
+                        "maxBytes",
+                        "artifacts",
+                        "maxArtifacts"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "artifacts",
+                    "quota"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "document",
+                "pdf",
+                "spreadsheet",
+                "presentation",
+                "image",
+                "audio",
+                "video",
+                "source",
+                "project",
+                "game",
+                "visualization",
+                "execution",
+                "data"
+              ]
+            }
+          },
+          {
+            "name": "projectId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "conversationId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "taskId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "uploadArtifact",
+        "summary": "Store a new artifact version from base64-encoded bytes.",
+        "tags": [
+          "artifacts"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored artifact",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "cloud"
+                          ]
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "versions": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "projectId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "taskId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "inferenceExposure": {
+                          "const": "none"
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "kind",
+                        "filename",
+                        "mediaType",
+                        "bytes",
+                        "sha256",
+                        "mode",
+                        "version",
+                        "versions",
+                        "createdAt",
+                        "updatedAt",
+                        "inferenceExposure"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "version": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "note": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "version",
+                        "filename",
+                        "mediaType",
+                        "kind",
+                        "bytes",
+                        "sha256",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "artifact",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "mediaType": {
+                    "type": "string",
+                    "enum": [
+                      "text/plain",
+                      "text/markdown",
+                      "text/csv",
+                      "text/tab-separated-values",
+                      "application/json",
+                      "application/pdf",
+                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                      "application/vnd.oasis.opendocument.text",
+                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                      "application/vnd.oasis.opendocument.spreadsheet",
+                      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                      "application/vnd.oasis.opendocument.presentation",
+                      "image/png",
+                      "image/jpeg",
+                      "image/gif",
+                      "image/webp",
+                      "audio/mpeg",
+                      "audio/wav",
+                      "audio/ogg",
+                      "audio/flac",
+                      "audio/mp4",
+                      "video/mp4",
+                      "video/webm",
+                      "video/ogg",
+                      "video/quicktime"
+                    ]
+                  },
+                  "contentBase64": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 14000000
+                  },
+                  "sha256": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "document",
+                      "pdf",
+                      "spreadsheet",
+                      "presentation",
+                      "image",
+                      "audio",
+                      "video",
+                      "source",
+                      "project",
+                      "game",
+                      "visualization",
+                      "execution",
+                      "data"
+                    ]
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ]
+                  },
+                  "projectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "conversationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "taskId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "retentionDays": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3650
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "filename",
+                  "mediaType",
+                  "contentBase64"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/artifacts/{artifactId}/versions": {
+      "get": {
+        "operationId": "listArtifactVersions",
+        "summary": "Retained version history for one artifact, newest last.",
+        "tags": [
+          "artifacts"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact version list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifactId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "versions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "artifactId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "version": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "filename": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "mediaType": {
+                            "type": "string",
+                            "enum": [
+                              "text/plain",
+                              "text/markdown",
+                              "text/csv",
+                              "text/tab-separated-values",
+                              "application/json",
+                              "application/pdf",
+                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                              "application/vnd.oasis.opendocument.text",
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                              "application/vnd.oasis.opendocument.spreadsheet",
+                              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                              "application/vnd.oasis.opendocument.presentation",
+                              "image/png",
+                              "image/jpeg",
+                              "image/gif",
+                              "image/webp",
+                              "audio/mpeg",
+                              "audio/wav",
+                              "audio/ogg",
+                              "audio/flac",
+                              "audio/mp4",
+                              "video/mp4",
+                              "video/webm",
+                              "video/ogg",
+                              "video/quicktime"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "document",
+                              "pdf",
+                              "spreadsheet",
+                              "presentation",
+                              "image",
+                              "audio",
+                              "video",
+                              "source",
+                              "project",
+                              "game",
+                              "visualization",
+                              "execution",
+                              "data"
+                            ]
+                          },
+                          "bytes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10485760
+                          },
+                          "sha256": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "note": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "artifactId",
+                          "version",
+                          "filename",
+                          "mediaType",
+                          "kind",
+                          "bytes",
+                          "sha256",
+                          "createdAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifactId",
+                    "versions"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "uploadArtifactVersion",
+        "summary": "Append a new immutable version to an existing artifact.",
+        "tags": [
+          "artifacts"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored artifact version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "cloud"
+                          ]
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "versions": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "projectId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "taskId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "inferenceExposure": {
+                          "const": "none"
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "kind",
+                        "filename",
+                        "mediaType",
+                        "bytes",
+                        "sha256",
+                        "mode",
+                        "version",
+                        "versions",
+                        "createdAt",
+                        "updatedAt",
+                        "inferenceExposure"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "version": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "filename": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "text/plain",
+                            "text/markdown",
+                            "text/csv",
+                            "text/tab-separated-values",
+                            "application/json",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.oasis.opendocument.text",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.oasis.opendocument.spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.presentation",
+                            "image/png",
+                            "image/jpeg",
+                            "image/gif",
+                            "image/webp",
+                            "audio/mpeg",
+                            "audio/wav",
+                            "audio/ogg",
+                            "audio/flac",
+                            "audio/mp4",
+                            "video/mp4",
+                            "video/webm",
+                            "video/ogg",
+                            "video/quicktime"
+                          ]
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "document",
+                            "pdf",
+                            "spreadsheet",
+                            "presentation",
+                            "image",
+                            "audio",
+                            "video",
+                            "source",
+                            "project",
+                            "game",
+                            "visualization",
+                            "execution",
+                            "data"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 10485760
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "note": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "version",
+                        "filename",
+                        "mediaType",
+                        "kind",
+                        "bytes",
+                        "sha256",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "artifact",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "mediaType": {
+                    "type": "string",
+                    "enum": [
+                      "text/plain",
+                      "text/markdown",
+                      "text/csv",
+                      "text/tab-separated-values",
+                      "application/json",
+                      "application/pdf",
+                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                      "application/vnd.oasis.opendocument.text",
+                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                      "application/vnd.oasis.opendocument.spreadsheet",
+                      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                      "application/vnd.oasis.opendocument.presentation",
+                      "image/png",
+                      "image/jpeg",
+                      "image/gif",
+                      "image/webp",
+                      "audio/mpeg",
+                      "audio/wav",
+                      "audio/ogg",
+                      "audio/flac",
+                      "audio/mp4",
+                      "video/mp4",
+                      "video/webm",
+                      "video/ogg",
+                      "video/quicktime"
+                    ]
+                  },
+                  "contentBase64": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 14000000
+                  },
+                  "sha256": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "document",
+                      "pdf",
+                      "spreadsheet",
+                      "presentation",
+                      "image",
+                      "audio",
+                      "video",
+                      "source",
+                      "project",
+                      "game",
+                      "visualization",
+                      "execution",
+                      "data"
+                    ]
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ]
+                  },
+                  "retentionDays": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3650
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "filename",
+                  "mediaType",
+                  "contentBase64"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/conversations": {
       "get": {
         "operationId": "listConversations",
@@ -3923,251 +6010,6 @@
         }
       }
     },
-    "/v1/work/{taskId}/artifacts": {
-      "get": {
-        "operationId": "listTaskArtifacts",
-        "summary": "Artifacts a Work task produced, with digest and size.",
-        "tags": [
-          "artifacts"
-        ],
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Artifact list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "artifacts": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "artifactId": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          },
-                          "taskId": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 128
-                          },
-                          "path": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 1024
-                          },
-                          "mediaType": {
-                            "type": "string",
-                            "minLength": 3,
-                            "maxLength": 160
-                          },
-                          "bytes": {
-                            "type": "integer",
-                            "minimum": 0
-                          },
-                          "digest": {
-                            "type": "string"
-                          },
-                          "createdAt": {
-                            "type": "string",
-                            "format": "date-time"
-                          }
-                        },
-                        "required": [
-                          "artifactId",
-                          "taskId",
-                          "path",
-                          "mediaType",
-                          "bytes",
-                          "digest",
-                          "createdAt"
-                        ],
-                        "additionalProperties": false
-                      }
-                    }
-                  },
-                  "required": [
-                    "artifacts"
-                  ],
-                  "additionalProperties": false
-                }
-              }
-            }
-          },
-          "4XX": {
-            "description": "Problem",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "5XX": {
-            "description": "Problem",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "taskId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            }
-          }
-        ]
-      },
-      "post": {
-        "operationId": "uploadTaskArtifact",
-        "summary": "Store artifact bytes for a task and return their verified digest.",
-        "tags": [
-          "artifacts"
-        ],
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Stored artifact",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "artifactId": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 128
-                    },
-                    "taskId": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 128
-                    },
-                    "path": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 1024
-                    },
-                    "mediaType": {
-                      "type": "string",
-                      "minLength": 3,
-                      "maxLength": 160
-                    },
-                    "bytes": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "digest": {
-                      "type": "string"
-                    },
-                    "createdAt": {
-                      "type": "string",
-                      "format": "date-time"
-                    }
-                  },
-                  "required": [
-                    "artifactId",
-                    "taskId",
-                    "path",
-                    "mediaType",
-                    "bytes",
-                    "digest",
-                    "createdAt"
-                  ],
-                  "additionalProperties": false
-                }
-              }
-            }
-          },
-          "4XX": {
-            "description": "Problem",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "5XX": {
-            "description": "Problem",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "taskId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 1024
-                  },
-                  "mediaType": {
-                    "type": "string",
-                    "minLength": 3,
-                    "maxLength": 160
-                  },
-                  "contentBase64": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 12000000
-                  }
-                },
-                "required": [
-                  "path",
-                  "mediaType",
-                  "contentBase64"
-                ],
-                "additionalProperties": false
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/tasks": {
       "get": {
         "operationId": "listTasks",
@@ -4469,6 +6311,92 @@
                 "required": [
                   "taskIds"
                 ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/artifacts/prune": {
+      "post": {
+        "operationId": "pruneArtifacts",
+        "summary": "Delete this owner’s artifacts whose retention has expired.",
+        "tags": [
+          "artifacts"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prune result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pruned": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "releasedBytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "pruned",
+                    "releasedBytes",
+                    "at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ]
+                  }
+                },
                 "additionalProperties": false
               }
             }

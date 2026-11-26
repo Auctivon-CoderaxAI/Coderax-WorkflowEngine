@@ -2,10 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createFakeDatabase } from '../fakes/mongo.js';
 import {
-  createMongoArtifactRepository,
   createMongoPermissionTable,
   createMongoScheduleRepository,
-  ensureArtifactIndexes,
   ensurePermissionIndexes,
   ensureScheduleIndexes,
 } from '../../src/persistence/mongo-records.js';
@@ -14,7 +12,7 @@ import {
   ensureIdempotencyIndexes,
   ensureTaskIndexes,
 } from '../../src/persistence/mongo-tables.js';
-import type { ArtifactRow, ScheduleRecord } from '../../src/domain.js';
+import type { ScheduleRecord } from '../../src/domain.js';
 import { MAX_ACTIVE_SCHEDULES } from '../../src/persistence/schedules.js';
 import { taskRecord } from '../helpers.js';
 
@@ -37,21 +35,6 @@ function schedule(overrides: Partial<ScheduleRecord> = {}): ScheduleRecord {
     nextRunAt: '2026-11-26T12:01:00.000Z',
     lastTaskId: null,
     lastError: null,
-    ...overrides,
-  };
-}
-
-function artifact(overrides: Partial<ArtifactRow> = {}): ArtifactRow {
-  return {
-    artifactId: 'art_1',
-    ownerId: 'owner-test',
-    taskId: 'task_1',
-    path: 'notes/release.txt',
-    mediaType: 'text/plain',
-    bytes: 4,
-    digest: `sha256:${'0'.repeat(64)}`,
-    mode: 'cloud',
-    createdAt: '2026-11-26T12:00:00.000Z',
     ...overrides,
   };
 }
@@ -156,19 +139,6 @@ test('a schedule owner cannot exceed the active bound', async () => {
     { ok: false, reason: 'limit' },
   );
   assert.equal(await repository.activeCount('owner-test'), MAX_ACTIVE_SCHEDULES);
-});
-
-test('artifact rows are durable and owner-scoped', async () => {
-  const database = createFakeDatabase();
-  const collection = database.collection('artifacts');
-  await ensureArtifactIndexes(collection);
-  const repository = createMongoArtifactRepository(collection);
-
-  await repository.insert(artifact());
-  assert.equal((await repository.get('owner-test', 'art_1'))?.path, 'notes/release.txt');
-  assert.equal(await repository.get('another-owner', 'art_1'), null);
-  assert.equal((await repository.list('owner-test', 'task_1')).length, 1);
-  assert.equal((await repository.list('owner-test', 'task_2')).length, 0);
 });
 
 test('a repeated submission replays the first task instead of creating another', async () => {

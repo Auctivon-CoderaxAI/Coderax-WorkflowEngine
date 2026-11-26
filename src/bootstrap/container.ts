@@ -9,7 +9,7 @@ import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { ScheduleRepository } from '../persistence/schedules.js';
-import type { ArtifactRepository, ArtifactStorage } from '../artifacts/store.js';
+import type { ArtifactService } from '../artifacts/service.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MediaService } from '../media/service.js';
@@ -47,8 +47,7 @@ export type InfrastructureDependencies = {
   creative: CreativeService;
   notifications: NotificationStore;
   schedules: ScheduleRepository;
-  artifacts: ArtifactRepository;
-  artifactStorage: ArtifactStorage;
+  artifactService: ArtifactService;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -73,8 +72,7 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'creative',
   'notifications',
   'schedules',
-  'artifacts',
-  'artifactStorage',
+  'artifactService',
   'audit',
   'events',
   'runner',

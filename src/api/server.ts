@@ -1,13 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Router } from './router.js';
 
-function readBody(request: IncomingMessage, maxBodyBytes: number): Promise<string> {
+const MAX_BODY_BYTES = 1_048_576;
+
+function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > maxBodyBytes) {
+      if (size > limit) {
         reject(new Error('request body is too large'));
         request.destroy();
         return;
@@ -38,21 +40,25 @@ export function createHttpServer(input: {
   router: Router;
   host: string;
   port: number;
-  maxBodyBytes: number;
 }): HttpServer {
   const server: Server = createServer((request, response) => {
     void (async () => {
       let bodyText = '';
       try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          bodyText = await readBody(request, input.maxBodyBytes);
+          const limit =
+            input.router.bodyLimit(
+              request.method ?? 'GET',
+              request.url ?? '/',
+            ) ?? MAX_BODY_BYTES;
+          bodyText = await readBody(request, limit);
         }
       } catch {
         sendJson(response, 413, {
-          type: 'https://coderax.dev/problems/validation_failed',
-          title: 'validation failed',
+          type: 'https://coderax.dev/problems/payload_too_large',
+          title: 'payload too large',
           status: 413,
-          code: 'validation_failed',
+          code: 'payload_too_large',
           detail: 'The request body is too large.',
           retryable: false,
         });
@@ -65,7 +71,9 @@ export function createHttpServer(input: {
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
-          accept: request.headers.accept,
+          accept: Array.isArray(request.headers.accept)
+            ? request.headers.accept.join(', ')
+            : request.headers.accept,
           lastEventId: Array.isArray(request.headers['last-event-id'])
             ? request.headers['last-event-id'][0]
             : request.headers['last-event-id'],
@@ -80,14 +88,11 @@ export function createHttpServer(input: {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',
           connection: 'keep-alive',
-          ...(result.headers ?? {}),
         });
-        for await (const frame of result.events) {
+        for await (const event of result.events) {
           if (response.destroyed || response.writableEnded) break;
-          if (frame.id !== undefined) {
-            response.write(`id: ${frame.id}\n`);
-          }
-          response.write(`data: ${JSON.stringify(frame.data)}\n\n`);
+          if (event.id) response.write(`id: ${event.id}\n`);
+          response.write(`data: ${JSON.stringify(event.data)}\n\n`);
         }
         response.end();
       } catch {

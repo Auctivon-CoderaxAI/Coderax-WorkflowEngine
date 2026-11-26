@@ -1,5 +1,7 @@
 import type {
   AgentId,
+  ArtifactKind,
+  ArtifactMediaType,
   Budget,
   CreativeArtifact,
   DataMode,
@@ -155,15 +157,37 @@ export type ScheduleRecord = {
   lastError: string | null;
 };
 
-export type ArtifactRow = {
+export type ArtifactRecord = {
   artifactId: string;
   ownerId: string;
-  taskId: string;
-  path: string;
-  mediaType: string;
-  bytes: number;
-  digest: string;
+  tenantId: string | null;
   mode: DataMode;
+  kind: ArtifactKind;
+  filename: string;
+  mediaType: ArtifactMediaType;
+  bytes: number;
+  sha256: string;
+  version: number;
+  versions: number;
+  projectId: string | null;
+  conversationId: string | null;
+  taskId: string | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  expiresAt: IsoDateTime | null;
+};
+
+export type ArtifactVersionRecord = {
+  ownerId: string;
+  mode: DataMode;
+  artifactId: string;
+  version: number;
+  filename: string;
+  mediaType: ArtifactMediaType;
+  kind: ArtifactKind;
+  bytes: number;
+  sha256: string;
+  note?: string;
   createdAt: IsoDateTime;
 };
 

@@ -1,9 +1,6 @@
 import type {
   AgentId,
   AgentList,
-  ArtifactContent,
-  ArtifactList,
-  ArtifactRecord,
   BudgetState,
   ChatReply,
   ChatRequest,
@@ -49,7 +46,7 @@ import {
   modelKey,
 } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { ArtifactRow, ScheduleRecord, TaskRecord } from '../domain.js';
+import type { ScheduleRecord, TaskRecord } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -77,7 +74,7 @@ import type { HealthService } from '../observability/health.js';
 import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ScheduleRepository } from '../persistence/schedules.js';
-import type { ArtifactRepository, ArtifactStorage } from '../artifacts/store.js';
+import type { ArtifactService } from '../artifacts/service.js';
 import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
@@ -102,8 +99,7 @@ export type ApplicationServiceDeps = {
   creative: CreativeService;
   notifications: NotificationStore;
   schedules: ScheduleRepository;
-  artifacts: ArtifactRepository;
-  artifactStorage: ArtifactStorage;
+  artifactService: ArtifactService;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -123,6 +119,7 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  artifacts: ArtifactService;
   submitWork: (
     principal: Principal,
     request: WorkSubmitRequest,
@@ -173,17 +170,6 @@ export type ApplicationService = {
     scheduleId: string,
   ) => Promise<ServiceResult<ScheduleControlResult>>;
   tickSchedules: () => Promise<{ submitted: number; failed: number }>;
-  listArtifacts: (principal: Principal, taskId: string) => Promise<ServiceResult<ArtifactList>>;
-  uploadArtifact: (
-    principal: Principal,
-    taskId: string,
-    request: { path: string; mediaType: string; contentBase64: string },
-  ) => Promise<ServiceResult<ArtifactRecord>>;
-  artifact: (principal: Principal, artifactId: string) => Promise<ServiceResult<ArtifactRecord>>;
-  artifactContent: (
-    principal: Principal,
-    artifactId: string,
-  ) => Promise<ServiceResult<ArtifactContent>>;
   mediaCapabilities: () => MediaCapabilities;
   uploadMedia: (
     principal: Principal,
@@ -262,35 +248,7 @@ function toSchedule(record: {
   };
 }
 
-function toArtifact(row: {
-  artifactId: string;
-  taskId: string;
-  path: string;
-  mediaType: string;
-  bytes: number;
-  digest: string;
-  createdAt: string;
-}): ArtifactRecord {
-  return {
-    artifactId: row.artifactId,
-    taskId: row.taskId,
-    path: row.path,
-    mediaType: row.mediaType,
-    bytes: row.bytes,
-    digest: row.digest,
-    createdAt: row.createdAt,
-  };
-}
-
 /** Strict base64: a lenient decode would store bytes the client did not send. */
-function decodeBase64(value: string): Buffer | null {
-  const normalized = value.replace(/\s+/g, '');
-  if (normalized.length === 0 || normalized.length % 4 !== 0) return null;
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) return null;
-  const decoded = Buffer.from(normalized, 'base64');
-  return decoded.toString('base64') === normalized ? decoded : null;
-}
-
 function capability(state: 'available' | 'unsupported' | 'unconfigured', detail: string) {
   return { state, detail };
 }
@@ -906,6 +864,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
+    artifacts: deps.artifactService,
 
     submitWork: async (principal, request) => {
       if (request.idempotencyKey) {
@@ -1451,7 +1410,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           'available',
           `Durable schedules are stored in the ${deps.config.persistence.driver} store.`,
         ),
-        artifacts: capability('available', 'Owner-scoped bytes with sha256 verification.'),
+        artifacts: capability('available', 'Durable owner-scoped artifacts with immutable versions and sha256 verification.'),
         permissions: capability(
           'available',
           `Scoped approvals are stored in the ${deps.config.persistence.driver} store.`,
@@ -1577,88 +1536,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     tickSchedules,
-
-    listArtifacts: async (principal, taskId) => {
-      const found = ownedTask(await deps.tasks.get(taskId), principal);
-      if (!found.ok) return found;
-      return ok({
-        artifacts: (await deps.artifacts.list(principal.ownerId, taskId)).map(toArtifact),
-      });
-    },
-
-    uploadArtifact: async (principal, taskId, request) => {
-      const found = ownedTask(await deps.tasks.get(taskId), principal);
-      if (!found.ok) return found;
-      const content = decodeBase64(request.contentBase64);
-      if (!content) {
-        return fail('validation_failed', 'The artifact content is not valid base64.');
-      }
-      if (content.length > deps.config.artifacts.maxBytes) {
-        return fail(
-          'validation_failed',
-          `An artifact may contain at most ${deps.config.artifacts.maxBytes} bytes.`,
-        );
-      }
-      const artifactId = deps.ids.artifactId();
-      let stored: { bytes: number; digest: string };
-      try {
-        stored = await deps.artifactStorage.write({
-          mode: found.value.mode,
-          artifactId,
-          content,
-        });
-      } catch {
-        return fail('internal_error', 'The artifact bytes could not be stored.');
-      }
-      const row: ArtifactRow = {
-        artifactId,
-        ownerId: principal.ownerId,
-        taskId,
-        path: request.path,
-        mediaType: request.mediaType,
-        bytes: stored.bytes,
-        digest: stored.digest,
-        mode: found.value.mode,
-        createdAt: deps.clock.iso(),
-      };
-      try {
-        await deps.artifacts.insert(row);
-      } catch {
-        await deps.artifactStorage
-          .remove({ mode: found.value.mode, artifactId })
-          .catch(() => undefined);
-        return fail('internal_error', 'The artifact could not be recorded.');
-      }
-      return ok(toArtifact(row));
-    },
-
-    artifact: async (principal, artifactId) => {
-      const row = await deps.artifacts.get(principal.ownerId, artifactId);
-      return row
-        ? ok(toArtifact(row))
-        : fail('not_found', 'That artifact does not exist for this owner.');
-    },
-
-    artifactContent: async (principal, artifactId) => {
-      const row = await deps.artifacts.get(principal.ownerId, artifactId);
-      if (!row) return fail('not_found', 'That artifact does not exist for this owner.');
-      try {
-        const content = await deps.artifactStorage.read({
-          mode: row.mode,
-          artifactId: row.artifactId,
-          digest: row.digest,
-        });
-        return ok({
-          artifactId: row.artifactId,
-          mediaType: row.mediaType,
-          bytes: row.bytes,
-          digest: row.digest,
-          contentBase64: content.toString('base64'),
-        });
-      } catch {
-        return fail('not_found', 'The artifact bytes are unavailable.');
-      }
-    },
 
     mediaCapabilities: () => {
       const vision = deps.models

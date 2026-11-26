@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createClock } from '../../src/support/clock.js';
 import { decodeBase64 } from '../../src/media/decode.js';
 import { sniffImage } from '../../src/media/sniff.js';
 import { createMediaService } from '../../src/media/service.js';
-import { createMediaStore } from '../../src/media/store.js';
+import { artifactHarness } from '../fixtures/artifacts.js';
 import { gifBytes, jpegBytes, pngBytes, webpBytes } from '../helpers.js';
 
 const LIMITS = { maxPixels: 40_000_000 };
@@ -107,9 +106,10 @@ test('base64 decoding is canonical and bounded before allocation', () => {
 });
 
 test('an upload is owner-scoped, header-typed and mode-bound', async () => {
+  const harness = artifactHarness({ settings: { allowEphemeral: true } });
   const media = createMediaService({
-    store: createMediaStore(),
-    clock: createClock(),
+    artifacts: harness.service,
+    clock: harness.clock,
     limits: {
       enabled: true,
       maxBytes: 5_000_000,
@@ -121,7 +121,7 @@ test('an upload is owner-scoped, header-typed and mode-bound', async () => {
   });
   const data = pngBytes(10, 10).toString('base64');
 
-  const uploaded = await media.upload('owner-a', {
+  const uploaded = await media.upload(harness.owner.ownerId, {
     mode: 'cloud',
     data,
     declaredType: 'image/png',
@@ -130,7 +130,7 @@ test('an upload is owner-scoped, header-typed and mode-bound', async () => {
   if (!uploaded.ok) return;
   assert.equal(uploaded.value.media.mediaType, 'image/png');
 
-  const mismatch = await media.upload('owner-a', {
+  const mismatch = await media.upload(harness.owner.ownerId, {
     mode: 'cloud',
     data,
     declaredType: 'image/jpeg',
@@ -138,12 +138,12 @@ test('an upload is owner-scoped, header-typed and mode-bound', async () => {
   assert.equal(mismatch.ok, false);
   assert.equal(mismatch.ok === false && mismatch.code, 'media_invalid');
 
-  const foreign = await media.get('owner-b', uploaded.value.media.mediaId);
+  const foreign = await media.get(harness.other.ownerId, uploaded.value.media.mediaId);
   assert.equal(foreign.ok, false);
   assert.equal(foreign.ok === false && foreign.code, 'not_found');
 
   const wrongMode = await media.resolve({
-    ownerId: 'owner-a',
+    ownerId: harness.owner.ownerId,
     mode: 'private',
     mediaIds: [uploaded.value.media.mediaId],
   });
@@ -151,7 +151,7 @@ test('an upload is owner-scoped, header-typed and mode-bound', async () => {
   assert.equal(wrongMode.ok === false && wrongMode.code, 'forbidden');
 
   const resolved = await media.resolve({
-    ownerId: 'owner-a',
+    ownerId: harness.owner.ownerId,
     mode: 'cloud',
     mediaIds: [uploaded.value.media.mediaId],
   });
@@ -162,9 +162,10 @@ test('an upload is owner-scoped, header-typed and mode-bound', async () => {
 });
 
 test('the capability report keeps unimplemented modalities unavailable', () => {
+  const harness = artifactHarness({ settings: { allowEphemeral: true } });
   const media = createMediaService({
-    store: createMediaStore(),
-    clock: createClock(),
+    artifacts: harness.service,
+    clock: harness.clock,
     limits: {
       enabled: true,
       maxBytes: 4_194_304,

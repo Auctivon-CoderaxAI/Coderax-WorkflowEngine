@@ -24,7 +24,7 @@ import type {
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createMediaService } from '../media/service.js';
 import { createCreativeService } from '../creative/service.js';
-import { createArtifactStorage } from '../artifacts/store.js';
+import { createArtifactService } from '../artifacts/service.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
@@ -393,15 +393,25 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const permissions = persistence.permissions;
   const notifications = persistence.notifications;
   const schedules = persistence.schedules;
-  const artifacts = persistence.artifacts;
-  const artifactStorage = createArtifactStorage(workspaceRoots(config.workspaces));
+  const audit = createAuditLog({ clock, ids });
+  const artifactService = createArtifactService({
+    artifacts: persistence.artifacts,
+    blobs: persistence.blobs,
+    capacity: persistence.capacity,
+    ownerId: config.auth.ownerId,
+    conversations,
+    tasks,
+    audit,
+    clock,
+    ids,
+    settings: config.artifacts,
+  });
   const media = createMediaService({
-    store: persistence.media,
+    artifacts: artifactService,
     clock,
     limits: config.media,
   });
   const creative = createCreativeService({ maxBytes: config.media.creativeMaxBytes });
-  const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -496,6 +506,30 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
+        name: 'artifacts',
+        required: false,
+        check: async () => {
+          if (artifactService.durable) {
+            return {
+              status: 'ok' as const,
+              detail: `Versioned artifacts and media use the durable ${artifactService.backend} store.`,
+            };
+          }
+          if (config.artifacts.allowEphemeral) {
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact uploads use the explicitly enabled in-memory test store; a restart loses them.',
+            };
+          }
+          return {
+            status: 'failed' as const,
+            detail:
+              'Artifact and media uploads are refused because persistence.driver=memory cannot survive a restart.',
+          };
+        },
+      },
+      {
         // Optional on purpose: an enabled external agent being down degrades the
         // report without stopping an engine that still has Native.
         name: 'agents',
@@ -522,8 +556,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     creative,
     notifications,
     schedules,
-    artifacts,
-    artifactStorage,
+    artifactService,
     audit,
     events,
     runner,
@@ -583,7 +616,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     router,
     host: config.server.host,
     port: config.server.port,
-    maxBodyBytes: config.server.maxBodyBytes,
   });
 
   return {
@@ -598,6 +630,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       models.start();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
+      await service.artifacts.reconcile();
+      await service.artifacts.sweepExpiredArtifacts();
       await service.recoverInterrupted();
       if (config.schedules.enabled) {
         scheduleTimer = setInterval(() => {

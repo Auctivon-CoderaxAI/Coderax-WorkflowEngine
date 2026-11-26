@@ -18,6 +18,18 @@ function matches(document: Document, filter: MongoFilter): boolean {
         const right = bound instanceof Date ? bound.getTime() : bound;
         if (left === undefined || left === null || left > right) return false;
       }
+      if ('$gte' in operators) {
+        const bound = operators.$gte as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left < right) return false;
+      }
+      if ('$lt' in operators) {
+        const bound = operators.$lt as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left >= right) return false;
+      }
       if ('$gt' in operators) {
         const bound = operators.$gt as Date | string | number;
         const left = value instanceof Date ? value.getTime() : value;
@@ -40,6 +52,15 @@ function matches(document: Document, filter: MongoFilter): boolean {
 
 function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
   return JSON.stringify(Object.keys(keys).map((field) => document[field] ?? null));
+}
+
+function applyUpdate(document: Document, update: Record<string, unknown>): Document {
+  const next: Document = { ...document, ...(update.$set as Document | undefined) };
+  for (const [field, delta] of Object.entries((update.$inc as Record<string, number>) ?? {})) {
+    const current = typeof next[field] === 'number' ? (next[field] as number) : 0;
+    next[field] = current + delta;
+  }
+  return next;
 }
 
 function duplicateKey(): Error {
@@ -125,13 +146,13 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = { ...documents[index], ...update.$set };
+      documents[index] = applyUpdate(documents[index] ?? {}, update);
       return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);
       if (index !== -1) {
-        const next = { ...documents[index], ...update.$set };
+        const next = applyUpdate(documents[index] ?? {}, update);
         assertUnique(next, index);
         documents[index] = next;
         return { matchedCount: 1, upsertedCount: 0 };

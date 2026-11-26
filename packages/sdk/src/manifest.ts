@@ -39,10 +39,15 @@ export const SDK_COVERAGE: Readonly<Record<string, string>> = Object.freeze({
   createSchedule: 'createSchedule',
   getSchedule: 'schedule',
   cancelSchedule: 'cancelSchedule',
-  listTaskArtifacts: 'artifacts',
-  uploadTaskArtifact: 'uploadArtifact',
+  listArtifacts: 'artifacts',
+  uploadArtifact: 'uploadArtifact',
+  pruneArtifacts: 'pruneArtifacts',
   getArtifact: 'artifact',
-  getArtifactContent: 'artifactContent',
+  uploadArtifactVersion: 'uploadArtifactVersion',
+  listArtifactVersions: 'artifactVersions',
+  downloadArtifact: 'downloadArtifact',
+  exportArtifact: 'exportArtifact',
+  deleteArtifact: 'deleteArtifact',
 });
 
 /** Streaming methods that are an alternate transport for a covered operation. */
