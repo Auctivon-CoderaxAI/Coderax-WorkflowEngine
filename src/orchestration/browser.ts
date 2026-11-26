@@ -127,6 +127,16 @@ type AuditOutcome = 'accepted' | 'completed' | 'failed' | 'cancelled' | 'refused
 const TERMINAL_STATES = new Set(['closed', 'expired', 'failed', 'quarantined']);
 const APPROVAL_TTL_MS = 10 * 60_000;
 
+/** A create the provider may have fulfilled without returning a session handle. */
+type UnresolvedCreate = { reference: string; at: string };
+
+type Capacity = {
+  limit: number;
+  live: number;
+  pending: number;
+  unresolved: UnresolvedCreate[];
+};
+
 function limitsFor(config: EngineConfig): BrowserLimits {
   return {
     maxSessionTtlSeconds: Math.floor(config.browsers.sessionTtlMs / 1000),
@@ -159,15 +169,16 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
   const pendingCreates = new Map<string, number>();
   // Without a provider handle or lookup, a local timer cannot establish
   // termination: the provider may allocate after the client has timed out.
-  const unresolvedCreates = new Map<string, string[]>();
+  const unresolvedCreates = new Map<string, UnresolvedCreate[]>();
   const sessionQueues = new Map<string, Promise<void>>();
   let closing = false;
 
   function retainUnresolvedCreate(ownerId: string): void {
     const reference = deps.ids.requestId();
-    const retained = unresolvedCreates.get(ownerId) ?? [];
-    retained.push(reference);
-    unresolvedCreates.set(ownerId, retained);
+    unresolvedCreates.set(ownerId, [
+      ...(unresolvedCreates.get(ownerId) ?? []),
+      { reference, at: deps.clock.iso() },
+    ]);
     audit(
       ownerId,
       'browser.session.create.unresolved',
@@ -203,6 +214,46 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     const remaining = (pendingCreates.get(ownerId) ?? 1) - 1;
     if (remaining <= 0) pendingCreates.delete(ownerId);
     else pendingCreates.set(ownerId, remaining);
+  }
+
+  function capacity(ownerId: string): Capacity {
+    return {
+      limit: deps.config.browsers.maxSessionsPerOwner,
+      live: store
+        .sessions(ownerId)
+        .filter(
+          (record) => isLive(record.session) || record.session.state === 'quarantined',
+        ).length,
+      pending: pendingCreates.get(ownerId) ?? 0,
+      unresolved: [...(unresolvedCreates.get(ownerId) ?? [])],
+    };
+  }
+
+  /**
+   * An unconfirmed allocation has no session record and no receipt, so the
+   * refusal itself must name its create references. A generic limit error hides
+   * what is occupying the slots and leaves the owner unable to investigate.
+   */
+  function capacityFailure(current: Capacity): ServiceFailure {
+    if (current.unresolved.length > 0) {
+      const shown = current.unresolved.slice(0, 5).map((entry) => entry.reference);
+      const omitted = current.unresolved.length - shown.length;
+      const references = `${shown.join(', ')}${omitted > 0 ? `, +${omitted} more` : ''}`;
+      return fail(
+        'conflict',
+        `No browser slot is free in the configured limit of ${current.limit}: ${current.unresolved.length} reserved by create requests the provider did not confirm (createRef=${references}). Protocol v1 cannot look these up, so verify remote cleanup with the provider; these reservations clear when the engine process restarts.`,
+      );
+    }
+    if (current.pending > 0) {
+      return fail(
+        'conflict',
+        `No browser slot is free in the configured limit of ${current.limit}: ${current.pending} create request(s) are still waiting on the provider. Retry once they settle.`,
+      );
+    }
+    return fail(
+      'conflict',
+      `All ${current.limit} browser slots are in use: ${current.live} live or quarantined session(s). Close one before creating another; a quarantined session needs a confirmed close retry.`,
+    );
   }
 
   function nowMs(): number {
@@ -574,16 +625,18 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       if (closing) {
         return fail('conflict', 'The browser service is shutting down.');
       }
-      const live = store.sessions(ownerId).filter(
-        (record) => isLive(record.session) || record.session.state === 'quarantined',
-      );
-      const pending = pendingCreates.get(ownerId) ?? 0;
-      const unresolved = unresolvedCreates.get(ownerId)?.length ?? 0;
-      if (live.length + pending + unresolved >= deps.config.browsers.maxSessionsPerOwner) {
-        return fail(
-          'conflict',
-          'The owner already has the maximum number of live browser sessions.',
+      const current = capacity(ownerId);
+      if (
+        current.live + current.pending + current.unresolved.length >=
+        current.limit
+      ) {
+        audit(
+          ownerId,
+          'browser.session.create',
+          'refused',
+          `capacity limit=${current.limit} live=${current.live} pending=${current.pending} unresolved=${current.unresolved.length}`,
         );
+        return capacityFailure(current);
       }
 
       const configuredTtl = Math.floor(deps.config.browsers.sessionTtlMs / 1000);

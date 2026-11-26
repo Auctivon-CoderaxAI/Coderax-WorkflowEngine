@@ -950,6 +950,37 @@ test('an unknown create outcome retains capacity and an audit reference past the
   }
 });
 
+test('capacity exhaustion names the unresolved allocations that hold the slots', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({
+    browser: fake,
+    config: { browsers: { enabled: true, maxSessionsPerOwner: 1 } },
+  });
+  try {
+    const request = {
+      label: 'Unresolved allocation',
+      purpose: 'testing' as const,
+      origins: ['https://example.test'],
+    };
+    fake.failNextCreateUnknown();
+    const lost = await started.app.service.createBrowserSession(principal, request);
+    assert.equal(lost.ok, false);
+    assert.equal(lost.ok === false && lost.code, 'browser_unavailable');
+
+    const blocked = await started.app.service.createBrowserSession(principal, request);
+    assert.equal(blocked.ok, false);
+    if (blocked.ok) return;
+    assert.equal(blocked.code, 'conflict');
+    assert.match(blocked.detail, /provider did not confirm/i);
+    assert.match(blocked.detail, /createRef=req_[0-9a-f-]{36}/);
+    assert.match(blocked.detail, /limit of 1/);
+    assert.doesNotMatch(blocked.detail, /maximum number of live browser sessions/i);
+    assert.equal(fake.createInputs.length, 1);
+  } finally {
+    await started.close();
+  }
+});
+
 test('a session created during shutdown is quarantined when termination is unconfirmed', async () => {
   const fake = fakeBrowserProvider();
   const started = await startTestApp({

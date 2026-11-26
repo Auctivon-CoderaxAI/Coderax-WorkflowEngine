@@ -89,9 +89,12 @@ The SDK exposes every operation on `CoderaxClient`.
   request before dispatch and for credential rejections (HTTP 401 or 403).
   An unconfirmed create without a session handle keeps its reservation for
   the life of the engine process. The audit log records a local create
-  reference. Protocol v1 cannot look up an allocation by that reference, and
-  a local timer cannot confirm termination. A process restart loses this
-  bookkeeping; verify remote cleanup before restarting to recover capacity.
+  reference, and a create refused for capacity names the retained references
+  (`createRef=...`) instead of a generic limit error, so the owner can see
+  what is occupying the slots. Protocol v1 cannot look up an allocation by
+  that reference, and a local timer cannot confirm termination. A process
+  restart loses this bookkeeping; verify remote cleanup before restarting to
+  recover capacity.
   Retry close to clean up a quarantined session with a known handle. The
   engine retains the latest 128 confirmed terminal sessions and their
   receipt histories across owners.
