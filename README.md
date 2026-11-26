@@ -35,7 +35,7 @@ are clients of the same versioned API.
 | Zero-cost model router (discovery, verification, modes, limits, fallback, health) | Implemented | `src/models/router.ts`, `src/models/providers`, tests |
 | Reproducible quality benchmark harness | Implemented; live run requires provider credentials | `benchmarks/`, `scripts/benchmark.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
-| MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
+| MongoDB lease table + index bootstrap | Implemented, selected at startup; live-verified in CI against a `mongo:8.0` container | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent: dependency-aware DAG plan, native/JSON tool actions, verification, bounded recovery | Implemented | `src/agents/native` |
 | Durable reservation ledger with per-owner and per-task ceilings | Implemented; live MongoDB atomicity not verified | `src/models/budget.ts`, `src/persistence/budgets.ts` |
 | Built-in tools behind call-bound, single-use exact-resource approvals; SSRF, shell and symlink hardening | Implemented | `src/tools`, `src/security`, `tests/unit` |
@@ -44,7 +44,7 @@ are clients of the same versioned API.
 | Retrieval with evidence-gated semantic embeddings or honest lexical fallback | Implemented | `src/knowledge/store.ts` |
 | OpenCode HTTP/SSE transport | Implemented; not live-verified | `src/agents/adapters/opencode.ts` |
 | FreeBuff transport | Injection only — no authorized endpoint | `src/agents/adapters/external.ts` |
-| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
+| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; one live server in CI, not replica-verified | `src/bootstrap/compose.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |

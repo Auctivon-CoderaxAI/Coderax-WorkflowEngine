@@ -20,6 +20,25 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The live-persistence integration test is opt-in: it only runs when
+    # CODERAX_MONGODB_URI names a reachable database. This container is that
+    # database, so the tier executes against a real server instead of skipping.
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Loopback without TLS is the one shape the connector accepts; a remote
+      # deployment would need tls=true or an SRV connection string.
+      CODERAX_MONGODB_URI: mongodb://127.0.0.1:27017/coderax_verify
+      # A missing database fails the run instead of quietly skipping the tier.
+      CODERAX_REQUIRE_LIVE_MONGO: '1'
     steps:
       - uses: actions/checkout@v4
 

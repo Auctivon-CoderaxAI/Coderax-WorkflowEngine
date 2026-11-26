@@ -711,9 +711,19 @@ test('the memory driver is reported as process-local and the fake MongoDB as mon
 /**
  * The real-database check is opt-in and reported as skipped otherwise. No live
  * MongoDB is contacted without an authorized connection string, and a skipped
- * test is never counted as durable verification.
+ * test is never counted as durable verification. CI provides the database as a
+ * service container, so it also sets CODERAX_REQUIRE_LIVE_MONGO: a missing
+ * connection string then fails the run instead of dropping the only
+ * real-database evidence in silence.
  */
 const mongoUri = process.env.CODERAX_MONGODB_URI?.trim();
+if (process.env.CODERAX_REQUIRE_LIVE_MONGO === '1' && !mongoUri) {
+  test('a live MongoDB is required but CODERAX_MONGODB_URI is empty', () => {
+    assert.fail(
+      'CODERAX_REQUIRE_LIVE_MONGO is set but CODERAX_MONGODB_URI is empty, so the live-persistence test would have been skipped',
+    );
+  });
+}
 test(
   'a real MongoDB stores the stream and resumes its sequence after a restart',
   {
@@ -744,10 +754,13 @@ test(
       assert.deepEqual(await log.append({ ...base, eventId: 'live-2', seq: 2, type: 'task.started' }), {
         appended: true,
       });
-      // The head rejects reuse before Mongo sees an insert.
+      // A redelivery is refused, but it must be reported as the same `duplicate`
+      // the in-memory log reports: the bus treats `duplicate` as benign and
+      // `out_of_order` as a settlement failure, so the wrong reason would fail a
+      // task whose terminal event was simply delivered twice.
       assert.deepEqual(await log.append({ ...base, eventId: 'live-2', seq: 2, type: 'task.started' }), {
         appended: false,
-        reason: 'out_of_order',
+        reason: 'duplicate',
       });
 
       await assert.rejects(events.insertOne({ ...base, eventId: 'other', seq: 2 }), { code: 11000 });

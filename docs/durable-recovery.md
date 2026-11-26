@@ -97,15 +97,20 @@ These are deliberately separate and are not interchangeable.
    process state. This proves the wiring and the semantics, **not** that a server
    stored a row.
 3. **Actual MongoDB**. `a real MongoDB stores the stream and resumes its sequence
-   after a restart` runs only when `CODERAX_MONGODB_URI` names an authorized
-   database. Without it the test is **skipped** and reported as skipped; it is
-   never counted as durable verification. No live MongoDB was contacted while
-   authoring this change, and the PR says so.
+   after a restart` runs when `CODERAX_MONGODB_URI` names a reachable database.
+   The `verify` workflow starts a `mongo:8.0` service container and sets that
+   variable, so hosted CI executes this tier against a real server; the job also
+   sets `CODERAX_REQUIRE_LIVE_MONGO=1`, which fails the run if the variable is
+   ever missing instead of skipping the tier silently. A local run without the
+   variable still reports the test as **skipped** and never counts it. The
+   conflict resolution against `feat/intelligence-core` was produced with this
+   tier passing against a local `mongod` 8.0 before the CI run existed.
 
 ## What is not verified here
 
-- No live MongoDB was contacted, so no claim is made about a real server storing
-  a row, index build timing, or replica behaviour.
+- The live tier runs against one standalone `mongod` (locally and as the CI
+  service container), never a replica set, so no claim is made about
+  transactions, failover or secondary reads.
 - No multi-replica race was executed. The fencing, watermark and
   stop-scoping rules are enforced by the store contract and tested against the
   fake, not across two live processes. `a graceful stop leaves a run owned by

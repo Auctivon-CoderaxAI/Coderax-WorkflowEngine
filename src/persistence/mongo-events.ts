@@ -90,7 +90,17 @@ export function createMongoEventLog(input: EventCollections): EventLog {
       const { taskId, eventId, seq, generation } = event;
       let current = await reconcile(taskId);
       if (generation < current.generation) return { appended: false, reason: 'stale_generation' };
-      if (seq <= current.seq) return { appended: false, reason: 'out_of_order' };
+      if (seq <= current.seq) {
+        // A sequence at or below the watermark is normally a stale writer, but a
+        // redelivery of an event that is already committed must report the same
+        // `duplicate` the in-memory log reports: the reason decides whether the
+        // caller treats it as a benign retry or as an ordering defect.
+        const sameId = await events.findOne({ taskId, eventId });
+        return {
+          appended: false,
+          reason: sameId && sameId.provisional !== true ? 'duplicate' : 'out_of_order',
+        };
+      }
 
       try {
         await events.insertOne({ ...event, provisional: true });
