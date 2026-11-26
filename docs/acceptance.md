@@ -13,19 +13,20 @@
   scripts, lockfile/manifest integrity and the SDK/contract release range — were
   folded into this branch. There is one gate implementation, not three.
 
-The exact remote SHA is the branch head at publication and is restated in the
-final handoff. Any later docs-only commit changes the review head but not the
-verified code tree; hosted exact-head CI is a separate, still-unavailable
-evidence item (see below).
+Verified code head: `3c7c0446026691bf34a67628d038b1fa7e549332`. The final
+remote SHA is the branch head at publication and is restated in the handoff.
+A later docs-only record commit changes the review head but not the code tree;
+hosted exact-head CI is a separate, still-unavailable evidence item (see below).
 
 ## Exact-tree acceptance
 
 Command: `npm run verify` with `CODERAX_TEST_MONGO_URI` pointing at a disposable
-real MongoDB started for this run. Exit status: 0.
+real MongoDB started for this run. Exit status: 0 at code head
+`3c7c0446026691bf34a67628d038b1fa7e549332`.
 
 | Gate | Tests | Result |
 | --- | --- | --- |
-| unit | 90 | 90 passed |
+| unit | 91 | 91 passed |
 | integration (fake Mongo labelled) | 9 | 9 passed |
 | security | 25 | 25 passed |
 | adversarial | 19 | 19 passed |
@@ -37,7 +38,7 @@ real MongoDB started for this run. Exit status: 0.
 | openapi | command | `openapi.json` matches contracts |
 | mongo-live (real database) | 8 | 8 passed, 0 skipped |
 
-Total: 219 tests across 11 gates. Gate manifest: 37 compiled test files
+Total: 220 tests across 11 gates. Gate manifest: 37 compiled test files
 assigned, none unclaimed. The live gate forces `CODERAX_REQUIRE_MONGO=1`; with no
 URI it exits 1 with eight explicit failures and zero skips.
 
