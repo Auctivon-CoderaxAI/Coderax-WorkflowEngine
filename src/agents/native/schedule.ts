@@ -14,7 +14,10 @@ export function planWaves(input: {
   completed: ReadonlySet<string>;
   maxParallel: number;
 }): ScheduleResult {
-  const maxParallel = Math.max(1, Math.trunc(input.maxParallel));
+  const maxParallel = Math.max(
+    1,
+    Number.isFinite(input.maxParallel) ? Math.trunc(input.maxParallel) : 1,
+  );
   const done = new Set(input.completed);
   const remaining = new Map(
     input.steps.filter((step) => !done.has(step.id)).map((step) => [step.id, step]),

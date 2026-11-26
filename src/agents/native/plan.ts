@@ -239,6 +239,9 @@ export function parseModelPlan(input: {
     if (!title) return { ok: false, reason: `step ${id} had no bounded title` };
     const kind = entry.kind === 'read' ? 'read' : entry.kind === 'reason' ? 'reason' : null;
     if (!kind) return { ok: false, reason: `step ${id} had an unsupported kind` };
+    if (entry.dependsOn !== undefined && !Array.isArray(entry.dependsOn)) {
+      return { ok: false, reason: `step ${id} had a malformed dependency list` };
+    }
     const dependsOn = Array.isArray(entry.dependsOn)
       ? entry.dependsOn.filter((value): value is string => typeof value === 'string')
       : [];

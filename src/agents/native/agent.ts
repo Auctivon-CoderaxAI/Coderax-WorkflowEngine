@@ -20,9 +20,8 @@ import type {
   StepActionFailure,
   StepEvidence,
 } from './types.js';
-import { createNativePlanner } from './plan.js';
+import { createNativePlanner, validatePlan } from './plan.js';
 import { createNativeExecutor } from './actions.js';
-import { validatePlan } from './plan.js';
 import { planWaves } from './schedule.js';
 import { resolveReasoningMode, limitsFor } from './reason.js';
 import { decideCorrection, pause, toFailureCode } from './errors.js';
@@ -655,6 +654,7 @@ export function createNativeAgent(input: {
           code: 'provider_error',
           detail: 'The Native plan could not be executed safely.',
           retryable: false,
+          ...(usage() ? { usage: usage() } : {}),
         };
       }
     },

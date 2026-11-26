@@ -120,6 +120,14 @@ test('parallel waves respect dependencies and the configured concurrency bound',
     maxParallel: 2,
   });
   assert.equal(blocked.ok, false);
+
+  const malformed = planWaves({
+    steps: [step('a'), step('b')],
+    completed: new Set(),
+    maxParallel: Number.NaN,
+  });
+  assert.equal(malformed.ok, true);
+  if (malformed.ok) assert.equal(malformed.waves.length, 2);
 });
 
 test('the model plan parser accepts a valid read plan and refuses unsupported actions', () => {
@@ -173,6 +181,21 @@ test('the model plan parser accepts a valid read plan and refuses unsupported ac
     completedSteps: [],
   });
   assert.equal(escaping.ok, false);
+
+  const malformedDependencies = parseModelPlan({
+    text: JSON.stringify({
+      steps: [{ id: 'answer', title: 'Answer', kind: 'reason', dependsOn: 'read-notes' }],
+    }),
+    mode: 'complex',
+    maxSteps: 6,
+    revision: 1,
+    completedSteps: [],
+  });
+  assert.equal(malformedDependencies.ok, false);
+  assert.match(
+    malformedDependencies.ok ? '' : malformedDependencies.reason,
+    /malformed dependency list/,
+  );
 });
 
 test('auto reasoning is fast for simple objectives and complex for structured ones', () => {
