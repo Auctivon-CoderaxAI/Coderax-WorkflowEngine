@@ -109,6 +109,7 @@ export function createTaskRepository(): TaskRepository {
         ...task,
         state: 'queued',
         generation: task.generation + 1,
+        checkpoint: { ...task.checkpoint, text: '' },
         runToken: token,
         updatedAt: now,
         leaseExpiresAt,

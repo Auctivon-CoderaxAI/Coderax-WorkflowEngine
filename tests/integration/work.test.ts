@@ -192,6 +192,8 @@ test('late reports and cleanup cannot touch a resumed generation', async () => {
     let finishCurrent: (() => void) | undefined;
     agent.run = async ({ signal }, report) => {
       if (!stopOld) {
+        report({ type: 'text.delta', text: 'previous output ' });
+        report({ type: 'step.completed', stepId: 'first', title: 'First' });
         await new Promise<void>(resolve => {
           stopOld = () => {
             report({ type: 'text.replace', text: 'stale output' });
@@ -211,10 +213,18 @@ test('late reports and cleanup cannot touch a resumed generation', async () => {
     assert.ok(task.ok);
     const { taskId, generation, conversationId } = task.value;
     const finishOld = await waitFor(async () => stopOld);
+    assert.equal((await deps.tasks.get(taskId))?.checkpoint.text, 'previous output ');
     deps.clock.now = () => new Date(Date.now() + 60_000);
     const resumed = await started.app.service.resumeTask(principal, taskId, generation);
     assert.ok(resumed.ok && resumed.value.outcome === 'accepted');
     const finish = await waitFor(async () => finishCurrent);
+    assert.equal((await deps.tasks.get(taskId))?.checkpoint.text, '');
+    const replay = deps.events.replay(taskId, 0).events.filter(event => event.type === 'text.delta' || event.type === 'text.replace');
+    assert.deepEqual(replay.map(event => [event.type, event.payload]), [
+      ['text.delta', { text: 'previous output ' }],
+      ['text.replace', { text: '' }],
+      ['text.delta', { text: 'current ' }],
+    ]);
     finishOld();
     await waitFor(async () => deps.scheduler.active() === 1 || null);
     assert.doesNotMatch(JSON.stringify(deps.events.replay(taskId, 0)), /stale/);
@@ -225,6 +235,44 @@ test('late reports and cleanup cannot touch a resumed generation', async () => {
     const conversation = await started.app.service.conversation(principal, conversationId);
     assert.ok(conversation.ok);
     assert.equal(conversation.value.messages.at(-1)?.text, 'current output');
+  } finally {
+    await started.close();
+  }
+});
+
+test('failed transcript and notification writes do not strand a settled run', async () => {
+  const started = await startTestApp();
+  try {
+    const deps = started.app.dependencies;
+    const append = deps.conversations.appendMessage;
+    let publishedBeforeAppend = false;
+    let notificationAttempted = false;
+    const agent = deps.agents.get('coderax');
+    assert.ok(agent);
+    agent.run = async (_request, report) => {
+      deps.conversations.appendMessage = async () => {
+        const [task] = await deps.tasks.listByOwner(principal.ownerId);
+        publishedBeforeAppend = !!task && deps.events.replay(task.taskId, 0).events.at(-1)?.type === 'task.completed';
+        throw new Error('write unavailable');
+      };
+      report({ type: 'text.delta', text: 'result' });
+      return { ok: true, summary: 'done' };
+    };
+    deps.notifications.record = async () => {
+      notificationAttempted = true;
+      throw new Error('write unavailable');
+    };
+    const submit = (conversationId?: string) => started.app.service.submitWork(principal, {
+      objective: 'test settlement', mode: 'cloud', requireApproval: true, ...(conversationId ? { conversationId } : {}),
+    });
+    const task = await submit();
+    assert.ok(task.ok);
+    await deps.scheduler.idle();
+    assert.ok(publishedBeforeAppend && notificationAttempted);
+    assert.ok(deps.audit.list().some(entry => entry.action === 'work.completed'));
+    deps.conversations.appendMessage = append;
+    assert.ok((await submit(task.value.conversationId)).ok);
+    await deps.scheduler.idle();
   } finally {
     await started.close();
   }

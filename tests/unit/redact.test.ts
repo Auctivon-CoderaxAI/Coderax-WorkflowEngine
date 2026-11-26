@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { redactText } from '../../src/observability/redact.js';
+import { redactText, redactToolInput } from '../../src/observability/redact.js';
 
 test('redaction removes bearer tokens, keys and JWTs', () => {
   const text =
@@ -40,4 +40,23 @@ test('redaction is bounded and leaves ordinary text untouched', () => {
 test('quoted JSON credentials are scrubbed, including escaped value quotes', () => {
   const diagnostic = JSON.stringify({ api_key: 'sample"private value' });
   assert.equal(redactText(diagnostic), '{"api_key":[redacted]}');
+});
+
+test('credential suffixes are scrubbed in text and nested tool inputs', () => {
+  for (const key of ['access_token', 'client_secret', 'refresh_token', 'id_token', 'OPENAI_API_KEY']) {
+    assert.equal(redactText(key + '=plainvalue1'), key + '=[redacted]');
+    assert.equal(redactText(key + ': "plain value"'), key + ': [redacted]');
+    assert.deepEqual(redactToolInput([{ [key]: 'plainvalue1', max_tokens: 4000 }]),
+      [{ [key]: '[redacted]', max_tokens: 4000 }]);
+  }
+  assert.equal(redactText('max_tokens: 4000'), 'max_tokens: 4000');
+});
+
+test('authorization schemes hide their credentials as the header arrives', () => {
+  for (const scheme of ['Basic', 'Digest', 'Token', 'Negotiate', 'Custom-Auth']) {
+    const prefix = 'Authorization: ' + scheme + ' ';
+    const value = scheme === 'Digest' ? 'username="sample", response="example"' : 'c2FtcGxl';
+    assert.equal(redactText(prefix), 'Authorization: [redacted]');
+    assert.equal(redactText(prefix + value), redactText(prefix));
+  }
 });

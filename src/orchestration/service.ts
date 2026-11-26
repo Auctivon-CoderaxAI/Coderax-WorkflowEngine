@@ -300,59 +300,46 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
 
     const settled = applied.task;
-    const text = checkpoint?.text ?? '';
-    if (text.length > 0) {
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId: task.conversationId,
-        role: 'assistant',
-        text,
-        createdAt: now,
-        agent: task.agent,
-      });
-    }
+    try {
+      if (outcome.kind === 'completed') {
+        publish(settled, 'task.completed', {
+          summary: outcome.summary.slice(0, 20_000),
+          ...(task.model ? { model: task.model } : {}),
+          ...(outcome.usage ? { usage: outcome.usage } : {}),
+        });
+      } else if (outcome.kind === 'cancelled') {
+        publish(settled, 'task.cancelled', {});
+      } else {
+        publish(settled, 'task.failed', {
+          code: outcome.code, detail: outcome.detail, retryable: outcome.retryable,
+        });
+      }
 
-    if (outcome.kind === 'completed') {
-      publish(settled, 'task.completed', {
-        summary: outcome.summary.slice(0, 20_000),
-        ...(task.model ? { model: task.model } : {}),
-        ...(outcome.usage ? { usage: outcome.usage } : {}),
-      });
-      await notifyTerminal(settled, 'completed', outcome.summary);
+      const text = checkpoint?.text ?? '';
+      if (text.length > 0) {
+        await deps.conversations.appendMessage({
+          messageId: deps.ids.messageId(),
+          conversationId: task.conversationId,
+          role: 'assistant',
+          text,
+          createdAt: now,
+          agent: task.agent,
+        }).catch(() => undefined);
+      }
+      const detail = outcome.kind === 'completed' ? outcome.summary
+        : outcome.kind === 'failed' ? outcome.detail : undefined;
+      await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
       deps.audit.record({
         actor: task.ownerId,
-        action: 'work.completed',
+        action: `work.${outcome.kind}`,
         taskId: task.taskId,
         conversationId: task.conversationId,
-        outcome: 'completed',
+        outcome: outcome.kind,
+        ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
-    } else if (outcome.kind === 'cancelled') {
-      publish(settled, 'task.cancelled', {});
-      await notifyTerminal(settled, 'cancelled');
-      deps.audit.record({
-        actor: task.ownerId,
-        action: 'work.cancelled',
-        taskId: task.taskId,
-        conversationId: task.conversationId,
-        outcome: 'cancelled',
-      });
-    } else {
-      publish(settled, 'task.failed', {
-        code: outcome.code,
-        detail: outcome.detail,
-        retryable: outcome.retryable,
-      });
-      await notifyTerminal(settled, 'failed', outcome.detail);
-      deps.audit.record({
-        actor: task.ownerId,
-        action: 'work.failed',
-        taskId: task.taskId,
-        conversationId: task.conversationId,
-        outcome: 'failed',
-        detail: outcome.code,
-      });
+    } finally {
+      await releaseLease(task, token);
     }
-    await releaseLease(task, token);
   }
 
   async function execute(taskId: string, token: string): Promise<void> {
@@ -430,7 +417,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
-    let text = started.task.checkpoint.text;
+    let text = '';
     let visible = text;
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
@@ -831,6 +818,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
       publish(applied.task, 'task.queued', {});
+      publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
       return ok({
         taskId,
@@ -879,6 +867,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
       publish(applied.task, 'task.queued', {});
+      publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
       return ok({
         taskId,

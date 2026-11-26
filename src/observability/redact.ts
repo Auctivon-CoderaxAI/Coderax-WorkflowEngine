@@ -9,6 +9,10 @@
 
 /** Long, credential-shaped values that must never be echoed back. */
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  // A scheme may carry several comma-separated parameters (e.g. Digest).
+  // Treat an unquoted non-Bearer authorization field as opaque through end of line.
+  [/(authorization\b["']?\s*[:=][ \t]*)(?!Bearer\b)[a-z][\w.+-]*[ \t]+[^\r\n]*/gi, '$1[redacted]'],
+  [/(authorization\b["']?\s*[:=][ \t]*Bearer)[ \t]+[^\s,;]+/gi, '$1 [redacted]'],
   [/\b(Bearer)\s+[A-Za-z0-9._~+/-]{12,}=*/gi, '$1 [redacted]'],
   [/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}/g, '[redacted-key]'],
   [/\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{16,}/g, '[redacted-token]'],
@@ -16,7 +20,7 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/([?&](?:token|key|api_key|apikey|password|secret|sig)=)[^&\s]+/gi, '$1[redacted]'],
   [
     // `Bearer` is handled above, so it is not re-consumed as a bare value.
-    /(\b(?:token|password|passwd|secret|api[_-]?key|authorization)\b["']?\s*[:=]\s*)(?!Bearer\b)("(?:\\[\s\S]|[^"\\])*(?:"|\\?$)|'(?:\\[\s\S]|[^'\\])*(?:'|\\?$)|[^\s,;]+)/gi,
+    /((?:token|password|passwd|secret|api[_-]?key|authorization)\b["']?\s*[:=]\s*)(?!Bearer\b)("(?:\\[\s\S]|[^"\\])*(?:"|\\?$)|'(?:\\[\s\S]|[^'\\])*(?:'|\\?$)|[^\s,;]+)/gi,
     '$1[redacted]',
   ],
   // Absolute home directories leak an owner's name and layout.
@@ -32,7 +36,7 @@ export function redactContent(value: string): string {
 export function redactToolInput(input: unknown): unknown {
   try {
     return JSON.parse(JSON.stringify(input, (key, value: unknown) => {
-      if (/^(?:token|password|passwd|secret|api[_-]?key|authorization)$/i.test(key)) return '[redacted]';
+      if (/(?:token|password|passwd|secret|api[_-]?key|authorization)$/i.test(key)) return '[redacted]';
       return typeof value === 'string' ? redactContent(value) : value;
     }));
   } catch {
