@@ -343,11 +343,28 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         capabilityRevokedAt: null,
         processUseCount: 0,
       };
-      if (!(await deps.executions.create(record))) {
-        if (exclusive) {
-          if (previousRootOwner === undefined) activeRoots.delete(root);
-          else activeRoots.set(root, previousRootOwner);
+      const rollbackRoot = (): void => {
+        if (!exclusive) return;
+        // Restore the previous owner only while it is still running. It may
+        // have finished during the durability wait, and restoring a finished
+        // execution id would block the workspace forever.
+        if (previousRootOwner !== undefined && active.has(previousRootOwner)) {
+          activeRoots.set(root, previousRootOwner);
+        } else {
+          activeRoots.delete(root);
         }
+      };
+      let created: boolean;
+      try {
+        created = await deps.executions.create(record);
+      } catch (error) {
+        // A rejected durability write must not leave the root reserved for an
+        // execution that was never registered.
+        rollbackRoot();
+        throw error;
+      }
+      if (!created) {
+        rollbackRoot();
         return refused(
           'execution_duplicate',
           'That execution identity already exists.',

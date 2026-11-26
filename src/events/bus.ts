@@ -169,35 +169,39 @@ export function createEventBus(input: {
     const state = streams.get(taskId);
     if (!state || !input.log) return;
     if (state.flushing) return state.flushing;
-    state.flushing = (async () => {
-      try {
-        while (state.pending.length > 0) {
-          const batch = state.pending.splice(0, 200);
-          let results: Awaited<ReturnType<NonNullable<typeof input.log>['append']>>;
-          try {
-            results = await input.log!.append(batch);
-          } catch (error) {
-            // A failed append is not a lost append. Put the batch back ahead of
-            // anything published while it was in flight; the next flush retries
-            // in order, including terminal events.
-            state.pending.unshift(...batch);
-            throw error;
-          }
-          if (results.includes('stale_generation')) {
-            // This process no longer owns these generations. Fence exactly them,
-            // not the task forever: a resume in this process may legitimately
-            // publish the next generation.
-            const rejected = Math.max(...batch.map((event) => event.generation));
-            state.fencedGeneration = Math.max(state.fencedGeneration ?? 0, rejected);
-            state.pending.length = 0;
-            return;
-          }
+    const run = (async () => {
+      while (state.pending.length > 0) {
+        const batch = state.pending.splice(0, 200);
+        let results: Awaited<ReturnType<NonNullable<typeof input.log>['append']>>;
+        try {
+          results = await input.log!.append(batch);
+        } catch (error) {
+          // A failed append is not a lost append. Put the batch back ahead of
+          // anything published while it was in flight; the next flush retries
+          // in order, including terminal events.
+          state.pending.unshift(...batch);
+          throw error;
         }
-      } finally {
-        state.flushing = null;
+        if (results.includes('stale_generation')) {
+          // This process no longer owns these generations. Fence exactly them,
+          // not the task forever: a resume in this process may legitimately
+          // publish the next generation.
+          const rejected = Math.max(...batch.map((event) => event.generation));
+          state.fencedGeneration = Math.max(state.fencedGeneration ?? 0, rejected);
+          state.pending.length = 0;
+          return;
+        }
       }
     })();
-    return state.flushing;
+    // Do not clear this inside the async function: an empty flush resolves
+    // synchronously, before this assignment, which would pin a fulfilled
+    // promise and suppress every later flush.
+    state.flushing = run;
+    try {
+      await run;
+    } finally {
+      if (state.flushing === run) state.flushing = null;
+    }
   }
 
   return {

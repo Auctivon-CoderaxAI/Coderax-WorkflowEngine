@@ -228,7 +228,15 @@ export function createMongoTeamRepository(input: {
       // `runToken: null` plus the generation is the compare-and-swap. A running
       // team has a token, so it can never be resumed concurrently.
       const document = await collection.findOneAndUpdate(
-        { teamId, ownerId, generation: expectedGeneration, runToken: null },
+        {
+          teamId,
+          ownerId,
+          generation: expectedGeneration,
+          runToken: null,
+          // A concurrent `cancelInactive` leaves the generation and token
+          // unchanged, so the allowed states are part of the compare-and-swap.
+          state: { $in: ['interrupted', 'awaiting_approval'] },
+        },
         {
           $set: {
             generation: expectedGeneration + 1,

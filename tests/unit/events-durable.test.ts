@@ -89,6 +89,26 @@ test('a failed durable append restores the batch and a retry preserves terminal 
   );
 });
 
+test('an empty flush does not pin the stream and drop later events', async () => {
+  const log = createMemoryEventLog();
+  const bus = busOver(log);
+  await bus.flush('task-empty');
+  bus.publish({
+    taskId: 'task-empty',
+    agent: 'coderax',
+    generation: 1,
+    type: 'task.completed',
+    payload: { summary: 'done' },
+  });
+  await bus.flush('task-empty');
+  const durable = await log.read('task-empty', 0, 100);
+  assert.deepEqual(
+    durable.map((event) => event.type),
+    ['task.completed'],
+    'the event published after an empty flush is written',
+  );
+});
+
 test('a stale-generation fence does not silence a newer generation in the same process', async () => {
   const log = createMemoryEventLog();
   let reject = true;

@@ -272,7 +272,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   // the same zero-cost catalogue the run's resolved model passes. The adapter
   // itself honors `run.model` and never substitutes after admission.
   if (opencodeModel) {
-    const preference = models.resolve(opencodeModel, 'cloud');
+    // Membership and cost are checked against the catalogue, not against the
+    // Native gateway's readiness: an OpenCode transport can be healthy while
+    // the Native inference endpoint is not.
+    const preference = models.verify(opencodeModel);
     if (!preference.ok) {
       throw new StartupError([
         `engines.opencode.model does not resolve through the verified zero-cost catalogue (${preference.code}).`,

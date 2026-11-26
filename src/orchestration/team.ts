@@ -1153,10 +1153,14 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
         deps.supervisor.cancel(executionId, 'team_cancelled');
       }
       // A suspended or interrupted team has no execution loop left to observe
-      // the flag. Settle it atomically instead of leaving it resumable.
-      const inactive = context
-        ? null
-        : await deps.teams.cancelInactive({ ownerId: principal.ownerId, teamId, at });
+      // the flag. Settle it atomically even if a context object is still
+      // draining: it may already have cleared its run token, and the update
+      // itself refuses to touch a team that still has one.
+      const inactive = await deps.teams.cancelInactive({
+        ownerId: principal.ownerId,
+        teamId,
+        at,
+      });
       publish({ ...(inactive ?? record), cancelRequested: true }, 'task.cancelled', {
         reason: 'owner_cancelled',
       });

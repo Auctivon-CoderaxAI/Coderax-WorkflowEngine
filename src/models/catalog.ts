@@ -24,6 +24,12 @@ export type ModelCatalog = {
     requested: ModelRef | null | undefined,
     mode: DataMode,
   ) => ServiceResult<ModelDescriptor>;
+  /**
+   * Catalogue membership and cost only. Configuration validation must not
+   * depend on another endpoint's current readiness; the run still resolves
+   * through `resolve` before dispatch.
+   */
+  verify: (requested: ModelRef) => ServiceResult<ModelDescriptor>;
 };
 
 function usable(descriptor: ModelDescriptor, mode: DataMode): boolean {
@@ -62,6 +68,21 @@ export function createRouterCatalog(router: Router): ModelCatalog {
         streaming: true,
         availability: model.availability,
       });
+    },
+    verify: (requested) => {
+      const descriptor = router
+        .list()
+        .models.find((candidate) => modelKey(candidate.ref) === modelKey(requested));
+      if (!descriptor) {
+        return fail('engine_not_configured', 'That model is not in the verified catalogue.');
+      }
+      if (descriptor.costClass === 'paid') {
+        return fail(
+          'paid_model_refused',
+          'Coderax does not route to paid models; choose a verified zero-cost model.',
+        );
+      }
+      return ok({ ...descriptor });
     },
   };
 }
@@ -118,5 +139,18 @@ export function createModelCatalog(input: {
     }),
     route: () => [...routeRefs],
     resolve,
+    verify: (requested) => {
+      const descriptor = byKey.get(modelKey(requested));
+      if (!descriptor) {
+        return fail('engine_not_configured', 'That model is not in the verified catalogue.');
+      }
+      if (descriptor.costClass === 'paid') {
+        return fail(
+          'paid_model_refused',
+          'Coderax does not route to paid models; choose a verified zero-cost model.',
+        );
+      }
+      return ok({ ...descriptor });
+    },
   };
 }
