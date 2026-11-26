@@ -36,8 +36,21 @@ export type ModelCatalog = {
 export function createRouterCatalog(router: Router): ModelCatalog {
   return {
     list: () => router.list(),
-    route: (_mode: DataMode) => router.report('auto').route,
-    resolve: (requested, _mode) => {
+    /**
+     * This branch has no provider policy registry, so it cannot prove that a
+     * provider and an exact processing operation are approved for private
+     * execution. Private mode therefore resolves to nothing rather than reaching
+     * a hosted model. The authoritative router owns that decision; this
+     * catalogue never guesses it, and it never substitutes local inference.
+     */
+    route: (mode: DataMode) => (mode === 'private' ? [] : router.report('auto').route),
+    resolve: (requested, mode) => {
+      if (mode === 'private') {
+        return fail(
+          'model_missing',
+          'Private mode requires an approved data-processing policy. This branch has no provider policy registry, so the request fails closed and is not sent to a hosted model.',
+        );
+      }
       const selected = router.select({
         mode: 'auto' as RoutingMode,
         ...(requested ? { requested } : {}),

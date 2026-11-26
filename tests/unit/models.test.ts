@@ -45,6 +45,24 @@ function provider(id: string, models: ProviderModel[]): ProviderDescriptor {
 const free = model('openrouter', 'coderax:free', verified());
 const paid = model('openai', 'gpt-premium', { costClass: 'paid', verifiedFree: false, reason: 'price_not_zero' });
 
+test('private mode fails closed while this branch has no provider policy registry', () => {
+  const catalog = createRouterCatalog(createRouter({ providers: [provider('openrouter', [free])] }));
+
+  // Cloud mode keeps its existing behavior.
+  const cloud = catalog.resolve(null, 'cloud');
+  assert.equal(cloud.ok, true);
+  assert.deepEqual(catalog.route('cloud'), [free.ref]);
+
+  // A verified-free hosted model is not selectable for private execution, and an
+  // explicit pin does not bypass the refusal.
+  const privateRoute = catalog.resolve(null, 'private');
+  assert.equal(privateRoute.ok, false);
+  assert.equal(privateRoute.ok === false && privateRoute.code, 'model_missing');
+  assert.match(privateRoute.ok === false ? privateRoute.detail : '', /private mode/i);
+  assert.equal(catalog.resolve(free.ref, 'private').ok, false);
+  assert.deepEqual(catalog.route('private'), []);
+});
+
 test('the route resolves the verified free candidate', () => {
   const catalog = createRouterCatalog(createRouter({ providers: [provider('openrouter', [free])] }));
   const chosen = catalog.resolve(null, 'cloud');
