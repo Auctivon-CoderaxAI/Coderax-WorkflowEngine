@@ -351,6 +351,9 @@ test('an abandoned admission returns its quota and a materialized one is committ
     await new Promise((resolve) => setTimeout(resolve, 10));
     await (a as Replica).app.service.artifacts.sweepExpiredArtifacts();
     assert.deepEqual(await available(), afterUpload);
+    // Replaying a settlement whose row is already gone is a no-op, not a refund.
+    await capacity.commit(materialized.reservation);
+    assert.deepEqual(await available(), afterUpload);
     assert.equal(
       (await observer.collection('artifact_reservations').find({}).toArray()).length,
       0,
@@ -599,9 +602,11 @@ test('a delete during a read cannot remove the bytes under the reader', { skip }
       sha256: uploaded.artifact.sha256,
     };
 
-    // Stand in for a download that has already taken its expiring read lease.
-    const leaseId = await blobs.lease({ ref, ttlMs: 60_000 });
-    assert.ok(leaseId);
+    // Two downloads have already taken their expiring read leases.
+    const firstLease = await blobs.lease({ ref, ttlMs: 60_000 });
+    const secondLease = await blobs.lease({ ref, ttlMs: 60_000 });
+    assert.ok(firstLease);
+    assert.ok(secondLease);
     await (a as Replica).api.deleteArtifact(uploaded.artifact.artifactId, 'cloud');
     assert.equal(
       (await observer.collection('artifact_versions').find({}).toArray()).length,
@@ -616,9 +621,11 @@ test('a delete during a read cannot remove the bytes under the reader', { skip }
       1,
     );
 
-    // The live lease still protects the bytes after the version row is gone.
+    // Each live lease still protects the bytes after the version row is gone.
     assert.equal(await blobs.deleteIfUnreferenced(ref), false);
-    await blobs.releaseLease({ ref, leaseId });
+    await blobs.releaseLease({ ref, leaseId: firstLease as string });
+    assert.equal(await blobs.deleteIfUnreferenced(ref), false);
+    await blobs.releaseLease({ ref, leaseId: secondLease as string });
     assert.equal(await blobs.deleteIfUnreferenced(ref), true);
     assert.equal(await blobs.get(ref), null);
     assert.equal(
@@ -629,5 +636,124 @@ test('a delete during a read cannot remove the bytes under the reader', { skip }
     await a?.app.stop().catch(() => undefined);
     await observer?.close().catch(() => undefined);
     workspace.cleanup();
+  }
+});
+
+test('an upload racing the last delete keeps the shared digest alive', { skip }, async () => {
+  const real = maybeMongo as RealMongo;
+  const databaseName = uniqueName('upload-delete');
+  const workspaceA = createWorkspaces();
+  const workspaceB = createWorkspaces();
+  const content = Buffer.from('same digest across the race');
+  let a: Replica | undefined;
+  let b: Replica | undefined;
+  let observer: MongoDatabase | undefined;
+
+  try {
+    a = await boot({ real, databaseName, workspace: workspaceA });
+    b = await boot({ real, databaseName, workspace: workspaceB });
+    observer = await observerFor(real, databaseName);
+    const first = await (a as Replica).api.uploadArtifact({
+      filename: 'first.txt',
+      mediaType: 'text/plain',
+      contentBase64: base64(content),
+      mode: 'cloud',
+    });
+
+    const raced = await Promise.allSettled([
+      (a as Replica).api.deleteArtifact(first.artifact.artifactId, 'cloud'),
+      (b as Replica).api.uploadArtifact({
+        filename: 'second.txt',
+        mediaType: 'text/plain',
+        contentBase64: base64(content),
+        mode: 'cloud',
+      }),
+    ]);
+    assert.equal(raced[0]?.status, 'fulfilled');
+    assert.equal(raced[1]?.status, 'fulfilled');
+    const second = (raced[1] as PromiseFulfilledResult<ArtifactUploadResult>).value;
+
+    // Whichever order the acquire and the delete take, the surviving artifact
+    // must still find its bytes: the writer re-puts if the last delete won.
+    const downloaded = await (a as Replica).api.downloadArtifact(
+      second.artifact.artifactId,
+      { mode: 'cloud' },
+    );
+    assert.equal(downloaded.contentBase64, base64(content));
+    assert.equal(
+      (await observer.collection('artifact_blobs').find({}).toArray()).length,
+      1,
+    );
+
+    await (b as Replica).api.deleteArtifact(second.artifact.artifactId, 'cloud');
+    assert.equal(
+      (await observer.collection('artifact_blobs').find({}).toArray()).length,
+      0,
+    );
+  } finally {
+    await a?.app.stop().catch(() => undefined);
+    await b?.app.stop().catch(() => undefined);
+    await observer?.close().catch(() => undefined);
+    workspaceA.cleanup();
+    workspaceB.cleanup();
+  }
+});
+
+test('two replicas starting together reconcile one committed usage', { skip }, async () => {
+  const real = maybeMongo as RealMongo;
+  const databaseName = uniqueName('startup');
+  const workspaceA = createWorkspaces();
+  const workspaceB = createWorkspaces();
+  const workspaceC = createWorkspaces();
+  const content = Buffer.from('reconciled at startup');
+  let first: Replica | undefined;
+  let b: Replica | undefined;
+  let c: Replica | undefined;
+  let observer: MongoDatabase | undefined;
+
+  try {
+    first = await boot({ real, databaseName, workspace: workspaceA });
+    const uploaded = await first.api.uploadArtifact({
+      filename: 'startup.txt',
+      mediaType: 'text/plain',
+      contentBase64: base64(content),
+      mode: 'cloud',
+    });
+    await first.app.stop();
+    first = undefined;
+
+    // Both processes run startup reconciliation against the same committed row
+    // at the same time. Neither may overwrite the other's accounting.
+    [b, c] = await Promise.all([
+      boot({ real, databaseName, workspace: workspaceB }),
+      boot({ real, databaseName, workspace: workspaceC }),
+    ]);
+    observer = await observerFor(real, databaseName);
+    const capacity = await observer
+      .collection('artifact_capacity')
+      .findOne({ mode: 'cloud' });
+    assert.equal(
+      capacity?.availableBytes,
+      artifactSettings().maxBytesPerOwner - uploaded.artifact.bytes,
+    );
+    assert.equal(
+      capacity?.availableArtifacts,
+      artifactSettings().maxArtifactsPerOwner - 1,
+    );
+
+    for (const replica of [b as Replica, c as Replica]) {
+      const downloaded = await replica.api.downloadArtifact(uploaded.artifact.artifactId, {
+        mode: 'cloud',
+      });
+      assert.equal(downloaded.contentBase64, base64(content));
+    }
+  } finally {
+    await first?.app.stop().catch(() => undefined);
+    await b?.app.stop().catch(() => undefined);
+    await c?.app.stop().catch(() => undefined);
+    await observer?.close().catch(() => undefined);
+    workspaceA.cleanup();
+    workspaceB.cleanup();
+    workspaceC.cleanup();
   }
 });

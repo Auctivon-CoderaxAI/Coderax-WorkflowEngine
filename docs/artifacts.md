@@ -264,9 +264,9 @@ container, so the real-database lane cannot silently disappear. Hosted execution
 is evidence only when the `verify` workflow has actually run at the exact head;
 a local green run does not imply a hosted run.
 
-At the artifact branch head, `npm run verify` passed **155/155 tests with zero
+At the artifact branch head, `npm run verify` passed **157/157 tests with zero
 skips** against a real mongod, and `openapi:check` passed. The durable restart
-test, the seven real-Mongo concurrency/recovery tests and the failure-injection
+test, the nine real-Mongo concurrency/recovery tests and the failure-injection
 test are the evidence for the claims above; no production database has been
 exercised.
 
@@ -284,10 +284,14 @@ against one real deployment and proves:
   version exists is committed rather than refunded;
 - a deleted chunk makes download and export fail as corruption, never return
   reconstructed bytes;
-- deleting an artifact while a reader holds a read lease keeps the bytes
-  readable and blocks the delete until the lease is released;
+- deleting an artifact while two readers hold read leases keeps the bytes
+  readable and blocks the delete until both leases are released;
 - a reader that takes a lease and then never returns does not pin the blob:
   once the lease expires, the conditional delete succeeds;
+- an upload racing the last delete of the same digest still finds or re-puts
+  the bytes, so the surviving artifact is readable;
+- two replicas starting together reconcile the same committed usage, and both
+  read the artifact afterwards;
 - concurrent version creation across two replicas never loses or renumbers a
   committed version, and the capacity ledger equals the retained version bytes;
 - a thrown metadata write releases its blob reference and admission, as the
