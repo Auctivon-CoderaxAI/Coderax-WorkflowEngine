@@ -12,6 +12,16 @@ function matches(document: Document, filter: MongoFilter): boolean {
     const value = document[field];
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
+      const comparable = (candidate: unknown): unknown =>
+        candidate instanceof Date ? candidate.getTime() : candidate;
+      if ('$ne' in operators && value === operators.$ne) return false;
+      if ('$lt' in operators) {
+        const left = comparable(value);
+        const right = comparable(operators.$lt);
+        if (typeof left !== typeof right) return false;
+        if (typeof left === 'number' && typeof right === 'number' && !(left < right)) return false;
+        if (typeof left === 'string' && typeof right === 'string' && !(left < right)) return false;
+      }
       if ('$lte' in operators) {
         const bound = operators.$lte as Date;
         if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
