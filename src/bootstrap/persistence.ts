@@ -5,6 +5,15 @@ import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { MemoryStore } from '../memory/store.js';
+import type { EventLog } from '../events/log.js';
+import type { IdempotencyStore } from '../persistence/idempotency.js';
+import { createIdempotencyStore } from '../persistence/idempotency.js';
+import {
+  createMongoEventLog,
+  createMongoIdempotencyStore,
+  ensureEventIndexes,
+  ensureIdempotencyIndexes,
+} from '../persistence/mongo-state.js';
 import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
 import type { MongoCollectionLike } from '../persistence/mongo.js';
@@ -57,6 +66,14 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
+  /** Submission keys, so a retry after a restart still replays one task. */
+  idempotency: IdempotencyStore;
+  /**
+   * Published execution events, so a cursor can still be replayed after the
+   * process that published them is gone. Absent on the memory driver, where the
+   * live bus is the only history there is.
+   */
+  eventLog: EventLog | null;
   close: () => Promise<void>;
 };
 
@@ -127,6 +144,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      idempotency: createIdempotencyStore({ clock }),
+      eventLog: null,
       close: NO_CLOSE,
     };
   }
@@ -146,6 +165,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
+  const idempotency = database.collection(collectionName(config, 'idempotency'));
+  const eventLog = database.collection(collectionName(config, 'events'));
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -164,6 +185,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     });
+    await ensureIdempotencyIndexes(idempotency);
+    await ensureEventIndexes(eventLog);
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -192,6 +215,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
+    idempotency: createMongoIdempotencyStore({ collection: idempotency, clock }),
+    eventLog: createMongoEventLog(eventLog),
     close: database.close,
   };
 }

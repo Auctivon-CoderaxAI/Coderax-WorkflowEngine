@@ -37,18 +37,19 @@ are clients of the same versioned API.
 | Task list read model, notification read, memory write/search | Implemented | `/v1/tasks` (`/v1/work` alias), `/v1/notifications/{taskId}`, `/v1/memory` |
 | Schedule operations (create, list, pause, resume, delete) | Implemented, process-local | `src/scheduling`, `tests/integration/lifecycle.test.ts` |
 | Durable artifacts: global identity, immutable versions, quota admission | Implemented; MongoDB-backed when selected, uploads refused on `memory` | `src/artifacts`, `src/persistence/mongo-artifacts.ts` |
-| Idempotent task submission | Implemented | `src/persistence/idempotency.ts` |
+| Idempotent task submission | Implemented; durable key with a unique index and expiry when MongoDB is selected | `src/persistence/idempotency.ts`, `src/persistence/mongo-state.ts` |
 | Reproducible SDK artifact with checksums | Implemented | `packages/sdk/sdk-artifact.json`, `npm run sdk:check` |
 | Cross-repository HTTP contract harness | Implemented | `tests/integration/http-contract.test.ts` |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
-| MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
+| MongoDB lease table + index bootstrap | Implemented and exercised against a real MongoDB service in CI | `src/persistence/mongo.ts`, `tests/integration/durable-state.test.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
-| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
-| Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
-| Schedule and idempotency-key persistence | In-memory only; lost on restart | `src/scheduling`, `src/persistence/idempotency.ts` |
+| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; verified across a restart against real MongoDB | `src/bootstrap/persistence.ts` |
+| Task, conversation, memory, notification and event persistence | In-memory on the `memory` driver; MongoDB when selected | `src/persistence/*` |
+| Execution-event replay from stored history | Live buffer on `memory`; append-only MongoDB log when selected | `src/events/log.ts`, `src/persistence/mongo-state.ts` |
+| Schedule persistence | In-memory only; lost on restart | `src/scheduling` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |
 

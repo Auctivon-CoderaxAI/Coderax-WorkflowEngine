@@ -4,6 +4,7 @@ import type {
   ExecutionEventType,
 } from '@coderax/contracts';
 import { EVENT_SCHEMA_VERSION } from '@coderax/contracts';
+import type { EventLog } from './log.js';
 
 export type EventDraft = {
   taskId: string;
@@ -35,6 +36,11 @@ export type Unsubscribe = () => void;
  * beyond what has been seen; anything else is reported rather than applied. A
  * subscriber that disconnects does not stop the run: publishing is independent
  * of any listener.
+ *
+ * A durable `log` receives every published event. Writes are queued rather than
+ * awaited so publishing stays synchronous for the runner; `flush` is what a
+ * shutdown awaits before the connection closes, and it rethrows a write that
+ * failed so lost history is never reported as stored.
  */
 export type EventBus = {
   publish: (draft: EventDraft) => ExecutionEvent;
@@ -43,6 +49,14 @@ export type EventBus = {
   replay: (taskId: string, after: number) => Replay;
   subscribe: (taskId: string, after: number, listener: (event: ExecutionEvent) => void) => Unsubscribe;
   lastSeq: (taskId: string) => number;
+  /**
+   * Continues numbering from history a previous process stored. Without this a
+   * resumed run in a new process would publish `seq` 1 again over events that
+   * already exist.
+   */
+  adopt: (taskId: string, seq: number) => void;
+  /** Resolves once every published event has reached the durable log. */
+  flush: () => Promise<void>;
 };
 
 type Stream = {
@@ -56,8 +70,11 @@ export function createEventBus(input: {
   bufferSize: number;
   eventId: () => string;
   iso: () => string;
+  log?: EventLog;
 }): EventBus {
   const streams = new Map<string, Stream>();
+  const pending = new Set<Promise<void>>();
+  const failures: Error[] = [];
 
   function stream(taskId: string): Stream {
     const existing = streams.get(taskId);
@@ -67,12 +84,33 @@ export function createEventBus(input: {
     return created;
   }
 
+  function persist(event: ExecutionEvent): void {
+    if (!input.log) return;
+    const write = input.log.append(event).then(
+      (outcome) => {
+        if (!outcome.stored && outcome.reason === 'conflict') {
+          failures.push(
+            new Error(
+              `Event ${event.eventId} collides with another event on ${event.taskId} seq ${event.seq}.`,
+            ),
+          );
+        }
+      },
+      (error: unknown) => {
+        failures.push(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+    pending.add(write);
+    void write.then(() => pending.delete(write));
+  }
+
   function append(state: Stream, event: ExecutionEvent): void {
     state.events.push(event);
     state.seen.add(event.eventId);
     if (state.events.length > input.bufferSize) {
       state.events.splice(0, state.events.length - input.bufferSize);
     }
+    persist(event);
     for (const subscriber of state.listeners) {
       if (event.seq > subscriber.cursor) {
         subscriber.cursor = event.seq;
@@ -134,5 +172,15 @@ export function createEventBus(input: {
       };
     },
     lastSeq: (taskId) => streams.get(taskId)?.seq ?? 0,
+    adopt: (taskId, seq) => {
+      if (seq <= 0) return;
+      const state = stream(taskId);
+      if (seq > state.seq) state.seq = seq;
+    },
+    flush: async () => {
+      while (pending.size > 0) await Promise.all([...pending]);
+      const [failure] = failures.splice(0, failures.length);
+      if (failure) throw failure;
+    },
   };
 }

@@ -42,7 +42,7 @@ export type MongoCursor = {
 export type MongoCollectionLike = {
   createIndex: (
     keys: Record<string, 1 | -1>,
-    options?: { unique?: boolean; name?: string },
+    options?: { unique?: boolean; name?: string; expireAfterSeconds?: number },
   ) => Promise<unknown>;
   insertOne: (document: Record<string, unknown>) => Promise<unknown>;
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;

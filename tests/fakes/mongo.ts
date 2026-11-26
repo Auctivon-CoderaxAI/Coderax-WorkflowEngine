@@ -4,8 +4,15 @@ import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 type Document = Record<string, unknown>;
 type Index = {
   keys: Record<string, 1 | -1>;
-  options?: { unique?: boolean; name?: string };
+  options?: { unique?: boolean; name?: string; expireAfterSeconds?: number };
 };
+
+/** Dates and numbers are ordered the same way; anything else cannot be compared. */
+function difference(value: unknown, bound: unknown): number | null {
+  const left = value instanceof Date ? value.getTime() : typeof value === 'number' ? value : null;
+  const right = bound instanceof Date ? bound.getTime() : typeof bound === 'number' ? bound : null;
+  return left === null || right === null ? null : left - right;
+}
 
 function matches(document: Document, filter: MongoFilter): boolean {
   return Object.entries(filter).every(([field, condition]) => {
@@ -13,12 +20,12 @@ function matches(document: Document, filter: MongoFilter): boolean {
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
       if ('$lte' in operators) {
-        const bound = operators.$lte as Date;
-        if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
+        const compared = difference(value, operators.$lte);
+        if (compared === null || compared > 0) return false;
       }
       if ('$gt' in operators) {
-        const bound = operators.$gt as Date;
-        if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
+        const compared = difference(value, operators.$gt);
+        if (compared === null || compared <= 0) return false;
       }
       if ('$in' in operators) {
         const list = operators.$in as unknown[];

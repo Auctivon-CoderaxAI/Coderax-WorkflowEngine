@@ -37,7 +37,6 @@ import {
 import { buildPersistence, MEMORY_VALUE_LIMIT } from './persistence.js';
 import { createArtifactService } from '../artifacts/service.js';
 import { createScheduleStore, SCHEDULE_TICK_MS } from '../scheduling/store.js';
-import { createIdempotencyStore } from '../persistence/idempotency.js';
 import { ENGINE_NAME, ENGINE_VERSION } from '../version.js';
 import { StartupError } from './startup-error.js';
 
@@ -207,7 +206,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
   const schedules = createScheduleStore({ clock });
-  const idempotency = createIdempotencyStore({ clock });
+  const idempotency = persistence.idempotency;
   const audit = createAuditLog({ clock, ids });
   const artifactService = createArtifactService({
     artifacts: persistence.artifacts,
@@ -225,6 +224,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
     iso: clock.iso,
+    ...(persistence.eventLog ? { log: persistence.eventLog } : {}),
   });
   const runner = createTaskRunner({
     lease,
@@ -274,7 +274,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
           status: 'ok' as const,
           detail:
             persistence.driver === 'mongo'
-              ? `Tasks, conversations, memory and leases are stored in MongoDB (${config.persistence.database}).`
+              ? `Tasks, conversations, memory, leases, submission keys and execution events are stored in MongoDB (${config.persistence.database}).`
               : 'Tasks, conversations, memory and leases are process-local; a restart loses them.',
         }),
       },
@@ -367,6 +367,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const service = createApplicationService({
     ...infrastructure,
+    eventLog: persistence.eventLog,
   });
 
   const registry = createRouteRegistry();

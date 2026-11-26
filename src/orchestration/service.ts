@@ -70,6 +70,7 @@ import type { ArtifactService } from '../artifacts/service.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
+import type { EventLog } from '../events/log.js';
 import type { ScheduleStore } from '../scheduling/store.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { AuthService, Principal } from '../security/auth.js';
@@ -101,6 +102,11 @@ export type ApplicationServiceDeps = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  /**
+   * Durable history for events the bus published. Absent on the memory driver,
+   * where the bus buffer is the only history there is.
+   */
+  eventLog?: EventLog | null;
 };
 
 export type EventStream = {
@@ -282,6 +288,7 @@ function toSchedule(record: ScheduleRecord): Schedule {
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
   const pendingSubmissions = new Map<string, () => Promise<ServiceResult<TaskAccepted>>>();
+  const eventLog = deps.eventLog ?? null;
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -315,6 +322,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       at: deps.clock.iso(),
       ...(payload === undefined ? {} : { payload: scrub(type, payload) }),
     });
+  }
+
+  /**
+   * The union of stored history and the live buffer, ordered by sequence and
+   * deduplicated by id. After a restart the live buffer is empty and the durable
+   * log is the whole replay; while a run is live the two overlap.
+   */
+  function mergeReplay(durable: ExecutionEvent[], live: ExecutionEvent[]): ExecutionEvent[] {
+    const byId = new Map<string, ExecutionEvent>();
+    for (const event of durable) byId.set(event.eventId, event);
+    for (const event of live) byId.set(event.eventId, event);
+    return [...byId.values()].sort((left, right) => left.seq - right.seq);
   }
 
   /** Failure text is written by an adapter or a provider, so it is scrubbed. */
@@ -1152,7 +1171,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return fail('busy', 'This conversation already has a live Work run.');
       }
 
-      const accept = (stored: TaskRecord, replayed = false): ServiceResult<TaskAccepted> => {
+      const accept = async (
+        stored: TaskRecord,
+        replayed = false,
+      ): Promise<ServiceResult<TaskAccepted>> => {
         publish(stored, 'task.queued');
         deps.audit.record({
           actor: principal.ownerId,
@@ -1163,7 +1185,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
         });
         deps.scheduler.enqueue(() => execute(taskId, token));
-        if (intent) deps.idempotency.complete(intent);
+        // A durable key is completed before the submission is answered, so a
+        // retry after a restart replays this task instead of starting another.
+        if (intent) await deps.idempotency.complete(intent);
         return ok(acceptedFor(stored, replayed));
       };
 
@@ -1238,6 +1262,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             : 'That task identity is already in use.',
         );
       });
+
     },
 
     tasks: async (principal, query) => {
@@ -1664,7 +1689,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      const replay = deps.events.replay(taskId, after);
+      const live = deps.events.replay(taskId, after);
+      const durable = eventLog ? await eventLog.read(taskId, after) : [];
+      const durableLast = eventLog ? await eventLog.lastSeq(taskId) : 0;
+      // A replay is also when this process learns how far a previous one got, so
+      // a resumed run continues the numbering instead of repeating it.
+      deps.events.adopt(taskId, durableLast);
+      const replay: Replay = {
+        events: mergeReplay(durable, live.events),
+        truncated: live.truncated,
+      };
       const oldest = replay.events[0]?.seq;
       const truncatedEvent: ExecutionEvent | null =
         replay.truncated && oldest !== undefined && oldest > 1
@@ -1680,7 +1714,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               payload: { after, oldestSeq: oldest },
             } as ExecutionEvent)
           : null;
-      const lastSeq = deps.events.lastSeq(taskId);
+      const lastSeq = Math.max(deps.events.lastSeq(taskId), durableLast);
       const terminalInReplay =
         replay.events.some((event) => event.generation === found.value.generation && isTerminalEvent(event.type));
       return ok({
@@ -1733,6 +1767,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
+      // Aborting is not settling: a run that already started still writes its
+      // outcome and releases its lease. The caller closes the connection right
+      // after this, so the pool must be empty before that happens.
+      await deps.scheduler.idle();
+      // Same reason: every published event must reach the durable log while the
+      // connection that stores it is still open.
+      await deps.events.flush();
     },
   };
 

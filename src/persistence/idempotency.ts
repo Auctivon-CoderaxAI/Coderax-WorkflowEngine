@@ -1,13 +1,27 @@
 import type { Clock } from '../support/clock.js';
 
-type Reservation = { ownerId: string; key: string; taskId: string };
-type ReserveResult = { ok: true } | { ok: false; completedTaskId?: string; pendingTaskId?: string };
+export type Reservation = { ownerId: string; key: string; taskId: string };
+/** `pendingTaskId` names the in-flight submission a retry may be reconciled with. */
+export type ReserveResult =
+  | { ok: true }
+  | { ok: false; completedTaskId?: string; pendingTaskId?: string };
+
+/**
+ * A key is reserved before the task exists and completed once it does, so a
+ * concurrent retry is refused instead of starting a second run. Completion is
+ * asynchronous because a durable store has to persist the task identity before
+ * the submission is answered.
+ */
 export type IdempotencyStore = {
   reserve: (input: Reservation) => Promise<ReserveResult>;
-  complete: (input: Reservation) => void;
+  complete: (input: Reservation) => Promise<void>;
   release: (input: Reservation) => Promise<void>;
 };
 
+/**
+ * Process-local reservations. `maxEntries` bounds the memory a single process
+ * may spend; a database implementation is bounded by expiry instead.
+ */
 export function createIdempotencyStore(input: {
   clock: Clock;
   ttlMs?: number;
@@ -38,7 +52,7 @@ export function createIdempotencyStore(input: {
       entries.set(key, { taskId: request.taskId, expiresAt: null });
       return { ok: true };
     },
-    complete: (request) => {
+    complete: async (request) => {
       const entry = entries.get(partition(request));
       if (entry?.taskId === request.taskId) entry.expiresAt = input.clock.now().getTime() + ttlMs;
     },
