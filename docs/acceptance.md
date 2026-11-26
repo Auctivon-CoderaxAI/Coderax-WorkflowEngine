@@ -5,7 +5,9 @@
 - Repository: `Auctivon-CoderaxAI/Coderax-WorkflowEngine`
 - Base: `main` at `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd`
 - Branch: `ci/permanent-quality-gates`
-- Exact remote head: `c6e022ea40122e47f3804cb825a0747a06404427`
+- Exact verified code head: `c6e022ea40122e47f3804cb825a0747a06404427`
+- Final branch head: the docs/record commit containing this file (docs-only
+  after the verified code head)
 - Compare: https://github.com/Auctivon-CoderaxAI/Coderax-WorkflowEngine/compare/main...ci/permanent-quality-gates
 - The branch is 5 commits ahead and 0 behind. The parallel
   `ci/permanent-quality-gate` branch remains at `21015a7f7484dda8a6b9951e52782a8bd8921d01`
@@ -14,7 +16,8 @@
 ## Exact-head local acceptance
 
 Command: `npm run verify` with `CODERAX_TEST_MONGO_URI` pointing at a disposable
-real MongoDB started for this run. Exit status: 0.
+real MongoDB started for this run. Exit status: 0. The same command was re-run
+at the final branch head (a docs-only commit) with the same result.
 
 | Gate | Tests | Result |
 | --- | --- | --- |
