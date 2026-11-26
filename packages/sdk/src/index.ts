@@ -13,6 +13,7 @@ import {
   ChatReply,
   Conversation,
   ConversationList,
+  Deliverable,
   ExecutionEvent,
   HealthReport,
   MemoryList,
@@ -31,6 +32,7 @@ import type {
   ArtifactVersionRequest,
   ChatRequest,
   DataMode,
+  DeliverableRequestInput,
   PermissionDecisionRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
@@ -224,6 +226,18 @@ export class CoderaxClient {
 
   models(): Promise<ModelList> {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
+  }
+
+  /**
+   * Generates and durably persists a document, workbook, deck, analysis or
+   * software project. The response names stored artifacts, never workspace paths.
+   */
+  deliver(request: DeliverableRequestInput): Promise<Deliverable> {
+    return this.request<Deliverable>(Deliverable, {
+      method: 'POST',
+      path: '/v1/deliverables',
+      body: request,
+    });
   }
 
   chat(request: ChatRequest): Promise<ChatReply> {
