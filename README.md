@@ -37,7 +37,10 @@ are clients of the same versioned API.
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
 | Native Game Studio | Implemented | `src/games/studio.ts`: NL specs, design plans, original source, 8 genres, 12 composable mechanics, seeded levels, browser-boot verification, build history/restore, export, `docs/evidence/game-studio/` |
+| Native Game Studio — real-browser acceptance | Verified for two reference builds | desktop/mobile Chromium rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart and audio; `docs/evidence/browser/` |
+| Native Game Studio — AI-assisted generation | **Blocked** | no verified model participation or zero-cost model credential; deterministic generation remains operational |
 | Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`: durable Work task with `kind: game`, observed state/frames, bounded controls, pause/resume, takeover, cancellation, memory, measured completion |
+| Native Gaming Agent — cloud browser | **Blocked** | no verified zero-cost browser session/observation interface; the browser acceptance controller is test code, not the agent |
 | Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
@@ -63,7 +66,7 @@ exact dependency and the narrow ports the game code exposes for that migration.
 ```bash
 npm install
 npm run build
-npm test                          # 125 tests: unit, contract, integration, security, e2e
+npm test                          # 128 tests: unit, contract, integration, security, e2e
 npm run game:evidence             # regenerates the playable game evidence frames
 npm run openapi:check             # fails if the published contract drifted
 ```

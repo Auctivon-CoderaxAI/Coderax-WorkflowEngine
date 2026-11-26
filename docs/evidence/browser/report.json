@@ -1,0 +1,100 @@
+{
+  "capturedAt": "2026-11-26T19:45:00.000Z",
+  "sourceHead": "working tree after ce271b9; browser-test fixes and this evidence are delivered together",
+  "documentDigests": {
+    "platformer.html": "sha256:12035bbd67d17df7efe71ae95d4d4e98a7f1ddc0f53d0193b7e46f637aef0ef4",
+    "puzzle.html": "sha256:e6a215cd0743fef95fc0d2a735ae03e3acb1bcc04abfca3c37115790bf8c9f9a"
+  },
+  "environment": {
+    "browser": "Cloud Chromium via the Freebuff cloud browser panel",
+    "previewUrl": "https://pv-4b463b58d51d-agent37-37fbb862-2d4b-44cb-9bca-1aa0d1c06097.freebuff.site/",
+    "desktopViewport": "1280x800",
+    "mobileViewport": "390x844",
+    "ownerAuth": {
+      "anonymousContextStatus": 403,
+      "anonymousTitle": "Preview",
+      "authenticatedStatus": 200
+    }
+  },
+  "documents": {
+    "generatedExternalScripts": 0,
+    "inlineScripts": 6,
+    "csp": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'",
+    "hostInjectedScriptBlocked": "https://static.cloudflareinsights.com/beacon.min.js/... was blocked by the generated CSP",
+    "pageErrors": [],
+    "consoleErrors": [
+      "favicon.ico 404",
+      "CSP blocked the preview-host-injected Cloudflare beacon"
+    ]
+  },
+  "platformer": {
+    "canvas": { "width": 1280, "height": 682, "opaquePixels": 872960, "distinctColours": ">= 4" },
+    "keyboard": { "rightDeltaPx": 208, "jumpRisePx": 115, "moveSampleMs": 700 },
+    "pause": { "tickDelta": 0, "sampleMs": 500 },
+    "restart": { "statusBefore": "lost", "statusAfter": "playing", "tickAfter": 21, "xAfter": 40 },
+    "hud": { "health": 3, "healthRendered": "Health 3" },
+    "win": {
+      "status": "won",
+      "score": 120,
+      "collected": 2,
+      "health": 2,
+      "timeLeft": 113.2,
+      "elapsedMs": 6301,
+      "jumps": 5,
+      "gapJumps": 3,
+      "deaths": 0
+    },
+    "progression": { "levelIndexBefore": 0, "levelIndexAfter": 1, "levelIdAfter": "level-2", "statusAfter": "playing" },
+    "failure": { "condition": "level timer expired", "status": "lost", "observedTick": 7201 },
+    "audio": { "audioContextState": "running", "oscillatorsOnJump": 1, "muteToggle": [false, true] },
+    "performance": {
+      "sampleSeconds": 3,
+      "taskDurationSeconds": 0.307207,
+      "scriptDurationSeconds": 0.039422,
+      "jsHeapUsedBytes": 5188292,
+      "nodes": 634
+    }
+  },
+  "puzzle": {
+    "canvas": { "width": 1280, "height": 682, "opaquePixels": 698368 },
+    "autonomousController": {
+      "method": "in-browser BFS over measured collision geometry, replanning on stalls",
+      "status": "won",
+      "score": 140,
+      "collected": 4,
+      "switches": [true],
+      "goalLocked": false,
+      "collisions": 0,
+      "replans": 12,
+      "elapsedMs": 11960,
+      "tick": 3079
+    },
+    "progression": { "levelIndexBefore": 0, "levelIndexAfter": 1, "levelIdAfter": "level-2", "statusAfter": "playing" },
+    "mobile": {
+      "viewport": [390, 844],
+      "canvas": [390, 652],
+      "horizontalOverflow": false,
+      "buttons": 5,
+      "canvasOpaquePixels": 177840,
+      "touchRightDeltaPx": 100
+    }
+  },
+  "platformerMobile": {
+    "viewport": [390, 844],
+        "canvas": [390, 713],
+    "canvasCssHeight": 698,
+    "horizontalOverflow": false,
+    "buttons": 4,
+    "mouseRightDeltaPx": 208,
+    "touchRightDeltaPx": 100,
+      "touchJumpRisePx": 105
+  },
+  "limitations": [
+    "Chromium only; Safari, Firefox and real iOS/Android were not tested.",
+    "Touch was exercised with dispatched touchstart/touchend events on the real handlers after mouse input was verified with real pointer events.",
+    "Audio synthesis was verified by a running AudioContext and an oscillator created on jump; audible output was not captured.",
+    "The browser controller is acceptance-test code, not the Native Gaming Agent runtime; it does not make the agent a cloud-browser player.",
+    "Performance metrics come from Chrome DevTools Protocol on one desktop VM sample; they are not a cross-device benchmark.",
+    "No hosted browser CI exists at zero cost, so this evidence is for the two reference builds at the recorded head."
+  ]
+}

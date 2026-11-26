@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { OWNER_ID, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
+import { composeApplication } from '../../src/bootstrap/compose.js';
+import {
+  baseConfig,
+  createWorkspaces,
+  fakeGateway,
+  OWNER_ID,
+  OWNER_TOKEN,
+  startTestApp,
+  waitFor,
+} from '../helpers.js';
 
 const principal = { ownerId: OWNER_ID, isOwner: true as const };
 const PROMPT =
@@ -139,6 +148,72 @@ test('build history lists versions and restores a verified build with its exact 
     if (!stale.ok) assert.equal(stale.code, 'conflict');
   } finally {
     await started.close();
+  }
+});
+
+test('a game project, build history and restore survive an engine restart', async () => {
+  const workspace = createWorkspaces();
+  const env = { CODERAX_OWNER_TOKEN: OWNER_TOKEN };
+  let gameId = '';
+  let buildId = '';
+  try {
+    const first = await composeApplication({
+      config: baseConfig(workspace),
+      env,
+      gateway: fakeGateway(),
+    });
+    try {
+      const created = await first.service.createGame(principal, {
+        name: 'Lamplighter',
+        prompt: PROMPT,
+      });
+      assert.equal(created.ok, true);
+      if (!created.ok) return;
+      gameId = created.value.gameId;
+      const built = await first.service.buildGame(principal, gameId, {});
+      assert.equal(built.ok, true);
+      if (!built.ok) return;
+      buildId = built.value.buildId;
+    } finally {
+      await first.stop();
+    }
+
+    // A fresh application has no in-memory project state; it must read the
+    // project and the verified build from the durable workspace.
+    const second = await composeApplication({
+      config: baseConfig(workspace),
+      env,
+      gateway: fakeGateway(),
+    });
+    try {
+      const game = await second.service.getGame(principal, gameId);
+      assert.equal(game.ok, true);
+      if (!game.ok) return;
+      assert.equal(game.value.build?.buildId, buildId);
+
+      const history = await second.service.listGameBuilds(principal, gameId);
+      assert.equal(history.ok, true);
+      if (!history.ok) return;
+      const listed = history.value.builds.find((build) => build.buildId === buildId);
+      assert.ok(listed);
+      assert.equal(listed.verified, true);
+
+      const restored = await second.service.restoreGameBuild(principal, gameId, buildId, {
+        expectedRevision: game.value.revision,
+      });
+      assert.equal(restored.ok, true);
+      if (!restored.ok) return;
+      assert.equal(restored.value.build?.buildId, buildId);
+      assert.equal(restored.value.status, 'verified');
+
+      const preview = await second.service.gamePreview(principal, gameId);
+      assert.equal(preview.ok, true);
+      if (preview.ok) assert.match(preview.value, /createOscillator/);
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    workspace.cleanup();
   }
 });
 

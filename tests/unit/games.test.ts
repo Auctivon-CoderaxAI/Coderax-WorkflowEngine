@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { GameCamera } from '@coderax/contracts';
+import { GAME_GENRES, type GameCamera } from '@coderax/contracts';
 import { applyInstruction, interpretPrompt, validateBuildableSpec } from '../../src/games/spec.js';
 import { generateGame } from '../../src/games/generate.js';
 import { verifyGeneration } from '../../src/games/verify.js';
@@ -212,6 +212,49 @@ test('verification evidence is rendered from the shipped renderer, not a placeho
   assert.ok(render);
   const colours = Number(render.measurements.distinctColors ?? 0);
   assert.ok(colours >= 4, 'the rendered frame must contain distinct colours');
+});
+
+test('every declared genre generates a verified build with its own palette', () => {
+  for (const genre of GAME_GENRES) {
+    const spec = { ...interpretPrompt(PLATFORMER), genre };
+    const generation = generateGame({
+      spec,
+      gameId: 'game_unit',
+      buildId: `game_unit-${genre}-r1-a1`,
+      modelAssisted: false,
+    });
+    const outcome = verifyGeneration({
+      spec,
+      blueprint: generation.blueprint,
+      files: generation.files,
+      now: '2026-01-01T00:00:00.000Z',
+    });
+    const failed = outcome.verification.checks.filter((check) => !check.passed);
+    assert.deepEqual(
+      failed.map((check) => `${check.id}: ${check.detail}`),
+      [],
+      `${genre} must generate a verified build`,
+    );
+    assert.equal(generation.blueprint.spec.genre, genre);
+    assert.equal(generation.blueprint.palette.length, 6);
+  }
+});
+
+test('a corrupted generated script fails verification instead of becoming playable', () => {
+  const { spec, generation } = build(PLATFORMER);
+  const corrupted = generation.files.map((file) =>
+    file.path === 'src/game.js' ? { ...file, content: 'function (' } : file,
+  );
+  const outcome = verifyGeneration({
+    spec,
+    blueprint: generation.blueprint,
+    files: corrupted,
+    now: '2026-01-01T00:00:00.000Z',
+  });
+  assert.equal(outcome.verification.passed, false);
+  const parse = outcome.verification.checks.find((check) => check.id === 'code.parse');
+  assert.ok(parse);
+  assert.equal(parse.passed, false);
 });
 
 test('an edit changes only the stated fields and stays buildable', () => {

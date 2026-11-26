@@ -85,6 +85,8 @@ export type GameStudio = {
   }) => Promise<ServiceResult<{ build: GameBuild; files: StoredFile[] }>>;
   lastAttempts: (gameId: string) => BuildAttempt[];
   readonly maxProjects: number;
+  /** True only when a model gateway is actually wired for design narrative. */
+  readonly modelAssisted: boolean;
 };
 
 function blueprintFor(spec: GameSpec, gameId: string): Generation {
@@ -235,6 +237,7 @@ export function createGameStudio(input: {
 
   const studio: GameStudio = {
     maxProjects: input.maxProjects,
+    modelAssisted: input.assistant.available,
     lastAttempts: (gameId) => attempts.get(gameId) ?? [],
 
     create: async (ownerId, request) => {

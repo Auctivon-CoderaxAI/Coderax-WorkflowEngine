@@ -2,7 +2,7 @@
 
 Baseline: `Coderax@a5d237b0`, `packages/api/src/engines` and
 `packages/data-schemas/src/methods/workRun.ts`.
-Candidate: this repository at the head of `feat/workflow-engine-foundation`.
+Candidate: this repository at the head of `feat/native-game-studio-gaming-agent`.
 
 Status vocabulary:
 
@@ -68,6 +68,8 @@ Status vocabulary:
 | 52 | Native Gaming Agent | no session runtime (CX-33 Blocked) | `src/games/session.ts`: durable sessions over verified, version-pinned builds, observation, bounded controls, pause/resume, takeover, cancel, memory, logs, measured completion | Changed (deliberate) |
 | 53 | Gaming Agent — external game environments | none (blocked in the registry) | none; reported `blocked` with the exact prerequisite | Not started (both) |
 | 54 | Build version history and restore | `revision`/`specRevision` only; no historical build bytes | `GET /v1/games/{gameId}/builds` plus exact-spec restore; traversal- and owner-checked | Changed (deliberate) |
+| 55 | Real-browser acceptance of generated builds | none | platformer and puzzle rendered, controlled and completed in cloud Chromium; owner-only origin returned 403 anonymous / 200 owner | Changed (new evidence) — two reference builds, Chromium only |
+| 56 | Autonomous cloud-browser gameplay | none | none; `native.gaming-agent.browser` reported blocked | Not started (both) |
 
 ## Summary
 
@@ -77,8 +79,8 @@ Status vocabulary:
 | Strengthened | 10 |
 | Simplified | 5 |
 | Missing | 10 |
-| Changed (deliberate) | 5 |
-| Not started (both) | 2 |
+| Changed (deliberate) | 6 |
+| Not started (both) | 3 |
 
 ## What this means
 
@@ -106,14 +108,21 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the delivery head: **125/125 tests**, OpenAPI drift clean.
-- Durable stores are verified against a semantics-faithful collection fake that
-  enforces unique indexes and cursor semantics. **No live MongoDB has been
-  contacted**; "durable" here means the adapter and wiring are proven, not that a
-  real server has stored a row.
+- `npm run verify` at the delivery head: **128/128 tests**, OpenAPI drift clean.
+- Durable stores are verified against a semantics-faithful collection fake in
+  the default suite, and separately against a real MongoDB 8.0.4 server: a
+  completed task and transcript survived a server restart, and two clients
+  racing one lease produced exactly one winner. See `docs/evidence/mongo/`.
+  Game project/build bytes remain file-backed, so cross-replica game artifact
+  concurrency is not claimed.
 - No hosted CI run exists at the pushed head: the workflow triggers on a pull
   request or a `main` push, and no pull request could be opened from this
   environment. The local run above is the only executed evidence.
-- The browser-boot check executes the exact inline preview document in a bounded
-  DOM harness. It is not a real browser; CSP enforcement, real-canvas rendering
-  and mobile compatibility remain blocked with the cloud browser.
+- The default gate's browser-boot check executes the exact inline preview
+  document in a bounded DOM harness and presses its on-screen controls. It is
+  not a real browser.
+- Real Chromium acceptance was captured separately for the platformer and puzzle:
+  rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart,
+  audio synthesis, a 390×844 layout and owner-only 403/200 access. The report is
+  in `docs/evidence/browser/`. Safari, Firefox and physical mobile devices were
+  not tested, and the browser test controller is not the Gaming Agent.

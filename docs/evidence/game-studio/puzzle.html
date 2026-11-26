@@ -1156,13 +1156,13 @@ globalThis.CoderaxLevels = [
 
   function currentInput() {
     return {
-      left: !!(keys.ArrowLeft || keys.a || keys.A),
-      right: !!(keys.ArrowRight || keys.d || keys.D),
-      up: !!(keys.ArrowUp || keys.w || keys.W),
-      down: !!(keys.ArrowDown || keys.s || keys.S),
-      jump: !!(keys[' '] || keys.Spacebar),
-      fire: !!(keys.f || keys.F),
-      dash: !!(keys.Shift)
+      left: !!(keys.ArrowLeft || keys.a || keys.A || keys.left),
+      right: !!(keys.ArrowRight || keys.d || keys.D || keys.right),
+      up: !!(keys.ArrowUp || keys.w || keys.W || keys.up),
+      down: !!(keys.ArrowDown || keys.s || keys.S || keys.down),
+      jump: !!(keys[' '] || keys.Spacebar || keys.jump),
+      fire: !!(keys.f || keys.F || keys.fire),
+      dash: !!(keys.Shift || keys.dash)
     };
   }
 
@@ -1170,7 +1170,7 @@ globalThis.CoderaxLevels = [
     var state = game.state;
     hud.textContent = 'Level ' + (game.levelIndex + 1) + '/' + game.levelCount +
       '  Score ' + state.score +
-      '  Health ' + state.health +
+      '  Health ' + state.player.health +
       '  Collected ' + state.collected +
       (state.timeLeft >= 0 ? '  Time ' + Math.ceil(state.timeLeft) : '');
   }
@@ -1270,7 +1270,9 @@ globalThis.CoderaxLevels = [
   resize();
   requestAnimationFrame(frame);
   window.__CODERAX_GAME__ = function () {
-    return { config: CONFIG, state: game.snapshot(), level: game.level };
+    // Live state for same-page automation and browser acceptance tests; the
+    // snapshot remains the immutable view used by external inspection.
+    return { config: CONFIG, state: game.state, snapshot: game.snapshot(), level: game.level };
   };
 })();
 

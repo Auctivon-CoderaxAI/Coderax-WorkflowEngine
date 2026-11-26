@@ -227,6 +227,8 @@ export function verifyGeneration(input: {
         scripts: boot.scripts,
         frames: boot.frames,
         distinctColors: boot.distinctColors,
+        onScreenControlDelta: boot.touchDelta,
+        onScreenJumpVy: boot.jumpVy,
         hud: boot.hud,
       },
     };

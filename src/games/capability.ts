@@ -64,6 +64,70 @@ export function createGameCapabilityReport(input: GameCapabilityInput): GameCapa
     blockedBy: agentStatus === 'blocked' ? 'The isolated game runtime did not initialise.' : null,
   };
 
+  const browserStudioCapability: GameCapability = {
+    id: 'native.game-studio.browser',
+    title: 'Native Game Studio — real-browser acceptance',
+    status: 'degraded',
+    summary:
+      'Reference platformer and puzzle builds were rendered, controlled and completed in an actual Chromium browser, with screenshots and measured state.',
+    available: false,
+    detail:
+      'Two reference builds passed desktop and 390px mobile Chromium acceptance: rendering, keyboard, mouse, touch, jump, collision, scoring, switch/goal completion, level advancement, restart, timer failure, audio synthesis and owner-only access. Other genres and Safari/Firefox are covered by the DOM boot and deterministic verifier, not by a real browser.',
+    evidence: [
+      'docs/evidence/browser/report.json — measured browser state and performance',
+      'docs/evidence/browser/platformer-desktop.png, platformer-mobile.png, puzzle-desktop.png, puzzle-mobile.png',
+      'docs/evidence/browser/README.md — method, anonymous 403 / authenticated 200, limitations',
+    ],
+    environments: ['cloud-browser-chromium'],
+    isolation: 'owner-only-preview-origin',
+    modelAssisted: false,
+    blockedBy:
+      'There is no zero-cost browser CI or Safari/Firefox device matrix, so real-browser coverage is evidence for the reference builds rather than a per-build guarantee.',
+  };
+
+  const aiAssistedCapability: GameCapability = {
+    id: 'native.game-studio.ai-assisted',
+    title: 'Native Game Studio — AI-assisted generation',
+    status: input.modelAssisted ? 'degraded' : 'blocked',
+    available: false,
+    summary:
+      'A verified zero-cost model may add design narrative through the model catalogue and daily budget; code, levels and rules remain deterministic and measured.',
+    detail: input.modelAssisted
+      ? 'A zero-cost model route is configured, but this deployment has no executed model-assisted build to point at, so AI-assisted generation is not claimed as verified.'
+      : 'No authorized zero-cost model credential is configured in this deployment. Natural-language interpretation, source generation and verification are deterministic and operational; no model output is being claimed.',
+    evidence: [
+      'src/games/assistant.ts — optional narrative-only model call through the verified zero-cost catalogue',
+      'src/models/catalog.ts — paid models refused, budget enforced',
+      'tests/unit/games.test.ts — deterministic generation and verification',
+    ],
+    environments: ['coderax-cloud-engine'],
+    isolation: null,
+    modelAssisted: input.modelAssisted,
+    blockedBy: input.modelAssisted
+      ? 'No executed model-assisted build exists to verify; a configured route is not evidence of participation.'
+      : 'An owner-provided zero-cost model credential is required before AI-assisted generation can be claimed.',
+  };
+
+  const browserAgentCapability: GameCapability = {
+    id: 'native.gaming-agent.browser',
+    title: 'Native Gaming Agent — cloud-browser gameplay',
+    status: 'blocked',
+    available: false,
+    summary:
+      'Autonomous observation and control of an authorized game inside a cloud browser.',
+    detail:
+      'Blocked: the agent runtime is the engine V8 context over verified studio builds. The real-browser acceptance run used a test controller and browser screenshots; it is not an integrated cloud-browser observation/control adapter, and no zero-cost browser session service is verified.',
+    evidence: [
+      'docs/evidence/browser/report.json — browser acceptance, not agent runtime evidence',
+      'src/games/session.ts — V8 session loop over verified builds',
+    ],
+    environments: [],
+    isolation: null,
+    modelAssisted: false,
+    blockedBy:
+      'A verified zero-cost cloud browser with owner-scoped sessions and an observation/control interface is required.',
+  };
+
   const externalCapability: GameCapability = {
     id: 'native.gaming-agent.external',
     title: 'Gaming Agent — external game environments',
@@ -87,6 +151,13 @@ export function createGameCapabilityReport(input: GameCapabilityInput): GameCapa
 
   return {
     checkedAt: input.now,
-    capabilities: [studioCapability, agentCapability, externalCapability],
+    capabilities: [
+      studioCapability,
+      browserStudioCapability,
+      aiAssistedCapability,
+      agentCapability,
+      browserAgentCapability,
+      externalCapability,
+    ],
   };
 }

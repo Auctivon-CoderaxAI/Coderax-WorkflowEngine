@@ -1226,7 +1226,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         studioEnabled: deps.config.games.enabled,
         agentEnabled: deps.config.games.enabled && deps.config.games.agentEnabled,
         sandboxReady: deps.config.games.enabled,
-        modelAssisted: modelReady,
+        modelAssisted: modelReady && deps.studio.modelAssisted,
         studioMessage: deps.config.games.enabled
           ? 'Builds are generated and verified in the cloud engine; no owner device runs a game or a model.'
           : 'Native Game Studio is disabled in this deployment.',

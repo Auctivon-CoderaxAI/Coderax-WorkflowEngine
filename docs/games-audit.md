@@ -73,11 +73,11 @@ by this branch. The following capability work is **open and unmerged**:
 
 | PR / branch | What it owns | State |
 | --- | --- | --- |
-| #2 `feat/intelligence-core` | native tool loop, zero-cost router, MCP, retrieval, approvals | Open, not merged |
-| #3 `feat/native-reasoning-planner` | dependency-aware reasoning, verification, escalation | Open, not merged |
-| #4 `feat/zero-cost-model-router` | provider-independent zero-cost router | Open, not merged |
-| #5 `feat/execution-supervisor` | central supervisor and verified termination | Open, not merged |
-| #7 `freebuff/5e5de30e8775a8e9225cc0e2` | versioned 1.1.0 API, SDK artifact and HTTP contract harness | Open, not merged |
+| #2 `feat/intelligence-core` | native tool loop, zero-cost router, MCP, retrieval, approvals | Open at `c1bcf66e2c6ddc8c71e0ce61efae3de065a2d2a5`, not merged |
+| #3 `feat/native-reasoning-planner` | dependency-aware reasoning, verification, escalation | Open at `072c4371ed0190993468660e00fd20cf4827fccd`, not merged; GitHub reported the merge state as unstable |
+| #4 `feat/zero-cost-model-router` | provider-independent zero-cost router | Open at `ade0a292258ae2451e0bfe5678a91989798f22b8`, not merged |
+| #5 `feat/execution-supervisor` | central supervisor and verified termination | Open at `13d4b4f7796f819e4e58bd18006efc4970929e6e`, not merged |
+| #7 `freebuff/5e5de30e8775a8e9225cc0e2` | versioned 1.1.0 API, SDK artifact and HTTP contract harness | Open at `9b4cb5ce4f8688cf232d006028e5e255eda6cb1f`, not merged |
 | #8 `feat/native-team-orchestration` | bounded Native team orchestration | Open, not merged |
 | `feat/durable-artifacts` | durable artifact service, repository, blobs, quota | Branch, no PR |
 | `feat/artifact-intelligence` | artifact intelligence integration | Branch, no PR |
@@ -85,6 +85,7 @@ by this branch. The following capability work is **open and unmerged**:
 
 ### Consolidation decision
 
+The heads above were fetched from the remote and resolved to those exact SHAs.
 Merging those branches into this feature branch would duplicate other owners'
 work, couple a game change to several unreviewed architectures, and create a
 conflict-heavy mega-PR. This change therefore does **not** claim they are
@@ -146,7 +147,10 @@ there.
   grant for `game-session:<id>` before the task is enqueued.
 - `src/games/browser.ts`: a bounded DOM harness that executes the exact inline
   preview document and its animation loop, so a non-painting preview fails the
-  build.
+  build. It presses the shipped on-screen direction and jump controls, and
+  asserts the HUD reports real health, after browser testing found both bugs.
+- `docs/evidence/browser/`: the real Chromium acceptance report, method and
+  screenshots for the platformer and puzzle.
 - `src/games/templates.ts`: self-contained HTML entry, keyboard/mouse/touch
   controls, procedural Web Audio cues, original SVG theme.
 - Build history and restore in `src/games/store.ts` and `src/games/studio.ts`,
@@ -155,12 +159,31 @@ there.
   and verification documents.
 - Routes, SDK methods, OpenAPI, tests and evidence in this repository.
 
+## Real-browser acceptance (new evidence)
+
+The owner-authenticated preview was exercised in cloud Chromium on 2026-11-26.
+The platformer and puzzle rendered, accepted keyboard/mouse/touch input, scored,
+collided, advanced from level 1 to level 2 and restarted after failure. Measured
+values, screenshots and limitations are in `docs/evidence/browser/`. A fresh
+anonymous browser context received **403** and the owner context **200**, so the
+preview boundary was verified rather than disabled.
+
+The browser run found and drove three fixes that the DOM harness had missed: the
+HUD read a non-existent `state.health`, on-screen buttons wrote action names
+that `currentInput()` never read, and the exported preview was not actually
+playable until every module was inlined. The first two now have regression
+coverage in the boot harness. This is still Chromium-only evidence for two
+reference builds, not a claim that every genre or browser is verified.
+
 ## What stays blocked
 
 - External game environments (third-party or browser-hosted games) are reported
   `blocked` with the exact prerequisite: a verified zero-cost cloud browser plus
   an authorized game-provider interface. The engine will not stream an owner
-  device, bypass anti-cheat, or claim a session it cannot isolate.
+  device, bypass anti-cheat, or claim a session it cannot isolate. This is
+  distinct from the real-browser acceptance of the studio's own exported
+  documents: that proves those two builds are playable, not that the Gaming
+  Agent can autonomously play external games.
 - DeploymentPlatformAI could not be independently verified: its repository
   returned `404` to an unauthenticated request, so it is either private or not
   available at the stated path. Coderax's charter and vision name it as a
@@ -177,14 +200,17 @@ there.
 - `tests/unit/games.test.ts` — generation, composition, determinism, isolation,
   measured playability, edits.
 - `tests/integration/games.test.ts` — create, build, HTML preview, export, a
-  verified session, and pause/takeover/input/cancel.
-- `tests/integration/games.test.ts` — create, build, preview, export, build
-  history/restore and verified play over HTTP.
+  verified session, pause/takeover/input/cancel, build history/restore and
+  verified play over HTTP.
 - `tests/security/games.test.ts` — owner scoping, traversal refusal and
   disabled-capability reporting.
 - `docs/evidence/game-studio/` — rendered frames and the full check list from
   the shipped renderer, regenerated by `npm run game:evidence`.
-- `npm run verify` at the delivery head: **125/125 tests**, OpenAPI drift clean.
+- `docs/evidence/browser/` and `docs/evidence/mongo/` — real Chromium acceptance
+  and a real MongoDB 8.0.4 restart/lease-race run. The game project store itself
+  remains file-backed; the Mongo evidence covers the engine's durable Work,
+  transcript, notification and lease path, not multi-replica game artifacts.
+- `npm run verify` at the delivery head: **128/128 tests**, OpenAPI drift clean.
   No hosted CI run exists at the pushed head because the workflow triggers on a
   pull request or `main` push and no PR could be opened from this environment;
   the local gate is the executed evidence.

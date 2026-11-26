@@ -21,7 +21,10 @@ frame.
 | Capability | Status | Boundary |
 | --- | --- | --- |
 | `native.game-studio` | operational | Generation, verification and export execute in the engine |
+| `native.game-studio.browser` | degraded | Two reference builds passed real Chromium acceptance; not a per-build browser guarantee |
+| `native.game-studio.ai-assisted` | **blocked** | No executed model-assisted build; a configured route alone is not participation |
 | `native.gaming-agent` | operational | Sessions run in the engine's in-process V8 context (`isolation: in-process-v8-context`) |
+| `native.gaming-agent.browser` | **blocked** | The browser acceptance controller is test code, not an integrated cloud-browser agent runtime |
 | `native.gaming-agent.external` | **blocked** | No verified zero-cost cloud browser and no independently verified DeploymentPlatformAI workload/browser interface |
 
 The external row is a deliberate block, not a stub. The engine will not stream
@@ -112,6 +115,58 @@ the exact playable entry documents (`platformer.html`, `puzzle.html`) and a
 landing `index.html`, so the reviewed bytes can be opened and played directly.
 `npm run game:evidence` regenerates all of it.
 
+### Deterministic versus AI-assisted generation
+
+These are separate claims and the capability report keeps them separate:
+
+- **Deterministic generation is operational.** The prompt reader, design plan,
+  source emitter, level generator and verifier run without a model. They produce
+  original code and levels from the validated spec, and every build must pass
+  the measured checks above.
+- **AI-assisted generation is blocked here.** `src/games/assistant.ts` has an
+  optional, narrative-only model call through the verified zero-cost catalogue,
+  with a schema check and deterministic fallback. No zero-cost model credential
+  is configured in this deployment, and no model-assisted build was executed, so
+  no model participation is claimed. A route being available in a catalogue is
+  not evidence that a model wrote anything.
+- **Browser-verified playability is evidence for two reference builds.** The
+  platformer and puzzle were rendered, controlled and completed in a real
+  Chromium browser; the other six genres are covered by the deterministic
+  verifier and the DOM boot harness, not by a real browser.
+- **Autonomous gameplay is operational only for studio builds in the V8
+  runtime.** Cloud-browser autonomous play remains blocked; the browser test
+  controller is not the Native Gaming Agent.
+
+### Real-browser acceptance
+
+The exported `platformer.html` and `puzzle.html` were served from the
+owner-authenticated preview origin and exercised in cloud Chromium on
+2026-11-26:
+
+- **Rendering:** platformer 1280×682 / 872,960 opaque pixels; puzzle 1280×682 /
+  698,368 opaque pixels, with no page errors.
+- **Controls:** keyboard right moved +208 px and jump rose 115 px; the on-screen
+  mouse button moved +208 px; mobile touch moved +100 px and touch jump rose
+  105 px. The DOM boot harness now also presses the shipped on-screen buttons so
+  a broken touch mapping fails the default gate.
+- **Gameplay:** platformer won level 1 in 6.3 s (score 120, 2 pickups, health 2,
+  5 jumps, 3 gap clears) and advanced to level 2; puzzle won in 12.0 s (score
+  140, 4/4 pickups, switch on, goal unlocked, 0 collisions, 12 replans) and
+  advanced to level 2. Timer expiry produced `lost`; `R` restarted at tick 21.
+- **Audio:** the AudioContext was running and a jump created one oscillator;
+  mute toggled false/true. Audible output was not captured.
+- **Mobile:** 390×844 had no horizontal overflow and every on-screen button was
+  visible for both builds.
+- **Access:** a fresh anonymous browser context received **403**; the
+  owner-authenticated browser received **200**. Authentication was not disabled.
+- **Cost:** 3 s of platformer play used 0.307 s task time, 0.039 s script time
+  and 5.2 MB JS heap on the cloud VM.
+
+The measured report and four screenshots (desktop and 390×844 for both builds)
+are in `docs/evidence/browser/`. This is Chromium-only evidence for the two
+reference builds; there is no zero-cost browser CI or Safari/Firefox device
+matrix.
+
 ## Gaming Agent sessions
 
 `POST /v1/games/{gameId}/sessions` requires a verified build. Creation writes a
@@ -160,15 +215,20 @@ A session provides:
   `not_found`.
 - The preview is served as `text/html` with
   `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'`.
+- The real-browser run confirmed the owner-only preview returns **403** to a
+  fresh anonymous context and **200** to the owner. The generated document made
+  no network requests; the preview host's injected Cloudflare beacon was blocked
+  by the generated CSP.
 
 ## Limits
 
 - Sessions play **studio builds** in the engine's runtime. External games remain
   blocked until a verified cloud browser and provider interface exist.
-- The browser-boot check is a bounded DOM harness, not a real browser: it proves
-  the inline document loads and paints, but it does not enforce CSP, drive a real
-  canvas, or cover mobile Safari/Chrome. Those checks require the blocked
-  zero-cost cloud browser and are not claimed.
+- The default gate's browser-boot check is a bounded DOM harness. It executes
+  the exact inline document and now presses the shipped on-screen controls, but
+  it does not enforce CSP or cover real devices. Real-browser acceptance is a
+  separate, manually captured Chromium run for two reference builds; Safari,
+  Firefox and physical mobile devices are not claimed.
 - `first_person` and two-player builds are unsupported by design.
 - The studio ships original primitive-vector art driven by a generated palette
   and SVG theme; it does not fetch or copy third-party assets. Audio is
