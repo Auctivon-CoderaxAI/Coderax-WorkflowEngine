@@ -388,6 +388,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     started: number,
     approvalId?: string,
   ): Promise<ServiceFailure> {
+    record.lastElements = [];
     const released = await closeProvider(record);
     record.session = {
       ...record.session,
@@ -404,6 +405,37 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     addReceipt({ record, action, outcome: 'failed', started, detail, ...(approvalId ? { approvalId } : {}) });
     audit(record.ownerId, 'browser.action.failed', 'failed', `action=${action}`);
     return fail('protocol_error', detail);
+  }
+
+  async function lifecycleResult<T>(
+    record: StoredBrowserSession,
+    action: 'pause' | 'resume' | 'takeover' | 'release',
+    started: number,
+    dispatch: () => Promise<ProviderResult<T>>,
+  ): Promise<ServiceResult<T>> {
+    let result: ProviderResult<T>;
+    try {
+      result = await dispatch();
+    } catch {
+      result = {
+        ok: false,
+        code: 'unavailable',
+        outcomeUnknown: true,
+        detail: 'The browser provider did not confirm the session transition.',
+      };
+    }
+    if (result.ok) return ok(result.value);
+    if (result.outcomeUnknown) {
+      await protocolViolation(
+        record,
+        action,
+        'The browser provider did not confirm the session transition.',
+        started,
+      );
+    } else {
+      addReceipt({ record, action, outcome: 'failed', started, detail: result.detail });
+    }
+    return providerFailure(result);
   }
 
   async function checkApproval(input: {
@@ -567,7 +599,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
             ...(request.viewport ? { viewport: request.viewport } : {}),
           });
         } catch {
-          retainUnresolvedCreate(ownerId, started + ttlSeconds * 1000);
+          retainUnresolvedCreate(ownerId, nowMs() + ttlSeconds * 1000);
           audit(
             ownerId,
             'browser.session.create',
@@ -581,10 +613,10 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           );
         }
         if (!created.ok) {
-          if (created.outcomeUnknown) {
+          if (created.outcomeUnknown !== false) {
             // No provider session id means it cannot be closed or quarantined;
-            // retain the slot until the remote TTL has certainly passed.
-            retainUnresolvedCreate(ownerId, started + ttlSeconds * 1000);
+            // allow the full provider TTL after the failure was observed.
+            retainUnresolvedCreate(ownerId, nowMs() + ttlSeconds * 1000);
           }
           audit(ownerId, 'browser.session.create', 'failed', created.detail);
           return providerFailure(created);
@@ -843,7 +875,6 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       });
       if (!outcome.ok) {
         if (outcome.outcomeUnknown) {
-          record.lastElements = [];
           return protocolViolation(
             record,
             actionName,
@@ -1047,11 +1078,10 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           started,
         );
       }
-      const result = await deps.provider.pause(record.providerSessionId);
-      if (!result.ok) {
-        addReceipt({ record, action: 'pause', outcome: 'failed', started, detail: result.detail });
-        return providerFailure(result);
-      }
+      const result = await lifecycleResult(record, 'pause', started, () =>
+        deps.provider.pause(record.providerSessionId),
+      );
+      if (!result.ok) return result;
       record.session = { ...record.session, state: 'paused', updatedAt: deps.clock.iso() };
       store.updateSession(record);
       addReceipt({ record, action: 'pause', outcome: 'succeeded', started });
@@ -1073,11 +1103,10 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           started,
         );
       }
-      const result = await deps.provider.resume(record.providerSessionId);
-      if (!result.ok) {
-        addReceipt({ record, action: 'resume', outcome: 'failed', started, detail: result.detail });
-        return providerFailure(result);
-      }
+      const result = await lifecycleResult(record, 'resume', started, () =>
+        deps.provider.resume(record.providerSessionId),
+      );
+      if (!result.ok) return result;
       record.session = { ...record.session, state: 'ready', updatedAt: deps.clock.iso() };
       store.updateSession(record);
       addReceipt({ record, action: 'resume', outcome: 'succeeded', started });
@@ -1101,11 +1130,10 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
             started,
           );
         }
-        const result = await deps.provider.takeover(record.providerSessionId);
-        if (!result.ok) {
-          addReceipt({ record, action: 'takeover', outcome: 'failed', started, detail: result.detail });
-          return providerFailure(result);
-        }
+        const result = await lifecycleResult(record, 'takeover', started, () =>
+          deps.provider.takeover(record.providerSessionId),
+        );
+        if (!result.ok) return result;
         const interactiveUrl = sanitizePageUrl(result.value.interactiveUrl, {
           allowAboutBlank: false,
         });
@@ -1142,11 +1170,10 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           started,
         );
       }
-      const result = await deps.provider.release(record.providerSessionId);
-      if (!result.ok) {
-        addReceipt({ record, action: 'release', outcome: 'failed', started, detail: result.detail });
-        return providerFailure(result);
-      }
+      const result = await lifecycleResult(record, 'release', started, () =>
+        deps.provider.release(record.providerSessionId),
+      );
+      if (!result.ok) return result;
       record.session = { ...record.session, state: 'ready', updatedAt: deps.clock.iso() };
       store.updateSession(record);
       addReceipt({ record, action: 'release', outcome: 'succeeded', started });

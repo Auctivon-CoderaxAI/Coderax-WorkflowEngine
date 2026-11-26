@@ -25,7 +25,7 @@ function refusal(reason: BrowserCapabilityReason, detail: string): ProviderFailu
       : reason === 'protocol_error'
         ? 'protocol_error'
         : 'unavailable';
-  return { ok: false, code, detail };
+  return { ok: false, code, detail, outcomeUnknown: false };
 }
 
 export function createUnavailableBrowserProvider(input: {

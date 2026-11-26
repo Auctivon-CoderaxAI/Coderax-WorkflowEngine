@@ -15,7 +15,7 @@ import { fakeBrowserProvider, PNG_1X1 } from '../fakes/browser.js';
 
 const TOKEN = 'provider-token-0123456789abcdef';
 
-type Behavior = 'malformed-action' | 'rejected-action' | 'ready' | 'paid' | 'missing' | 'malformed' | 'redirect' | 'unauthorized';
+type Behavior = 'ambiguous-create' | 'rejected-create' | 'malformed-action' | 'rejected-action' | 'ready' | 'paid' | 'missing' | 'malformed' | 'redirect' | 'unauthorized';
 
 type RecordedRequest = {
   method: string;
@@ -106,6 +106,10 @@ async function startProvider(behavior: Behavior): Promise<{
       }
 
       if (recorded.url === '/v1/sessions' && recorded.method === 'POST') {
+        if (behavior === 'ambiguous-create' || behavior === 'rejected-create') {
+          send(response, behavior === 'ambiguous-create' ? 409 : 403, { error: 'rejected' });
+          return;
+        }
         send(response, 200, {
           providerSessionId: 'ps_remote_1',
           url: 'about:blank',
@@ -495,6 +499,31 @@ test('an unknown remote action outcome takes the session out of service', async 
         assert.equal((await service.browserAction(principal, id, { type: 'inspect', maxTextChars: 100, includeElements: true })).ok, false);
         assert.equal(provider.requests.filter(({ url }) => url.endsWith('/actions')).length, 1);
       }
+    } finally {
+      await started.close();
+      await provider.close();
+    }
+  }
+});
+
+test('only confirmed remote create rejections release capacity immediately', async () => {
+  for (const behavior of ['ambiguous-create', 'rejected-create'] as const) {
+    const provider = await startProvider(behavior);
+    const config = browserConfig(provider.url);
+    const started = await startTestApp({
+      config: { ...config, browsers: { ...config.browsers, maxSessionsPerOwner: 1 } },
+      env: { CODERAX_TEST_BROWSER_TOKEN: TOKEN },
+    });
+    try {
+      const create = () => started.app.service.createBrowserSession(principal, {
+        label: 'Remote create', purpose: 'testing', origins: ['https://example.test'],
+      });
+      const first = await create();
+      const second = await create();
+      const ambiguous = behavior === 'ambiguous-create';
+      assert.equal(first.ok === false && first.code, ambiguous ? 'protocol_error' : 'forbidden');
+      assert.equal(second.ok === false && second.code, ambiguous ? 'conflict' : 'forbidden');
+      assert.equal(provider.requests.filter(({ url }) => url === '/v1/sessions').length, ambiguous ? 1 : 2);
     } finally {
       await started.close();
       await provider.close();

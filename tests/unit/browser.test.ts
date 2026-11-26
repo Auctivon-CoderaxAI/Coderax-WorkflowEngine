@@ -678,6 +678,48 @@ test('pause, resume, owner takeover and release preserve the session safely', as
   }
 });
 
+test('unconfirmed lifecycle transitions retire the session while definite rejections preserve it', async (t) => {
+  for (const operation of ['pause', 'resume', 'takeover', 'release'] as const) {
+    await t.test(operation, async () => {
+      const fake = fakeBrowserProvider();
+      const started = await startTestApp({ browser: fake, config: { browsers: { enabled: true } } });
+      try {
+        const service = started.app.service;
+        const session = await open(started);
+        const id = session.sessionId;
+        if (operation === 'resume') await must(service.pauseBrowserSession(principal, id));
+        if (operation === 'release') await must(service.takeoverBrowserSession(principal, id, { active: true }));
+        const expectedState = operation === 'resume' ? 'paused' : operation === 'release' ? 'owner_controlled' : 'ready';
+        const dispatch = () => {
+          if (operation === 'pause') return service.pauseBrowserSession(principal, id);
+          if (operation === 'resume') return service.resumeBrowserSession(principal, id);
+          return service.takeoverBrowserSession(principal, id, { active: operation === 'takeover' });
+        };
+        fake[operation] = async () => ({ ok: false, code: 'forbidden', detail: 'Rejected.' });
+        const rejected = await dispatch();
+        assert.equal(rejected.ok === false && rejected.code, 'forbidden');
+        assert.equal((await must(service.browserSession(principal, id))).state, expectedState);
+        assert.equal(fake.closed.length, 0);
+
+        fake[operation] = async () => ({
+          ok: false, code: 'timeout', outcomeUnknown: true, detail: 'Provider timed out.',
+        });
+        const closeConfirmed = operation === 'pause' || operation === 'takeover';
+        if (!closeConfirmed) fake.failNextClose();
+        const uncertain = await dispatch();
+        assert.equal(uncertain.ok === false && uncertain.code, 'browser_unavailable');
+        assert.equal((await must(service.browserSession(principal, id))).state, closeConfirmed ? 'failed' : 'quarantined');
+        assert.equal(fake.closed.length, 1);
+        const receipt = (await receiptsOf(started, id)).at(-1);
+        assert.equal(receipt?.action, operation);
+        assert.equal(receipt?.outcome, 'failed');
+      } finally {
+        await started.close();
+      }
+    });
+  }
+});
+
 test('closing a session is terminal and idempotent', async () => {
   const fake = fakeBrowserProvider();
   const started = await startTestApp({
@@ -795,7 +837,9 @@ test('the configured live-session limit is enforced', async () => {
       origins: ['https://example.test'],
     });
     const allocate = fake.create;
-    fake.create = async () => ({ ok: false, code: 'unavailable', detail: 'No allocation.' });
+    fake.create = async () => ({
+      ok: false, code: 'unavailable', outcomeUnknown: false, detail: 'No allocation.',
+    });
     assert.equal((await create()).ok, false);
     fake.create = allocate;
     const results = await Promise.all([create(), create()]);

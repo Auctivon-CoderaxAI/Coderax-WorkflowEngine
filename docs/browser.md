@@ -78,12 +78,22 @@ The SDK exposes every operation on `CoderaxClient`.
   confirmed close marks the record `expired`; an unconfirmed close marks it
   `quarantined`, because reporting a clean expiry without terminating the
   remote workload would be false.
-- At most `maxSessionsPerOwner` slots exist per owner. Pending creates,
-  quarantined sessions and creates whose provider answer was lost occupy slots;
-  an unresolved create remains counted until the provider TTL has passed because
-  no session handle exists to close. Retry close to clean up a quarantined
-  session. The engine retains the latest 128 confirmed terminal sessions and
-  their receipt histories across owners.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:182443c2eed66a7db4cf704b45b75c1fd8e86770481e6e5b49f7ec7f9be709a5 -->
+
+- At most `maxSessionsPerOwner` slots exist per owner. Pending creates and
+  quarantined sessions occupy slots. A failed create releases its slot
+  immediately only if the provider confirms it made no allocation. The HTTP
+  adapter can confirm this for checks that stop the request before dispatch
+  and for credential rejections (HTTP 401 or 403). All other failures without
+  a confirmed outcome retain a slot for the full provider TTL after the
+  failure is observed, because no session handle is available to close.
+  Retry close to clean up a quarantined session. The engine retains the latest
+  128 confirmed terminal sessions and their receipt histories across owners.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
 - States are `ready`, `paused`, `owner_controlled`, `closed`, `expired`,
   `failed` and `quarantined`. An action on any state other than `ready` is
   refused with a receipt. `quarantined` means remote termination was **not**
@@ -118,13 +128,24 @@ policy.
 
 A sensitive category always needs a single-use, resource-scoped approval:
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:c5b66da38253f18773f8d23cb8cdf5635db2a3b0a551e6e657d99fb1dba6a94a -->
+
 | Category | Permission scope | Example |
 | --- | --- | --- |
 | `purchase` | `browser.control` | Completing a checkout |
 | `account_change` | `browser.control` | Changing account settings |
-| `authentication` | `browser.control` | Signing in, entering a password |
+| `authentication` | `browser.control` | Declared sign-in intent or filling an observed password field |
 | `irreversible` | `browser.control` | A committing click or key press |
 | `file_transfer` | `browser.transfer` | Upload or download |
+
+Callers must declare `authentication` for sign-in submissions. Protocol v1
+reports element roles and input types but does not identify which actions
+submit a sign-in form. An undeclared sign-in submission made with a committing
+click or key press still needs approval under the fail-closed defaults below.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Approvals are created through `.../authorize`, decided by the owner through
 `.../authorize/decision`, and bound to

@@ -29,8 +29,11 @@ export type ProviderFailureCode =
 export type ProviderFailure = {
   ok: false;
   code: ProviderFailureCode;
-  /** The request may have taken effect, but its outcome could not be verified. */
-  outcomeUnknown?: true;
+  /**
+   * True if the request may have taken effect; false only when it had no effect.
+   * For create, an omitted value does not prove that no browser was allocated.
+   */
+  outcomeUnknown?: boolean;
   /** User-safe text: no credential, upstream body, stack or owner path. */
   detail: string;
 };

@@ -91,12 +91,13 @@ export function createHttpBrowserProvider(input: {
     try {
       url = new URL(`${base}${path}`);
     } catch {
-      return { ok: false, code: 'protocol_error', detail: 'The provider URL could not be composed.' };
+      return { ok: false, code: 'protocol_error', outcomeUnknown: false, detail: 'The provider URL could not be composed.' };
     }
     if (url.origin !== baseOrigin) {
       return {
         ok: false,
         code: 'protocol_error',
+        outcomeUnknown: false,
         detail: 'The provider path resolved outside the configured endpoint.',
       };
     }
@@ -123,6 +124,7 @@ export function createHttpBrowserProvider(input: {
           return {
             ok: false,
             code: 'forbidden',
+            outcomeUnknown: false,
             detail: 'The browser provider rejected the configured credentials.',
           };
         }
@@ -137,6 +139,7 @@ export function createHttpBrowserProvider(input: {
         return {
           ok: false,
           code: 'protocol_error',
+          ...(response.status === 408 ? { outcomeUnknown: true } : {}),
           detail: `The browser provider rejected the request (HTTP ${response.status}).`,
         };
       }
@@ -389,9 +392,10 @@ export function createHttpBrowserProvider(input: {
 
     create: async (requestInput: ProviderCreateInput) => {
       const gate = await ensure();
-      if (!gate.ok) return gate;
+      // These checks run before the create POST, so no session can exist.
+      if (!gate.ok) return { ...gate, outcomeUnknown: false };
       const missing = requireFeature(gate.value, 'sessions');
-      if (missing) return missing;
+      if (missing) return { ...missing, outcomeUnknown: false };
       const result = await request(
         '/v1/sessions',
         'POST',
