@@ -118,9 +118,27 @@ test(
       assert.equal(events.events.at(-1)?.type, 'task.completed');
       assert.equal(events.truncated, false);
 
-      const notifications = await second.service.notifications(principal);
-      assert.equal(notifications.unread, 1);
-      assert.equal(notifications.notifications[0]?.state, 'completed');
+      const notifications = await second.service.notifications(principal, {
+        limit: 1,
+        unreadOnly: 'true',
+      });
+      assert.equal(notifications.ok, true);
+      assert.ok(notifications.ok);
+      assert.equal(notifications.value.total, 1);
+      assert.equal(notifications.value.unread, 1);
+      assert.equal(notifications.value.notifications[0]?.state, 'completed');
+
+      const taskPage = await second.service.tasks(principal, { mode: 'cloud', limit: 1 });
+      assert.equal(taskPage.ok, true);
+      assert.ok(taskPage.ok);
+      assert.equal(taskPage.value.total, 1);
+      assert.equal(taskPage.value.tasks[0]?.taskId, taskId);
+
+      const receiptPage = await second.service.receipts(principal, taskId, { limit: 1 });
+      assert.equal(receiptPage.ok, true);
+      assert.ok(receiptPage.ok);
+      assert.ok(receiptPage.value.total >= 2);
+      assert.equal(receiptPage.value.receipts.length, 1);
 
       const memory = await second.service.memory(principal, 'private');
       assert.deepEqual(
@@ -129,9 +147,14 @@ test(
       );
       assert.deepEqual((await second.service.memory(principal, 'cloud')).entries, []);
 
-      const permissions = await second.service.permissions(principal, taskId);
+      const permissions = await second.service.permissions(principal, taskId, {
+        decision: 'pending',
+        limit: 1,
+      });
       assert.equal(permissions.ok, true);
-      assert.equal(permissions.ok && permissions.value.requests.length, 1);
+      assert.ok(permissions.ok);
+      assert.equal(permissions.value.total, 1);
+      assert.equal(permissions.value.requests.length, 1);
       const decided = await second.service.decidePermission(principal, taskId, {
         requestId: permissionRequestId,
         decision: 'approved',

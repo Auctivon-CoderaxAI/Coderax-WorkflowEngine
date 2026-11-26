@@ -119,6 +119,12 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 202, body: result.value };
   });
 
+  registry.register('listWork', async (context) => {
+    const result = await service.tasks(context.principal, context.query as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('getTask', async (context) => {
     const result = await service.task(context.principal, context.params.taskId ?? '');
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -171,11 +177,20 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'sse', status: 200, events: toEventStream(result.value) };
   });
 
-  registry.register('listConversations', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.conversations(context.principal),
-  }));
+  registry.register('listConversations', async (context) => {
+    const result = await service.conversations(context.principal, context.query as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('deleteConversation', async (context) => {
+    const result = await service.deleteConversation(
+      context.principal,
+      context.params.conversationId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
 
   registry.register('getConversation', async (context) => {
     const result = await service.conversation(
@@ -188,11 +203,43 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
 
   registry.register('listMemory', async (context) => {
     const mode: DataMode = context.query.mode === 'cloud' ? 'cloud' : 'private';
-    return { kind: 'json', status: 200, body: await service.memory(context.principal, mode) };
+    const limit = typeof context.query.limit === 'number' ? context.query.limit : undefined;
+    const cursor = typeof context.query.cursor === 'string' ? context.query.cursor : undefined;
+    return {
+      kind: 'json',
+      status: 200,
+      body: await service.memory(context.principal, mode, {
+        ...(limit === undefined ? {} : { limit }),
+        ...(cursor ? { cursor } : {}),
+      }),
+    };
+  });
+
+  registry.register('writeMemory', async (context) => {
+    const result = await service.writeMemory(
+      context.principal,
+      context.params.key ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('deleteMemory', async (context) => {
+    const mode: DataMode = context.query.mode === 'cloud' ? 'cloud' : 'private';
+    return {
+      kind: 'json',
+      status: 200,
+      body: await service.deleteMemory(context.principal, context.params.key ?? '', mode),
+    };
   });
 
   registry.register('listPermissions', async (context) => {
-    const result = await service.permissions(context.principal, context.params.taskId ?? '');
+    const result = await service.permissions(
+      context.principal,
+      context.params.taskId ?? '',
+      context.query as never,
+    );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
@@ -207,11 +254,27 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
-  registry.register('listNotifications', async (context) => ({
+  registry.register('getBudget', async (context) => ({
     kind: 'json',
     status: 200,
-    body: await service.notifications(context.principal),
+    body: service.budget(context.principal),
   }));
+
+  registry.register('listReceipts', async (context) => {
+    const result = await service.receipts(
+      context.principal,
+      context.params.taskId ?? '',
+      context.query as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listNotifications', async (context) => {
+    const result = await service.notifications(context.principal, context.query as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
 
   registry.register('markNotificationsRead', async (context) => {
     const body = context.body as { taskIds: string[] };

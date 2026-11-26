@@ -164,7 +164,7 @@ export function createRouter(input: {
     handle: async (raw) => {
       const requestId = input.requestId();
       const [pathname, search = ''] = raw.path.split('?');
-      const query = Object.fromEntries(new URLSearchParams(search).entries());
+      const rawQuery = Object.fromEntries(new URLSearchParams(search).entries());
       const method = raw.method.toUpperCase();
 
       for (const route of routes) {
@@ -177,18 +177,31 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = (match.groups ?? {}) as Record<string, string>;
+        let params: Record<string, string>;
+        try {
+          params = Object.fromEntries(
+            Object.entries(match.groups ?? {}).map(([key, value]) => [
+              key,
+              decodeURIComponent(String(value)),
+            ]),
+          );
+        } catch {
+          return problem('validation_failed', 'A path parameter is invalid.', requestId);
+        }
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
+          params = parsed.data as Record<string, string>;
         }
+        let query: Record<string, unknown> = rawQuery;
         if (route.spec.query) {
-          const parsed = route.spec.query.safeParse(query);
+          const parsed = route.spec.query.safeParse(rawQuery);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
+          query = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;

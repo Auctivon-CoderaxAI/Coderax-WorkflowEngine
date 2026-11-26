@@ -39,9 +39,11 @@ test('Work runs to completion, persists its transcript and notifies once', async
       assert.equal(conversation.value.messages[1]?.role, 'assistant');
     }
 
-    const notifications = await started.app.service.notifications(principal);
-    assert.equal(notifications.unread, 1);
-    assert.equal(notifications.notifications[0]?.state, 'completed');
+    const notifications = await started.app.service.notifications(principal, {});
+    assert.equal(notifications.ok, true);
+    assert.ok(notifications.ok);
+    assert.equal(notifications.value.unread, 1);
+    assert.equal(notifications.value.notifications[0]?.state, 'completed');
 
     const events = started.app.dependencies.events.replay(submitted.value.taskId, 0);
     const types = events.events.map((event) => event.type);

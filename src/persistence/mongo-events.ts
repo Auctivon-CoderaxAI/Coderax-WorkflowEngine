@@ -120,6 +120,13 @@ export function createMongoEventLog(input: MongoEventCollections): EventLog {
       return result.deletedCount;
     },
 
+    deleteByTaskIds: async (taskIds) => {
+      if (taskIds.length === 0) return 0;
+      const result = await events.deleteMany({ taskId: { $in: [...taskIds] } });
+      await heads.deleteMany({ taskId: { $in: [...taskIds] } });
+      return result.deletedCount;
+    },
+
     close: async () => undefined,
   };
 }

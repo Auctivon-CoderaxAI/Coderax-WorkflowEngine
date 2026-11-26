@@ -2,25 +2,37 @@ import type { z } from 'zod';
 import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
 import { HealthReport, ReadinessReport } from './health.js';
-import { ModelList } from './models.js';
+import { BudgetState, ModelList } from './models.js';
 import {
   NotificationList,
+  NotificationListQuery,
   NotificationReadRequest,
   PermissionDecisionRequest,
   PermissionList,
+  PermissionListQuery,
 } from './permissions.js';
+import { ReceiptList, ReceiptListQuery } from './receipts.js';
 import {
   CancelRequest,
   ChatReply,
   ChatRequest,
   Conversation,
+  ConversationDeletion,
   ConversationList,
+  ConversationListQuery,
+  MemoryDeletion,
+  MemoryEntry,
+  MemoryKeyParams,
   MemoryList,
+  MemoryListQuery,
+  MemoryWriteRequest,
   ResumeRequest,
   RetryRequest,
   TaskAccepted,
   TaskControlResult,
+  TaskList,
   TaskStatus,
+  WorkListQuery,
   WorkSubmitRequest,
 } from './tasks.js';
 import { z as zod } from 'zod';
@@ -35,7 +47,7 @@ import { ConversationId, TaskId } from './primitives.js';
  * the SDK cannot drift apart.
  */
 
-export type RouteMethod = 'GET' | 'POST';
+export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
 export type RouteAuth = 'owner' | 'public';
 
@@ -117,6 +129,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 202, description: 'Task accepted', schema: TaskAccepted },
   },
   {
+    operationId: 'listWork',
+    method: 'GET',
+    path: '/v1/work',
+    summary: 'Owner-scoped Work tasks, filtered and cursor-paged.',
+    tags: ['work'],
+    auth: 'owner',
+    query: WorkListQuery,
+    response: { status: 200, description: 'Task list', schema: TaskList },
+  },
+  {
     operationId: 'getTask',
     method: 'GET',
     path: '/v1/work/{taskId}',
@@ -178,7 +200,18 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     summary: 'Conversation history shared by web and CLI clients.',
     tags: ['conversations'],
     auth: 'owner',
+    query: ConversationListQuery,
     response: { status: 200, description: 'Conversation list', schema: ConversationList },
+  },
+  {
+    operationId: 'deleteConversation',
+    method: 'DELETE',
+    path: '/v1/conversations/{conversationId}',
+    summary: 'Delete one conversation and its dependent records, when no task is live.',
+    tags: ['conversations'],
+    auth: 'owner',
+    params: ConversationParams,
+    response: { status: 200, description: 'Deletion result', schema: ConversationDeletion },
   },
   {
     operationId: 'getConversation',
@@ -197,8 +230,30 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     summary: 'Owner-scoped memory for the requested data mode.',
     tags: ['memory'],
     auth: 'owner',
-    query: zod.object({ mode: zod.enum(['private', 'cloud']).optional() }).strict(),
+    query: MemoryListQuery,
     response: { status: 200, description: 'Memory entries', schema: MemoryList },
+  },
+  {
+    operationId: 'writeMemory',
+    method: 'PUT',
+    path: '/v1/memory/{key}',
+    summary: 'Create or replace one owner-scoped, mode-partitioned memory entry.',
+    tags: ['memory'],
+    auth: 'owner',
+    params: MemoryKeyParams,
+    body: MemoryWriteRequest,
+    response: { status: 200, description: 'Stored memory entry', schema: MemoryEntry },
+  },
+  {
+    operationId: 'deleteMemory',
+    method: 'DELETE',
+    path: '/v1/memory/{key}',
+    summary: 'Delete one memory entry in exactly one data mode.',
+    tags: ['memory'],
+    auth: 'owner',
+    params: MemoryKeyParams,
+    query: zod.object({ mode: zod.enum(['private', 'cloud']).optional() }).strict(),
+    response: { status: 200, description: 'Deletion result', schema: MemoryDeletion },
   },
   {
     operationId: 'listPermissions',
@@ -208,6 +263,7 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['permissions'],
     auth: 'owner',
     params: TaskParams,
+    query: PermissionListQuery,
     response: { status: 200, description: 'Permission list', schema: PermissionList },
   },
   {
@@ -222,12 +278,33 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Permission list', schema: PermissionList },
   },
   {
+    operationId: 'getBudget',
+    method: 'GET',
+    path: '/v1/budget',
+    summary: 'Daily zero-cost request and token budget with its reset instant.',
+    tags: ['models'],
+    auth: 'owner',
+    response: { status: 200, description: 'Budget and quota status', schema: BudgetState },
+  },
+  {
+    operationId: 'listReceipts',
+    method: 'GET',
+    path: '/v1/work/{taskId}/receipts',
+    summary: 'Durable execution receipts for one owner-scoped task.',
+    tags: ['work'],
+    auth: 'owner',
+    params: TaskParams,
+    query: ReceiptListQuery,
+    response: { status: 200, description: 'Execution receipts', schema: ReceiptList },
+  },
+  {
     operationId: 'listNotifications',
     method: 'GET',
     path: '/v1/notifications',
     summary: 'Durable completion notifications, including unread count.',
     tags: ['notifications'],
     auth: 'owner',
+    query: NotificationListQuery,
     response: { status: 200, description: 'Notification list', schema: NotificationList },
   },
   {

@@ -56,6 +56,8 @@ export type EventBus = {
   hydrate: (taskId: string) => Promise<number>;
   /** Waits until everything published for the task is stored (or rejected). */
   flush: (taskId: string) => Promise<void>;
+  /** Authorized erasure for tasks whose conversation was deleted. */
+  deleteTasks: (taskIds: readonly string[]) => Promise<number>;
   /** Flushes every task; called before the process releases the database. */
   close: () => Promise<void>;
   /** Events dropped by backpressure, for health and tests. */
@@ -267,6 +269,14 @@ export function createEventBus(input: {
       if (last && TERMINAL.has(last.type)) {
         await input.log.prune(taskId, retain).catch(() => 0);
       }
+    },
+
+    deleteTasks: async (taskIds) => {
+      for (const taskId of taskIds) {
+        await flush(taskId).catch(() => undefined);
+        streams.delete(taskId);
+      }
+      return input.log ? input.log.deleteByTaskIds(taskIds) : 0;
     },
 
     close: async () => {

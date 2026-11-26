@@ -9,6 +9,13 @@ import type { IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import type { MongoCollectionLike } from '../persistence/mongo.js';
+import { clampLimit, decodeCursor, encodeCursor } from '../persistence/pagination.js';
+
+export type PermissionPageQuery = {
+  decision?: 'pending' | 'approved' | 'denied';
+  limit?: number;
+  cursor?: string;
+};
 
 /**
  * Permissions are asked for, never assumed.
@@ -32,7 +39,11 @@ export type PermissionStore = {
     resource: string;
     ttlMs?: number;
   }) => Promise<PermissionRequest>;
-  list: (ownerId: string, taskId: string) => Promise<PermissionList>;
+  list: (
+    ownerId: string,
+    taskId: string,
+    query?: PermissionPageQuery,
+  ) => Promise<PermissionList>;
   decide: (input: {
     ownerId: string;
     taskId: string;
@@ -83,21 +94,87 @@ export function createPermissionStore(input: {
   const collection = input.collection;
   const rows = new Map<string, Row>();
 
-  async function scoped(ownerId: string, taskId: string): Promise<Row[]> {
+  async function listFor(
+    ownerId: string,
+    taskId: string,
+    query: PermissionPageQuery = {},
+  ): Promise<PermissionList> {
+    const limit = clampLimit(query.limit);
+    const cursor = query.cursor ? decodeCursor(query.cursor) : null;
     if (collection) {
-      const documents = await collection
-        .find({ ownerId, taskId })
-        .sort({ requestedAt: 1 })
-        .toArray();
-      return documents.map(toRow);
+      const base = {
+        ownerId,
+        taskId,
+        ...(query.decision ? { decision: query.decision } : {}),
+      };
+      const filter: Record<string, unknown> = {
+        ...base,
+        ...(cursor
+          ? {
+              $or: [
+                { requestedAt: { $gt: cursor.at } },
+                { requestedAt: cursor.at, requestId: { $gt: cursor.id } },
+              ],
+            }
+          : {}),
+      };
+      const [documents, total] = await Promise.all([
+        collection
+          .find(filter)
+          .sort({ requestedAt: 1, requestId: 1 })
+          .limit(limit + 1)
+          .toArray(),
+        collection.countDocuments(base),
+      ]);
+      const page = documents.slice(0, limit).map(toRow);
+      const hasMore = documents.length > limit;
+      return {
+        requests: page.map(publicRow),
+        total,
+        ...(hasMore && page.length > 0
+          ? {
+              nextCursor: encodeCursor(
+                page[page.length - 1]!.requestedAt,
+                page[page.length - 1]!.requestId,
+              ),
+            }
+          : {}),
+      };
     }
-    return [...rows.values()]
-      .filter((row) => row.ownerId === ownerId && row.taskId === taskId)
-      .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt));
-  }
 
-  async function listFor(ownerId: string, taskId: string): Promise<PermissionList> {
-    return { requests: (await scoped(ownerId, taskId)).map(publicRow) };
+    const matching = [...rows.values()]
+      .filter(
+        (row) =>
+          row.ownerId === ownerId &&
+          row.taskId === taskId &&
+          (!query.decision || row.decision === query.decision),
+      )
+      .sort(
+        (left, right) =>
+          left.requestedAt.localeCompare(right.requestedAt) ||
+          left.requestId.localeCompare(right.requestId),
+      );
+    const after = cursor
+      ? matching.filter(
+          (row) =>
+            row.requestedAt > cursor.at ||
+            (row.requestedAt === cursor.at && row.requestId > cursor.id),
+        )
+      : matching;
+    const page = after.slice(0, limit);
+    const hasMore = after.length > limit;
+    return {
+      requests: page.map(publicRow),
+      total: matching.length,
+      ...(hasMore && page.length > 0
+        ? {
+            nextCursor: encodeCursor(
+              page[page.length - 1]!.requestedAt,
+              page[page.length - 1]!.requestId,
+            ),
+          }
+        : {}),
+    };
   }
 
   return {
@@ -121,7 +198,7 @@ export function createPermissionStore(input: {
       return publicRow(row);
     },
 
-    list: async (ownerId, taskId) => listFor(ownerId, taskId),
+    list: async (ownerId, taskId, query) => listFor(ownerId, taskId, query),
 
     decide: async ({ ownerId, taskId, requestId, decision }) => {
       const now = input.clock.now().toISOString();

@@ -55,7 +55,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 48 tests: unit, contract, integration, security, e2e
+npm test                          # 126 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -83,6 +83,25 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
 ```
 
 The engine binds `127.0.0.1` by default and is never public-facing.
+
+## Shared read models and API operations
+
+Coderax Web and CoderaxCLI consume the same authoritative endpoints through
+`packages/sdk`; neither keeps a competing database.
+
+| Operation | Endpoint | Bounds |
+| --- | --- | --- |
+| Owner Work list | `GET /v1/work` | state/agent/mode/conversation filters, newest-first cursor page, total |
+| Task receipts | `GET /v1/work/{taskId}/receipts` | owner-scoped, newest-first cursor page, total |
+| Conversation list | `GET /v1/conversations` | mode/agent/isWork filters, cursor page, total |
+| Conversation deletion | `DELETE /v1/conversations/{conversationId}` | refuses while a task is live; cascades messages, tasks, events, checkpoints, permissions, notifications, receipts and idempotency records |
+| Memory CRUD | `GET/PUT/DELETE /v1/memory[/{key}]` | owner + mode scoped; page limit 500 |
+| Notification page | `GET /v1/notifications` | unread filter, cursor page, total and durable unread count |
+| Mark notifications read | `POST /v1/notifications/read` | owner-scoped task ids |
+| Permission queue | `GET /v1/work/{taskId}/permissions` | decision filter, cursor page, total |
+| Permission decision | `POST /v1/work/{taskId}/permissions` | single decision, conflict after expiry or a second decision |
+| Budget and quota | `GET /v1/budget` | used, remaining, exhausted, UTC reset instant |
+| Idempotent submission | `POST /v1/work` with `idempotencyKey` | replay returns the original task; a different body conflicts |
 
 ## Architecture
 

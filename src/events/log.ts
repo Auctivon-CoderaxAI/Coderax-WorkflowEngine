@@ -23,6 +23,8 @@ export type EventLog = {
   lastSeq: (taskId: string) => Promise<number>;
   /** Drops all but the newest `keep` events. Returns how many were removed. */
   prune: (taskId: string, keep: number) => Promise<number>;
+  /** Authorized erasure for a deleted conversation. */
+  deleteByTaskIds: (taskIds: readonly string[]) => Promise<number>;
   close: () => Promise<void>;
 };
 
@@ -93,6 +95,18 @@ export function createMemoryEventLog(): EventLog {
       const removed = state.events.splice(0, excess);
       for (const event of removed) state.ids.delete(event.eventId);
       return removed.length;
+    },
+
+    deleteByTaskIds: async (taskIds) => {
+      let deleted = 0;
+      for (const taskId of taskIds) {
+        const state = streams.get(taskId);
+        if (state) {
+          deleted += state.events.length;
+          streams.delete(taskId);
+        }
+      }
+      return deleted;
     },
 
     close: async () => undefined,

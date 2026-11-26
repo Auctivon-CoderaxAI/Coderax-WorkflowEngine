@@ -40,16 +40,18 @@ export type IdempotencyStore = {
   release: (input: { ownerId: string; key: string }) => Promise<void>;
   prune: (before: string, limit: number) => Promise<number>;
   get: (ownerId: string, key: string) => Promise<IdempotencyRecord | null>;
+  /** Authorized erasure when a conversation is deleted. */
+  deleteByConversation: (ownerId: string, conversationId: string) => Promise<number>;
 };
 
-type Row = IdempotencyRecord & { id: string };
+type Row = IdempotencyRecord & { id: string; conversationId?: string };
 
 function rowId(ownerId: string, key: string): string {
   return `${ownerId}\u0000${key}`;
 }
 
 function toRecord(row: Row): IdempotencyRecord {
-  const { id: _id, ...record } = row;
+  const { id: _id, conversationId: _conversation, ...record } = row;
   return record;
 }
 
@@ -106,6 +108,7 @@ export function createIdempotencyStore(): IdempotencyStore {
         ...existing,
         state: 'completed',
         response,
+        conversationId: response.conversationId,
         updatedAt: now,
         expiresAt,
       });
@@ -129,6 +132,16 @@ export function createIdempotencyStore(): IdempotencyStore {
     get: async (ownerId, key) => {
       const row = rows.get(rowId(ownerId, key));
       return row ? toRecord(row) : null;
+    },
+    deleteByConversation: async (ownerId, conversationId) => {
+      let deleted = 0;
+      for (const [id, row] of rows) {
+        if (row.ownerId === ownerId && row.conversationId === conversationId) {
+          rows.delete(id);
+          deleted += 1;
+        }
+      }
+      return deleted;
     },
   };
 }
@@ -201,7 +214,15 @@ export function createMongoIdempotencyStore(collection: MongoCollectionLike): Id
     complete: async ({ ownerId, key, response, now, expiresAt }) => {
       await collection.updateOne(
         { ownerId, key },
-        { $set: { state: 'completed', response, updatedAt: now, expiresAt } },
+        {
+          $set: {
+            state: 'completed',
+            response,
+            conversationId: response.conversationId,
+            updatedAt: now,
+            expiresAt,
+          },
+        },
         { upsert: false },
       );
     },
@@ -227,6 +248,11 @@ export function createMongoIdempotencyStore(collection: MongoCollectionLike): Id
     get: async (ownerId, key) => {
       const document = await collection.findOne({ ownerId, key });
       return document ? toRecord(toMongoRow(document)) : null;
+    },
+
+    deleteByConversation: async (ownerId, conversationId) => {
+      const result = await collection.deleteMany({ ownerId, conversationId });
+      return result.deletedCount;
     },
   };
 }

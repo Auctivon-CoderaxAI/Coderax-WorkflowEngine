@@ -43,9 +43,23 @@ export const PermissionRequest = z
 export type PermissionRequest = z.infer<typeof PermissionRequest>;
 
 export const PermissionList = z
-  .object({ requests: z.array(PermissionRequest) })
+  .object({
+    requests: z.array(PermissionRequest),
+    /** Rows matching the filter, independent of the current page. */
+    total: z.number().int().nonnegative(),
+    nextCursor: z.string().min(1).max(1024).optional(),
+  })
   .strict();
 export type PermissionList = z.infer<typeof PermissionList>;
+
+export const PermissionListQuery = z
+  .object({
+    decision: z.enum(['pending', 'approved', 'denied']).optional(),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+    cursor: z.string().min(1).max(1024).optional(),
+  })
+  .strict();
+export type PermissionListQuery = z.infer<typeof PermissionListQuery>;
 
 export const PermissionDecisionRequest = z
   .object({

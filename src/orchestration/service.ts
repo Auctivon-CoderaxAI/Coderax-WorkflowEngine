@@ -5,16 +5,27 @@ import type {
   ChatReply,
   ChatRequest,
   Conversation,
+  ConversationDeletion,
   ConversationList,
+  ConversationListQuery,
   DataMode,
+  MemoryDeletion,
+  MemoryEntry,
   MemoryList,
+  MemoryWriteRequest,
   ModelList,
   NotificationList,
+  NotificationListQuery,
   PermissionDecisionRequest,
   PermissionList,
+  PermissionListQuery,
+  ReceiptList,
+  ReceiptListQuery,
   TaskAccepted,
   TaskControlResult,
+  TaskList,
   TaskStatus,
+  WorkListQuery,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
@@ -42,6 +53,7 @@ import type { IdempotencyStore } from '../persistence/idempotency.js';
 import type { RetentionService } from '../persistence/retention.js';
 import type { PersistenceHealth } from '../bootstrap/persistence.js';
 import { createHash } from 'node:crypto';
+import { decodeCursor } from '../persistence/pagination.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
@@ -108,23 +120,60 @@ export type ApplicationService = {
     generation: number,
   ) => Promise<ServiceResult<TaskControlResult>>;
   chat: (principal: Principal, request: ChatRequest) => Promise<ServiceResult<ChatReply>>;
-  conversations: (principal: Principal) => Promise<ConversationList>;
+  tasks: (
+    principal: Principal,
+    query: WorkListQuery,
+  ) => Promise<ServiceResult<TaskList>>;
+  conversations: (
+    principal: Principal,
+    query: ConversationListQuery,
+  ) => Promise<ServiceResult<ConversationList>>;
   conversation: (
     principal: Principal,
     conversationId: string,
   ) => Promise<ServiceResult<Conversation>>;
-  memory: (principal: Principal, mode: DataMode) => Promise<MemoryList>;
-  permissions: (principal: Principal, taskId: string) => Promise<ServiceResult<PermissionList>>;
+  deleteConversation: (
+    principal: Principal,
+    conversationId: string,
+  ) => Promise<ServiceResult<ConversationDeletion>>;
+  memory: (
+    principal: Principal,
+    mode: DataMode,
+    query?: { limit?: number; cursor?: string },
+  ) => Promise<MemoryList>;
+  writeMemory: (
+    principal: Principal,
+    key: string,
+    body: MemoryWriteRequest,
+  ) => Promise<ServiceResult<MemoryEntry>>;
+  deleteMemory: (
+    principal: Principal,
+    key: string,
+    mode: DataMode,
+  ) => Promise<MemoryDeletion>;
+  permissions: (
+    principal: Principal,
+    taskId: string,
+    query?: PermissionListQuery,
+  ) => Promise<ServiceResult<PermissionList>>;
   decidePermission: (
     principal: Principal,
     taskId: string,
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
-  notifications: (principal: Principal) => Promise<NotificationList>;
+  notifications: (
+    principal: Principal,
+    query: NotificationListQuery,
+  ) => Promise<ServiceResult<NotificationList>>;
   markNotificationsRead: (
     principal: Principal,
     taskIds: string[],
   ) => Promise<NotificationList>;
+  receipts: (
+    principal: Principal,
+    taskId: string,
+    query: ReceiptListQuery,
+  ) => Promise<ServiceResult<ReceiptList>>;
   events: (
     principal: Principal,
     taskId: string,
@@ -1213,7 +1262,54 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    conversations: (principal) => deps.conversations.list(principal.ownerId),
+    tasks: async (principal, query) => {
+      if (query.cursor && !decodeCursor(query.cursor)) {
+        return fail('validation_failed', 'The pagination cursor is invalid.');
+      }
+      const page = await deps.tasks.listPage({
+        ownerId: principal.ownerId,
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+        ...(query.state ? { state: query.state } : {}),
+        ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+        ...(query.agent ? { agent: query.agent } : {}),
+        ...(query.mode ? { mode: query.mode } : {}),
+      });
+      return ok({
+        tasks: page.tasks.map((task) => ({
+          taskId: task.taskId,
+          conversationId: task.conversationId,
+          state: task.state,
+          agent: task.agent,
+          mode: task.mode,
+          generation: task.generation,
+          objectivePreview: task.objective.slice(0, 200),
+          createdAt: task.createdAt,
+          updatedAt: task.updatedAt,
+        })),
+        total: page.total,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      });
+    },
+
+    conversations: async (principal, query) => {
+      if (query.cursor && !decodeCursor(query.cursor)) {
+        return fail('validation_failed', 'The pagination cursor is invalid.');
+      }
+      const page = await deps.conversations.listPage({
+        ownerId: principal.ownerId,
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+        ...(query.mode ? { mode: query.mode } : {}),
+        ...(query.agent ? { agent: query.agent } : {}),
+        ...(query.isWork === undefined ? {} : { isWork: query.isWork === 'true' }),
+      });
+      return ok({
+        conversations: page.conversations,
+        total: page.total,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      });
+    },
 
     conversation: async (principal, conversationId) => {
       const record = await deps.conversations.get(principal.ownerId, conversationId);
@@ -1221,12 +1317,106 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return ok(await deps.conversations.toContract(record));
     },
 
-    memory: (principal, mode) => deps.memory.list({ ownerId: principal.ownerId, mode }),
+    deleteConversation: async (principal, conversationId) => {
+      const record = await deps.conversations.get(principal.ownerId, conversationId);
+      if (!record) return fail('not_found', 'That conversation does not exist for this owner.');
+      const tasks = await deps.tasks.listByConversation(conversationId);
+      if (tasks.some((task) => task.ownerId === principal.ownerId && !isTerminalState(task.state))) {
+        return fail(
+          'conflict',
+          'That conversation still has a live Work task; cancel it before deleting the conversation.',
+        );
+      }
+      const ownedTaskIds = tasks
+        .filter((task) => task.ownerId === principal.ownerId)
+        .map((task) => task.taskId);
+      const removed = await deps.conversations.delete(principal.ownerId, conversationId);
+      if (!removed.deleted) {
+        return fail('not_found', 'That conversation does not exist for this owner.');
+      }
+      const tasksDeleted = await deps.tasks.deleteByConversation(
+        principal.ownerId,
+        conversationId,
+      );
+      await deps.notifications
+        .deleteByConversation(principal.ownerId, conversationId)
+        .catch(() => 0);
+      await deps.permissions.deleteByTaskIds(ownedTaskIds).catch(() => 0);
+      await deps.checkpoints.deleteByTaskIds(ownedTaskIds).catch(() => 0);
+      await deps.events.deleteTasks(ownedTaskIds).catch(() => 0);
+      await deps.audit.deleteByTaskIds(ownedTaskIds).catch(() => 0);
+      await deps.idempotency
+        .deleteByConversation(principal.ownerId, conversationId)
+        .catch(() => 0);
+      await audit({
+        actor: principal.ownerId,
+        action: 'conversation.deleted',
+        conversationId,
+        outcome: 'accepted',
+        mode: record.mode,
+        detail: `messages=${removed.messages} tasks=${tasksDeleted}`,
+      });
+      return ok({
+        conversationId,
+        deleted: true,
+        messagesDeleted: removed.messages,
+        tasksDeleted,
+      });
+    },
 
-    permissions: async (principal, taskId) => {
+    memory: (principal, mode, query = {}) =>
+      deps.memory.list({
+        ownerId: principal.ownerId,
+        mode,
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+      }),
+
+    writeMemory: async (principal, key, body) => {
+      const trimmed = key.trim();
+      if (trimmed.length === 0) {
+        return fail('validation_failed', 'A memory key is required.');
+      }
+      await deps.memory.put({
+        ownerId: principal.ownerId,
+        tenantId: null,
+        mode: body.mode,
+        key: trimmed,
+        value: body.value,
+      });
+      const stored = await deps.memory.get({
+        ownerId: principal.ownerId,
+        mode: body.mode,
+        key: trimmed,
+      });
+      if (!stored) {
+        return fail('internal_error', 'The memory entry could not be read back after it was written.');
+      }
+      return ok({
+        key: stored.key,
+        value: stored.value,
+        mode: stored.mode,
+        updatedAt: stored.updatedAt,
+      });
+    },
+
+    deleteMemory: async (principal, key, mode) => {
+      const trimmed = key.trim();
+      const deleted = await deps.memory.delete({
+        ownerId: principal.ownerId,
+        mode,
+        key: trimmed,
+      });
+      return { key: trimmed, mode, deleted };
+    },
+
+    permissions: async (principal, taskId, query) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      return ok(await deps.permissions.list(principal.ownerId, taskId));
+      if (query?.cursor && !decodeCursor(query.cursor)) {
+        return fail('validation_failed', 'The pagination cursor is invalid.');
+      }
+      return ok(await deps.permissions.list(principal.ownerId, taskId, query));
     },
 
     decidePermission: async (principal, taskId, body) => {
@@ -1241,11 +1431,39 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    notifications: (principal) => deps.notifications.list({ ownerId: principal.ownerId }),
+    notifications: async (principal, query) => {
+      if (query.cursor && !decodeCursor(query.cursor)) {
+        return fail('validation_failed', 'The pagination cursor is invalid.');
+      }
+      return ok(
+        await deps.notifications.list({
+          ownerId: principal.ownerId,
+          ...(query.limit === undefined ? {} : { limit: query.limit }),
+          ...(query.cursor ? { cursor: query.cursor } : {}),
+          ...(query.unreadOnly === undefined ? {} : { unreadOnly: query.unreadOnly === 'true' }),
+        }),
+      );
+    },
 
     markNotificationsRead: async (principal, taskIds) => {
       await deps.notifications.markRead(principal.ownerId, taskIds);
       return deps.notifications.list({ ownerId: principal.ownerId });
+    },
+
+    receipts: async (principal, taskId, query) => {
+      const found = ownedTask(await deps.tasks.get(taskId), principal);
+      if (!found.ok) return found;
+      if (query.cursor && !decodeCursor(query.cursor)) {
+        return fail('validation_failed', 'The pagination cursor is invalid.');
+      }
+      return ok(
+        await deps.audit.list({
+          actor: principal.ownerId,
+          taskId,
+          ...(query.limit === undefined ? {} : { limit: query.limit }),
+          ...(query.cursor ? { cursor: query.cursor } : {}),
+        }),
+      );
     },
 
     events: async (principal, taskId, after) => {

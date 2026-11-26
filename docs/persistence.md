@@ -17,7 +17,7 @@ downgrade.
 | Record | Collection | Key / index | Contract surface |
 | --- | --- | --- | --- |
 | Work lease | `work_runs` | unique `key`, `expiresAt` | internal fencing |
-| Task | `tasks` | unique `taskId`, `(ownerId, updatedAt, taskId)`, `state` | `GET /v1/work/{id}`; list read model follows |
+| Task | `tasks` | unique `taskId`, `(ownerId, updatedAt, taskId)`, `state` | `GET /v1/work`, `GET /v1/work/{id}` |
 | Conversation | `conversations` | unique `conversationId`, `(ownerId, updatedAt, conversationId)` | `GET /v1/conversations` |
 | Message | `messages` | unique `messageId`, `(conversationId, createdAt)` | `GET /v1/conversations/{id}` |
 | Execution event | `events` + `event_heads` | unique `(taskId, seq)`, unique `(taskId, eventId)`, monotonic generation head | `GET /v1/work/{id}/events` |
@@ -25,7 +25,7 @@ downgrade.
 | Memory | `memory` | unique `(ownerId, mode, key)` | `GET /v1/memory` |
 | Notification | `notifications` | unique `taskId`, `(ownerId, createdAt, taskId)`, `(ownerId, read)` | `/v1/notifications` |
 | Permission request | `permissions` | unique `requestId`, `(ownerId, taskId, requestedAt)` | `/v1/work/{id}/permissions` |
-| Audit receipt | `audit_receipts` | unique `receipt`, `(actor, at)`, `(taskId, at)` | internal evidence; retrieval follows |
+| Audit receipt | `audit_receipts` | unique `receipt`, `(actor, at)`, `(taskId, at)` | `GET /v1/work/{id}/receipts` |
 | Idempotency record | `idempotency` | unique `(ownerId, key)`, `expiresAt` | `POST /v1/work` |
 
 The collection names are prefixed by `persistence.collectionPrefix`, so one

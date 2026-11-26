@@ -1,25 +1,36 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  BudgetState,
   ChatReply,
   Conversation,
+  ConversationDeletion,
   ConversationList,
   ExecutionEvent,
   HealthReport,
+  MemoryDeletion,
+  MemoryEntry,
   MemoryList,
   ModelList,
   NotificationList,
   PermissionList,
   Problem,
   ReadinessReport,
+  ReceiptList,
   TaskAccepted,
   TaskControlResult,
+  TaskList,
   TaskStatus,
 } from '@coderax/contracts';
 import type {
   ChatRequest,
+  ConversationListQuery,
   DataMode,
+  NotificationListQuery,
   PermissionDecisionRequest,
+  PermissionListQuery,
+  ReceiptListQuery,
+  WorkListQuery,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 
@@ -70,7 +81,7 @@ export type CoderaxClientOptions = {
 };
 
 type RequestInput = {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
@@ -222,11 +233,50 @@ export class CoderaxClient {
     });
   }
 
-  submitWork(request: WorkSubmitRequest): Promise<TaskAccepted> {
+  submitWork(
+    request: WorkSubmitRequest,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<TaskAccepted> {
     return this.request<TaskAccepted>(TaskAccepted, {
       method: 'POST',
       path: '/v1/work',
-      body: request,
+      body: {
+        ...request,
+        ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+      },
+    });
+  }
+
+  /** Owner-scoped Work tasks, filtered and cursor-paged. */
+  tasks(query: WorkListQuery = {}): Promise<TaskList> {
+    return this.request<TaskList>(TaskList, {
+      method: 'GET',
+      path: '/v1/work',
+      query: {
+        state: query.state,
+        conversationId: query.conversationId,
+        agent: query.agent,
+        mode: query.mode,
+        limit: query.limit,
+        cursor: query.cursor,
+      },
+    });
+  }
+
+  /** Execution receipts for one task. */
+  receipts(taskId: string, query: ReceiptListQuery = {}): Promise<ReceiptList> {
+    return this.request<ReceiptList>(ReceiptList, {
+      method: 'GET',
+      path: `/v1/work/${encodeURIComponent(taskId)}/receipts`,
+      query: { limit: query.limit, cursor: query.cursor },
+    });
+  }
+
+  /** Daily zero-cost budget and quota status. */
+  budget(): Promise<BudgetState> {
+    return this.request<BudgetState>(BudgetState, {
+      method: 'GET',
+      path: '/v1/budget',
     });
   }
 
@@ -261,10 +311,24 @@ export class CoderaxClient {
     });
   }
 
-  conversations(): Promise<ConversationList> {
+  conversations(query: ConversationListQuery = {}): Promise<ConversationList> {
     return this.request<ConversationList>(ConversationList, {
       method: 'GET',
       path: '/v1/conversations',
+      query: {
+        mode: query.mode,
+        isWork: query.isWork,
+        agent: query.agent,
+        limit: query.limit,
+        cursor: query.cursor,
+      },
+    });
+  }
+
+  deleteConversation(conversationId: string): Promise<ConversationDeletion> {
+    return this.request<ConversationDeletion>(ConversationDeletion, {
+      method: 'DELETE',
+      path: `/v1/conversations/${encodeURIComponent(conversationId)}`,
     });
   }
 
@@ -275,18 +339,45 @@ export class CoderaxClient {
     });
   }
 
-  memory(mode: DataMode = 'private'): Promise<MemoryList> {
+  memory(
+    mode: DataMode = 'private',
+    query: { limit?: number; cursor?: string } = {},
+  ): Promise<MemoryList> {
     return this.request<MemoryList>(MemoryList, {
       method: 'GET',
       path: '/v1/memory',
+      query: { mode, limit: query.limit, cursor: query.cursor },
+    });
+  }
+
+  writeMemory(
+    key: string,
+    value: string,
+    mode: DataMode = 'private',
+  ): Promise<MemoryEntry> {
+    return this.request<MemoryEntry>(MemoryEntry, {
+      method: 'PUT',
+      path: `/v1/memory/${encodeURIComponent(key)}`,
+      body: { value, mode },
+    });
+  }
+
+  deleteMemory(key: string, mode: DataMode = 'private'): Promise<MemoryDeletion> {
+    return this.request<MemoryDeletion>(MemoryDeletion, {
+      method: 'DELETE',
+      path: `/v1/memory/${encodeURIComponent(key)}`,
       query: { mode },
     });
   }
 
-  permissions(taskId: string): Promise<PermissionList> {
+  permissions(
+    taskId: string,
+    query: PermissionListQuery = {},
+  ): Promise<PermissionList> {
     return this.request<PermissionList>(PermissionList, {
       method: 'GET',
       path: `/v1/work/${encodeURIComponent(taskId)}/permissions`,
+      query: { decision: query.decision, limit: query.limit, cursor: query.cursor },
     });
   }
 
@@ -301,10 +392,15 @@ export class CoderaxClient {
     });
   }
 
-  notifications(): Promise<NotificationList> {
+  notifications(query: NotificationListQuery = {}): Promise<NotificationList> {
     return this.request<NotificationList>(NotificationList, {
       method: 'GET',
       path: '/v1/notifications',
+      query: {
+        unreadOnly: query.unreadOnly,
+        limit: query.limit,
+        cursor: query.cursor,
+      },
     });
   }
 

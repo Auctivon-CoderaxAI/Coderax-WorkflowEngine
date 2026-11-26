@@ -34,6 +34,7 @@ export type AuditListInput = {
 
 export type AuditPage = {
   receipts: AuditRecord[];
+  total: number;
   nextCursor?: string;
 };
 
@@ -72,9 +73,12 @@ export function createAuditLog(input: {
       const limit = clampLimit(query.limit);
       const cursor = query.cursor ? decodeCursor(query.cursor) : null;
       if (collection) {
-        const filter: Record<string, unknown> = {
+        const base = {
           ...(query.actor ? { actor: query.actor } : {}),
           ...(query.taskId ? { taskId: query.taskId } : {}),
+        };
+        const filter: Record<string, unknown> = {
+          ...base,
           ...(cursor
             ? {
                 $or: [
@@ -84,11 +88,10 @@ export function createAuditLog(input: {
               }
             : {}),
         };
-        const documents = await collection
-          .find(filter)
-          .sort({ at: -1, receipt: -1 })
-          .limit(limit + 1)
-          .toArray();
+        const [documents, total] = await Promise.all([
+          collection.find(filter).sort({ at: -1, receipt: -1 }).limit(limit + 1).toArray(),
+          collection.countDocuments(base),
+        ]);
         const page = documents.slice(0, limit).map((document) => {
           const copy = { ...document };
           delete copy._id;
@@ -97,6 +100,7 @@ export function createAuditLog(input: {
         const hasMore = documents.length > limit;
         return {
           receipts: page,
+          total,
           ...(hasMore && page.length > 0
             ? { nextCursor: encodeCursor(page[page.length - 1]!.at, page[page.length - 1]!.receipt) }
             : {}),
@@ -117,6 +121,7 @@ export function createAuditLog(input: {
       const hasMore = after.length > limit;
       return {
         receipts: page,
+        total: matching.length,
         ...(hasMore && page.length > 0
           ? { nextCursor: encodeCursor(page[page.length - 1]!.at, page[page.length - 1]!.receipt) }
           : {}),
