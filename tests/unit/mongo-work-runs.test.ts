@@ -4,7 +4,7 @@ import {
   createMongoWorkRunTable,
   ensureWorkRunIndexes,
 } from '../../src/persistence/mongo.js';
-import { createFakeCollection } from '../fakes/mongo.js';
+import { createFakeCollection, type FakeCollection } from '../fakes/mongo.js';
 
 const T0 = new Date('2026-11-26T00:00:00.000Z');
 const at = (ms: number): Date => new Date(T0.getTime() + ms);
@@ -14,15 +14,25 @@ function row(token: string, expiresAt: Date) {
   return { key: 'k1', owner: 'replica-a', token, cancelRequested: false, expiresAt };
 }
 
+/**
+ * The table is only correct on a collection whose unique `key` index exists, so
+ * every test starts from the same bootstrap the composition root performs.
+ */
+async function freshTable(): Promise<{ table: ReturnType<typeof createMongoWorkRunTable>; collection: FakeCollection }> {
+  const collection = createFakeCollection();
+  await ensureWorkRunIndexes(collection);
+  return { table: createMongoWorkRunTable(collection), collection };
+}
+
 test('mongo table refuses a claim while a live lease exists', async () => {
-  const table = createMongoWorkRunTable(createFakeCollection());
+  const { table } = await freshTable();
   assert.equal(await table.insertIfAbsent(row('t1', at(TTL)), T0), true);
   assert.equal(await table.insertIfAbsent(row('t2', at(TTL * 2)), at(1_000)), false);
   assert.equal((await table.find('k1'))?.token, 't1');
 });
 
 test('mongo table takes over an expired lease and fences the old token out', async () => {
-  const table = createMongoWorkRunTable(createFakeCollection());
+  const { table } = await freshTable();
   await table.insertIfAbsent(row('t1', at(TTL)), T0);
   const later = at(TTL + 1);
   assert.equal(await table.insertIfAbsent(row('t2', at(TTL * 3)), later), true);
@@ -35,7 +45,7 @@ test('mongo table takes over an expired lease and fences the old token out', asy
 });
 
 test('mongo table flags a live cancellation and retires an expired one', async () => {
-  const table = createMongoWorkRunTable(createFakeCollection());
+  const { table } = await freshTable();
   await table.insertIfAbsent(row('t1', at(TTL)), T0);
   const flagged = await table.flagCancel('k1', at(1_000));
   assert.equal(flagged?.cancelRequested, true);
@@ -46,7 +56,7 @@ test('mongo table flags a live cancellation and retires an expired one', async (
 });
 
 test('mongo table renewal requires an unexpired lease with the exact token', async () => {
-  const table = createMongoWorkRunTable(createFakeCollection());
+  const { table } = await freshTable();
   await table.insertIfAbsent(row('t1', at(TTL)), T0);
   assert.equal(await table.updateExpiry({ key: 'k1', token: 'other', now: T0, expiresAt: at(TTL) }), null);
   assert.equal(await table.updateExpiry({ key: 'k1', token: 't1', now: at(TTL), expiresAt: at(TTL) }), null);
@@ -56,8 +66,7 @@ test('mongo table renewal requires an unexpired lease with the exact token', asy
 });
 
 test('mongo sweep is bounded, ordered and keeps rows renewed after selection', async () => {
-  const collection = createFakeCollection();
-  const table = createMongoWorkRunTable(collection);
+  const { table, collection } = await freshTable();
   await table.insertIfAbsent({ key: 'a', owner: 'r', token: 'ta', cancelRequested: false, expiresAt: at(10) }, T0);
   await table.insertIfAbsent({ key: 'b', owner: 'r', token: 'tb', cancelRequested: false, expiresAt: at(20) }, T0);
   await table.insertIfAbsent({ key: 'c', owner: 'r', token: 'tc', cancelRequested: false, expiresAt: at(30) }, T0);
