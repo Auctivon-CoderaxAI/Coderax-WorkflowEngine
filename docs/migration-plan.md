@@ -9,7 +9,7 @@ authoritative engine.
 
 | Phase | Scope | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | Repository creation, architecture audit, dependency map, migration plan | **Done** | This document, `docs/architecture-audit.md`, private repository |
+| 1 | Repository creation, architecture audit, dependency map, migration plan | **Done** | This document, `docs/architecture-audit.md`, public source repository; deployment and owner data private |
 | 2 | Shared contracts, configuration standard, SDK | **Done in this repo** | `packages/contracts`, `packages/sdk`, `openapi.json`, drift gate |
 | 3 | Centralized routing, dependency injection, initialization | **Done in this repo** | `src/api/router.ts`, `src/bootstrap`, contract tests |
 | 4 | Extract durable execution and Native agent | **Partially done** | Lease store, fencing, heartbeat runner, recovery, Native agent, zero-cost routing are implemented here; the real provider adapters and Mongo lease table are wired at deployment time |

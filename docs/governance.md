@@ -1,84 +1,79 @@
 # Governance: what is enforceable at $0.00
 
-Verified on 2026-11-26 against the live repository and the vendors' published
-plans. Nothing here is inferred from a plan name.
+Updated 2026-11-26 against the live repository. Nothing here is inferred from a
+plan name.
 
-## Branch protection is not available on this repository
+## Source visibility does not make the application public
 
-```
-$ gh api repos/Auctivon-CoderaxAI/Coderax-WorkflowEngine/branches/main/protection
-{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":403}
+The owner intentionally made the Coderax source repositories public so standard
+GitHub-hosted Actions run at no cost. That decision applies to **source code
+visibility only**. The deployed application, owner data, credentials,
+conversations, memory and artifacts remain private, and this repository still
+publishes no public-facing endpoint.
 
-$ gh api repos/Auctivon-CoderaxAI/Coderax-WorkflowEngine/rulesets
-{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":403}
-```
+Do not describe the deployed system as public, and do not weaken owner-only
+authentication because the source can be read.
 
-Branch protection and rulesets require GitHub Pro for a private repository.
-Making the repository public would violate the owner's non-negotiable visibility
-requirement, and upgrading would violate the $0.00 requirement. **The platform
-gate cannot be enabled.** This is a documented limitation, not a waived rule.
+## Branch protection is available, but is not verified enabled
 
-### Equivalent policy that is followed instead
+Public repositories support branch protection and rulesets on the free plan. The
+earlier claim that protection required GitHub Pro applied to a private
+repository and is obsolete. This branch did not change repository settings;
+whether protection is currently enabled must be checked in Settings rather than
+assumed.
 
-The rules are enforced by process, and every pull request records the evidence:
+### Equivalent policy that is followed regardless
 
-| Rule | How it is honoured without platform enforcement |
+Every pull request records the evidence:
+
+| Rule | How it is honoured |
 | --- | --- |
-| No direct push to `main` | Every change lands through a pull request from a short-lived branch. `main` has one commit and no direct push since creation. |
-| Independent approval | A pull request is not merged by its author without a recorded review. The current PR has **no** approval and is therefore not merged. |
-| Required checks at the current head | `npm run verify` is run at the pushed head and its exact output pasted into the pull request. A pass at an earlier head is not accepted. |
+| No direct push to `main` | Every change lands through a pull request from a short-lived branch. |
+| Independent approval | A pull request is not merged by its author without a recorded review. |
+| Required checks at the current head | `npm run verify` and hosted CI are run at the pushed head; a pass at an earlier head is not accepted. |
 | Code-owner review | `.github/CODEOWNERS` names the owner for every path. |
-| No force-push, no branch deletion | Followed by policy; `main`'s history is linear and unchanged. |
-| No bypass | No administrator override exists to use, and none is simulated. |
+| No force-push | Changes are additive; no history is rewritten. |
+| No bypass | No administrator override is used or simulated. |
 
-The gap this leaves is real: nothing prevents a direct push except discipline. It
-is recorded here so it is never mistaken for enforcement.
+The gap is real: until platform protection is verified enabled, nothing prevents
+a direct push except discipline. It is recorded here so it is never mistaken for
+enforcement.
 
 ## Reviewers available at $0.00
 
-| Reviewer | Free tier on a **private** repository | Verdict |
+| Reviewer | Free tier on a **public source repository** | Verdict |
 | --- | --- | --- |
-| **Greptile** | Starter: 1 active developer, **50 credits/month, unlimited repositories, private repositories included**; a base review is 1 credit | **Usable.** The only zero-cost reviewer that actually reviews private pull requests. Requires the owner to install the GitHub App once. |
-| CodeRabbit | Free plan covers unlimited repositories but on private code it produces **PR summaries only**; reviews are limited to 3 IDE and 3 CLI runs per hour. Full private reviews start at $24/developer/month | Not usable for a genuine private review without paying |
-| Codex (ChatGPT code review) | Requires a paid ChatGPT plan | Not usable at $0 |
-| GitHub Copilot review | Not available on Copilot Free for pull requests | Not usable at $0 |
+| **Greptile** | Starter: 1 active developer, 50 credits/month; a base review is 1 credit. Requires the owner to install the GitHub App once. | Usable as an independent signal; not installed. |
+| CodeRabbit | Free plan covers unlimited repositories; review depth varies by plan. | Not relied on here. |
+| Codex (ChatGPT code review) | Requires a paid ChatGPT plan. | Not usable at $0. |
+| GitHub Copilot review | Plan-dependent. | Not relied on here. |
 
-Recommendation: install **Greptile Starter** on this repository (one click by the
-owner; no card). It fits inside the free credit allowance for a repository of this
-size, and its review would be a genuine independent signal.
-
-Until a reviewer is installed, a pull request stays unapproved. Fabricating an
-approval, self-approving, or merging without review is not an option.
+No reviewer is installed on this repository. A pull request stays unapproved
+until a genuine review is recorded. Fabricating an approval, self-approving, or
+merging without review is not an option.
 
 ## Continuous integration at $0.00
 
-Hosted GitHub Actions cannot run: the account is billing-restricted, so the job
-never starts.
+Hosted GitHub Actions now run on this public repository. Exact-head evidence:
 
-```
-The job was not started because recent account payments have failed or your
-spending limit needs to be increased.
-```
+| Run | Head | Result |
+| --- | --- | --- |
+| `45885151358` | `77cc40b49e8f` | `verify` success |
+| `45877952215` | `c0cfa993ef2d` | `verify` success |
+| `45877479332` | `a22c496daa52` | `verify` success |
 
-Options, cheapest first:
-
-| Option | Cost | Requirement | Status |
-| --- | --- | --- | --- |
-| **Self-hosted GitHub Actions runner on the authorized Oracle Always Free instance** | $0 — self-hosted runners do not consume hosted minutes and are not affected by the hosted billing restriction | Access to the existing OCI host to register the runner | Recommended; blocked on host access |
-| Cloudflare Workers Builds | $0 within the free build allowance | Connect the repository in the Cloudflare dashboard | Configurable build commands can run tests. Validate this repository’s verification command and free allowance remotely; engine deployment compatibility is a separate question. |
-| Greptile | $0 Starter | App install | Reviews code, does not run tests |
-| Purchasing hosted minutes | > $0 | — | Prohibited by the owner |
-
-Until an authorized remote runner passes the required check, hosted verification
-remains blocked. Prior workstation results are historical evidence; the charter
-requires cloud compute for future verification.
+The workflow installs from the lockfile, builds, runs the full test suite and
+checks OpenAPI drift. Hosted runs are free standard runners; no paid minutes are
+purchased. Local `npm run verify` remains the fast feedback loop, not a substitute
+for the exact-head hosted run.
 
 ## Current state
 
 | Item | State |
 | --- | --- |
-| `main` protection | Not enforceable (Pro-only); equivalent policy documented above |
+| Source visibility | Public, by owner decision, for free standard Actions |
+| `main` protection | Available on the free plan; enabled state not verified by this branch |
 | Reviewers installed | None |
-| Approvals on PR #1 | 0 |
-| Hosted CI | Never started (account billing restriction) |
-| Local verification at `1cbd9db` | build 0, 60/60 tests, contract gate clean |
+| Pull request for this branch | Not opened (no write credential in the agent environment) |
+| Hosted CI at `77cc40b` | Success |
+| Local verification at `77cc40b` | 209/209 tests, OpenAPI drift clean |
