@@ -6,6 +6,7 @@ import type {
   DeliverableKind,
   DeliverableRequestInput,
   DocumentFormat,
+  ProjectVerification,
   StoredDocument,
   VerificationCheck,
 } from '@coderax/contracts';
@@ -119,7 +120,8 @@ export type ProducedDeliverable = {
     description: string;
     language: string;
     template: string;
-    verification: { executed: false; method: string; note: string };
+    /** Carried into the result so the parse-only disclosure is never lost. */
+    verification: ProjectVerification;
   };
 };
 

@@ -63,7 +63,9 @@ decision and is listed as outstanding.
    artifact**: the store derives `ArtifactProjectManifest` from the rows that
    carry the `projectId`, so the tree has one authority and a client reads it
    with `GET /v1/artifacts/manifest`. A software request may name an existing
-   `projectId` to extend that tree; otherwise the deliverable opens one.
+   `projectId` to extend that tree; otherwise the deliverable opens one. Because
+   the manifest is a query over rows and carries no verification, the parse-only
+   disclosure lives in the result as `Deliverable.project.verification`.
 4. **Cross-device editing.** `DocumentRequest.base` is
    `{ artifactId, mode, expectedVersion? }`. The engine downloads that version
    from the durable service into staging, parses it as a
@@ -85,8 +87,10 @@ existing clients are unaffected; the durable branch should adopt it (or the
 integration branch rebases when that branch changes).
 
 `Deliverable.artifacts` is `ArtifactDescriptor[]`; `Deliverable.source` names the
-artifact that can be revised by id (`document.json` or `project.json`);
+editable artifact that can be revised by id (`document.json`);
 `Deliverable.receipt` is the audit receipt written after persistence succeeded.
+`Deliverable.project.verification` reports what verification actually proved,
+with `executed: false` for generated software.
 
 ## Security controls
 
@@ -108,15 +112,17 @@ artifact that can be revised by id (`document.json` or `project.json`);
   cannot turn a relative path into an escape.
 - Generated software is parsed (`node --check`, TypeScript transpile) and its
   relative imports resolved. It is **not executed**: no sandboxed execution
-  supervisor is available on this branch, and `ProjectManifest.verification`
-  records `executed: false` with the method actually used.
+  supervisor is available on this branch, and
+  `Deliverable.project.verification` records `executed: false` with the method
+  actually used. The disclosure is part of the result, so it survives the tree
+  being derived from stored rows instead of a manifest file.
 
 ## Verification evidence
 
 At the branch head, `npm run verify`:
 
 - `tsc -b` across contracts, SDK and engine;
-- `node --test "dist/tests/**/*.test.js"` — 185 tests, 185 pass, 0 fail,
+- `node --test "dist/tests/**/*.test.js"` — 186 tests, 186 pass, 0 fail,
   **0 skipped**, against a real `mongod` (7.0.14). `mongodb-memory-server` is now
   a dev dependency, so the real-Mongo durability lanes start their own server
   instead of skipping; `.github/workflows/verify.yml` additionally pins

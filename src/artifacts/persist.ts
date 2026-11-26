@@ -170,6 +170,7 @@ export async function persistProduced(
   const treeDescriptors: ArtifactDescriptor[] = [];
 
   if (input.produced.project) {
+    const tree = input.produced.project;
     if (!input.projectId) {
       await rollback();
       return fail(
@@ -225,7 +226,13 @@ export async function persistProduced(
       }
       treeDescriptors.push(descriptor.value);
     }
-    project = { projectId: written.value.projectId, manifest: written.value.manifest };
+    project = {
+      projectId: written.value.projectId,
+      manifest: written.value.manifest,
+      // The manifest is derived from rows and says nothing about execution, so
+      // the generator's parse-only report is carried in the result itself.
+      verification: tree.verification,
+    };
   }
 
   if (input.produced.document) {

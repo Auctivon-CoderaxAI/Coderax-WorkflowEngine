@@ -245,6 +245,34 @@ test('a dataset and a software project are stored as descriptors, not paths', as
   }
 });
 
+test('a software deliverable still reports that its program was never executed', async () => {
+  const first = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database: createFakeDatabase() },
+  });
+  try {
+    const api = client(first.url);
+    const software = await api.deliver({
+      kind: 'software',
+      mode: 'cloud',
+      name: 'never-run',
+      description: 'A generated module whose verification stops at parsing.',
+      template: 'module',
+      language: 'javascript',
+      files: [],
+    });
+    const project = software.project;
+    assert.ok(project, 'the stored tree is reported');
+    // The tree has no manifest file to carry this, so the result must.
+    assert.equal(project.verification.executed, false, 'the program was never executed');
+    assert.equal(project.verification.method, 'parse-and-resolve');
+    assert.match(project.verification.note, /not executed/);
+    assert.match(software.summary, /not executed/);
+  } finally {
+    await first.close();
+  }
+});
+
 test('exhausting the artifact quota fails the deliverable and leaves nothing behind', async () => {
   const first = await startTestApp({
     config: {

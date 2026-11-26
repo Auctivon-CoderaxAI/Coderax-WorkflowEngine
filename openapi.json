@@ -5774,11 +5774,36 @@
                             "generatedAt"
                           ],
                           "additionalProperties": false
+                        },
+                        "verification": {
+                          "type": "object",
+                          "properties": {
+                            "executed": {
+                              "const": false
+                            },
+                            "method": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 120
+                            },
+                            "note": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "executed",
+                            "method",
+                            "note"
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
                         "projectId",
-                        "manifest"
+                        "manifest",
+                        "verification"
                       ],
                       "additionalProperties": false
                     },

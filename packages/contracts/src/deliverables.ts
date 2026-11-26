@@ -486,16 +486,36 @@ export const DatasetAnalysis = z
 export type DatasetAnalysis = z.infer<typeof DatasetAnalysis>;
 
 /**
+ * What verification actually proved about a generated software tree.
+ *
+ * `executed` is the literal `false`: this deployment has no sandboxed execution
+ * supervisor, so the program is parsed and its relative imports resolved but
+ * never run. The disclosure travels with the deliverable result, because the
+ * tree is derived from stored rows and has no manifest file that could carry it.
+ */
+export const ProjectVerification = z
+  .object({
+    executed: z.literal(false),
+    method: z.string().min(1).max(120),
+    note: z.string().min(1).max(500),
+  })
+  .strict();
+export type ProjectVerification = z.infer<typeof ProjectVerification>;
+
+/**
  * A generated project, as the durable store owns it.
  *
  * The manifest is not a stored copy: the store derives it from the rows that
  * carry the same `projectId`, so the tree has one authority. `manifest.files`
  * names each relative path, its artifact id, its current version and its digest.
+ * `verification` is generation's own report about the tree, including the fact
+ * that its program was never executed.
  */
 export const DeliverableProject = z
   .object({
     projectId: ProjectId,
     manifest: ArtifactProjectManifest,
+    verification: ProjectVerification,
   })
   .strict();
 export type DeliverableProject = z.infer<typeof DeliverableProject>;
@@ -520,7 +540,10 @@ export const Deliverable = z
       })
       .strict(),
     source: DeliverableSource.optional(),
-    /** The stored tree of a generated software project, as the store lists it. */
+    /**
+     * The stored tree of a generated software project, as the store lists it,
+     * plus the verification report that says the program was never executed.
+     */
     project: DeliverableProject.optional(),
     analysis: DatasetAnalysis.optional(),
   })
