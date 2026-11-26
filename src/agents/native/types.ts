@@ -103,6 +103,7 @@ export type PlanInput = {
   mode: ReasoningMode;
   completedSteps: string[];
   maxSteps: number;
+  maxOutputTokens?: number;
   signal: AbortSignal;
 };
 
@@ -122,6 +123,7 @@ export type ReplanInput = {
   evidence: StepEvidence[];
   failure: ReplanFailure;
   maxSteps: number;
+  maxOutputTokens?: number;
   signal: AbortSignal;
 };
 

@@ -79,6 +79,8 @@ export type TaskCheckpoint = {
   plan: TaskPlan | null;
   /** Evidence produced by completed steps, bounded per step. */
   evidence: TaskEvidence[];
+  /** Iterations consumed before a suspension; a resume continues this bound. */
+  iterations?: number;
 };
 
 /**

@@ -56,12 +56,9 @@ export function createPermissionGate(input: {
       if (pending) {
         return { decision: 'pending', requestId: pending.requestId };
       }
-      // A decision the owner already made is not silently re-asked on resume.
-      // An expired denial no longer matches, so a later attempt may request again.
-      const denied = matching.find(
-        (request) =>
-          request.decision === 'denied' && new Date(request.expiresAt).getTime() > now,
-      );
+      // A denial is the owner's answer for this task, scope and resource; it is
+      // not re-asked merely because the request's approval window elapsed.
+      const denied = matching.find((request) => request.decision === 'denied');
       if (denied) return { decision: 'denied' };
 
       const request = await input.permissions.request({

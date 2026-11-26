@@ -1,4 +1,4 @@
-import { TERMINAL_TASK_STATES, isTerminalState } from '@coderax/contracts';
+import { TERMINAL_TASK_STATES } from '@coderax/contracts';
 import type {
   ConversationRecord,
   MemoryRecord,
@@ -193,11 +193,11 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
-    reissue: async ({ taskId, token, now, leaseExpiresAt }): Promise<FencedWriteResult> => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, from }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
       const task = toTask(current);
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if (!from.includes(task.state)) {
         return { applied: false, reason: 'superseded' };
       }
       // Generation and state are part of the filter: two replicas resuming the

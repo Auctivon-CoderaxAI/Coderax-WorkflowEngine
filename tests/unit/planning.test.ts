@@ -11,8 +11,18 @@ import { limitsFor, resolveReasoningMode } from '../../src/agents/native/reason.
 import type { TaskPlan, TaskPlanStep } from '../../src/domain.js';
 import type { NativeLimits } from '../../src/agents/native/types.js';
 
-function step(id: string, dependsOn: string[] = []): TaskPlanStep {
-  return { id, title: `Step ${id}`, kind: 'reason', dependsOn };
+function step(
+  id: string,
+  dependsOn: string[] = [],
+  kind: 'reason' | 'read' = 'reason',
+): TaskPlanStep {
+  return {
+    id,
+    title: `Step ${id}`,
+    kind,
+    dependsOn,
+    ...(kind === 'read' ? { resource: 'notes.txt' } : {}),
+  };
 }
 
 function plan(steps: TaskPlanStep[], mode: 'fast' | 'complex' = 'complex'): TaskPlan {
@@ -87,6 +97,17 @@ test('plan validation refuses cycles, unknown dependencies, escaping reads and d
   const denied = validatePlan({ plan: escaping, completedSteps: [], maxSteps: 4 });
   assert.equal(denied.ok, false);
   assert.match(denied.ok ? '' : denied.reason, /invalid workspace resource/);
+
+  const duplicateRead = validatePlan({
+    plan: plan([
+      step('first', [], 'read'),
+      step('second', [], 'read'),
+    ]),
+    completedSteps: [],
+    maxSteps: 4,
+  });
+  assert.equal(duplicateRead.ok, false);
+  assert.match(duplicateRead.ok ? '' : duplicateRead.reason, /planned more than once/);
 
   const forwardReference = validatePlan({
     plan: plan([step('finish', ['start']), step('start')]),

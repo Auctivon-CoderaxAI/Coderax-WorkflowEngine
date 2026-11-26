@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AgentReportEvent, AgentRunRequest } from '../../src/agents/types.js';
 import { createNativeAgent } from '../../src/agents/native/agent.js';
+import { verifyObjective } from '../../src/agents/native/verify.js';
 import type {
   ActionExecutor,
   ModelCompletionRequest,
@@ -100,6 +101,7 @@ function stepGateway(options: {
   failAllSteps?: boolean;
   verificationPassed?: boolean;
   uncitedPass?: boolean;
+  longOutput?: number;
 } = {}): ModelGateway & { calls: number; maxActive: number; prompts: string[] } {
   const failed = new Set<string>();
   let active = 0;
@@ -154,7 +156,10 @@ function stepGateway(options: {
         }
         if (request.signal.aborted) throw new Error('aborted');
         return {
-          text: `result-${stepId}`,
+          text:
+            options.longOutput !== undefined
+              ? `result-${stepId}${'x'.repeat(options.longOutput)}-END`
+              : `result-${stepId}`,
           usage: { inputTokens: 2, outputTokens: 3 },
         };
       } finally {
@@ -211,6 +216,27 @@ test('complex plans run independent steps in parallel and dependent steps after 
   assert.ok(verificationPrompt);
   assert.match(verificationPrompt, /OUTPUT a: result-a/);
   assert.match(verificationPrompt, /OUTPUT b: result-b/);
+});
+
+test('a long step result is preserved in the summary and streamed text', async () => {
+  const gateway = stepGateway({ longOutput: 5_000 });
+  const agent = agentWith(gateway, scriptedPlanner({ plans: [planOf([step('long')])] }));
+  const events: AgentReportEvent[] = [];
+  const outcome = await agent.run(runRequest(), (event) => events.push(event));
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.ok(outcome.summary.length > 5_000, 'the full step result must survive');
+  assert.match(outcome.summary, /-END/);
+  const streamed = events
+    .filter(
+      (event): event is Extract<AgentReportEvent, { type: 'text.delta' }> =>
+        event.type === 'text.delta',
+    )
+    .map((event) => event.text)
+    .join('');
+  assert.match(streamed, /-END/);
+  assert.ok(events.some((event) => event.type === 'budget' && event.iterations === 3));
 });
 
 test('an exhausted wave aborts and drains sibling actions before returning', async () => {
@@ -305,6 +331,51 @@ test('a transient provider failure is corrected within the step bound', async ()
   );
   assert.equal(completed?.attempts, 2);
   assert.equal(gateway.calls, 3);
+});
+
+test('a replan is not asked for when no step capacity remains', async () => {
+  const gateway = stepGateway({ verificationPassed: false });
+  let replanned = false;
+  const planner = scriptedPlanner({
+    plans: [planOf([step('a')])],
+    replans: [planOf([step('b')])],
+    onReplan: () => {
+      replanned = true;
+    },
+  });
+  const agent = agentWith(gateway, planner, { maxReplans: 1 });
+  const outcome = await agent.run(
+    runRequest({ maxSteps: 1 }),
+    () => undefined,
+  );
+
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.code, 'verification_failed');
+  assert.equal(replanned, false);
+});
+
+test('a blank citation row is not a citable evidence source', async () => {
+  const gateway: ModelGateway = {
+    id: 'test',
+    complete: async () => ({
+      text: JSON.stringify({ passed: true, reason: 'ok', cited: ['b'] }),
+    }),
+  };
+  const result = await verifyObjective({
+    gateway,
+    model: { providerId: 'free', modelId: 'test' },
+    signal: new AbortController().signal,
+    objective: 'Check the result',
+    mode: 'complex',
+    plan: planOf([step('a')]),
+    completed: new Set(['a']),
+    evidence: [
+      { stepId: 'a', title: 'A', attempts: 1, citation: 'a: real evidence', output: 'real' },
+      { stepId: 'b', title: 'B', attempts: 1, citation: '   ', output: 'blank' },
+    ],
+  });
+  assert.equal(result.verification.passed, false);
 });
 
 test('a verifier that passes without citing evidence is rejected', async () => {

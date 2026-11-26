@@ -72,6 +72,8 @@ export function renderEvidence(evidence: StepEvidence[], includeOutput = false):
   return lines.join('\n');
 }
 
+const MAX_PROMPT_OUTPUT = 4_000;
+
 function renderPlan(plan: TaskPlan, completed: ReadonlySet<string>): string {
   return plan.steps
     .map((step) => {
@@ -111,7 +113,10 @@ export function buildStepPrompt(input: {
   if (dependencies.length > 0) {
     sections.push(
       `Results this step depends on:\n\n${dependencies
-        .map((entry) => `[${entry.stepId}] ${entry.title}\n${entry.output}`)
+        .map(
+          (entry) =>
+            `[${entry.stepId}] ${entry.title}\n${entry.output.slice(0, MAX_PROMPT_OUTPUT)}`,
+        )
         .join('\n\n')}`,
     );
   }

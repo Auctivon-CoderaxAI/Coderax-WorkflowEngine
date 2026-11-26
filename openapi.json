@@ -1156,7 +1156,8 @@
                               "type": "string",
                               "minLength": 1,
                               "maxLength": 80
-                            }
+                            },
+                            "maxItems": 64
                           },
                           "attempts": {
                             "type": "integer",
@@ -1219,7 +1220,8 @@
                               "items": {
                                 "type": "string",
                                 "maxLength": 500
-                              }
+                              },
+                              "maxItems": 20
                             }
                           },
                           "required": [

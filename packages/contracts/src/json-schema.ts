@@ -22,6 +22,8 @@ type Def = {
   defaultValue?: unknown;
   description?: string;
   checks?: Array<{ kind: string; value?: unknown; inclusive?: boolean }>;
+  minLength?: { value: number } | null;
+  maxLength?: { value: number } | null;
 };
 
 function def(schema: z.ZodTypeAny): Def {
@@ -74,7 +76,14 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       return { type: 'string', enum: [...(d.values ?? [])] };
     case 'ZodArray': {
       const item = d.type ? toJsonSchema(d.type) : {};
-      return { type: 'array', items: item };
+      const out: JsonSchema = { type: 'array', items: item };
+      if (typeof d.minLength?.value === 'number') out.minItems = d.minLength.value;
+      if (typeof d.maxLength?.value === 'number') out.maxItems = d.maxLength.value;
+      for (const check of d.checks ?? []) {
+        if (check.kind === 'min' && typeof check.value === 'number') out.minItems = check.value;
+        if (check.kind === 'max' && typeof check.value === 'number') out.maxItems = check.value;
+      }
+      return out;
     }
     case 'ZodRecord':
       return {

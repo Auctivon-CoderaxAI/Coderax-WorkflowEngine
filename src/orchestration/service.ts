@@ -20,7 +20,7 @@ import type {
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskEvidence, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
+import type { TaskEvidence, TaskPatch, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -302,6 +302,25 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // where authorization stopped. No completion notification is emitted because
     // nothing completed.
     if (outcome.kind === 'failed' && outcome.code === 'approval_required') {
+      // Publish partial text while the old run still owns the task, then release
+      // the lease before exposing the suspended state. If the state were visible
+      // first, an immediate approved resume could see `awaiting_approval` and
+      // still be refused because the old lease had not been released yet.
+      const partial = checkpoint?.text ?? '';
+      if (partial.length > 0) {
+        await deps.conversations
+          .appendMessage({
+            messageId: deps.ids.messageId(),
+            conversationId: task.conversationId,
+            role: 'assistant',
+            text: partial,
+            createdAt: now,
+            unfinished: true,
+            agent: task.agent,
+          })
+          .catch(() => undefined);
+      }
+      await releaseLease(task, token);
       const applied = await deps.tasks.updateFenced({
         taskId: task.taskId,
         token,
@@ -321,19 +340,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
-        const partial = checkpoint?.text ?? '';
-        if (partial.length > 0) {
-          await deps.conversations
-            .appendMessage({
-              messageId: deps.ids.messageId(),
-              conversationId: task.conversationId,
-              role: 'assistant',
-              text: partial,
-              createdAt: now,
-              unfinished: true,
-              agent: task.agent,
-            })
-            .catch(() => undefined);
+        // Suspension settles this generation's usage even though the task is not
+        // terminal. The resumed generation is charged separately, so the daily
+        // ledger matches the cumulative usage the owner sees.
+        if ('usage' in outcome && outcome.usage) {
+          deps.budget.consume(task.ownerId, outcome.usage, new Date(now));
         }
         deps.audit.record({
           actor: task.ownerId,
@@ -344,7 +355,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           detail: outcome.code,
         });
       }
-      await releaseLease(task, token);
       return;
     }
 
@@ -402,6 +412,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
 
     const settled = applied.task;
+    // Charge the usage produced by this generation, not the merged task total:
+    // the previous generation was already charged when it settled.
+    if ('usage' in outcome && outcome.usage) {
+      deps.budget.consume(task.ownerId, outcome.usage, new Date(now));
+    }
     try {
       if (outcome.kind === 'completed') {
         publish(settled, 'task.completed', {
@@ -521,8 +536,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const completed: string[] = [...started.task.checkpoint.completedSteps];
     const evidence: TaskEvidence[] = [...(started.task.checkpoint.evidence ?? [])];
     let plan: TaskPlan | null = started.task.checkpoint.plan ?? null;
+    let iterations = started.task.checkpoint.iterations ?? 0;
     let text = '';
     let visible = text;
+    // Report patches are snapshots of mutable local arrays. Serialize them in
+    // issue order so a delayed plan.ready cannot overwrite a later completed
+    // checkpoint on a replica that applies writes out of order.
+    let writeChain: Promise<void> = Promise.resolve();
+    const persist = (patch: TaskPatch): void => {
+      const snapshot = structuredClone(patch);
+      writeChain = writeChain
+        .then(async () => {
+          await deps.tasks.updateFenced({ taskId, token, patch: snapshot });
+        })
+        .catch(() => undefined);
+    };
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
       else if (next !== visible) publish(started.task, 'text.delta', { text: next.slice(visible.length) });
@@ -531,6 +559,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const report = (event: AgentReportEvent): void => {
       if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
+
+      if (event.type === 'budget') {
+        iterations = event.iterations;
+        return;
+      }
 
       /**
        * A plan is persisted before its first step starts, so the owner can see
@@ -558,20 +591,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         }
         steps.length = 0;
         steps.push(...next);
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            reasoning: event.plan.mode,
-            checkpoint: {
-              completedSteps: [...completed],
-              text: visible,
-              plan: event.plan,
-              evidence,
-            },
-            updatedAt: deps.clock.iso(),
+        persist({
+          steps,
+          reasoning: event.plan.mode,
+          checkpoint: {
+            completedSteps: [...completed],
+            text: visible,
+            plan: event.plan,
+            evidence,
+            iterations,
           },
+          updatedAt: deps.clock.iso(),
         });
         return;
       }
@@ -591,11 +621,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           });
         }
         publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
-        });
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'step.completed') {
@@ -612,32 +638,24 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           const safeEvidence: TaskEvidence = {
             ...event.evidence,
             citation: redactText(event.evidence.citation, [], 500),
-            output: redactContent(event.evidence.output).slice(0, 4_000),
+            output: redactContent(event.evidence.output).slice(0, 20_000),
           };
           const index = evidence.findIndex((entry) => entry.stepId === event.stepId);
           if (index === -1) evidence.push(safeEvidence);
           else evidence[index] = safeEvidence;
         }
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            checkpoint: { completedSteps: [...completed], text: visible, plan, evidence },
-            updatedAt: deps.clock.iso(),
-          },
+        persist({
+          steps,
+          checkpoint: { completedSteps: [...completed], text: visible, plan, evidence, iterations },
+          updatedAt: deps.clock.iso(),
         });
         return;
       }
       if (event.type === 'step.failed') {
         const existing = steps.find((step) => step.id === event.stepId);
         if (existing) existing.state = 'failed';
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
-        });
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'text.delta' || event.type === 'text.replace') {
@@ -707,11 +725,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         completedSteps: [...started.task.checkpoint.completedSteps],
         plan: started.task.checkpoint.plan ?? null,
         evidence: [...(started.task.checkpoint.evidence ?? [])],
+        iterationsUsed: started.task.checkpoint.iterations ?? 0,
       },
       report,
     });
     if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
+    await writeChain.catch(() => undefined);
 
     if (result.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer
@@ -732,6 +752,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         text: safeText,
         plan,
         evidence,
+        iterations,
       },
       steps,
     );
@@ -1061,6 +1082,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        // A concurrent cancel may land between the read above and this write.
+        // Only the two suspending states may be revived; a cancelled task stays
+        // cancelled.
+        from: ['interrupted', 'awaiting_approval'],
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
       publish(applied.task, 'task.queued', {});
@@ -1110,6 +1135,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        from: ['failed', 'interrupted'],
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
       publish(applied.task, 'task.queued', {});

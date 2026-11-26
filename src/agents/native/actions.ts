@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { ActionExecution, ActionExecutor, ModelGateway } from './types.js';
 import { buildStepPrompt, STEP_SYSTEM } from './prompt.js';
@@ -68,13 +68,36 @@ export async function readWorkspaceFile(input: {
   } catch {
     return { ok: false, code: 'not_found', detail: 'That workspace file could not be inspected.' };
   }
-  if (size > (input.maxBytes ?? MAX_READ_BYTES)) {
+  const maxBytes = input.maxBytes ?? MAX_READ_BYTES;
+  if (size > maxBytes) {
     return { ok: false, code: 'too_large', detail: 'That workspace file exceeds the read bound.' };
   }
 
   let buffer: Buffer;
   try {
-    buffer = await readFile(target);
+    const handle = await open(target, 'r');
+    try {
+      // The file can grow after `stat`; read at most one byte past the bound so
+      // an append cannot turn this into an unbounded allocation.
+      const scratch = Buffer.alloc(maxBytes + 1);
+      let offset = 0;
+      while (offset < scratch.length) {
+        const { bytesRead } = await handle.read(
+          scratch,
+          offset,
+          scratch.length - offset,
+          offset,
+        );
+        if (bytesRead === 0) break;
+        offset += bytesRead;
+      }
+      if (offset > maxBytes) {
+        return { ok: false, code: 'too_large', detail: 'That workspace file exceeds the read bound.' };
+      }
+      buffer = scratch.subarray(0, offset);
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
   } catch {
     return { ok: false, code: 'not_found', detail: 'That workspace file could not be read.' };
   }

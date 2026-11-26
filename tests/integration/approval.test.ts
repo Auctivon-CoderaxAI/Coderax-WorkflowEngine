@@ -70,8 +70,11 @@ test('a scoped read suspends for owner approval, then resumes with the real gran
     assert.equal(awaiting.reasoning, 'complex');
     assert.equal(awaiting.failure?.code, 'approval_required');
     assert.equal(awaiting.result, undefined);
-    // The planning call already spent tokens; suspension must not erase them.
+    // The planning call already spent tokens and an iteration; suspension must
+    // not erase either, and the resumed generation continues the same bound.
     assert.deepEqual(awaiting.usage, { inputTokens: 11, outputTokens: 13 });
+    const suspended = await started.app.dependencies.tasks.get(taskId);
+    assert.equal(suspended?.checkpoint.iterations, 1);
     assert.deepEqual(
       awaiting.steps.map((entry) => [entry.id, entry.state]),
       [
@@ -109,8 +112,12 @@ test('a scoped read suspends for owner approval, then resumes with the real gran
     assert.equal(completed.generation, 2);
     assert.ok(completed.steps.every((entry) => entry.state === 'completed'));
     assert.equal(completed.result?.verification?.passed, true);
-    // Plan (1) + resumed reason step + verification, cumulative across the pause.
+    // Plan (1) + read + reason + verification: cumulative across the pause.
     assert.deepEqual(completed.usage, { inputTokens: 33, outputTokens: 39 });
+    const settled = await started.app.dependencies.tasks.get(taskId);
+    assert.equal(settled?.checkpoint.iterations, 4);
+    // Work usage is charged to the daily ledger exactly once per generation.
+    assert.deepEqual(started.app.service.budget(principal).used.usage, completed.usage);
     assert.ok(
       completed.result?.verification?.evidence.some((entry) => entry.includes('read notes.txt')),
       `evidence was ${JSON.stringify(completed.result?.verification?.evidence)}`,
@@ -130,6 +137,12 @@ test('a scoped read suspends for owner approval, then resumes with the real gran
         conversation.value.messages.map((message) => message.role),
         ['user', 'assistant'],
       );
+      // The resumed generation skipped the read, so its final transcript must
+      // replay the read's evidence rather than only the verification line.
+      const answer = conversation.value.messages.at(-1)?.text ?? '';
+      assert.match(answer, /alpha beta gamma/);
+      assert.match(answer, /A verified result\./);
+      assert.match(answer, /Verification: passed/);
     }
   } finally {
     await started.close();

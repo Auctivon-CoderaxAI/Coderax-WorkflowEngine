@@ -61,20 +61,24 @@ export type AgentRunRequest = {
   plan?: TaskPlan | null;
   /** Evidence already produced by completed steps in an earlier generation. */
   evidence?: TaskEvidence[];
+  /** Iterations already consumed by a suspended generation; a resume continues the same bound. */
+  iterationsUsed?: number;
 };
 
 export type AgentReportEvent =
   /** The planner produced or revised a dependency-aware plan; nothing ran yet. */
-  | { type: 'plan.ready'; plan: TaskPlan }
-  | { type: 'step.started'; stepId: string; title: string }
+  | { type: 'plan.ready'; plan: TaskPlan; iterations?: number }
+  | { type: 'budget'; iterations: number }
+  | { type: 'step.started'; stepId: string; title: string; iterations?: number }
   | {
       type: 'step.completed';
       stepId: string;
       title: string;
       attempts?: number;
       evidence?: TaskEvidence;
+      iterations?: number;
     }
-  | { type: 'step.failed'; stepId: string; title: string; detail: string }
+  | { type: 'step.failed'; stepId: string; title: string; detail: string; iterations?: number }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }

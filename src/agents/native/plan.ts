@@ -135,6 +135,7 @@ export function validatePlan(input: {
 
   const completed = new Set(input.completedSteps);
   const ids = new Set<string>();
+  const readResources = new Set<string>();
   for (const step of plan.steps) {
     if (!ID_PATTERN.test(step.id)) {
       return { ok: false, reason: `step id "${step.id}" is not a stable identifier` };
@@ -156,6 +157,10 @@ export function validatePlan(input: {
       if (!step.resource || !resourceIsConfined(step.resource)) {
         return { ok: false, reason: `read step "${step.id}" has an invalid workspace resource` };
       }
+      if (readResources.has(step.resource)) {
+        return { ok: false, reason: `read resource "${step.resource}" is planned more than once` };
+      }
+      readResources.add(step.resource);
     } else if (step.resource !== undefined) {
       return { ok: false, reason: `reason step "${step.id}" must not name a resource` };
     }
@@ -314,6 +319,9 @@ async function modelPlan(input: {
       model: input.planInput.model,
       system: input.system,
       prompt: input.prompt,
+      ...(input.planInput.maxOutputTokens
+        ? { maxOutputTokens: input.planInput.maxOutputTokens }
+        : {}),
       signal: input.planInput.signal,
     });
     const parsed = parseModelPlan({
@@ -401,6 +409,9 @@ export function createNativePlanner(input: {
               failure: replanInput.failure,
               maxSteps,
             }),
+            ...(replanInput.maxOutputTokens
+              ? { maxOutputTokens: replanInput.maxOutputTokens }
+              : {}),
             signal: replanInput.signal,
           });
           text = completion.text;

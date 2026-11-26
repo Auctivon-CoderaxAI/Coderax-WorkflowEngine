@@ -53,7 +53,10 @@ export function structuralAssessment(input: {
 
   const citations = input.plan.steps
     .map((step) => byId.get(step.id))
-    .filter((entry): entry is StepEvidence => Boolean(entry))
+    .filter(
+      (entry): entry is StepEvidence =>
+        entry !== undefined && entry.citation.trim().length > 0,
+    )
     .map((entry) => clamp(`${entry.stepId}: ${entry.citation}`, MAX_EVIDENCE_CHARS))
     .slice(0, MAX_EVIDENCE);
 
@@ -164,6 +167,10 @@ export async function verifyObjective(input: {
   });
   if (!structural.passed) return { verification: structural };
 
+  // A blank citation cannot support a verdict. Keep it out of the prompt, the
+  // citable set and the returned evidence alike.
+  const usable = input.evidence.filter((entry) => entry.citation.trim().length > 0);
+
   try {
     const completion = await input.gateway.complete({
       model: input.model,
@@ -173,7 +180,7 @@ export async function verifyObjective(input: {
         mode: input.mode,
         plan: input.plan,
         completed: input.completed,
-        evidence: input.evidence,
+        evidence: usable,
         structuralReason: structural.reason,
       }),
       signal: input.signal,
@@ -181,7 +188,7 @@ export async function verifyObjective(input: {
     });
     const parsed = parseVerification(
       completion.text,
-      new Set(input.evidence.map((entry) => entry.stepId)),
+      new Set(usable.map((entry) => entry.stepId)),
     );
     if (!parsed) {
       return {
@@ -217,7 +224,7 @@ export async function verifyObjective(input: {
       verification: {
         passed: true,
         reason: clamp(parsed.reason, 1000),
-        evidence: citedEvidence(parsed.cited, input.evidence),
+        evidence: citedEvidence(parsed.cited, usable),
       },
       ...(completion.usage ? { usage: completion.usage } : {}),
     };

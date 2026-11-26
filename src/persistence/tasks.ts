@@ -35,6 +35,8 @@ export type TaskRepository = {
     token: string;
     now: string;
     leaseExpiresAt: string;
+    /** States this caller is authorized to replace; checked atomically. */
+    from: TaskRecord['state'][];
   }) => Promise<FencedWriteResult>;
   listByConversation: (conversationId: string) => Promise<TaskRecord[]>;
   /** Tasks that are not terminal, used by startup ownership verification. */
@@ -99,10 +101,10 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(next.state)) settle(next);
       return true;
     },
-    reissue: async ({ taskId, token, now, leaseExpiresAt }) => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, from }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if (!from.includes(task.state)) {
         return { applied: false, reason: 'superseded' };
       }
       const next: TaskRecord = {

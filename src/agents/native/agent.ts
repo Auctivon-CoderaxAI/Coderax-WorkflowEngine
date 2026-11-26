@@ -50,7 +50,7 @@ const DEFAULT_LIMITS: NativeLimits = {
   maxIterations: 32,
 };
 
-const MAX_OUTPUT_CONTEXT = 4_000;
+const MAX_STEP_RESULT = 20_000;
 const REASONING_PAUSE_MS = 50;
 
 class IterationLimitError extends Error {
@@ -230,6 +230,7 @@ export function createNativeAgent(input: {
           model: request.model,
           signal: request.signal,
         });
+        if (request.signal.aborted) return cancelled();
         if (!execution.ok) {
           return {
             ok: false,
@@ -278,7 +279,7 @@ export function createNativeAgent(input: {
         }
       }
 
-      let iterations = 0;
+      let iterations = request.iterationsUsed ?? 0;
       let replans = 0;
       let usageIn: number | undefined;
       let usageOut: number | undefined;
@@ -288,6 +289,7 @@ export function createNativeAgent(input: {
         if (iterations > activeLimits.maxIterations) {
           throw new IterationLimitError(activeLimits.maxIterations);
         }
+        report({ type: 'budget', iterations });
       };
       const accumulate = (usage: Usage | undefined): void => {
         if (usage?.inputTokens !== undefined) usageIn = (usageIn ?? 0) + usage.inputTokens;
@@ -352,14 +354,18 @@ export function createNativeAgent(input: {
           };
         }
 
-        report({ type: 'step.started', stepId: step.id, title: step.title });
         let attempts = 0;
+        let started = false;
         let feedback: string | undefined;
 
         for (;;) {
           if (signal.aborted) return { kind: 'cancelled' };
           attempts += 1;
           spend();
+          if (!started) {
+            report({ type: 'step.started', stepId: step.id, title: step.title, iterations });
+            started = true;
+          }
           const execution = await executor.execute({
             step,
             objective: request.objective,
@@ -378,7 +384,7 @@ export function createNativeAgent(input: {
             const entry: StepEvidence = {
               stepId: step.id,
               title: step.title,
-              output: execution.text.slice(0, MAX_OUTPUT_CONTEXT),
+              output: execution.text.slice(0, MAX_STEP_RESULT),
               citation: (execution.citation ?? execution.text).slice(0, 500),
               attempts,
             };
@@ -397,6 +403,7 @@ export function createNativeAgent(input: {
               title: step.title,
               attempts,
               evidence: entry,
+              iterations,
             });
             return { kind: 'completed' };
           }
@@ -413,6 +420,7 @@ export function createNativeAgent(input: {
               stepId: step.id,
               title: step.title,
               detail: execution.failure.detail,
+              iterations,
             });
             return { kind: 'failed', failure: execution.failure };
           }
@@ -431,6 +439,7 @@ export function createNativeAgent(input: {
             mode,
             completedSteps: [...completed],
             maxSteps,
+            ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
             signal: request.signal,
           });
           accumulate(planned.usage);
@@ -448,7 +457,7 @@ export function createNativeAgent(input: {
             };
           }
           plan = planned.plan;
-          report({ type: 'plan.ready', plan });
+          report({ type: 'plan.ready', plan, iterations });
         }
 
         // `activePlan` is the single plan this run executes; replanning replaces
@@ -486,12 +495,14 @@ export function createNativeAgent(input: {
               completed,
               evidence: [...evidence.values()],
             });
+            if (request.signal.aborted) return cancelled();
             accumulate(assessed.usage);
             verification = assessed.verification;
 
             if (verification.passed) break;
 
-            if (mode === 'complex' && replans < activeLimits.maxReplans) {
+            const remainingCapacity = Math.max(0, maxSteps - completed.size);
+            if (mode === 'complex' && replans < activeLimits.maxReplans && remainingCapacity > 0) {
               replans += 1;
               spend();
               const revised = await planner.replan({
@@ -506,7 +517,8 @@ export function createNativeAgent(input: {
                   reason: 'verification_failed',
                   detail: verification.reason,
                 },
-                maxSteps,
+                maxSteps: remainingCapacity,
+                ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
                 signal: request.signal,
               });
               accumulate(revised.usage);
@@ -526,7 +538,7 @@ export function createNativeAgent(input: {
                 };
               }
               activePlan = merged;
-              report({ type: 'plan.ready', plan: activePlan });
+              report({ type: 'plan.ready', plan: activePlan, iterations });
               continue;
             }
 
@@ -581,7 +593,13 @@ export function createNativeAgent(input: {
           if (failed) {
             const correctable =
               failed.failure.code === 'provider_error' || failed.failure.code === 'invalid_output';
-            if (mode === 'complex' && correctable && replans < activeLimits.maxReplans) {
+            const remainingCapacity = Math.max(0, maxSteps - completed.size);
+            if (
+              mode === 'complex' &&
+              correctable &&
+              replans < activeLimits.maxReplans &&
+              remainingCapacity > 0
+            ) {
               replans += 1;
               spend();
               const revised = await planner.replan({
@@ -597,7 +615,8 @@ export function createNativeAgent(input: {
                   detail: failed.failure.detail,
                   ...(wave.length === 1 && wave[0] ? { stepId: wave[0].id } : {}),
                 },
-                maxSteps,
+                maxSteps: remainingCapacity,
+                ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
                 signal: request.signal,
               });
               accumulate(revised.usage);
@@ -617,7 +636,7 @@ export function createNativeAgent(input: {
                 };
               }
               activePlan = merged;
-              report({ type: 'plan.ready', plan: activePlan });
+              report({ type: 'plan.ready', plan: activePlan, iterations });
               continue;
             }
             return {
@@ -654,11 +673,16 @@ export function createNativeAgent(input: {
           .filter((text): text is string => typeof text === 'string' && text.length > 0);
         const verificationText = verificationSummaryText(verification);
         sections.push(verificationText);
+        const summary = sections.join('\n\n');
         report({ type: 'text.delta', text: `\n\n${verificationText}` });
+        // A resumed generation may have skipped already-completed steps. Replace
+        // the live text with the full evidence-backed summary so the final
+        // transcript is self-contained instead of only the verification line.
+        report({ type: 'text.replace', text: summary });
 
         return {
           ok: true,
-          summary: sections.join('\n\n'),
+          summary,
           ...(usage() ? { usage: usage() } : {}),
           verification,
         };
