@@ -26,7 +26,7 @@
     "sdk:verify": "node dist/scripts/pack-sdk.js --check",
     "verify": "npm run build && node dist/scripts/pack-sdk.js && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js",
     "evidence": "npm run build && node dist/scripts/capability-evidence.js",
-    "test:mongo": "npm run build && CODERAX_REQUIRE_MONGODB=1 node --test \"dist/tests/integration/mongo*.test.js\""
+    "test:mongo": "npm run build && CODERAX_REQUIRE_MONGODB=1 node --test --test-reporter=tap \"dist/tests/integration/mongo*.test.js\""
   },
   "dependencies": {
     "@coderax/contracts": "*",
