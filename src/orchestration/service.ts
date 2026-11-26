@@ -10,6 +10,7 @@ import type {
   CreateGameRequest,
   CreateGameSessionRequest,
   DataMode,
+  GameBuildList,
   GameCapabilityReport,
   GameExport,
   GameIteration,
@@ -28,6 +29,7 @@ import type {
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
+  RestoreGameBuildRequest,
   SaveGameSpecRequest,
   TaskAccepted,
   TaskControlResult,
@@ -159,6 +161,16 @@ export type ApplicationService = {
     gameId: string,
     request: BuildGameRequest,
   ) => Promise<ServiceResult<import('@coderax/contracts').GameBuild>>;
+  listGameBuilds: (
+    principal: Principal,
+    gameId: string,
+  ) => Promise<ServiceResult<GameBuildList>>;
+  restoreGameBuild: (
+    principal: Principal,
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ) => Promise<ServiceResult<GameProject>>;
   iterateGame: (
     principal: Principal,
     gameId: string,
@@ -1258,6 +1270,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(request.expectedSpecRevision !== undefined
           ? { expectedSpecRevision: request.expectedSpecRevision }
           : {}),
+      });
+    },
+
+    listGameBuilds: async (principal, gameId) =>
+      deps.studio.listBuilds(principal.ownerId, gameId),
+
+    restoreGameBuild: async (principal, gameId, buildId, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.restore({
+        ownerId: principal.ownerId,
+        gameId,
+        buildId,
+        expectedRevision: request.expectedRevision,
       });
     },
 

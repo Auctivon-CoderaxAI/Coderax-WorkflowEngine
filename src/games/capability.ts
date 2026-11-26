@@ -30,13 +30,13 @@ export function createGameCapabilityReport(input: GameCapabilityInput): GameCapa
     title: 'Native Game Studio',
     status: studioStatus,
     summary:
-      'Natural-language game specs, design planning, original source generation, generated assets, levels, mechanics, previews, playability verification, persistent projects and exportable source.',
+      'Natural-language game specs, design planning, original source generation, generated assets and procedural audio, levels, mechanics, self-contained browser previews, browser-boot and playability verification, persistent projects, build history/restore and exportable source.',
     available: studioStatus === 'operational',
     detail: input.studioMessage,
     evidence: [
-      'tests/unit/games.test.ts — generation, composition, isolation and measured playability',
-      'tests/integration/games.test.ts — create, build, preview, export and verified play over HTTP',
-      'tests/security/games.test.ts — owner scoping and disabled-capability reporting',
+      'tests/unit/games.test.ts — generation, composition, browser boot, procedural audio, isolation and measured playability',
+      'tests/integration/games.test.ts — create, build, preview, export, build history/restore and verified play over HTTP',
+      'tests/security/games.test.ts — owner scoping, traversal refusal and disabled-capability reporting',
       'docs/game-studio.md — generated artifact and verification model',
     ],
     environments: ['coderax-cloud-engine', 'browser-preview'],
@@ -50,7 +50,7 @@ export function createGameCapabilityReport(input: GameCapabilityInput): GameCapa
     title: 'Native Gaming Agent',
     status: agentStatus,
     summary:
-      'Creates durable game sessions against verified studio builds, observes frames and state, plans objectives, plays with bounded controls, supports pause/resume, owner takeover and cancellation, keeps session memory and logs, and verifies completion from measured state.',
+      'Creates durable game sessions against verified, version-pinned studio builds, observes frames and state, plans objectives, plays with bounded controls, supports pause/resume, owner takeover and cancellation, keeps session memory and logs, and verifies completion from measured state.',
     available: agentStatus === 'operational',
     detail: input.agentMessage,
     evidence: [

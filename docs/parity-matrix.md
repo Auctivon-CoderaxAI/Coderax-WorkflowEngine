@@ -64,9 +64,10 @@ Status vocabulary:
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
 | 49 | Shared typed SDK for both clients | none (hand-written helpers) | `packages/sdk` | Strengthened |
 | 50 | Startup dependency validation | none (config read at request time) | `src/bootstrap/compose.ts` refuses to start | Strengthened |
-| 51 | Native Game Studio | project lifecycle + design brief only; every build capability hard-coded false (CX-32 Partial) | `src/games/studio.ts`: deterministic spec, plan, original source/assets/levels, measured playability, preview, export, iterations, persistence | Changed (deliberate) — lifecycle pattern migrated, executor newly built |
-| 52 | Native Gaming Agent | no session runtime (CX-33 Blocked) | `src/games/session.ts`: durable sessions over verified builds, observation, bounded controls, pause/resume, takeover, cancel, memory, logs, measured completion | Changed (deliberate) |
+| 51 | Native Game Studio | project lifecycle + design brief only; every build capability hard-coded false (CX-32 Partial) | `src/games/studio.ts`: deterministic spec, plan, original source/assets/levels, 8 genres, procedural audio, self-contained preview, browser-boot and measured playability, export, iterations, persistence | Changed (deliberate) — lifecycle pattern migrated, executor newly built |
+| 52 | Native Gaming Agent | no session runtime (CX-33 Blocked) | `src/games/session.ts`: durable sessions over verified, version-pinned builds, observation, bounded controls, pause/resume, takeover, cancel, memory, logs, measured completion | Changed (deliberate) |
 | 53 | Gaming Agent — external game environments | none (blocked in the registry) | none; reported `blocked` with the exact prerequisite | Not started (both) |
+| 54 | Build version history and restore | `revision`/`specRevision` only; no historical build bytes | `GET /v1/games/{gameId}/builds` plus exact-spec restore; traversal- and owner-checked | Changed (deliberate) |
 
 ## Summary
 
@@ -76,7 +77,7 @@ Status vocabulary:
 | Strengthened | 10 |
 | Simplified | 5 |
 | Missing | 10 |
-| Changed (deliberate) | 4 |
+| Changed (deliberate) | 5 |
 | Not started (both) | 2 |
 
 ## What this means
@@ -105,10 +106,14 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 122/122 tests, OpenAPI drift clean.
+- `npm run verify` at the delivery head: **125/125 tests**, OpenAPI drift clean.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a
   real server has stored a row.
-- No hosted CI run exists: the GitHub Actions job is blocked by account billing.
-  The local run above is the only executed evidence.
+- No hosted CI run exists at the pushed head: the workflow triggers on a pull
+  request or a `main` push, and no pull request could be opened from this
+  environment. The local run above is the only executed evidence.
+- The browser-boot check executes the exact inline preview document in a bounded
+  DOM harness. It is not a real browser; CSP enforcement, real-canvas rendering
+  and mobile compatibility remain blocked with the cloud browser.

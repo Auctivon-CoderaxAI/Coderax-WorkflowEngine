@@ -17,8 +17,10 @@ export const GAME_GENRES = [
   'platformer',
   'puzzle',
   'shooter',
+  'arcade',
   'strategy',
   'role_playing',
+  'adventure',
   'other',
 ] as const;
 export type GameGenre = (typeof GAME_GENRES)[number];
@@ -231,6 +233,34 @@ export const GameBuild = z
   })
   .strict();
 export type GameBuild = z.infer<typeof GameBuild>;
+
+/** A historical build as listed by the version-history operation. */
+export const GameBuildSummary = z
+  .object({
+    buildId: z.string().min(1).max(120),
+    specRevision: z.number().int().min(1),
+    attempt: z.number().int().min(1),
+    status: z.enum(['verified', 'failed']),
+    digest: z.string().min(1).max(128),
+    verified: z.boolean(),
+    createdAt: IsoDateTime,
+  })
+  .strict();
+export type GameBuildSummary = z.infer<typeof GameBuildSummary>;
+
+export const GameBuildList = z
+  .object({
+    gameId: z.string().min(1).max(120),
+    builds: z.array(GameBuildSummary).max(64),
+  })
+  .strict();
+export type GameBuildList = z.infer<typeof GameBuildList>;
+
+/** Restores a build and the exact spec it was generated from. */
+export const RestoreGameBuildRequest = z
+  .object({ expectedRevision: z.number().int().min(1) })
+  .strict();
+export type RestoreGameBuildRequest = z.infer<typeof RestoreGameBuildRequest>;
 
 export const GAME_PROJECT_STATUSES = ['draft', 'spec_ready', 'built', 'verified', 'failed'] as const;
 

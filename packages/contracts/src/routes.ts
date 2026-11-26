@@ -6,6 +6,7 @@ import {
   CreateGameRequest,
   CreateGameSessionRequest,
   GameBuild,
+  GameBuildList,
   GameCapabilityReport,
   GameExport,
   GameIteration,
@@ -18,6 +19,7 @@ import {
   GameSessionLogs,
   GameSessionVerification,
   IterateGameRequest,
+  RestoreGameBuildRequest,
   SaveGameSpecRequest,
 } from './games.js';
 import { HealthReport, ReadinessReport } from './health.js';
@@ -78,6 +80,12 @@ export type RouteSpec = {
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
 const GameParams = zod.object({ gameId: zod.string().trim().min(1).max(120) }).strict();
+const GameBuildParams = zod
+  .object({
+    gameId: zod.string().trim().min(1).max(120),
+    buildId: zod.string().trim().min(1).max(120),
+  })
+  .strict();
 const GameSessionParams = zod
   .object({ sessionId: zod.string().trim().min(1).max(120) })
   .strict();
@@ -307,6 +315,27 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     params: GameParams,
     body: BuildGameRequest,
     response: { status: 200, description: 'Verified or failed build with evidence', schema: GameBuild },
+  },
+  {
+    operationId: 'listGameBuilds',
+    method: 'GET',
+    path: '/v1/games/{gameId}/builds',
+    summary: 'Owner-scoped build history, newest first.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: { status: 200, description: 'Build history', schema: GameBuildList },
+  },
+  {
+    operationId: 'restoreGameBuild',
+    method: 'POST',
+    path: '/v1/games/{gameId}/builds/{buildId}/restore',
+    summary: 'Restore a verified historical build and the exact spec it was built from.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameBuildParams,
+    body: RestoreGameBuildRequest,
+    response: { status: 200, description: 'Restored game project', schema: GameProject },
   },
   {
     operationId: 'iterateGame',

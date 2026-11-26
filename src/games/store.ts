@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { GameBuild, GameFile, GameProject, GameProjectList } from '@coderax/contracts';
+import type { GameBuild, GameFile, GameProject, GameProjectList, GameSpec } from '@coderax/contracts';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 
@@ -25,6 +25,8 @@ export type StoredFile = {
 
 export type StoredBuild = {
   build: GameBuild;
+  /** The exact spec this build was generated from; restore needs the pair. */
+  spec: GameSpec | null;
   files: StoredFile[];
 };
 
@@ -49,9 +51,11 @@ export type GameStore = {
     ownerId: string;
     gameId: string;
     build: GameBuild;
+    spec: GameSpec;
     files: StoredFile[];
   }) => Promise<void>;
   readBuild: (ownerId: string, gameId: string, buildId: string) => Promise<StoredBuild | null>;
+  listBuilds: (ownerId: string, gameId: string) => Promise<StoredBuild[]>;
   countProjects: (ownerId: string) => Promise<number>;
   root: string;
 };
@@ -78,6 +82,30 @@ export function createGameStore(input: { root: string }): GameStore {
       const record = JSON.parse(text) as ProjectRecord;
       if (!record || record.ownerId !== ownerId || !record.project) return null;
       return record;
+    } catch {
+      return null;
+    }
+  }
+
+  async function readStoredBuild(
+    ownerId: string,
+    gameId: string,
+    buildId: string,
+  ): Promise<StoredBuild | null> {
+    if (!gameIdIsSafe(gameId) || !buildIdIsSafe(buildId)) return null;
+    try {
+      const text = await readFile(
+        path.join(input.root, gameId, 'builds', buildId, 'build.json'),
+        'utf8',
+      );
+      const stored = JSON.parse(text) as {
+        ownerId: string;
+        build: GameBuild;
+        spec?: GameSpec | null;
+        files: StoredFile[];
+      };
+      if (stored.ownerId !== ownerId || !stored.build || !Array.isArray(stored.files)) return null;
+      return { build: stored.build, spec: stored.spec ?? null, files: stored.files };
     } catch {
       return null;
     }
@@ -146,7 +174,7 @@ export function createGameStore(input: { root: string }): GameStore {
         nextCursor: next < records.length ? String(next) : null,
       };
     },
-    writeBuild: async ({ ownerId, gameId, build, files }) => {
+    writeBuild: async ({ ownerId, gameId, build, spec, files }) => {
       if (!gameIdIsSafe(gameId) || !buildIdIsSafe(build.buildId)) {
         throw new Error('invalid game or build identity');
       }
@@ -161,22 +189,25 @@ export function createGameStore(input: { root: string }): GameStore {
       }
       await writeAtomic(
         path.join(directory, 'build.json'),
-        `${JSON.stringify({ ownerId, build, files }, null, 2)}\n`,
+        `${JSON.stringify({ ownerId, build, spec, files }, null, 2)}\n`,
       );
     },
-    readBuild: async (ownerId, gameId, buildId) => {
-      if (!gameIdIsSafe(gameId) || !buildIdIsSafe(buildId)) return null;
+    readBuild: readStoredBuild,
+    listBuilds: async (ownerId, gameId) => {
+      if (!gameIdIsSafe(gameId)) return [];
+      let entries: string[];
       try {
-        const text = await readFile(
-          path.join(input.root, gameId, 'builds', buildId, 'build.json'),
-          'utf8',
-        );
-        const stored = JSON.parse(text) as { ownerId: string; build: GameBuild; files: StoredFile[] };
-        if (stored.ownerId !== ownerId || !stored.build || !Array.isArray(stored.files)) return null;
-        return { build: stored.build, files: stored.files };
+        entries = await readdir(path.join(input.root, gameId, 'builds'));
       } catch {
-        return null;
+        return [];
       }
+      const builds: StoredBuild[] = [];
+      for (const entry of entries.sort()) {
+        if (!buildIdIsSafe(entry)) continue;
+        const stored = await readStoredBuild(ownerId, gameId, entry);
+        if (stored) builds.push(stored);
+      }
+      return builds.sort((left, right) => right.build.createdAt.localeCompare(left.build.createdAt));
     },
     countProjects,
   };

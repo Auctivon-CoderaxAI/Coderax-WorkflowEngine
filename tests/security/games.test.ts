@@ -53,6 +53,46 @@ test('the owner can still read a game it created while another owner is refused'
   }
 });
 
+test('build history and restore are owner-scoped and refuse traversal', async () => {
+  const started = await startTestApp();
+  try {
+    const created = await started.app.service.createGame(owner, {
+      name: 'Circuits',
+      prompt: PROMPT,
+    });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const gameId = created.value.gameId;
+    const built = await started.app.service.buildGame(owner, gameId, {});
+    assert.equal(built.ok, true);
+
+    const history = await started.app.service.listGameBuilds(stranger, gameId);
+    assert.equal(history.ok, false);
+    const forged = await started.app.service.restoreGameBuild(stranger, gameId, 'build', {
+      expectedRevision: 1,
+    });
+    assert.equal(forged.ok, false);
+
+    const current = await started.app.service.getGame(owner, gameId);
+    assert.equal(current.ok, true);
+    if (!current.ok) return;
+    const traversal = await started.app.service.restoreGameBuild(
+      owner,
+      gameId,
+      '../../../etc/passwd',
+      { expectedRevision: current.value.revision },
+    );
+    assert.equal(traversal.ok, false);
+    if (!traversal.ok) assert.equal(traversal.code, 'not_found');
+
+    const ownHistory = await started.app.service.listGameBuilds(owner, gameId);
+    assert.equal(ownHistory.ok, true);
+    if (ownHistory.ok) assert.ok(ownHistory.value.builds.length >= 1);
+  } finally {
+    await started.close();
+  }
+});
+
 test('disabling games reports the capabilities blocked and refuses new projects', async () => {
   const started = await startTestApp({ config: { games: { enabled: false } } });
   try {

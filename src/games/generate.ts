@@ -4,6 +4,7 @@ import { controlsFor, buildDesignPlan } from './plan.js';
 import { generateLevels } from './level.js';
 import { paletteFor } from './spec.js';
 import {
+  AUDIO_SOURCE,
   configSource,
   GAME_SOURCE,
   htmlSource,
@@ -77,12 +78,24 @@ export function generateGame(input: {
     ...(input.narrative ? { narrative: input.narrative } : {}),
   });
 
+  const config = configSource(blueprint);
+  const levelsJs = levelsSource(blueprint);
+  const entry = htmlSource(blueprint, input.spec, {
+    config,
+    levels: levelsJs,
+    game: GAME_SOURCE,
+    render: RENDER_SOURCE,
+    audio: AUDIO_SOURCE,
+    main: MAIN_SOURCE,
+  });
+
   const sources: GeneratedSourceFile[] = [
-    { path: 'index.html', kind: 'html', content: htmlSource(blueprint, input.spec) },
-    { path: 'src/config.js', kind: 'js', content: configSource(blueprint) },
-    { path: 'src/levels.js', kind: 'js', content: levelsSource(blueprint) },
+    { path: 'index.html', kind: 'html', content: entry },
+    { path: 'src/config.js', kind: 'js', content: config },
+    { path: 'src/levels.js', kind: 'js', content: levelsJs },
     { path: 'src/game.js', kind: 'js', content: GAME_SOURCE },
     { path: 'src/render.js', kind: 'js', content: RENDER_SOURCE },
+    { path: 'src/audio.js', kind: 'js', content: AUDIO_SOURCE },
     { path: 'src/main.js', kind: 'js', content: MAIN_SOURCE },
     { path: 'assets/theme.svg', kind: 'svg', content: themeSvg(blueprint) },
     { path: 'README.md', kind: 'md', content: readmeSource(blueprint, input.spec, input.buildId) },
@@ -107,6 +120,7 @@ export function generateGame(input: {
     entry: 'index.html',
     previewPath: `/v1/games/${input.gameId}/preview`,
     license: 'generated-original',
+    audio: 'procedural-webaudio',
     thirdPartyAssets: [] as string[],
     files: described,
   };

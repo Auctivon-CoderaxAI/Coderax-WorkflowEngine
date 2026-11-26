@@ -2580,8 +2580,10 @@
                                       "platformer",
                                       "puzzle",
                                       "shooter",
+                                      "arcade",
                                       "strategy",
                                       "role_playing",
+                                      "adventure",
                                       "other"
                                     ]
                                   },
@@ -3309,8 +3311,10 @@
                                 "platformer",
                                 "puzzle",
                                 "shooter",
+                                "arcade",
                                 "strategy",
                                 "role_playing",
+                                "adventure",
                                 "other"
                               ]
                             },
@@ -4031,8 +4035,10 @@
                                 "platformer",
                                 "puzzle",
                                 "shooter",
+                                "arcade",
                                 "strategy",
                                 "role_playing",
+                                "adventure",
                                 "other"
                               ]
                             },
@@ -4734,8 +4740,10 @@
                                 "platformer",
                                 "puzzle",
                                 "shooter",
+                                "arcade",
                                 "strategy",
                                 "role_playing",
+                                "adventure",
                                 "other"
                               ]
                             },
@@ -5406,8 +5414,10 @@
                           "platformer",
                           "puzzle",
                           "shooter",
+                          "arcade",
                           "strategy",
                           "role_playing",
+                          "adventure",
                           "other"
                         ]
                       },
@@ -5815,6 +5825,861 @@
         }
       }
     },
+    "/v1/games/{gameId}/builds": {
+      "get": {
+        "operationId": "listGameBuilds",
+        "summary": "Owner-scoped build history, newest first.",
+        "tags": [
+          "games"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Build history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "gameId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "builds": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "buildId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "specRevision": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "attempt": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "verified",
+                              "failed"
+                            ]
+                          },
+                          "digest": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "verified": {
+                            "type": "boolean"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "buildId",
+                          "specRevision",
+                          "attempt",
+                          "status",
+                          "digest",
+                          "verified",
+                          "createdAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "gameId",
+                    "builds"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gameId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          }
+        ]
+      }
+    },
+    "/v1/games/{gameId}/builds/{buildId}/restore": {
+      "post": {
+        "operationId": "restoreGameBuild",
+        "summary": "Restore a verified historical build and the exact spec it was built from.",
+        "tags": [
+          "games"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restored game project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "gameId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "summary": {
+                      "type": "string",
+                      "maxLength": 600
+                    },
+                    "spec": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "prompt": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4000
+                            },
+                            "genre": {
+                              "type": "string",
+                              "enum": [
+                                "platformer",
+                                "puzzle",
+                                "shooter",
+                                "arcade",
+                                "strategy",
+                                "role_playing",
+                                "adventure",
+                                "other"
+                              ]
+                            },
+                            "camera": {
+                              "type": "string",
+                              "enum": [
+                                "side_view",
+                                "top_down",
+                                "isometric",
+                                "ui_only",
+                                "first_person"
+                              ]
+                            },
+                            "players": {
+                              "anyOf": [
+                                {
+                                  "const": 1
+                                },
+                                {
+                                  "const": 2
+                                }
+                              ]
+                            },
+                            "difficulty": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 5
+                            },
+                            "mechanics": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "gravity",
+                                  "jump",
+                                  "double_jump",
+                                  "dash",
+                                  "shoot",
+                                  "enemies",
+                                  "hazards",
+                                  "collectibles",
+                                  "moving_platforms",
+                                  "push_blocks",
+                                  "switches",
+                                  "timer"
+                                ]
+                              }
+                            },
+                            "levels": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 8
+                            },
+                            "seed": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 2147483647
+                            },
+                            "coreLoop": {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            "winCondition": {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            "artDirection": {
+                              "type": "string",
+                              "maxLength": 2000
+                            }
+                          },
+                          "required": [
+                            "prompt",
+                            "genre",
+                            "camera",
+                            "players",
+                            "difficulty",
+                            "mechanics",
+                            "levels",
+                            "seed",
+                            "coreLoop",
+                            "winCondition",
+                            "artDirection"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "specRevision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "draft",
+                        "spec_ready",
+                        "built",
+                        "verified",
+                        "failed"
+                      ]
+                    },
+                    "design": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "title": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 120
+                            },
+                            "logline": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 600
+                            },
+                            "pillars": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              }
+                            },
+                            "mechanics": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "string",
+                                    "enum": [
+                                      "gravity",
+                                      "jump",
+                                      "double_jump",
+                                      "dash",
+                                      "shoot",
+                                      "enemies",
+                                      "hazards",
+                                      "collectibles",
+                                      "moving_platforms",
+                                      "push_blocks",
+                                      "switches",
+                                      "timer"
+                                    ]
+                                  },
+                                  "purpose": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 300
+                                  },
+                                  "systems": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 80
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "purpose",
+                                  "systems"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "levelArc": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "index": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                  },
+                                  "name": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80
+                                  },
+                                  "intent": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 300
+                                  }
+                                },
+                                "required": [
+                                  "index",
+                                  "name",
+                                  "intent"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "controls": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "action": {
+                                    "type": "string",
+                                    "enum": [
+                                      "left",
+                                      "right",
+                                      "up",
+                                      "down",
+                                      "jump",
+                                      "fire",
+                                      "dash"
+                                    ]
+                                  },
+                                  "keys": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 60
+                                  },
+                                  "description": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200
+                                  }
+                                },
+                                "required": [
+                                  "action",
+                                  "keys",
+                                  "description"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "scoring": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "event": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80
+                                  },
+                                  "points": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "event",
+                                  "points"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "art": {
+                              "type": "object",
+                              "properties": {
+                                "palette": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                },
+                                "style": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 300
+                                }
+                              },
+                              "required": [
+                                "palette",
+                                "style"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "assets": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80
+                                  },
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "sprite",
+                                      "tile"
+                                    ]
+                                  },
+                                  "purpose": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200
+                                  },
+                                  "license": {
+                                    "const": "generated-original"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "kind",
+                                  "purpose",
+                                  "license"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "risks": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300
+                              }
+                            },
+                            "modelAssisted": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "title",
+                            "logline",
+                            "pillars",
+                            "mechanics",
+                            "levelArc",
+                            "controls",
+                            "scoring",
+                            "art",
+                            "assets",
+                            "risks",
+                            "modelAssisted"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "build": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "buildId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 120
+                            },
+                            "gameId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 120
+                            },
+                            "specRevision": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "attempt": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "status": {
+                              "type": "string",
+                              "enum": [
+                                "verified",
+                                "failed"
+                              ]
+                            },
+                            "digest": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "entry": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            },
+                            "previewPath": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 300
+                            },
+                            "files": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "path": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200
+                                  },
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "html",
+                                      "js",
+                                      "json",
+                                      "svg",
+                                      "md"
+                                    ]
+                                  },
+                                  "bytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "digest": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128
+                                  }
+                                },
+                                "required": [
+                                  "path",
+                                  "kind",
+                                  "bytes",
+                                  "digest"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "verification": {
+                              "type": "object",
+                              "properties": {
+                                "passed": {
+                                  "type": "boolean"
+                                },
+                                "checks": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "id": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 80
+                                      },
+                                      "title": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 200
+                                      },
+                                      "passed": {
+                                        "type": "boolean"
+                                      },
+                                      "detail": {
+                                        "type": "string",
+                                        "maxLength": 600
+                                      },
+                                      "measurements": {
+                                        "type": "object",
+                                        "additionalProperties": true
+                                      }
+                                    },
+                                    "required": [
+                                      "id",
+                                      "title",
+                                      "passed",
+                                      "detail",
+                                      "measurements"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "levels": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "levelId": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 80
+                                      },
+                                      "name": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 80
+                                      },
+                                      "completed": {
+                                        "type": "boolean"
+                                      },
+                                      "ticks": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                      },
+                                      "score": {
+                                        "type": "integer"
+                                      },
+                                      "deaths": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                      },
+                                      "frames": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                      }
+                                    },
+                                    "required": [
+                                      "levelId",
+                                      "name",
+                                      "completed",
+                                      "ticks",
+                                      "score",
+                                      "deaths",
+                                      "frames"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "deterministicReplay": {
+                                  "type": "boolean"
+                                },
+                                "replayDigest": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                },
+                                "frameCount": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "distinctColors": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "artifactPaths": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 400
+                                  }
+                                },
+                                "createdAt": {
+                                  "type": "string",
+                                  "format": "date-time"
+                                }
+                              },
+                              "required": [
+                                "passed",
+                                "checks",
+                                "levels",
+                                "deterministicReplay",
+                                "replayDigest",
+                                "frameCount",
+                                "distinctColors",
+                                "artifactPaths",
+                                "createdAt"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "createdAt": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "buildId",
+                            "gameId",
+                            "specRevision",
+                            "attempt",
+                            "status",
+                            "digest",
+                            "entry",
+                            "previewPath",
+                            "files",
+                            "verification",
+                            "createdAt"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "gameId",
+                    "name",
+                    "summary",
+                    "spec",
+                    "specRevision",
+                    "revision",
+                    "status",
+                    "design",
+                    "build",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gameId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          {
+            "name": "buildId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "expectedRevision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/games/{gameId}/iterate": {
       "post": {
         "operationId": "iterateGame",
@@ -5868,8 +6733,10 @@
                                     "platformer",
                                     "puzzle",
                                     "shooter",
+                                    "arcade",
                                     "strategy",
                                     "role_playing",
+                                    "adventure",
                                     "other"
                                   ]
                                 },

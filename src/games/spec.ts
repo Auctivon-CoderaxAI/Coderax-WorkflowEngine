@@ -21,9 +21,11 @@ import { isSupportedCamera } from './types.js';
 const GENRE_WORDS: Array<{ genre: GameGenre; words: string[] }> = [
   { genre: 'platformer', words: ['platformer', 'platform', 'jump', 'run and jump', 'rooftop'] },
   { genre: 'puzzle', words: ['puzzle', 'route', 'circuit', 'logic', 'tile', 'garden'] },
-  { genre: 'shooter', words: ['shooter', 'shoot', 'blaster', 'drone', 'arcade', 'bullet'] },
+  { genre: 'arcade', words: ['arcade', 'high score', 'endless', 'wave'] },
+  { genre: 'shooter', words: ['shooter', 'shoot', 'blaster', 'drone', 'bullet'] },
   { genre: 'strategy', words: ['strategy', 'manage', 'harbor', 'economy', 'plan', 'tactics'] },
-  { genre: 'role_playing', words: ['role playing', 'rpg', 'quest', 'hero', 'adventure'] },
+  { genre: 'adventure', words: ['adventure', 'explore', 'exploration', 'dungeon', 'maze'] },
+  { genre: 'role_playing', words: ['role playing', 'rpg', 'quest', 'hero'] },
 ];
 
 const CAMERA_WORDS: Array<{ camera: GameCamera; words: string[] }> = [
@@ -56,8 +58,10 @@ function includesAny(text: string, words: readonly string[]): boolean {
 const GENRE_DEFAULTS: Record<GameGenre, GameMechanic[]> = {
   platformer: ['gravity', 'jump', 'collectibles', 'hazards', 'enemies'],
   puzzle: ['collectibles', 'switches', 'push_blocks'],
+  arcade: ['shoot', 'enemies', 'hazards', 'collectibles'],
   shooter: ['shoot', 'enemies', 'hazards', 'collectibles'],
   strategy: ['collectibles', 'enemies', 'switches'],
+  adventure: ['collectibles', 'enemies', 'switches', 'hazards'],
   role_playing: ['gravity', 'jump', 'collectibles', 'enemies', 'switches'],
   other: ['gravity', 'jump', 'collectibles'],
 };
@@ -121,6 +125,10 @@ function artDirectionFor(genre: GameGenre): string {
   switch (genre) {
     case 'puzzle':
       return 'Soft engineered palette, copper traces, calm readable silhouettes.';
+    case 'arcade':
+      return 'Bright high-contrast palette, bold targets, instantly readable action.';
+    case 'adventure':
+      return 'Warm explorable palette, distinct landmarks, calm silhouettes.';
     case 'shooter':
       return 'High-contrast space palette, bright projectiles, minimal HUD.';
     case 'strategy':
@@ -141,6 +149,10 @@ const PALETTES: Record<GameGenre, string[][]> = {
     ['#0f1f1a', '#1e3b30', '#8fd694', '#c98b4b', '#e8f3e7', '#5aa9a3'],
     ['#111827', '#27364a', '#7dd3fc', '#fbbf24', '#e5e7eb', '#34d399'],
   ],
+  arcade: [
+    ['#0b0b1a', '#241b45', '#ffd60a', '#ff4d6d', '#4cc9f0', '#f8f9fa'],
+    ['#140f1f', '#33204f', '#7bf1a8', '#ff9f1c', '#5bc0eb', '#fdfcdc'],
+  ],
   shooter: [
     ['#050912', '#101a33', '#4cc9f0', '#f72585', '#ffd60a', '#e8eaf6'],
     ['#0a0a14', '#1b1b2f', '#00e5ff', '#ff4d6d', '#c6ff00', '#f8f9fa'],
@@ -148,6 +160,10 @@ const PALETTES: Record<GameGenre, string[][]> = {
   strategy: [
     ['#0b1c24', '#15414f', '#f4a261', '#2a9d8f', '#e9c46a', '#f1faee'],
     ['#12161a', '#23303a', '#ffb703', '#8ecae6', '#fb8500', '#f8f9fa'],
+  ],
+  adventure: [
+    ['#15130f', '#2f2a1f', '#e9c46a', '#b23a48', '#7f9c6c', '#f7f3e8'],
+    ['#101614', '#24352c', '#f4d35e', '#d1495b', '#66a182', '#fefae0'],
   ],
   role_playing: [
     ['#191324', '#2d2140', '#f4d35e', '#9b5de5', '#f15bb5', '#fefae0'],
@@ -255,6 +271,14 @@ export function applyInstruction(spec: GameSpec, instruction: string): SpecEdit 
     next.genre = 'puzzle';
     changes.push('Changed the genre to puzzle.');
   }
+  if (/\barcade\b/.test(text) && next.genre !== 'arcade') {
+    next.genre = 'arcade';
+    changes.push('Changed the genre to arcade.');
+  }
+  if (/\badventure\b/.test(text) && next.genre !== 'adventure') {
+    next.genre = 'adventure';
+    changes.push('Changed the genre to adventure.');
+  }
   if (/\bshooter\b/.test(text) && next.genre !== 'shooter') {
     next.genre = 'shooter';
     changes.push('Changed the genre to shooter.');
@@ -266,6 +290,10 @@ export function applyInstruction(spec: GameSpec, instruction: string): SpecEdit 
   if (/\bplatformer\b/.test(text) && next.camera !== 'side_view') {
     next.camera = 'side_view';
     changes.push('Switched to the side-view camera.');
+  }
+  if (/\b(?:arcade|adventure)\b/.test(text) && next.camera === 'side_view') {
+    next.camera = 'top_down';
+    changes.push('Switched to the top-down camera for exploration.');
   }
   if (/\btop[- ]down\b/.test(text) && next.camera !== 'top_down') {
     next.camera = 'top_down';
@@ -309,7 +337,7 @@ export const SUPPORTED_EDITS = Object.freeze([
   'add enemies / remove enemies',
   'add a timer / remove the timer',
   'double jump, dash, shooting, moving platforms, pushable blocks, switches',
-  'puzzle, shooter or platformer genre',
+  'puzzle, shooter, arcade, adventure or platformer genre',
   'side view, top-down or isometric camera',
   'regenerate / new layout',
 ]);

@@ -42,12 +42,25 @@ operational.
    falls back to the deterministic plan.
 3. **Generate** — `POST /v1/games/{gameId}/build` generates original HTML, JS,
    JSON, SVG and a README. No canvas template is selected and no third-party art
-   is copied; every asset is generated SVG or a palette colour.
+   is copied; every asset is generated SVG or a palette colour, and audio cues
+   are synthesized by the generated Web Audio module rather than downloaded.
 4. **Verify** — the generated code is loaded into a V8 context with no
    `require`, `process`, `fetch` or filesystem access and is played by a
-   deterministic bot. Playability is measured, not asserted.
-5. **Preview and export** — `GET /preview` returns the self-contained HTML with
-   a strict CSP; `GET /export` returns a deterministic ZIP archive.
+   deterministic bot. The exact preview document is also booted through its
+   inlined scripts and `requestAnimationFrame` loop in a bounded DOM harness, so
+   a preview that cannot paint is a failed build. Playability is measured, not
+   asserted.
+5. **Preview and export** — `GET /preview` returns one self-contained HTML
+   document: every generated module is inlined, so the CSP permits it and the
+   endpoint needs to serve no other file. `GET /export` returns a deterministic
+   ZIP archive whose `index.html` is the same document and whose `src/` tree is
+   the readable source.
+6. **Version, restore and continue** — `GET /v1/games/{gameId}/builds` lists
+   the owner's build history. `POST /v1/games/{gameId}/builds/{buildId}/restore`
+   restores a verified build together with the exact spec snapshot it was built
+   from, so a later edit can be rolled back without rebuilding different bytes.
+   Every build stays downloadable and every project remains retrievable across
+   engine restarts and devices.
 
 Edits go through `POST /v1/games/{gameId}/iterate`. A supported instruction
 changes the spec (difficulty, level count, mechanics, genre, camera, reseed,
@@ -59,6 +72,8 @@ silently rebuilding a different game. Debug attempts are bounded and recorded.
 
 The generator composes a game from independent axes:
 
+- **Genres (8):** `platformer`, `puzzle`, `shooter`, `arcade`, `strategy`,
+  `role_playing`, `adventure`, `other`.
 - **Movement models:** `platformer`, `top_down`.
 - **Cameras:** `side_view`, `top_down`, `isometric`, `ui_only`.
 - **Mechanics (12):** `gravity`, `jump`, `double_jump`, `dash`, `shoot`,
@@ -66,6 +81,8 @@ The generator composes a game from independent axes:
   `switches`, `timer`.
 - **Levels:** 1–8, seeded geometry constrained by the shipped physics, with
   collision, scoring, input and a level arc.
+- **Presentation:** keyboard, mouse/touch buttons, a generated palette, an
+  original SVG theme and synthesized Web Audio cues; no third-party asset.
 
 `first_person` and two-player specs are rejected at build admission with named
 errors. They are not mapped onto a supported camera or a single-player stand-in.
@@ -76,7 +93,9 @@ Every build must pass all checks that apply to its mechanics:
 
 | Area | Checks |
 | --- | --- |
-| Code | scripts compile; no ambient authority, randomness or clock; CSP present; assets original |
+| Code | scripts compile; no ambient authority, randomness or clock; CSP present and permits the inlined scripts; assets original |
+| Browser entry | every module is inlined; the exact document boots and paints frames through its animation loop |
+| Audio | cues are synthesized by the build; the manifest records procedural audio; no audio file is fetched |
 | Isolation | `require`, `process` and `fetch` are absent in the runtime context |
 | Levels | requested level count; bot completes every level |
 | Controls | granted input moves the player |
@@ -102,6 +121,8 @@ identity.
 
 A session provides:
 
+- **Version pinning** — a session names a verified build. It plays those exact
+  bytes, even after the project is edited or an older build is restored.
 - **Observation** — `GET /v1/game-sessions/{id}/observation` returns the
   measured state (level, tick, score, health, player, objective target) plus a
   PNG frame rendered by the shipped renderer.
@@ -143,9 +164,14 @@ A session provides:
 
 - Sessions play **studio builds** in the engine's runtime. External games remain
   blocked until a verified cloud browser and provider interface exist.
+- The browser-boot check is a bounded DOM harness, not a real browser: it proves
+  the inline document loads and paints, but it does not enforce CSP, drive a real
+  canvas, or cover mobile Safari/Chrome. Those checks require the blocked
+  zero-cost cloud browser and are not claimed.
 - `first_person` and two-player builds are unsupported by design.
 - The studio ships original primitive-vector art driven by a generated palette
-  and SVG theme; it does not fetch or copy third-party assets.
+  and SVG theme; it does not fetch or copy third-party assets. Audio is
+  synthesized, not sampled.
 - The preview is a self-contained document intended for the engine's preview
   surface, not a hosted game portal.
 

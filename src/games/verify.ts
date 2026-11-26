@@ -5,6 +5,7 @@ import { loadRuntime, scanGeneratedSource, type RuntimeGame } from './runtime.js
 import { chooseInput, createPolicyMemory } from './policy.js';
 import { createRandom } from './random.js';
 import { digest } from './random.js';
+import { bootGeneratedDocument } from './browser.js';
 
 /**
  * Automated playability verification.
@@ -181,19 +182,77 @@ export function verifyGeneration(input: {
 
   const html = files.find((file) => file.path === 'index.html');
   const htmlText = html?.content ?? '';
-  record('html.self_contained', 'The preview loads no external resource', () => {
+  record('html.self_contained', 'The preview is one document with every script inlined', () => {
     const external = /(?:src|href)\s*=\s*["']https?:/i.test(htmlText);
+    const scriptTags = htmlText.match(/<script(?:\s[^>]*)?>/gi) ?? [];
+    const externalScripts = scriptTags.filter((tag) => /\bsrc\s*=/i.test(tag)).length;
+    const inlineScripts = scriptTags.length - externalScripts;
+    const relativeRef =
+      /<(?:script|link)[^>]+(?:src|href)\s*=\s*["'](?!https?:|data:|#)[^"']+/i.test(htmlText);
     const csp = /Content-Security-Policy/i.test(htmlText);
+    const inlineAllowed = /script-src[^;]*'unsafe-inline'/i.test(htmlText);
+    const passed =
+      Boolean(html) &&
+      !external &&
+      externalScripts === 0 &&
+      !relativeRef &&
+      csp &&
+      inlineAllowed &&
+      inlineScripts >= 6;
     return {
-      passed: Boolean(html) && !external && csp,
+      passed,
       detail: !html
         ? 'index.html is missing.'
         : external
           ? 'The preview references an external URL.'
-          : csp
-            ? 'The preview is self-contained and carries a CSP.'
-            : 'The preview has no Content-Security-Policy.',
-      measurements: { external, csp },
+          : externalScripts > 0
+            ? 'The preview loads scripts the preview endpoint does not serve.'
+            : relativeRef
+              ? 'The preview references a relative resource that is not inlined.'
+              : !csp
+                ? 'The preview has no Content-Security-Policy.'
+                : !inlineAllowed
+                  ? 'The CSP would block the inlined scripts.'
+                  : 'The preview inlines every script and carries a CSP that permits them.',
+      measurements: { external, externalScripts, inlineScripts, relativeRef, csp, inlineAllowed },
+    };
+  });
+
+  record('browser.boot', 'The exact preview document boots and paints frames', () => {
+    const boot = bootGeneratedDocument(htmlText);
+    return {
+      passed: boot.passed,
+      detail: boot.detail,
+      measurements: {
+        scripts: boot.scripts,
+        frames: boot.frames,
+        distinctColors: boot.distinctColors,
+        hud: boot.hud,
+      },
+    };
+  });
+
+  record('audio.procedural', 'Sound is synthesized by the build, never fetched', () => {
+    const audio = files.find((file) => file.path === 'src/audio.js');
+    const manifest = files.find((file) => file.path === 'manifest.json');
+    const entry = files.find((file) => file.path === 'index.html');
+    const externalAudio = files.some((file) =>
+      /<audio[^>]+src=|(?:src|href)\s*=\s*["'][^"']*\.(?:mp3|wav|ogg|flac|m4a)/i.test(file.content),
+    );
+    const recorded = manifest ? /"audio"\s*:\s*"procedural-webaudio"/.test(manifest.content) : false;
+    const synthesized = entry ? /createOscillator/.test(entry.content) : false;
+    return {
+      passed: Boolean(audio) && recorded && synthesized && !externalAudio,
+      detail: !audio
+        ? 'The procedural audio source is missing.'
+        : !recorded
+          ? 'The manifest does not record procedural audio.'
+          : !synthesized
+            ? 'The entry document does not inline the synthesizer.'
+            : externalAudio
+              ? 'A generated file references an audio asset.'
+              : 'Cues are synthesized with the Web Audio API; no audio asset is fetched.',
+      measurements: { audio: Boolean(audio), recorded, synthesized, externalAudio },
     };
   });
 

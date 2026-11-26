@@ -36,8 +36,8 @@ are clients of the same versioned API.
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
-| Native Game Studio | Implemented | `src/games/studio.ts`, `docs/game-studio.md`, `docs/evidence/game-studio/` |
-| Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`, durable Work task with `kind: game` |
+| Native Game Studio | Implemented | `src/games/studio.ts`: NL specs, design plans, original source, 8 genres, 12 composable mechanics, seeded levels, browser-boot verification, build history/restore, export, `docs/evidence/game-studio/` |
+| Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`: durable Work task with `kind: game`, observed state/frames, bounded controls, pause/resume, takeover, cancellation, memory, measured completion |
 | Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
@@ -52,12 +52,18 @@ been migrated, that the engine is deployed, or that the external agents work.
 Coderax runs today, and `docs/pr-1-review.md` records what is preserved, what is
 simplified and what is still missing.
 
+The game modules use the zero-cost model catalogue that exists on `main`. The
+durable artifact service, capability registry, reasoning planner, model router
+and execution supervisor exist only on open, unmerged PR branches (#2–#8); this
+change does not claim they are integrated. `docs/games-audit.md` records the
+exact dependency and the narrow ports the game code exposes for that migration.
+
 ## Quick start
 
 ```bash
 npm install
 npm run build
-npm test                          # 122 tests: unit, contract, integration, security, e2e
+npm test                          # 125 tests: unit, contract, integration, security, e2e
 npm run game:evidence             # regenerates the playable game evidence frames
 npm run openapi:check             # fails if the published contract drifted
 ```

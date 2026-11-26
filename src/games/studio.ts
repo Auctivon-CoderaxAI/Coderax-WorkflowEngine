@@ -1,6 +1,7 @@
 import type {
   CreateGameRequest,
   GameBuild,
+  GameBuildList,
   GameDesignPlan,
   GameExport,
   GameIteration,
@@ -62,6 +63,13 @@ export type GameStudio = {
     gameId: string;
     expectedSpecRevision?: number;
   }) => Promise<ServiceResult<GameBuild>>;
+  listBuilds: (ownerId: string, gameId: string) => Promise<ServiceResult<GameBuildList>>;
+  restore: (input: {
+    ownerId: string;
+    gameId: string;
+    buildId: string;
+    expectedRevision: number;
+  }) => Promise<ServiceResult<GameProject>>;
   iterate: (input: {
     ownerId: string;
     gameId: string;
@@ -212,6 +220,7 @@ export function createGameStudio(input: {
       ownerId,
       gameId,
       build,
+      spec: generation.blueprint.spec,
       files: generation.files.map((file) => ({
         path: file.path,
         kind: file.kind,
@@ -398,6 +407,63 @@ export function createGameStudio(input: {
         debugAttempts: attempts.get(gameId)?.length ?? 1,
         modelAssisted: false,
       });
+    },
+
+    listBuilds: async (ownerId, gameId) => {
+      const current = await getProject(ownerId, gameId);
+      if (!current.ok) return current;
+      const stored = await input.store.listBuilds(ownerId, gameId);
+      return ok({
+        gameId,
+        builds: stored.map(({ build }) => ({
+          buildId: build.buildId,
+          specRevision: build.specRevision,
+          attempt: build.attempt,
+          status: build.status,
+          digest: build.digest,
+          verified: build.verification.passed,
+          createdAt: build.createdAt,
+        })),
+      });
+    },
+
+    restore: async ({ ownerId, gameId, buildId, expectedRevision }) => {
+      const current = await getProject(ownerId, gameId);
+      if (!current.ok) return current;
+      if (current.value.revision !== expectedRevision) {
+        return fail('conflict', 'The project changed since the revision this restore was based on.');
+      }
+      const stored = await input.store.readBuild(ownerId, gameId, buildId);
+      if (!stored || stored.build.gameId !== gameId) {
+        return fail('not_found', 'That build does not exist for this owner.');
+      }
+      if (stored.build.status !== 'verified' || !stored.build.verification.passed) {
+        return fail('conflict', 'Only a build that passed verification can be restored.');
+      }
+      if (!stored.spec) {
+        return fail(
+          'conflict',
+          'That build predates spec snapshots, so it cannot be restored exactly; rebuild it first.',
+        );
+      }
+      for (const file of stored.files) {
+        if (digest(file.content) !== file.digest) {
+          return fail('conflict', 'A stored file no longer matches the verified build digest.');
+        }
+      }
+      const spec = stored.spec;
+      const plan = await planFor(spec, gameId);
+      const next: GameProject = {
+        ...current.value,
+        spec,
+        specRevision: current.value.specRevision + 1,
+        revision: current.value.revision + 1,
+        status: 'verified',
+        design: plan,
+        build: stored.build,
+        updatedAt: input.clock.iso(),
+      };
+      return input.store.writeProject({ ownerId, project: next, expectedRevision });
     },
 
     preview: async (ownerId, gameId) => {

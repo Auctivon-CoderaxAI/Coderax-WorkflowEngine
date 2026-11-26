@@ -73,6 +73,75 @@ test('Game Studio builds, previews, exports and verifies a playable game over HT
   }
 });
 
+test('build history lists versions and restores a verified build with its exact spec', async () => {
+  const started = await startTestApp();
+  try {
+    const created = await started.app.service.createGame(principal, {
+      name: 'Lamplighter',
+      prompt: PROMPT,
+    });
+    assert.equal(created.ok, true);
+    if (!created.ok || !created.value.spec) return;
+    const gameId = created.value.gameId;
+
+    const first = await started.app.service.buildGame(principal, gameId, {});
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+
+    // A second spec revision produces a distinct build without changing the game.
+    const afterFirst = await started.app.service.getGame(principal, gameId);
+    assert.equal(afterFirst.ok, true);
+    if (!afterFirst.ok) return;
+    const saved = await started.app.service.saveGameSpec(principal, gameId, {
+      spec: created.value.spec,
+      expectedRevision: afterFirst.value.revision,
+    });
+    assert.equal(saved.ok, true);
+    const second = await started.app.service.buildGame(principal, gameId, {});
+    assert.equal(second.ok, true);
+    if (!second.ok) return;
+    assert.notEqual(first.value.buildId, second.value.buildId);
+
+    const history = await started.app.service.listGameBuilds(principal, gameId);
+    assert.equal(history.ok, true);
+    if (!history.ok) return;
+    const listed = history.value.builds.map((build) => build.buildId);
+    assert.ok(listed.includes(first.value.buildId));
+    assert.ok(listed.includes(second.value.buildId));
+    assert.ok(history.value.builds.every((build) => build.status === 'verified' && build.verified));
+
+    const current = await started.app.service.getGame(principal, gameId);
+    assert.equal(current.ok, true);
+    if (!current.ok) return;
+    const restored = await started.app.service.restoreGameBuild(
+      principal,
+      gameId,
+      first.value.buildId,
+      { expectedRevision: current.value.revision },
+    );
+    assert.equal(restored.ok, true);
+    if (!restored.ok) return;
+    assert.equal(restored.value.build?.buildId, first.value.buildId);
+    assert.equal(restored.value.status, 'verified');
+    assert.deepEqual(restored.value.spec, created.value.spec);
+
+    const preview = await started.app.service.gamePreview(principal, gameId);
+    assert.equal(preview.ok, true);
+    if (preview.ok) assert.match(preview.value, /createOscillator/);
+
+    const stale = await started.app.service.restoreGameBuild(
+      principal,
+      gameId,
+      first.value.buildId,
+      { expectedRevision: current.value.revision },
+    );
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.code, 'conflict');
+  } finally {
+    await started.close();
+  }
+});
+
 test('the gaming agent completes a verified objective and records evidence', async () => {
   const started = await startTestApp();
   try {

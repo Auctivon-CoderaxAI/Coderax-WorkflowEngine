@@ -13,10 +13,13 @@ capabilities are recorded as partial or blocked in its own capability registry.
 
 | Repository | Refs inspected | Surfaces |
 | --- | --- | --- |
-| `Coderax` | `origin/main` (the only remote branch), full `packages/`, `api/`, `client/` trees | `packages/api/src/games/`, `packages/data-provider/src/games.ts`, `packages/data-schemas*`, `api/server/routes/games.js`, `client/src/components/Games/`, `docs/product/CAPABILITY_REGISTRY.md` |
-| `Coderax-WorkflowEngine` | `main` at the start of this work | `src/`, `packages/contracts`, `packages/sdk`, `tests/`, `docs/` |
+| `Coderax` | `origin/main` at `a5d237b0` (PR #307 merged), full `packages/`, `api/`, `client/` trees | `packages/api/src/games/` (`index.ts`, `handlers.ts`, `handlers.spec.ts`), `packages/data-provider/src/games.ts`, `packages/data-schemas*`, `docs/product/CAPABILITY_REGISTRY.md`, open PRs #308–#319 |
+| `Coderax-WorkflowEngine` | `main` at `808dfd3`; open PRs #2–#8; branches `feat/durable-artifacts`, `feat/artifact-intelligence`, `feat/durable-events*`, `feat/multimodal-*`, `feat/persistent-records` | `src/`, `packages/contracts`, `packages/sdk`, `tests/`, `docs/`, `.github/workflows/verify.yml` |
 
-No feature branch existed on `origin` in either repository. A read-only clone of
+At the initial audit there was no game executor in either repository and no
+feature branch on `origin` in Coderax. By delivery, WorkflowEngine has several
+open, unmerged capability branches (listed above); none of them is on `main`, and
+this change does not merge or silently reimplement them. A read-only clone of
 Coderax was used for the audit and is not part of this repository's deliverable.
 
 ## Findings in Coderax
@@ -51,6 +54,61 @@ reference. The only runtime binding is a read-only CyVox status proxy
 browser interface. Nothing in either repository independently verifies a
 workload or browser interface, so no external game environment can be claimed.
 
+## Re-audit at delivery (2026-11-26)
+
+`Coderax@a5d237b0` still contains only the studio's first milestone:
+
+- `packages/api/src/games/handlers.ts` exposes capabilities, list, create, get,
+  update, delete and spec-save operations.
+- `packages/data-provider/src/games.ts` still hard-codes
+  `executor: 'unavailable'` with `builds`, `playtests` and `agentSessions` all
+  `false`.
+- There is no build, preview, export, playtest, session, observation or control
+  handler anywhere in `packages/api/src/games/`.
+- The only two client-facing capabilities remain CX-32 (Partial) and CX-33
+  (Blocked).
+
+`Coderax-WorkflowEngine@main` still has no game code; the game modules are added
+by this branch. The following capability work is **open and unmerged**:
+
+| PR / branch | What it owns | State |
+| --- | --- | --- |
+| #2 `feat/intelligence-core` | native tool loop, zero-cost router, MCP, retrieval, approvals | Open, not merged |
+| #3 `feat/native-reasoning-planner` | dependency-aware reasoning, verification, escalation | Open, not merged |
+| #4 `feat/zero-cost-model-router` | provider-independent zero-cost router | Open, not merged |
+| #5 `feat/execution-supervisor` | central supervisor and verified termination | Open, not merged |
+| #7 `freebuff/5e5de30e8775a8e9225cc0e2` | versioned 1.1.0 API, SDK artifact and HTTP contract harness | Open, not merged |
+| #8 `feat/native-team-orchestration` | bounded Native team orchestration | Open, not merged |
+| `feat/durable-artifacts` | durable artifact service, repository, blobs, quota | Branch, no PR |
+| `feat/artifact-intelligence` | artifact intelligence integration | Branch, no PR |
+| `feat/durable-events*`, `feat/persistent-records`, `feat/multimodal-*` | durable events, records, multimodal work | Branches, no PR |
+
+### Consolidation decision
+
+Merging those branches into this feature branch would duplicate other owners'
+work, couple a game change to several unreviewed architectures, and create a
+conflict-heavy mega-PR. This change therefore does **not** claim they are
+integrated. It binds to what `main` actually contains and leaves narrow,
+replaceable seams:
+
+- **Generation and design** use `src/models/catalog.ts` on `main`: one verified
+  zero-cost route, `allowPaid: false`, and the daily budget ledger. A model may
+  add narrative only; source, levels and rules are deterministic and verified.
+- **Execution** uses the existing durable Work task, lease, fencing, heartbeat,
+  event and cancellation path as `kind: 'game'`. It does not add an execution
+  authority or a fourth agent identity.
+- **Artifacts** are owner- and mode-scoped through `src/artifacts/store.ts` and
+  the game project store. That is a temporary adapter, not the authoritative
+  durable artifact service: replacing it is a mechanical change to the
+  `ArtifactStore`/`GameStore` ports once `feat/durable-artifacts` lands. Claiming
+  the replacement today would be false because the service is not on `main`.
+- **Capabilities** are reported by `GET /v1/games/capabilities` with
+  machine-readable status and evidence. There is no capability registry on
+  `main` to register into; the report is the seam PR #2 must consume rather than
+  a competing registry.
+- **Shared API/SDK** is the only contract path: routes are declared once, the SDK
+  parses the same schemas, and OpenAPI is generated and drift-checked.
+
 ## Findings in WorkflowEngine
 
 At the start of the work there was no game contract, no game route, no game
@@ -70,6 +128,8 @@ there.
 | Fixed canvas template gallery | Not migrated | The requirement is generated code, not a choice of three canvases |
 | Any build/playtest/agent executor | Did not exist to migrate | The previous capability gates were false; inventing an executor would be fabrication |
 | Browser-hosted game session | Not migrated (blocked) | No verified cloud browser or provider interface exists at zero cost |
+| Fixed project/spec revision history | Extended into build history plus exact-spec restore | A revision number alone cannot restore the bytes that were verified |
+| Genre vocabulary | Extended with explicit `arcade` and `adventure` | Coderax had no such genres; both now generate and verify like every other genre |
 
 ## What was newly built, and where
 
@@ -84,6 +144,13 @@ there.
   task; it is not a fourth agent identity.
 - `src/games/session.ts`: session creation writes a scoped `command.execute`
   grant for `game-session:<id>` before the task is enqueued.
+- `src/games/browser.ts`: a bounded DOM harness that executes the exact inline
+  preview document and its animation loop, so a non-painting preview fails the
+  build.
+- `src/games/templates.ts`: self-contained HTML entry, keyboard/mouse/touch
+  controls, procedural Web Audio cues, original SVG theme.
+- Build history and restore in `src/games/store.ts` and `src/games/studio.ts`,
+  with the exact spec snapshot stored beside every verified build.
 - `src/artifacts/store.ts`: owner- and mode-scoped artifacts for evidence frames
   and verification documents.
 - Routes, SDK methods, OpenAPI, tests and evidence in this repository.
@@ -94,6 +161,13 @@ there.
   `blocked` with the exact prerequisite: a verified zero-cost cloud browser plus
   an authorized game-provider interface. The engine will not stream an owner
   device, bypass anti-cheat, or claim a session it cannot isolate.
+- DeploymentPlatformAI could not be independently verified: its repository
+  returned `404` to an unauthenticated request, so it is either private or not
+  available at the stated path. Coderax's charter and vision name it as a
+  long-term execution platform, and its Oracle Always Free host is documented as
+  the existing API host, but neither repository exposes a verified workload
+  interface, browser interface, memory/CPU limit, network policy or termination
+  contract. No external runtime is claimed on that basis.
 - `first_person` camera and two-player specs are reported as unsupported at
   build time. They are not approximated by another camera or by a single-player
   stand-in.
@@ -104,7 +178,13 @@ there.
   measured playability, edits.
 - `tests/integration/games.test.ts` — create, build, HTML preview, export, a
   verified session, and pause/takeover/input/cancel.
-- `tests/security/games.test.ts` — owner scoping and disabled-capability
-  reporting.
+- `tests/integration/games.test.ts` — create, build, preview, export, build
+  history/restore and verified play over HTTP.
+- `tests/security/games.test.ts` — owner scoping, traversal refusal and
+  disabled-capability reporting.
 - `docs/evidence/game-studio/` — rendered frames and the full check list from
   the shipped renderer, regenerated by `npm run game:evidence`.
+- `npm run verify` at the delivery head: **125/125 tests**, OpenAPI drift clean.
+  No hosted CI run exists at the pushed head because the workflow triggers on a
+  pull request or `main` push and no PR could be opened from this environment;
+  the local gate is the executed evidence.

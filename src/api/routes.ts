@@ -255,6 +255,23 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('listGameBuilds', async (context) => {
+    const result = await service.listGameBuilds(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('restoreGameBuild', async (context) => {
+    const result = await service.restoreGameBuild(
+      context.principal,
+      context.params.gameId ?? '',
+      context.params.buildId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('iterateGame', async (context) => {
     const result = await service.iterateGame(
       context.principal,

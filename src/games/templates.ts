@@ -522,6 +522,91 @@ export const RENDER_SOURCE = `(function () {
 })();
 `;
 
+export const AUDIO_SOURCE = `(function () {
+  'use strict';
+  /* Procedural cues: no audio file, sample or third-party sound is shipped. */
+  var CUES = {
+    jump: [520, 0.06, 'square'],
+    double_jump: [640, 0.06, 'square'],
+    collect: [880, 0.07, 'triangle'],
+    hit: [130, 0.12, 'sawtooth'],
+    death: [90, 0.2, 'sawtooth'],
+    goal: [660, 0.18, 'triangle'],
+    unlock: [760, 0.12, 'triangle'],
+    shoot: [320, 0.04, 'square'],
+    dash: [240, 0.05, 'sine'],
+    push: [180, 0.05, 'sine']
+  };
+  var context = null;
+  var enabled = true;
+
+  function ensure() {
+    if (!enabled) return null;
+    if (context) return context;
+    var Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!Audio) return null;
+    try {
+      context = new Audio();
+    } catch (error) {
+      context = null;
+    }
+    return context;
+  }
+
+  function tone(frequency, duration, type) {
+    var audio = ensure();
+    if (!audio) return;
+    try {
+      if (audio.state === 'suspended') audio.resume();
+      var oscillator = audio.createOscillator();
+      var gain = audio.createGain();
+      var now = audio.currentTime;
+      oscillator.type = type || 'square';
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.07, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+      oscillator.connect(gain);
+      gain.connect(audio.destination);
+      oscillator.start(now);
+      oscillator.stop(now + duration + 0.02);
+    } catch (error) {
+      /* Audio is optional; a blocked context never interrupts play. */
+    }
+  }
+
+  function play(events) {
+    if (!enabled || !events) return;
+    for (var index = 0; index < events.length; index += 1) {
+      var cue = CUES[events[index].type];
+      if (cue) tone(cue[0], cue[1], cue[2]);
+    }
+  }
+
+  function unlock() {
+    var audio = ensure();
+    if (!audio) return;
+    try {
+      if (audio.state === 'suspended') audio.resume();
+    } catch (error) {
+      /* The browser may still refuse until the next gesture. */
+    }
+  }
+
+  function toggle() {
+    enabled = !enabled;
+    if (!enabled && context) {
+      try { context.suspend(); } catch (error) { /* already suspended */ }
+    } else {
+      unlock();
+    }
+    return enabled;
+  }
+
+  globalThis.CoderaxAudio = { play: play, toggle: toggle, unlock: unlock, enabled: function () { return enabled; } };
+})();
+`;
+
 export const MAIN_SOURCE = `(function () {
   'use strict';
   var CONFIG = globalThis.CoderaxConfig;
@@ -586,6 +671,7 @@ export const MAIN_SOURCE = `(function () {
       var guard = 0;
       while (accumulator >= CONFIG.tuning.fixedStep && guard < 8) {
         game.step(currentInput());
+        if (globalThis.CoderaxAudio) globalThis.CoderaxAudio.play(game.state.events);
         accumulator -= CONFIG.tuning.fixedStep;
         guard += 1;
       }
@@ -607,8 +693,13 @@ export const MAIN_SOURCE = `(function () {
 
   window.addEventListener('keydown', function (event) {
     keys[event.key] = true;
+    if (globalThis.CoderaxAudio) globalThis.CoderaxAudio.unlock();
     if (event.key === 'p' || event.key === 'P') paused = !paused;
     if (event.key === 'r' || event.key === 'R') load(levelIndex);
+    if (event.key === 'm' || event.key === 'M') {
+      if (globalThis.CoderaxAudio) globalThis.CoderaxAudio.toggle();
+      syncMute();
+    }
     if (event.key === ' ') event.preventDefault();
   });
   window.addEventListener('keyup', function (event) {
@@ -635,6 +726,20 @@ export const MAIN_SOURCE = `(function () {
     })(buttons[i]);
   }
 
+  var mute = document.getElementById('mute');
+  function syncMute() {
+    if (!mute) return;
+    mute.textContent =
+      globalThis.CoderaxAudio && globalThis.CoderaxAudio.enabled() ? 'sound on' : 'sound off';
+  }
+  if (mute) {
+    mute.addEventListener('click', function () {
+      if (globalThis.CoderaxAudio) globalThis.CoderaxAudio.toggle();
+      syncMute();
+    });
+  }
+  syncMute();
+
   resize();
   requestAnimationFrame(frame);
   window.__CODERAX_GAME__ = function () {
@@ -643,16 +748,43 @@ export const MAIN_SOURCE = `(function () {
 })();
 `;
 
-export function htmlSource(blueprint: GameBlueprint, spec: GameSpec): string {
+export type InlineSources = {
+  config: string;
+  levels: string;
+  game: string;
+  render: string;
+  audio: string;
+  main: string;
+};
+
+function inlineScript(code: string): string {
+  // A generated file must never be able to close its own script element.
+  return `<script>\n${code.replace(/<\/script/gi, '<\\/script')}\n</script>`;
+}
+
+/**
+ * The preview document is self-contained on purpose: the preview endpoint serves
+ * this one HTML response, so a relative `src/*.js` reference would 404 and the
+ * strict CSP would block it. Inlining keeps the verified bytes and the playable
+ * bytes identical; the same modules are still exported separately as readable
+ * source.
+ */
+export function htmlSource(
+  blueprint: GameBlueprint,
+  spec: GameSpec,
+  inline: InlineSources,
+): string {
   const palette = blueprint.palette;
   const title = escapeHtml(spec.prompt.slice(0, 90));
-  const touchControls = blueprint.controls
-    .filter((control) => ['left', 'right', 'jump', 'fire', 'up', 'down'].includes(control.action))
-    .map(
-      (control) =>
-        `<button type="button" data-action="${escapeHtml(control.action)}">${escapeHtml(control.action)}</button>`,
-    )
-    .join('\n      ');
+  const touchControls = [
+    ...blueprint.controls
+      .filter((control) => ['left', 'right', 'jump', 'fire', 'up', 'down'].includes(control.action))
+      .map(
+        (control) =>
+          `<button type="button" data-action="${escapeHtml(control.action)}">${escapeHtml(control.action)}</button>`,
+      ),
+    '<button type="button" id="mute">sound on</button>',
+  ].join('\n      ');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -688,13 +820,14 @@ export function htmlSource(blueprint: GameBlueprint, spec: GameSpec): string {
     <div id="touch">
       ${touchControls}
     </div>
-    <footer>${escapeHtml(blueprint.controls.map((control) => `${control.action}: ${control.keys}`).join('  |  '))}  |  P pause  |  R restart</footer>
+    <footer>${escapeHtml(blueprint.controls.map((control) => `${control.action}: ${control.keys}`).join('  |  '))}  |  P pause  |  R restart  |  M mute</footer>
   </main>
-  <script src="src/config.js"></script>
-  <script src="src/levels.js"></script>
-  <script src="src/game.js"></script>
-  <script src="src/render.js"></script>
-  <script src="src/main.js"></script>
+  ${inlineScript(inline.config)}
+  ${inlineScript(inline.levels)}
+  ${inlineScript(inline.game)}
+  ${inlineScript(inline.render)}
+  ${inlineScript(inline.audio)}
+  ${inlineScript(inline.main)}
 </body>
 </html>
 `;
@@ -755,12 +888,15 @@ draws that state and nothing else. The same \`src/game.js\` is executed by the
 studio's verification sandbox, so the verified build and the playable build
 cannot diverge.
 
-## Assets and licence
+## Assets, audio and licence
 
 Every sprite, tile, palette and level in this project was generated for it. No
 third-party asset, trademark, character or sound is included. The generated
-theme backdrop is \`assets/theme.svg\`. Provenance is recorded in
-\`manifest.json\`; the whole project is exportable as a ZIP archive.
+theme backdrop is \`assets/theme.svg\`; sound cues are synthesized at runtime by
+\`src/audio.js\` with the Web Audio API, and no audio file is shipped.
+\`index.html\` inlines the generated modules so the preview is one self-contained
+document; the same modules are present in \`src/\` as readable source. Provenance
+is recorded in \`manifest.json\`; the whole project is exportable as a ZIP archive.
 
 ## Verification
 

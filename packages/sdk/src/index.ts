@@ -6,6 +6,7 @@ import {
   ConversationList,
   ExecutionEvent,
   GameBuild,
+  GameBuildList,
   GameCapabilityReport,
   GameExport,
   GameIteration,
@@ -36,6 +37,7 @@ import type {
   GameSessionControlRequest,
   IterateGameRequest,
   PermissionDecisionRequest,
+  RestoreGameBuildRequest,
   SaveGameSpecRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
@@ -367,6 +369,25 @@ export class CoderaxClient {
     return this.request<GameBuild>(GameBuild, {
       method: 'POST',
       path: `/v1/games/${encodeURIComponent(gameId)}/build`,
+      body: request,
+    });
+  }
+
+  gameBuilds(gameId: string): Promise<GameBuildList> {
+    return this.request<GameBuildList>(GameBuildList, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds`,
+    });
+  }
+
+  restoreGameBuild(
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds/${encodeURIComponent(buildId)}/restore`,
       body: request,
     });
   }

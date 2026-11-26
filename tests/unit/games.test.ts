@@ -12,6 +12,9 @@ const PUZZLE =
 const STRATEGY =
   'A grid-based board strategy game about defending a seed vault through the winter.';
 const RPG = 'An isometric role playing quest about a courier hero rebuilding a mountain village.';
+const ARCADE = 'A bright top-down arcade game about clearing waves of drones for a high score.';
+const ADVENTURE =
+  'A top-down adventure about exploring a flooded dungeon to restore its three switches.';
 
 function build(prompt: string, seedOffset = 0) {
   const base = interpretPrompt(prompt);
@@ -45,6 +48,10 @@ test('a natural-language specification selects a coherent genre, camera and mech
 
   assert.equal(interpretPrompt(STRATEGY).camera, 'ui_only');
   assert.equal(interpretPrompt(RPG).camera, 'isometric');
+  assert.equal(interpretPrompt(ARCADE).genre, 'arcade');
+  assert.equal(interpretPrompt(ARCADE).camera, 'top_down');
+  assert.equal(interpretPrompt(ADVENTURE).genre, 'adventure');
+  assert.equal(interpretPrompt(ADVENTURE).camera, 'top_down');
 });
 
 test('unsupported cameras and two-player specs are refused before generation', () => {
@@ -96,6 +103,8 @@ test('every supported camera generates a playable, independently verified build'
     [PUZZLE, 'top_down'],
     [RPG, 'isometric'],
     [STRATEGY, 'ui_only'],
+    [ARCADE, 'top_down'],
+    [ADVENTURE, 'top_down'],
   ];
   for (const [prompt, camera] of prompts) {
     const { spec, generation, checks } = build(prompt);
@@ -156,6 +165,22 @@ test('a build with every mechanic verifies each shipped mechanic, not a template
     const id = mechanic === 'collectibles' ? 'scoring.collect' : `mechanics.${mechanic}`;
     assert.ok(covered.includes(id), `${mechanic} has no passing check (${id})`);
   }
+});
+
+test('the playable entry inlines every script and synthesizes its audio', () => {
+  const { generation } = build(ARCADE);
+  const html = generation.files.find((file) => file.path === 'index.html');
+  assert.ok(html);
+  const scriptTags = html.content.match(/<script(?:\s[^>]*)?>/gi) ?? [];
+  assert.equal(scriptTags.some((tag) => /\bsrc\s*=/.test(tag)), false, 'no script src');
+  assert.ok(scriptTags.length >= 6, 'every generated module is inlined');
+  assert.match(html.content, /createOscillator/);
+  assert.match(html.content, /script-src[^;]*'unsafe-inline'/);
+  assert.ok(generation.files.some((file) => file.path === 'src/audio.js'));
+  assert.match(
+    generation.files.find((file) => file.path === 'manifest.json')?.content ?? '',
+    /"audio": "procedural-webaudio"/,
+  );
 });
 
 test('the generated runtime is self-contained and has no ambient authority', () => {
