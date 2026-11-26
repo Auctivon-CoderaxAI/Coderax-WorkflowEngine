@@ -18,6 +18,7 @@ export async function ensureExecutionIndexes(collection: MongoCollectionLike): P
     { name: 'execution_phase_heartbeat' },
   );
   await collection.createIndex({ taskId: 1, startedAt: 1 }, { name: 'execution_task_started' });
+  await collection.createIndex({ phase: 1, finishedAt: 1 }, { name: 'execution_phase_finished' });
 }
 
 function toRecord(document: Record<string, unknown>): ExecutionRecord {
@@ -114,6 +115,23 @@ export function createMongoExecutionRepository(
         if (applied) retired += 1;
       }
       return retired;
+    },
+
+    prune: async (before, limit) => {
+      if (limit <= 0) return 0;
+      const expired = await collection
+        .find({ phase: 'finished', finishedAt: { $lt: before } })
+        .limit(limit)
+        .toArray();
+      const ids = expired
+        .map((document) => document.executionId)
+        .filter((id): id is string => typeof id === 'string');
+      if (ids.length === 0) return 0;
+      const result = await collection.deleteMany({
+        executionId: { $in: ids },
+        phase: 'finished',
+      });
+      return result.deletedCount ?? 0;
     },
   };
 }

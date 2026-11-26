@@ -22,6 +22,9 @@ import {
 import { createConversationRepository } from '../../src/persistence/conversations.js';
 import { createNotificationStore } from '../../src/persistence/notifications.js';
 import { createTaskRepository } from '../../src/persistence/tasks.js';
+import { createExecutionRepository } from '../../src/persistence/executions.js';
+import { createMemoryBudgetStore } from '../../src/persistence/budgets.js';
+import type { ExecutionRecord } from '../../src/execution/identity.js';
 import { createMemoryStore } from '../../src/memory/store.js';
 import { createRetentionService } from '../../src/persistence/retention.js';
 import { RetentionConfig } from '../../src/configuration/schema.js';
@@ -322,6 +325,8 @@ test('retention removes only rows older than each configured window', async () =
     permissionMs: 3_600_000,
     checkpointMs: 3_600_000,
     idempotencyMs: 3_600_000,
+    budgetReservationMs: 3_600_000,
+    executionMs: 3_600_000,
     sweepIntervalMs: 60_000,
     batchSize: 10,
   });
@@ -382,6 +387,55 @@ test('retention removes only rows older than each configured window', async () =
     expiresAt: new Date(clock.nowMs() + 60_000).toISOString(),
   });
 
+  const executions = createExecutionRepository();
+  const budget = createMemoryBudgetStore();
+  const execution = (executionId: string, finishedAt: string | null): ExecutionRecord => ({
+    executionId,
+    kind: 'work',
+    taskId: 'task_old',
+    conversationId: 'conv_old',
+    ownerId: 'owner',
+    tenantId: null,
+    agent: 'coderax',
+    mode: 'cloud',
+    generation: 1,
+    token: 'run_old',
+    workspaceRoot: '/srv/old',
+    phase: finishedAt ? 'finished' : 'starting',
+    cause: finishedAt ? 'completed' : null,
+    startedAt: '2025-12-31T00:00:00.000Z',
+    lastHeartbeatAt: finishedAt ?? '2025-12-31T00:00:00.000Z',
+    finishedAt,
+    termination: finishedAt
+      ? { status: 'verified', method: 'no-child-processes', observedAt: finishedAt }
+      : null,
+    capabilityRevokedAt: finishedAt,
+    processUseCount: 0,
+  });
+  await executions.create(execution('exec_old', '2025-12-31T00:00:00.000Z'));
+  await executions.create(execution('exec_live', null));
+
+  const reservation = {
+    ownerId: 'owner',
+    day: '2025-12-30',
+    inputTokens: 5,
+    outputTokens: 5,
+    state: 'reserved' as const,
+  };
+  const settled = await budget.reserve({
+    reservation: { ...reservation, id: 'res_old' },
+    maxRequests: 10,
+    maxTokens: 100,
+  });
+  assert.equal(settled.allowed, true);
+  await budget.settle('res_old', { inputTokens: 4, outputTokens: 4 });
+  const live = await budget.reserve({
+    reservation: { ...reservation, id: 'res_live' },
+    maxRequests: 10,
+    maxTokens: 100,
+  });
+  assert.equal(live.allowed, true);
+
   clock.advance(2 * 3_600_000);
   const retention = createRetentionService({
     clock,
@@ -391,6 +445,8 @@ test('retention removes only rows older than each configured window', async () =
     permissions,
     checkpoints,
     idempotency,
+    executions,
+    budget,
   });
   const result = await retention.run();
   assert.deepEqual(result.deleted, {
@@ -399,11 +455,19 @@ test('retention removes only rows older than each configured window', async () =
     permissions: 1,
     checkpoints: 1,
     idempotency: 1,
+    executions: 1,
+    budgetReservations: 1,
   });
   assert.equal(retention.last()?.deleted.notifications, 1);
   assert.equal((await notifications.list({ ownerId: 'owner' })).notifications.length, 0);
   assert.equal((await audit.list({ actor: 'owner' })).receipts.length, 0);
   assert.equal((await checkpoints.list({ taskId: 'task_old' })).checkpoints.length, 0);
+  // A finished attempt and a settled reservation leave after their window; a
+  // running attempt and a reserved allowance are live state and never do.
+  assert.equal(await executions.get('exec_old'), null);
+  assert.ok(await executions.get('exec_live'));
+  assert.equal(await budget.release('res_old', { dispatched: true }), false);
+  assert.equal(await budget.release('res_live', { dispatched: true }), true);
 });
 
 test('task and conversation lists are bounded, stable and owner-scoped', async () => {

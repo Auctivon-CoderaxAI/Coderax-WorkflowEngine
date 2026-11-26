@@ -79,6 +79,15 @@ export const ModelsConfig = z
     allowPaid: z.literal(false).default(false),
     dailyRequestBudget: z.number().int().min(1).max(100_000).default(1_000),
     dailyTokenBudget: z.number().int().min(1).max(100_000_000).default(2_000_000),
+    /**
+     * Tokens one admitted request holds until it settles. A zero-token
+     * reservation is not a budget: every replica would read the same remaining
+     * allowance and spend it. These values are the request's ceiling, so the
+     * daily token cap is enforced at admission rather than reported after the
+     * spend. A task that declares its own budget uses that ceiling instead.
+     */
+    reservationInputTokens: z.number().int().min(1).max(50_000_000).default(16_000),
+    reservationOutputTokens: z.number().int().min(1).max(50_000_000).default(8_000),
   })
   .strict();
 
@@ -129,6 +138,10 @@ export const RetentionConfig = z
     checkpointMs: z.number().int().min(3_600_000).max(365 * DAY).default(30 * DAY),
     /** An idempotency identity is replayable for at least this long. */
     idempotencyMs: z.number().int().min(3_600_000).max(30 * DAY).default(DAY),
+    /** Settled budget reservations are pruned a week after their day. */
+    budgetReservationMs: z.number().int().min(3_600_000).max(365 * DAY).default(7 * DAY),
+    /** Finished execution records are operational evidence and are kept longer. */
+    executionMs: z.number().int().min(3_600_000).max(2_000 * DAY).default(90 * DAY),
     sweepIntervalMs: z.number().int().min(60_000).max(DAY).default(3_600_000),
     /** Maximum rows one store removes per sweep batch. */
     batchSize: z.number().int().min(1).max(5_000).default(1_000),

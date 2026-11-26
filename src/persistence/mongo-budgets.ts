@@ -15,7 +15,8 @@ import { isDuplicateKey } from './mongo.js';
  * document even after a busy day. `reserve` inserts the reservation first and
  * then applies one conditional `$inc`; if the condition fails the row is
  * removed. A crash between the two steps leaves an unused reservation row, which
- * is harmless and is cleaned by the budget retention window.
+ * is harmless and is cleaned by the budget retention window. Settled rows are
+ * pruned a fixed window after their day, so the ledger does not grow forever.
  */
 export async function ensureBudgetIndexes(input: {
   days: MongoCollectionLike;
@@ -32,6 +33,10 @@ export async function ensureBudgetIndexes(input: {
   await input.reservations.createIndex(
     { ownerId: 1, day: 1 },
     { name: 'budget_reservation_owner_day' },
+  );
+  await input.reservations.createIndex(
+    { state: 1, day: 1 },
+    { name: 'budget_reservation_state_day' },
   );
 }
 
@@ -167,8 +172,16 @@ export function createMongoBudgetStore(input: {
       if (!updated) return false;
       const reservation = await readReservation(reservationId);
       if (!reservation) return false;
-      const actualIn = Math.max(0, usage.inputTokens ?? reservation.inputTokens);
-      const actualOut = Math.max(0, usage.outputTokens ?? reservation.outputTokens);
+      // The reservation is this request's ceiling; a settle can refund unused
+      // allowance but never charge past what the day already admitted.
+      const actualIn = Math.min(
+        reservation.inputTokens,
+        Math.max(0, usage.inputTokens ?? reservation.inputTokens),
+      );
+      const actualOut = Math.min(
+        reservation.outputTokens,
+        Math.max(0, usage.outputTokens ?? reservation.outputTokens),
+      );
       await adjust(reservation.ownerId, reservation.day, {
         inputTokens: actualIn - reservation.inputTokens,
         outputTokens: actualOut - reservation.outputTokens,
@@ -197,5 +210,22 @@ export function createMongoBudgetStore(input: {
     },
 
     snapshot,
+
+    prune: async (beforeDay, limit) => {
+      if (limit <= 0) return 0;
+      const expired = await input.reservations
+        .find({ state: 'settled', day: { $lt: beforeDay } })
+        .limit(limit)
+        .toArray();
+      const ids = expired
+        .map((document) => document.id)
+        .filter((id): id is string => typeof id === 'string');
+      if (ids.length === 0) return 0;
+      const result = await input.reservations.deleteMany({
+        id: { $in: ids },
+        state: 'settled',
+      });
+      return result.deletedCount ?? 0;
+    },
   };
 }

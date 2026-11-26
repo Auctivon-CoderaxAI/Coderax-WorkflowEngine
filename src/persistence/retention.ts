@@ -5,6 +5,8 @@ import type { NotificationStore } from './notifications.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { CheckpointStore } from './checkpoints.js';
 import type { IdempotencyStore } from './idempotency.js';
+import type { ExecutionRepository } from './executions.js';
+import type { BudgetStore } from './budgets.js';
 
 /**
  * Bounded lifecycle maintenance.
@@ -20,6 +22,8 @@ export type RetentionCounts = {
   permissions: number;
   checkpoints: number;
   idempotency: number;
+  executions: number;
+  budgetReservations: number;
 };
 
 export type RetentionResult = {
@@ -46,6 +50,8 @@ export function createRetentionService(input: {
   permissions: PermissionStore;
   checkpoints: CheckpointStore;
   idempotency: IdempotencyStore;
+  executions: ExecutionRepository;
+  budget: BudgetStore;
 }): RetentionService {
   let last: RetentionResult | null = null;
   let timer: NodeJS.Timeout | null = null;
@@ -87,6 +93,16 @@ export function createRetentionService(input: {
       idempotency: await drain(
         (cutoff, limit) => input.idempotency.prune(cutoff, limit),
         before(input.config.idempotencyMs),
+      ),
+      executions: await drain(
+        (cutoff, limit) => input.executions.prune(cutoff, limit),
+        before(input.config.executionMs),
+      ),
+      // Reservations are counted per UTC day, so the cutoff is the day the
+      // window reaches; a reservation from that day is still within its window.
+      budgetReservations: await drain(
+        (cutoff, limit) => input.budget.prune(cutoff.slice(0, 10), limit),
+        before(input.config.budgetReservationMs),
       ),
     };
     last = {

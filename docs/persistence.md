@@ -70,11 +70,20 @@ is updated by one conditional `$inc` that checks both the request cap and the
 remaining token allowance, so two replicas racing for the last slot produce one
 success and one `budget_exhausted`. Reservation ids derive from the task and
 generation (or the Chat execution id), which makes an admission retry idempotent.
-Settling adjusts token counters to actual usage; the reservation state prevents a
-second settle or release from charging twice. A provider that omits usage is
-charged the reserved amount, never zero.
+Every request reserves a non-zero token allowance: the task's declared ceiling
+when it has one, otherwise `models.reservationInputTokens` and
+`reservationOutputTokens`. A zero-token reservation would let every replica read
+the same remaining allowance and spend it; this is the shared cap, not a warning
+counter. Settling replaces the reserved allowance with actual usage but never
+charges beyond it, so the cap admitted at reserve time cannot be overrun after
+the fact. The reservation state prevents a second settle or release from charging
+twice, and a provider that omits usage is charged the reserved amount, never zero.
 
-A workspace quarantine row is written when termination could not be verified.
+A workspace quarantine row is written when a local workload's termination could
+not be verified: an abandoned adapter, an unobservable child process, a failing
+provider that was supposed to verify, or a stale retirement. A remote workload
+whose transport returned without a configured provider is reported unverified
+but does not hold the shared root, because a local hold cannot contain it.
 Its unique `root` is read by every replica before execution admission, and it
 expires by deadline rather than by the process that wrote it. This is what makes
 the hold survive a crash and a replica change; it is not a claim that live
@@ -91,8 +100,11 @@ owner's total unread count even when the page is smaller.
 ## Retention
 
 `retention` configures one window per record class: notifications (30 d), audit
-receipts (90 d), permissions (7 d), checkpoints (30 d) and idempotency records
-(24 h). The sweep runs at startup and on `sweepIntervalMs`, removes at most
+receipts (90 d), permissions (7 d), checkpoints (30 d), idempotency records
+(24 h), settled budget reservations (7 d) and finished execution records (90 d).
+A reservation is pruned by the UTC day it was taken against, so a row from the
+current day always survives; a finished attempt is pruned by `finishedAt`. The
+sweep runs at startup and on `sweepIntervalMs`, removes at most
 `batchSize` rows per pass (ten passes maximum), and is safe on every replica
 because every delete is conditioned on the row's age. Conversations, tasks and
 their messages are deliberately not on an automatic timer: they are removed only
@@ -103,7 +115,10 @@ user history.
 
 The sweep never touches tasks, conversations, messages, execution events or
 artifacts. Permissions are removed only after expiry, checkpoints only after their
-window, and an idempotency record only after its replay window. A task that is
+window, and an idempotency record only after its replay window. An execution
+record is pruned only once it is finished and its window has passed, and a budget
+row only once it is settled: a running attempt and a reserved allowance are live
+ownership and admission state, not history. A task that is
 still running, interrupted or awaiting approval therefore keeps the task row, its
 transcript, its event stream and its checkpoints regardless of age. Deleting user
 history is a separate, owner-authorized conversation deletion.

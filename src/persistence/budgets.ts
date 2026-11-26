@@ -6,9 +6,10 @@ import type { Usage } from '@coderax/contracts';
  * The day counters live in one row per owner and UTC day, and a reservation is
  * written before the provider can be called. Two replicas that both want the
  * last request slot race on one conditional update; exactly one wins. Settling
- * adjusts the token counters to the usage the provider actually reported, and a
- * duplicate settle/release is refused by the reservation state, so a retried
- * completion cannot charge twice.
+ * replaces the reserved allowance with the usage the provider actually reported
+ * but never charges beyond the reservation, so the daily cap holds even when a
+ * provider reports more than was held. A duplicate settle/release is refused by
+ * the reservation state, so a retried completion cannot charge twice.
  *
  * Reservation ids are deterministic for a task generation, which makes an
  * admission retry idempotent without keeping process-local state.
@@ -44,6 +45,12 @@ export type BudgetStore = {
   settle: (reservationId: string, usage: Usage) => Promise<boolean>;
   release: (reservationId: string, options: { dispatched: boolean }) => Promise<boolean>;
   snapshot: (ownerId: string, day: string) => Promise<BudgetSnapshot>;
+  /**
+   * Removes settled reservations whose day is older than `beforeDay`
+   * (`YYYY-MM-DD`). A reserved row is never removed: it is live authority for a
+   * request that may still settle.
+   */
+  prune: (beforeDay: string, limit: number) => Promise<number>;
 };
 
 type Day = BudgetSnapshot;
@@ -94,8 +101,16 @@ export function createMemoryBudgetStore(): BudgetStore {
       const state = dayFor(reservation.ownerId, reservation.day);
       // A provider may omit one side. Charging the reservation for the omitted
       // side is the conservative choice: it cannot refund tokens already sent.
-      const actualIn = Math.max(0, usage.inputTokens ?? reservation.inputTokens);
-      const actualOut = Math.max(0, usage.outputTokens ?? reservation.outputTokens);
+      // Neither side may exceed the reservation: that allowance is the request's
+      // ceiling, and the cap was enforced when it was taken.
+      const actualIn = Math.min(
+        reservation.inputTokens,
+        Math.max(0, usage.inputTokens ?? reservation.inputTokens),
+      );
+      const actualOut = Math.min(
+        reservation.outputTokens,
+        Math.max(0, usage.outputTokens ?? reservation.outputTokens),
+      );
       state.inputTokens = Math.max(
         0,
         state.inputTokens - reservation.inputTokens + actualIn,
@@ -125,5 +140,17 @@ export function createMemoryBudgetStore(): BudgetStore {
     },
 
     snapshot: async (ownerId, day) => ({ ...dayFor(ownerId, day) }),
+
+    prune: async (beforeDay, limit) => {
+      if (limit <= 0) return 0;
+      let removed = 0;
+      for (const [id, reservation] of reservations) {
+        if (removed >= limit) break;
+        if (reservation.state !== 'settled' || reservation.day >= beforeDay) continue;
+        reservations.delete(id);
+        removed += 1;
+      }
+      return removed;
+    },
   };
 }

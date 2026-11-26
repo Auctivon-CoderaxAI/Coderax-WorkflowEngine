@@ -279,3 +279,55 @@ test('failed transcript and notification writes do not strand a settled run', as
     await started.close();
   }
 });
+
+test('submission holds a token reservation, not just a request slot', async () => {
+  const started = await startTestApp({
+    config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        dailyRequestBudget: 1_000,
+        dailyTokenBudget: 24_000,
+        reservationInputTokens: 16_000,
+        reservationOutputTokens: 8_000,
+      },
+    },
+  });
+  try {
+    // Two replicas would each read the same remaining allowance if a request
+    // reserved zero tokens; one shared store must admit only one of them.
+    const submissions = await Promise.all([
+      started.app.service.submitWork(principal, {
+        objective: 'Token contender A',
+        mode: 'cloud',
+        requireApproval: false,
+      }),
+      started.app.service.submitWork(principal, {
+        objective: 'Token contender B',
+        mode: 'cloud',
+        requireApproval: false,
+      }),
+    ]);
+    const accepted = submissions.filter((entry) => entry.ok);
+    const refused = submissions.filter((entry) => !entry.ok);
+    assert.equal(accepted.length, 1, 'the token reservation admits one request');
+    assert.equal(refused.length, 1);
+    const lost = refused[0];
+    assert.ok(lost && !lost.ok);
+    if (!lost || lost.ok) return;
+    assert.equal(lost.code, 'budget_exhausted');
+    assert.equal(
+      lost.detail,
+      'The daily zero-cost token budget cannot cover this request.',
+    );
+
+    // Settlement refunds the unused allowance, so the day reflects actual use.
+    const budget = await waitFor(async () => {
+      const state = await started.app.service.budget(principal);
+      return state.used.usage.inputTokens === 33 ? state : null;
+    });
+    assert.equal(budget.used.requests, 1);
+    assert.deepEqual(budget.used.usage, { inputTokens: 33, outputTokens: 39 });
+  } finally {
+    await started.close();
+  }
+});

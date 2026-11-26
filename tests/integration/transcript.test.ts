@@ -125,3 +125,51 @@ test('a chat follow-up is prompted with the earlier exchange', async () => {
     await started.close();
   }
 });
+
+test('a concurrent chat turn is refused when its token allowance is taken', async () => {
+  const started = await startTestApp({
+    config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        dailyRequestBudget: 1_000,
+        dailyTokenBudget: 24_000,
+        reservationInputTokens: 16_000,
+        reservationOutputTokens: 8_000,
+      },
+    },
+  });
+  try {
+    const turns = await Promise.all([
+      started.app.service.chat(principal, {
+        message: 'Token question A',
+        mode: 'cloud',
+        agent: 'coderax',
+      }),
+      started.app.service.chat(principal, {
+        message: 'Token question B',
+        mode: 'cloud',
+        agent: 'coderax',
+      }),
+    ]);
+    const accepted = turns.filter((entry) => entry.ok);
+    const refused = turns.filter((entry) => !entry.ok);
+    assert.equal(accepted.length, 1, 'a chat turn reserves the configured allowance');
+    assert.equal(refused.length, 1);
+    const lost = refused[0];
+    assert.ok(lost && !lost.ok);
+    if (!lost || lost.ok) return;
+    assert.equal(lost.code, 'budget_exhausted');
+    assert.equal(
+      lost.detail,
+      'The daily zero-cost token budget cannot cover this request.',
+    );
+
+    const budget = await started.app.service.budget(principal);
+    assert.equal(budget.used.requests, 1);
+    // Settled to the provider's usage, so the unused allowance is back.
+    assert.ok((budget.used.usage.inputTokens ?? 0) > 0);
+    assert.ok((budget.used.usage.inputTokens ?? 0) < 16_000);
+  } finally {
+    await started.close();
+  }
+});

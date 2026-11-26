@@ -6,8 +6,9 @@ import type { BudgetStore } from '../persistence/budgets.js';
  *
  * A request reserves one request slot and a token allowance before the provider
  * is called. A skipped candidate is released; a completed call is settled with
- * its actual usage. The counters live in the persistence layer, so two replicas
- * cannot each see the same remaining allowance and both admit the last request.
+ * its actual usage, capped at the allowance it holds so the shared day cannot
+ * overrun. The counters live in the persistence layer, so two replicas cannot
+ * each see the same remaining allowance and both admit the last request.
  */
 export type BudgetReservation = {
   id: string;

@@ -288,6 +288,63 @@ test(
       assert.ok(await first.dependencies.tasks.get('task_ancient'));
       assert.ok(await second.dependencies.tasks.get(taskId));
       assert.ok(await second.dependencies.conversations.get(OWNER_ID, record.conversationId));
+
+      // Bounded retention for the durable execution and budget ledgers: the
+      // sweep on one replica removes a finished attempt and a settled
+      // reservation for both. A live attempt and a reserved allowance are never
+      // removed, because they are current ownership and admission state.
+      assert.equal(
+        await first.dependencies.executions.create({
+          ...quarantineIdentity('exec_retention'),
+          workspaceRoot: workspace.privateRoot,
+          phase: 'starting',
+          cause: null,
+          startedAt: '2016-01-01T00:00:00.000Z',
+          lastHeartbeatAt: '2016-01-01T00:00:00.000Z',
+          finishedAt: null,
+          termination: null,
+          capabilityRevokedAt: null,
+          processUseCount: 0,
+        }),
+        true,
+      );
+      await first.dependencies.executions.finish({
+        executionId: 'exec_retention',
+        cause: 'completed',
+        finishedAt: '2016-01-01T00:00:00.000Z',
+        capabilityRevokedAt: '2016-01-01T00:00:00.000Z',
+        processUseCount: 0,
+        termination: {
+          status: 'verified',
+          method: 'no-child-processes',
+          observedAt: '2016-01-01T00:00:00.000Z',
+        },
+      });
+      const oldBudget = await first.dependencies.budget.reserve({
+        ownerId: OWNER_ID,
+        at: new Date('2016-01-01T00:00:00.000Z'),
+        inputTokens: 1,
+        outputTokens: 1,
+        reservationId: 'budget_retention',
+      });
+      assert.equal(oldBudget.allowed, true);
+      assert.equal(
+        await first.dependencies.budget.settle('budget_retention', {
+          inputTokens: 1,
+          outputTokens: 1,
+        }),
+        true,
+      );
+
+      const swept = await second.dependencies.retention.run();
+      assert.equal(swept.deleted.executions, 1);
+      assert.equal(swept.deleted.budgetReservations, 1);
+      assert.equal(await first.dependencies.executions.get('exec_retention'), null);
+      assert.equal(
+        await first.dependencies.budget.release('budget_retention'),
+        false,
+        'the settled reservation is gone for every replica',
+      );
     } finally {
       await first.stop().catch(() => undefined);
       await second.stop().catch(() => undefined);

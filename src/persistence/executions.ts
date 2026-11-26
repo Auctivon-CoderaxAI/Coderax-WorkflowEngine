@@ -38,6 +38,11 @@ export type ExecutionRepository = {
    * retire it.
    */
   retireStale: (input: { before: string; at: string }) => Promise<number>;
+  /**
+   * Removes finished attempts older than `before`. An attempt that is still
+   * running is never removed: the row is the live ownership proof.
+   */
+  prune: (before: string, limit: number) => Promise<number>;
 };
 
 export function createExecutionRepository(): ExecutionRepository {
@@ -126,6 +131,19 @@ export function createExecutionRepository(): ExecutionRepository {
         if (applied) retired += 1;
       }
       return retired;
+    },
+
+    prune: async (before, limit) => {
+      if (limit <= 0) return 0;
+      let removed = 0;
+      for (const [executionId, record] of records) {
+        if (removed >= limit) break;
+        if (record.phase !== 'finished') continue;
+        if (!record.finishedAt || record.finishedAt >= before) continue;
+        records.delete(executionId);
+        removed += 1;
+      }
+      return removed;
     },
   };
 }

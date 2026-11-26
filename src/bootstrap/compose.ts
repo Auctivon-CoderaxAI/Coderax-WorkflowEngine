@@ -221,6 +221,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     permissions,
     checkpoints,
     idempotency,
+    executions: persistence.executions,
+    budget: persistence.budget,
   });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,

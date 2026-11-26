@@ -36,9 +36,11 @@ import { toTerminationRecord } from './termination.js';
  *    never writes terminal state; shutdown leaves the task for startup
  *    reconciliation; cancellation is the owner's decision.
  * 4. Termination is recorded as `verified` only from evidence. A resolved
- *    adapter promise is not evidence. When no evidence exists the workspace root
- *    is held, so a new run cannot write alongside code this process can no longer
- *    observe.
+ *    adapter promise is not evidence. When the engine had to stop waiting, or an
+ *    in-process tool may have left descendants, the workspace root is held so a
+ *    new run cannot write alongside code this process can no longer observe. A
+ *    remote workload with no isolation provider is reported unverified without
+ *    that hold: refusing a local directory cannot contain it.
  *
  * What this is not: a syscall sandbox. It bounds authority and reports honestly
  * what it cannot prove (see `isolation()` and `docs/supervisor.md`).
@@ -99,6 +101,7 @@ export type SupervisionResult =
       abandoned: boolean;
       cause: ExecutionCause;
       termination: TerminationEvidence;
+      /** True only when an unverified local workload may still be writing. */
       workspaceHeld: boolean;
       record: ExecutionRecord;
     };
@@ -201,6 +204,23 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
   }
 
   /**
+   * Unverified termination is not the same decision as holding the root.
+   *
+   * A workload that may still be running locally is contained by refusing the
+   * root. A remote workload whose transport returned without a configured
+   * isolation provider is unverifiable, but a hold on a local directory cannot
+   * contain a process the engine does not own; it would only refuse every later
+   * run. So that case is reported unverified without a hold. The doubt is local
+   * — and the root is held — when the engine stopped waiting for the adapter, an
+   * in-process tool spawned an unobservable process, or a provider that could
+   * have verified the workload failed to.
+   */
+  type TerminationDecision = {
+    evidence: TerminationEvidence;
+    hold: boolean;
+  };
+
+  /**
    * Termination is a decision, not a passthrough. The adapter's own claim is
    * accepted only when it is at least as strong as what this process observed:
    * a run that exercised a process-spawning tool can never be `verified` merely
@@ -214,37 +234,65 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
     ownershipLost: boolean;
     spawned: boolean;
     supplied?: TerminationEvidence;
-  }): Promise<TerminationEvidence> {
+  }): Promise<TerminationDecision> {
     const observedAt = deps.clock.iso();
     const workload =
       input.adapter.workload ?? (input.adapter.agent === 'coderax' ? 'in-process' : 'external');
 
     if (input.abandoned || input.ownershipLost) {
       return {
-        kind: 'unverified',
-        reason: 'adapter_abandoned',
-        observedAt,
-        detail: 'The engine stopped waiting for the adapter; it may still be executing.',
+        evidence: {
+          kind: 'unverified',
+          reason: 'adapter_abandoned',
+          observedAt,
+          detail: 'The engine stopped waiting for the adapter; it may still be executing.',
+        },
+        hold: true,
       };
     }
 
     if (input.supplied?.kind === 'verified' && !input.spawned) {
-      return input.supplied;
+      return { evidence: input.supplied, hold: false };
     }
 
-    if (workload === 'external' || input.spawned) {
-      return verifyWith(deps.isolation, {
+    if (input.spawned) {
+      const evidence = await verifyWith(deps.isolation, {
         executionId: input.executionId,
         workspaceRoot: input.workspaceRoot,
         observedAt,
       });
+      return { evidence, hold: evidence.kind === 'unverified' };
+    }
+
+    if (workload === 'external') {
+      if (deps.isolation.available) {
+        const evidence = await verifyWith(deps.isolation, {
+          executionId: input.executionId,
+          workspaceRoot: input.workspaceRoot,
+          observedAt,
+        });
+        return { evidence, hold: evidence.kind === 'unverified' };
+      }
+      return {
+        evidence: {
+          kind: 'unverified',
+          reason: 'workload_isolation_unavailable',
+          observedAt,
+          detail:
+            'The external workload returned on its own transport; without a deployment-platform provider its termination cannot be observed, and a local hold cannot contain it.',
+        },
+        hold: false,
+      };
     }
 
     return {
-      kind: 'verified',
-      method: 'no-child-processes',
-      observedAt,
-      detail: 'The tool broker observed every call and none could spawn a process.',
+      evidence: {
+        kind: 'verified',
+        method: 'no-child-processes',
+        observedAt,
+        detail: 'The tool broker observed every call and none could spawn a process.',
+      },
+      hold: false,
     };
   }
 
@@ -464,7 +512,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
 
       const uses = deps.capabilities.uses(input.identity.executionId);
       const processUseCount = uses.filter((use) => use.spawnsProcesses).length;
-      const termination = await decideTermination({
+      const decision = await decideTermination({
         executionId: input.identity.executionId,
         workspaceRoot: root,
         adapter: input.adapter,
@@ -473,6 +521,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         spawned: processUseCount > 0,
         ...(supplied ? { supplied } : {}),
       });
+      const termination = decision.evidence;
 
       const requested = entry.requested;
       const cause: ExecutionCause = ownershipLost
@@ -510,7 +559,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
       active.delete(input.identity.executionId);
       releaseReservation();
 
-      const workspaceHeld = termination.kind === 'unverified';
+      const workspaceHeld = decision.hold;
       if (workspaceHeld) {
         // Durable before the slot is released: another replica must see the hold
         // even if this process dies immediately after settling the attempt.
@@ -518,7 +567,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
           root,
           generation: input.identity.generation,
           taskId: input.identity.taskId ?? '',
-          reason: termination.reason,
+          reason: termination.kind === 'unverified' ? termination.reason : 'adapter_did_not_report',
           now: deps.clock.now().getTime(),
           executionId: input.identity.executionId,
         });
@@ -617,7 +666,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
           name: 'quarantine',
           status: 'enforced',
           detail:
-            'A workspace root whose workload could not be verified as terminated is held in the shared store and refused by every replica until it expires.',
+            'A workspace root with an unverified local workload is held in the shared store and refused by every replica until it expires.',
         },
         {
           name: 'cross-replica-containment',

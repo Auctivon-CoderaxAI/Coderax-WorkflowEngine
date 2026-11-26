@@ -36,8 +36,11 @@ observed every call and none could spawn a process. Everything else is
 `unverified` unless a configured workload-isolation provider actually observed the
 workload.
 
-`unverified` is a first-class result, not an error. The supervisor records the
-attempt as unverified and writes a quarantine row for the workspace root:
+`unverified` is a first-class result, not an error. When the doubt is local — the
+engine stopped waiting for the adapter, an in-process tool spawned a process, a
+configured provider failed to verify, or startup retired an attempt whose owner
+stopped heartbeating — the supervisor records the attempt as unverified and
+writes a quarantine row for the workspace root:
 
 - `quarantine` has a unique `root`, an `until` deadline, the execution id and the
   reason.
@@ -49,6 +52,14 @@ attempt as unverified and writes a quarantine row for the workspace root:
   stale hold.
 - Startup `retireStale` finishes attempts whose owner stopped heartbeating and
   writes the same durable hold, which makes crash recovery cross-replica.
+
+A remote workload is different. An external agent runs on its own transport; when
+that call returns, its process is not something this engine owns or can contain by
+refusing a local directory. With no isolation provider configured such an attempt
+is recorded `unverified`, but no hold is written: holding the shared root would
+refuse every later Work and Chat run for the hold window without containing
+anything. The adapter's abandonment is still local — an external run the engine
+stopped waiting for holds the root like any other.
 
 This is held in `quarantine` (Mongo) or the process-local table when
 `persistence.driver=memory`. With the memory driver it is not cross-replica, and
@@ -65,7 +76,7 @@ available from `supervisor.isolation()`:
 | process | bounded | cancellation aborts and bounds the wait; descendants are not verifiably terminated |
 | credentials | enforced | child processes receive an allow-listed environment only |
 | network | bounded | network access is opt-in and host allow-listed |
-| quarantine | enforced | unverified termination holds the root for every replica |
+| quarantine | enforced | unverified local termination holds the root for every replica |
 | cross-replica-containment | bounded | quarantine is shared; live capability revocation is process-local |
 | workload | unavailable | no deployment-platform isolation provider is configured |
 

@@ -86,3 +86,40 @@ test('a released reservation must reserve again instead of reusing its row', asy
   const other = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 0, outputTokens: 0, reservationId: 'other' });
   assert.equal(other.allowed, false, 'the re-admission consumed the only slot');
 });
+
+test('a settle refunds unused allowance but never charges beyond the reservation', async () => {
+  const ledger = createBudgetLedger({
+    store: createMemoryBudgetStore(),
+    maxRequestsPerDay: 10,
+    maxTokensPerDay: 8,
+  });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+  const reserved = await ledger.reserve({
+    ownerId: 'owner',
+    at: now,
+    inputTokens: 4,
+    outputTokens: 4,
+    reservationId: 'bounded',
+  });
+  assert.equal(reserved.allowed, true);
+  assert.equal(
+    await ledger.settle('bounded', { inputTokens: 4_000, outputTokens: 4_000 }),
+    true,
+  );
+  // The reservation is this request's ceiling. A provider that reports more
+  // cannot push the shared day past the cap that admitted the request.
+  assert.deepEqual(await ledger.snapshot('owner', now), {
+    requests: 1,
+    inputTokens: 4,
+    outputTokens: 4,
+  });
+  const over = await ledger.reserve({
+    ownerId: 'owner',
+    at: now,
+    inputTokens: 1,
+    outputTokens: 0,
+    reservationId: 'over',
+  });
+  assert.equal(over.allowed, false);
+  assert.equal(over.allowed === false && over.reason, 'tokens');
+});

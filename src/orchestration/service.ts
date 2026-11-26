@@ -606,6 +606,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   }
 
   /**
+   * A reservation is released rather than settled when this attempt writes no
+   * terminal state: the request slot stays charged because the run may have
+   * reached the provider, and its unspent token allowance returns to the day.
+   */
+  async function releaseBudget(task: TaskRecord): Promise<void> {
+    await deps.budget
+      .release(`budget_${task.taskId}_${task.generation}`, { dispatched: true })
+      .catch(() => false);
+  }
+
+  /**
    * Persists a terminal outcome only while this generation still owns the task.
    * When ownership was lost the function writes nothing at all: a superseded run
    * must never overwrite the state a newer generation owns.
@@ -617,6 +628,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     checkpoint?: TaskRecord['checkpoint'],
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
+      await releaseBudget(task);
       return;
     }
     // Barrier: everything the run published is stored before the task record
@@ -657,6 +669,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         deps.metrics.recordLeaseFailure('fencingFailed');
         await releaseLease(task, token);
       }
+      // This attempt ended without a terminal write, so nothing will settle its
+      // reservation; leaving it would hold tokens for the rest of the day.
+      await releaseBudget(task);
       return;
     }
 
@@ -960,6 +975,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (supervised.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer
       // owns the task, and the new owner is the only writer of its state.
+      await releaseBudget(started.task);
       return;
     }
     const safeText = redactContent(text);
@@ -1034,6 +1050,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
+        await releaseBudget(applied.task);
         await deps.events.hydrate(applied.task.taskId).catch(() => 0);
         publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
@@ -1189,8 +1206,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const reservation = await deps.budget.reserve({
         ownerId: principal.ownerId,
         at: deps.clock.now(),
-        inputTokens: request.budget?.maxInputTokens ?? 0,
-        outputTokens: request.budget?.maxOutputTokens ?? 0,
+        inputTokens:
+          request.budget?.maxInputTokens ?? deps.config.models.reservationInputTokens,
+        outputTokens:
+          request.budget?.maxOutputTokens ?? deps.config.models.reservationOutputTokens,
         reservationId: budgetReservationId,
       });
       if (!reservation.allowed) {
@@ -1373,6 +1392,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'superseded',
         });
       }
+      await releaseBudget(applied.task);
       await deps.events.hydrate(applied.task.taskId).catch(() => 0);
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
@@ -1425,8 +1445,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const budgetReservation = await deps.budget.reserve({
         ownerId: task.ownerId,
         at: now,
-        inputTokens: task.budget?.maxInputTokens ?? 0,
-        outputTokens: task.budget?.maxOutputTokens ?? 0,
+        inputTokens: task.budget?.maxInputTokens ?? deps.config.models.reservationInputTokens,
+        outputTokens: task.budget?.maxOutputTokens ?? deps.config.models.reservationOutputTokens,
         reservationId: budgetReservationId,
       });
       if (!budgetReservation.allowed) {
@@ -1492,8 +1512,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const budgetReservation = await deps.budget.reserve({
         ownerId: task.ownerId,
         at: now,
-        inputTokens: task.budget?.maxInputTokens ?? 0,
-        outputTokens: task.budget?.maxOutputTokens ?? 0,
+        inputTokens: task.budget?.maxInputTokens ?? deps.config.models.reservationInputTokens,
+        outputTokens: task.budget?.maxOutputTokens ?? deps.config.models.reservationOutputTokens,
         reservationId: budgetReservationId,
       });
       if (!budgetReservation.allowed) {
@@ -1535,10 +1555,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const reservation = await deps.budget.reserve({
         ownerId: principal.ownerId,
         at: deps.clock.now(),
-        // The provider path is bounded by the router; this reservation owns the
-        // shared request slot and is settled with actual usage afterwards.
-        inputTokens: 0,
-        outputTokens: 0,
+        // A chat turn has no caller-declared ceiling, so it holds the configured
+        // per-request allowance until it settles. A zero-token reservation would
+        // let every replica spend the same remaining allowance at once.
+        inputTokens: deps.config.models.reservationInputTokens,
+        outputTokens: deps.config.models.reservationOutputTokens,
         reservationId,
       });
       if (!reservation.allowed) {

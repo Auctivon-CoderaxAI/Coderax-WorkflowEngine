@@ -145,3 +145,56 @@ test('a stale attempt is retired and its workspace is quarantined durably', asyn
   const held = await quarantine.find('/srv/private', NOW.getTime());
   assert.equal(held?.reason, 'process_stopped_heartbeating');
 });
+
+test('a completed external workload does not hold the shared root without a provider', async () => {
+  const { supervisor, quarantine } = createSupervisor();
+  const run = (executionId: string) =>
+    supervisor.run({
+      identity: {
+        ...identity(executionId),
+        kind: 'chat',
+        taskId: null,
+        conversationId: 'conv_external',
+        generation: 0,
+        token: null,
+      },
+      adapter: { agent: 'opencode', workload: 'external' },
+      workspaceRoot: '/srv/cloud',
+      scopes: ['workspace.write'],
+      launch: async () => ({ outcome: { kind: 'completed' as const, summary: 'ok' } }),
+    });
+
+  const first = await run('exec_external_a');
+  assert.equal(first.admitted, true);
+  // The engine still refuses to claim what it cannot observe...
+  assert.equal(first.admitted && first.termination.kind, 'unverified');
+  // ...but a local hold cannot contain a remote process, so it does not lock
+  // the shared root every later run depends on.
+  assert.equal(first.admitted && first.workspaceHeld, false);
+  assert.equal(await quarantine.find('/srv/cloud', NOW.getTime()), null);
+
+  const second = await run('exec_external_b');
+  assert.equal(second.admitted, true, 'an unverified remote result must not lock the shared root');
+});
+
+test('an unobservable child process still holds the root without a provider', async () => {
+  const { supervisor, quarantine } = createSupervisor();
+  const result = await supervisor.run({
+    identity: identity('exec_spawned'),
+    adapter: { agent: 'coderax', workload: 'in-process' },
+    workspaceRoot: '/srv/cloud',
+    scopes: ['workspace.write', 'command.execute'],
+    launch: async (execution) => {
+      execution.guard.recordUse({
+        scope: 'command.execute',
+        resource: '/srv/cloud',
+        spawnsProcesses: true,
+      });
+      return { outcome: { kind: 'completed' as const, summary: 'done' } };
+    },
+  });
+  assert.equal(result.admitted, true);
+  assert.equal(result.admitted && result.termination.kind, 'unverified');
+  assert.equal(result.admitted && result.workspaceHeld, true);
+  assert.ok(await quarantine.find('/srv/cloud', NOW.getTime()));
+});
