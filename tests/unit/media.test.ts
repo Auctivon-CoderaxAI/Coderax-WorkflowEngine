@@ -74,6 +74,8 @@ test('a truncated or inconsistent header is invalid, not guessed', () => {
 
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x40, 0x08]);
   assert.equal(sniffImage(jpeg, LIMITS).ok, false);
+  const unterminatedJpeg = jpegBytes(4, 4).subarray(0, jpegBytes(4, 4).length - 2);
+  assert.equal(sniffImage(unterminatedJpeg, LIMITS).ok, false);
 
   const unknown = Buffer.from('not an image at all');
   const result = sniffImage(unknown, LIMITS);

@@ -33,7 +33,7 @@ descriptor.
 | Encoding | standard base64 only; whitespace, URL-safe alphabets and misplaced padding are refused |
 | Format | PNG, JPEG, WebP or single-frame GIF, identified by magic bytes |
 | Dimensions | read from the file header; `media.maxPixels` (40M by default) is enforced before any decoder sees the file |
-| Animated input | animated GIF and animated WebP are refused explicitly |
+| Animated input | animated GIF, animated WebP and animated PNG (`acTL`) are refused explicitly |
 | SVG, HTML, PDF | refused as media input; SVG and HTML can carry active content |
 | Audio, video, documents | reported unavailable, never accepted and ignored |
 | Declared type | a hint that must agree with the sniffed type (`image/jpg` normalizes to `image/jpeg`) |
@@ -41,9 +41,11 @@ descriptor.
 The engine does not decompress the image. It parses the PNG IHDR, the JPEG SOF
 segment, the GIF screen/image descriptors and the WebP chunk headers. That avoids
 a decompression bomb in this process and bounds the memory a downstream decoder
-can be asked to allocate. Format-specific parsers are bounded in segment/chunk/
-block count, and a truncated or inconsistent header is `media_invalid`, not a
-guess.
+can be asked to allocate. PNG walks a bounded chunk stream and requires image
+data and `IEND`; JPEG requires an end-of-image marker after the frame header.
+Format-specific parsers are bounded in segment/chunk/block count, and a truncated
+or inconsistent header is `media_invalid`, not a guess. This is structural
+validation, not a full decode and not a content-safety verdict.
 
 Media is stored under `(mediaId, ownerId)` and carries its data mode. A lookup
 never omits the owner; an identifier belonging to another principal is reported
@@ -69,12 +71,20 @@ report exposes `privateModeAttachments` so a client does not have to discover th
 from a failure. Enabling the switch is an explicit operator decision that accepts
 provider processing; it is not inferred from a model identifier.
 
+Even when the switch is enabled, the router must still authorize the exact
+`multimodal` operation in private mode. The provider record must declare an
+owner-managed credential, no stored retention, training prohibited and a
+declared non-global location that matches the grant. A provider that is merely
+verified free, or that is approved for `chat`, is not authorized to receive a
+private image.
+
 ## Eligibility, quota and privacy
 
-An image request sets `requireVision` and adds 1,024 estimated input tokens per
-image. The router admits only a model whose provider metadata declared image
-input, whose cost is proven zero, whose context fits the estimate, whose provider
-is healthy and whose circuit is closed. Explicitly naming a text-only model is
+An image request sets `requireVision`, authorizes the `multimodal` processing
+operation (never the caller's `chat` or `work` grant) and adds 1,024 estimated
+input tokens per image. The router admits only a model whose provider metadata
+declared image input, whose cost is proven zero, whose context fits the estimate,
+whose provider is healthy and whose circuit is closed. Explicitly naming a text-only model is
 refused with `model_missing`; it is never silently replaced by another model, and
 a refusal never becomes a paid request.
 
@@ -152,6 +162,11 @@ must render `creative` content only when `safe` is true, in a sandbox.
 - Budgets, rate limits and circuits are process-local (inherited from the router).
 - Provider data-handling terms are external; private-mode attachments default to
   off because inference is hosted.
+- Media uses its own owner/mode-scoped collection. It is not yet backed by the
+  artifact version/quota authority; that depends on the artifact-contract
+  decision recorded in [`docs/consolidation.md`](consolidation.md).
+- Durable media is tested through the repository port, not against a real
+  `mongod`; distributed durability is not claimed.
 
 ## Verification
 
@@ -162,6 +177,10 @@ npm ci && npm run verify
 `tests/unit/media.test.ts` covers header parsing, pixel ceilings, animated input,
 active formats, strict base64 and store authorization. `tests/unit/creative.test.ts`
 covers the allowlist and withholding. `tests/integration/media.test.ts` covers the
-HTTP-to-router path with a recording provider, text-only refusal, owner/mode
+HTTP-to-router path with a recording provider, text-only refusal, missing
+`multimodal` authorization, private-mode credential refusal, owner/mode
 isolation, external-agent denial, concurrent budget enforcement, creative
 settlement and MongoDB durability.
+
+See [`docs/consolidation.md`](consolidation.md) for the branch inventory, the
+artifact-contract conflict and the exact capability states.

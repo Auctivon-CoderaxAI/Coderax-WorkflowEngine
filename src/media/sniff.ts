@@ -132,6 +132,12 @@ function sniffJpeg(bytes: Buffer, maxPixels: number): SniffResult {
     offset += length;
   }
   if (width === 0 || height === 0) return invalid('The JPEG has no readable frame size.');
+  // A truncated JPEG can still carry a valid frame header. Require the
+  // end-of-image marker so a partial upload is not handed to a decoder as if it
+  // were complete; this is still structural validation, not a full decode.
+  if (bytes.indexOf(Buffer.from([0xff, 0xd9]), offset) < 0) {
+    return invalid('The JPEG is truncated: it has no end-of-image marker.');
+  }
   const bound = withinPixelBound(width, height, maxPixels);
   if (bound) return bound;
   return { ok: true, mediaType: 'image/jpeg', width, height };
