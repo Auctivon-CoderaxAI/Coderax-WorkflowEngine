@@ -118,8 +118,12 @@ components, all now incorporated and verified here:
    (index bootstrap, restart persistence, recovery, notifications), merged into
    the existing lane.
 
-No third gate branch was created. `ci/permanent-quality-gates` should be closed as
-superseded; its head remains useful evidence but must not merge as a second gate.
+No third gate branch was created. The superseded branch advanced again after this
+consolidation, from `a43acc9` to `d00156a`, adding shutdown/network/gateway changes
+and new test layers that are **not** in this branch. It must not merge as a second
+gate, and it must not be closed as superseded until those post-adoption commits are
+reconciled here or shown to be duplicates. That reconciliation is a follow-up, not
+a claim of this change.
 
 ## Dependency advisory resolution
 
@@ -149,7 +153,8 @@ Verified result at this head:
 
 ```text
 npm run verify                          exit 0
-tests 182, pass 182, fail 0, skipped 0
+tests 190, pass 190, fail 0, skipped 0
+unit audit fail-closed tests        8/8
 gate:openapi                            clean (openapi.json byte-identical)
 gate:authority                          clean
 gate:audit                              clean (critical=0 high=0 moderate=0 low=0)

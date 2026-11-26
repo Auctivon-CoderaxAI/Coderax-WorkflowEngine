@@ -47,12 +47,14 @@ function parseReport(stdout: string): AuditReport | null {
   }
 }
 
-export function checkAudit(): Report {
-  const result = spawnSync('npm', ['audit', '--json'], {
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-  });
+export type AuditRun = {
+  stdout?: string | null;
+  stderr?: string | null;
+  error?: Error;
+};
 
+/** Classifies one audit result. Exported so every fail-closed path is testable. */
+export function auditFromResult(result: AuditRun): Report {
   if (result.error) {
     return report([
       {
@@ -81,7 +83,9 @@ export function checkAudit(): Report {
     ]);
   }
 
-  if (!parsed.metadata?.vulnerabilities && !parsed.vulnerabilities) {
+  // A vulnerability map alone is not proof the scan completed; only npm's
+  // metadata block distinguishes a clean tree from a truncated report.
+  if (!parsed.metadata?.vulnerabilities) {
     return report([
       {
         rule: 'audit-no-metadata',
@@ -113,4 +117,12 @@ export function checkAudit(): Report {
     });
   }
   return report(findings, warnings);
+}
+
+export function checkAudit(): Report {
+  const result = spawnSync('npm', ['audit', '--json'], {
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return auditFromResult(result);
 }

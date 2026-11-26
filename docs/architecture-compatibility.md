@@ -52,7 +52,7 @@ removed on rebase, **S** superseded, **U** unavailable.
 
 | Area | Ref | Head | PR | Status | Gate interaction | Decision |
 | --- | --- | --- | --- | --- | --- | --- |
-| Quality gate | `ci/permanent-quality-gate` | this branch | none yet | **A** | all controls | merge first; supersedes `ci/permanent-quality-gates` (`a43acc9`) |
+| Quality gate | `ci/permanent-quality-gate` | this branch | none yet | **A** | all controls | merge first; `ci/permanent-quality-gates` advanced to `d00156a` after adoption and is not reconciled: do not close or merge it as a second gate |
 | Authoritative router | `feat/zero-cost-model-router` | `ade0a292258ae2451e0bfe5678a91989798f22b8` | #4 | **A** | supplies the one model-routing authority | merge after gate |
 | Intelligence core | `feat/intelligence-core` | `c1bcf66e2c6ddc8c71e0ce61efae3de065a2d2a5` | #2 | **D** router, **A** tools/MCP/retrieval/approvals/quota | duplicate model router + `ModelCatalog` selector; durable budget/approval need live cases | rebase on #4, delete `src/models/router.ts` and selector, keep durable budget/approvals |
 | Native reasoning planner | `feat/native-reasoning-planner` | `072c4371ed0190993468660e00fd20cf4827fccd` | #3 | **A** planner | planner cardinality; contract rebase | rebase on #4/#7; keep one planner |
@@ -61,7 +61,7 @@ removed on rebase, **S** superseded, **U** unavailable.
 | Contract v1.1 / SDK | `freebuff/5e5de30e8775a8e9225cc0e2` | `9b4cb5ce4f8688cf232d006028e5e255eda6cb1f` | #7 | **A** contract surface | SDK probes, OpenAPI, release manifests, live memory/schedule/artifact stores | land after domain owners agree on operation ownership; do not let it add competing services |
 | Older contract v1.1 | `contract/authoritative-v1.1` | `ea660285b3c0a950067aa3b57f1764ccb509af8a` | none | **S** | would be a second API surface | close after reconciling unique operations into #7 |
 | Durable scheduling | `feat/durable-scheduling` | `6e05f1b7d2d4840d656c6f29654eeb023d9ff4a9` | #9 | **D** schedule contract duplicates, **A** engine | schedule operations declared twice; one schedule store/engine | rebase on #7; #7 owns contract, #9 owns repository/engine |
-| Durable events (preferred) | `feat/durable-recovery` | `f722ba35f79f33b0afb62d71715a2586202ec296` | none | **A** event log/crash repair | event log durability, replay across restart | open PR after gate; add live replay case |
+| Durable events (preferred) | `feat/durable-recovery` | `c3e94d7e7bfb6e0f20ba3fbdb68eae991ef940b2` | #10 | **A** event log/crash repair | event log durability, replay across restart | merge after the supervisor; add live replay case |
 | Durable events (older recovery) | `feat/durable-events-recovery` | `db289d2a9f1a1648f1101666c0f15353f87b3925` | none | **S** | superseded by `durable-recovery` | reconcile any unique test, then close |
 | Durable events (sibling) | `feat/durable-events-integration` | `2554edcfd99d85ab6e330f948663490460757017` | none | **S** | 18-line service difference from the older recovery head | reconcile into `durable-recovery`, then close |
 | Durable events (stale) | `feat/durable-events` | `9b3fd7dacd4ad750989c621565c8168b1290134d` | none | **S** | behind `main`; no PR | close |
@@ -77,7 +77,7 @@ removed on rebase, **S** superseded, **U** unavailable.
 | Older security remediation | `security/remediation-808dfd3` | `74b1264c1b20df24f80e20cc6c0c7d08db02a7c5` | none | **S** | `RunSupervisor` competes with PR #5 | close; port any unique fix |
 | Operability evidence | `feat/operability-evidence` | `5d2afd10a000fe79fe7e61c9527336822492aa00` | none | **A** docs | none | merge last; contains `main` |
 | Release certification | `freebuff/4fc2df7…` | `6e70c5dc11624a732fb4ec0990eae00560973162` | none | **C** separate lane | `release-verify.yml` reuses `verify` | rerun after the merge train; not a gate replacement |
-| Cloud Browser / Computer Use | — | — | — | **U** | no published branch | not claimed |
+| Cloud Browser / Computer Use | `freebuff/221aa2c8…` | `debdec0b1347ab3fbc568169df27e3b65b8de71d` | #11 | **C** proposed control plane | fail-closed browser control plane; not in this gate or on `main` | merge after #5/#7; do not claim browser availability until its live path is verified |
 
 ## Contract-surface check
 
