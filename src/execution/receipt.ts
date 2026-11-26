@@ -1,5 +1,5 @@
-import type { ExecutionReceipt, TaskState, Usage } from '@coderax/contracts';
-import type { TaskRecord } from '../domain.js';
+import type { TaskState, Usage } from '@coderax/contracts';
+import type { ExecutionReceipt, TaskRecord } from '../domain.js';
 
 /**
  * Receipt construction is a pure function of engine-owned facts: the task

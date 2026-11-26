@@ -38,7 +38,7 @@ are clients of the same versioned API.
 | Coderax Native agent: dependency-aware DAG plan, native/JSON tool actions, verification, bounded recovery | Implemented | `src/agents/native` |
 | Provider-independent zero-cost router with ranked modes + bounded fallback | Implemented | `src/models/router.ts`, `src/models/routed.ts` |
 | Built-in tools behind call-bound, single-use exact-resource approvals; SSRF, shell and symlink hardening | Implemented | `src/tools`, `src/security`, `tests/unit` |
-| Durable approval suspension and resume, durable plan/execution ledger and terminal execution receipts | Implemented | `src/agents/native/agent.ts`, `src/execution/receipt.ts`, `tests/integration/intelligence.test.ts` |
+| Durable approval suspension and resume, durable plan/execution ledger and internal persisted terminal receipts | Implemented | `src/agents/native/agent.ts`, `src/execution/receipt.ts`, `tests/integration/intelligence.test.ts` |
 | MCP tools over HTTP and stdio, destination policy and approved plugin servers | Implemented; scripted-server verified | `src/mcp/client.ts`, `src/plugins/manifest.ts` |
 | Retrieval with evidence-gated semantic embeddings or honest lexical fallback | Implemented | `src/knowledge/store.ts` |
 | OpenCode HTTP/SSE transport | Implemented; not live-verified | `src/agents/adapters/opencode.ts` |

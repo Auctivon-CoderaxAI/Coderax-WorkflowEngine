@@ -56,7 +56,7 @@ Status vocabulary:
 | 40 | Approval records bound to an exact resource | approvals store | call-bound single-use approval + durable `awaiting_approval` suspend/resume | Strengthened |
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
-| 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` + terminal `ExecutionReceipt` on task status | Strengthened |
+| 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` + internal persisted terminal `ExecutionReceipt` | Strengthened |
 | 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
 | 45 | Cloud browser orchestration | none | attachable through a configured browser/computer-use MCP server with `browser.use`; no live server verified | Simplified |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |

@@ -344,7 +344,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           }
         : {}),
       ...(task.usage ? { usage: task.usage } : {}),
-      ...(task.receipt ? { receipt: task.receipt } : {}),
       ...(task.failure
         ? {
             failure: {

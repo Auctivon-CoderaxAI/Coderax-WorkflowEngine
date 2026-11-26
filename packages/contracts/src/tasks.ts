@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { Budget } from './models.js';
-import { ExecutionReceipt } from './receipts.js';
 import {
   AgentId,
   ConversationId,
@@ -91,8 +90,6 @@ export const TaskStatus = z
       .strict()
       .optional(),
     usage: Usage.optional(),
-    /** Engine ledger of steps and dispatched calls; never model narrative. */
-    receipt: ExecutionReceipt.optional(),
     failure: z
       .object({ code: z.string().min(1).max(60), detail: z.string().max(1000).optional() })
       .strict()

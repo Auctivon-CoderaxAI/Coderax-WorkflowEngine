@@ -3,7 +3,6 @@ import type {
   Budget,
   DataMode,
   EngineId,
-  ExecutionReceipt,
   IsoDateTime,
   ModelRef,
   TaskState,
@@ -71,6 +70,28 @@ export type TaskCheckpoint = {
     observations: Record<string, string[]>;
     executed: TaskExecutedAction[];
   };
+};
+
+/**
+ * Internal terminal evidence. It is persisted with the task but is not part of
+ * the public contract until the unified API surface adopts it.
+ */
+export type ExecutionReceipt = {
+  receiptId: string;
+  taskId: string;
+  generation: number;
+  agent: AgentId;
+  engine: EngineId;
+  mode: DataMode;
+  model?: ModelRef;
+  state: 'completed' | 'failed' | 'cancelled';
+  startedAt: IsoDateTime;
+  finishedAt: IsoDateTime;
+  usage?: Usage;
+  requests?: number;
+  steps: Array<{ id: string; title: string; state: TaskState }>;
+  toolCalls: Array<{ callId: string; tool: string; ok: boolean; digest: string }>;
+  planDigest: string;
 };
 
 export type TaskResult = {
