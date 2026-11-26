@@ -24,7 +24,7 @@ metadata of its own and no capability list.
 | Ref | Commit |
 | --- | --- |
 | `main` (base) | `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd` |
-| `feat/durable-artifacts` (branch base) | `fd5edef2a2cfc83850fa43b19a813676c352bb92` |
+| `feat/durable-artifacts` (branch base) | `bf2e9b292257cae1247bd1df8f26630c2691205a` |
 | `feat/artifact-intelligence` (recovery baseline) | `c9bac16b0bd78252d39282853bd9ef842b8f228c` |
 | `feat/multimodal-creative-intelligence` (not merged) | `c0cfa993ef2d890b7abf4e2d33506c9f34214c85` |
 | `feat/native-reasoning-planner` (PR #3) | `90b87db7832cd948e801e01c3cf9ce97409bb068` |
@@ -32,8 +32,11 @@ metadata of its own and no capability list.
 | `feat/zero-cost-model-router` (PR #4) | `b6e002bc11c4a402c04d652681f75744cf428d65` |
 | `feat/execution-supervisor` (PR #5) | `13d4b4f7796f819e4e58bd18006efc4970929e6e` |
 
-The integration branch is stacked on `feat/durable-artifacts` at `fd5edef`,
-because that branch owns persistence. It does not merge PRs #2–#5: each of those
+The integration branch is stacked on `feat/durable-artifacts` at `bf2e9b2`,
+because that branch owns persistence. It was first built on `fd5edef` and
+rebased after the durable owner added validated tree paths and the `software`,
+`dataset` and `other` kinds; those primitives are now used directly instead of
+the manifest-only workaround described below. It does not merge PRs #2–#5: each of those
 changes the planner, router, permissions or supervisor this branch consumes
 through an existing port rather than duplicating. Merging them is an owner
 decision and is listed as outstanding.
@@ -50,13 +53,16 @@ decision and is listed as outstanding.
    through `ArtifactService`, and a deliverable is reported as created only
    after the service returned descriptors. Staging is removed in a `finally`,
    and a startup sweep removes directories a crashed process left behind.
-3. **Software source trees.** The durable store accepts flat file names only. A
-   generated project is therefore stored as its individual source artifacts plus
-   one `<name>.project.json` artifact (`ProjectManifest`, version 1) listing each
-   validated relative path, its SHA-256, its byte count and the artifact that
-   holds its bytes. Paths are contract-validated (relative, no parent segment, no
-   absolute path), flattened into unique artifact names, and duplicate normalized
-   names are refused before a single upload happens.
+3. **Software source trees.** The durable store models the tree itself:
+   `ArtifactDescriptor.relativePath` is a validated, metadata-only path whose
+   basename must equal `filename`, and nothing is ever opened from it. Each
+   generated source file is stored with `kind: 'software'` and its real path, so
+   a project keeps its structure without an archive and without weakening the
+   flat-name protections. A `<name>.project.json` artifact (`ProjectManifest`,
+   version 1) remains as the index a client reads for the entry point and the
+   per-file digests. Duplicate normalized tree paths are refused before a single
+   upload happens; identical basenames in different directories are legitimate
+   because the path, not the name, identifies the file.
 4. **Cross-device editing.** `DocumentRequest.base` is
    `{ artifactId, mode, expectedVersion? }`. The engine downloads that version
    from the durable service into staging, parses it as a
@@ -109,9 +115,9 @@ artifact that can be revised by id (`document.json` or `project.json`);
 At the branch head, `npm run verify`:
 
 - `tsc -b` across contracts, SDK and engine;
-- `node --test "dist/tests/**/*.test.js"` — 163 tests, 157 pass, 0 fail,
-  6 skipped (the skips are the pre-existing real-Mongo lanes that require a
-  reachable database);
+- `node --test "dist/tests/**/*.test.js"` — 174 tests, 164 pass, 0 fail,
+  10 skipped (the skips are the real-Mongo lanes that require a reachable
+  database);
 - `openapi.json` matches the published contracts.
 
 The generation suite reads files back instead of trusting the writer: DOCX parts

@@ -173,6 +173,19 @@ test('a dataset and a software project are stored as descriptors, not paths', as
     });
     assert.ok(software.source, 'a project manifest artifact is reported');
     assert.equal(software.source?.format, 'project.json');
+    const treeFiles = software.artifacts.filter(
+      (artifact) => artifact.relativePath !== undefined,
+    );
+    assert.ok(treeFiles.length > 0, 'each source file carries its validated tree path');
+    for (const file of treeFiles) {
+      assert.equal(
+        file.relativePath?.split('/').pop(),
+        file.filename,
+        'the store requires the basename to equal the file name',
+      );
+      assert.ok(!file.relativePath?.startsWith('/'));
+      assert.ok(!file.relativePath?.split('/').includes('..'));
+    }
     const manifest = await api.downloadArtifact(software.source!.artifactId, { mode: 'cloud' });
     const parsed = JSON.parse(Buffer.from(manifest.contentBase64, 'base64').toString()) as {
       version: number;
