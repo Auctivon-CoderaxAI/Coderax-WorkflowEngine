@@ -93,7 +93,7 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
           description: tool.description,
           tool: tool.name,
           binding: createHash('sha256').update(JSON.stringify([tool.name, request.context.mode, parsed.data])).digest('hex'),
-          consume: tool.approval === 'always',
+          consume: true,
         });
         if (decision.decision === 'pending') {
           return {
@@ -123,7 +123,9 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
         guard.recordUse({ scope, resource, spawnsProcesses: tool.spawnsProcesses === true });
       }
     }
-
+    if (request.context.signal.aborted) {
+      return { result: failure('cancelled', 'The run was cancelled.'), approval };
+    }
     try {
       const result = await tool.run(parsed.data, request.context);
       return { result, approval };

@@ -248,6 +248,18 @@ export function createOpenAiEmbeddingProvider(input: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): EmbeddingProvider {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(input.baseURL);
+  } catch {
+    throw new Error('Invalid embedding endpoint.');
+  }
+  const loopback = endpoint.hostname === 'localhost' || endpoint.hostname === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(endpoint.hostname);
+  if (endpoint.protocol !== 'https:' && !(loopback && endpoint.protocol === 'http:')) {
+    throw new Error('Remote embedding endpoints require HTTPS.');
+  }
+  endpoint.pathname = endpoint.pathname.replace(/\/+$/, '') + '/embeddings';
   const fetchImpl = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? 20_000;
   return {
@@ -257,7 +269,7 @@ export function createOpenAiEmbeddingProvider(input: {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetchImpl(`${input.baseURL.replace(/\/+$/, '')}/embeddings`, {
+        const response = await fetchImpl(endpoint.href, {
           method: 'POST',
           redirect: 'error',
           headers: {

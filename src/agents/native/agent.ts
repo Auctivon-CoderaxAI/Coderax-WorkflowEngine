@@ -165,6 +165,8 @@ export function createNativeAgent(input: {
 
       const completed = new Set(context.completedSteps ?? []);
       const sections: string[] = context.priorText ? [context.priorText] : [];
+      const outputs = [...(context.priorOutputs ?? (context.priorText
+        ? [{ stepId: [...completed].join(', '), text: context.priorText }] : []))];
       // Resume replaces the visible turn with the durable checkpoint before it
       // streams new work, so earlier text is not duplicated in the transcript.
       if (context.priorText) report({ type: 'text.replace', text: context.priorText });
@@ -200,10 +202,11 @@ export function createNativeAgent(input: {
         if (completed.has(step.id)) continue;
 
         report({ type: 'step.started', stepId: step.id, title: step.title });
-        const observations: string[] = [];
+        const saved = pending?.stepId === step.id ? pending : null;
+        const observations = [...(saved?.observations ?? [])];
         let stepText = '';
-        let invalidAnswers = 0;
-        let actions = 0;
+        let invalidAnswers = saved?.invalidAnswers ?? 0;
+        let actions = saved?.priorActions ?? 0;
 
         while (stepText.length === 0 && actions < MAX_TOOL_CALLS_PER_STEP) {
           if (request.signal.aborted) return cancelled();
@@ -219,6 +222,7 @@ export function createNativeAgent(input: {
                 steps,
                 step,
                 completed: [...completed],
+                outputs,
                 history,
                 observations,
                 memory: memoryLines,
@@ -325,6 +329,7 @@ export function createNativeAgent(input: {
 
           if (outcome.approval === 'pending') {
             if (context.savePendingAction && !(await context.savePendingAction({
+              observations, priorActions: actions - 1, invalidAnswers,
               stepId: step.id, json: JSON.stringify({ tool: action.tool, input: action.input }),
             }))) return cancelled();
             report({
@@ -370,8 +375,9 @@ export function createNativeAgent(input: {
         }
 
         sections.push(stepText);
+        outputs.push({ stepId: step.id, text: stepText });
         report({ type: 'text.delta', text: stepText });
-        report({ type: 'step.completed', stepId: step.id, title: step.title });
+        report({ type: 'step.completed', stepId: step.id, title: step.title, output: stepText });
         completed.add(step.id);
       }
 
