@@ -6,7 +6,8 @@ execution and inference seams — `feat/durable-events-integration` and
 is `security/remediation`.
 
 `feat/intelligence-core` and `feat/native-reasoning-planner` were inspected and
-**not merged**. Intelligence Core adds a second model router (`src/models/router.ts`
+**not merged** at the time (PR #5 has since reconciled them; see the
+coordination section). Intelligence Core adds a second model router (`src/models/router.ts`
 with the same exported names as the verified router), a tool loop and a different
 gateway contract; landing both routers would leave two authorities for one
 decision, which `AGENTS.md` forbids. Its findings are recorded at the end as
@@ -284,6 +285,39 @@ npm run verify
 
 Baseline evidence: the worktree at `808dfd3` printed the six `true` results above
 before the fix; the same behaviours are asserted and green at this head.
+
+## Coordination with concurrent work (2026-11-26)
+
+The two active pull requests advanced past the tips merged here while this branch
+was being verified. They now carry overlapping fixes, so this branch must not
+merge ahead of them and is not a competing authority.
+
+| Active branch | Head | Overlap with this branch |
+| --- | --- | --- |
+| `feat/zero-cost-model-router` (PR #4) | `1cd780d` | `src/models/policy.ts` adds a required per-operation data-processing policy. It is **stronger** than the hosting check in finding 3: private mode denies every hosted provider unless an exact owner grant with location, retention and training terms exists. It also hardens budget accounting and provider boundaries, and adds `tests/unit/policy.test.ts` and `tests/security/isolation.test.ts`. |
+| `feat/execution-supervisor` (PR #5) | `13d4b4f` | Its own `src/security/endpoint.ts` (`credentialEndpoint`), persisted action-bound approvals, external-agent history isolation, tool-approval consumption, supervisor admission and workspace admission. This overlaps findings 2, 4, 5, 9 and 11, and adds a second endpoint helper at the same path as this branch's. |
+| `feat/intelligence-core` (PR #2), `feat/native-reasoning-planner` (PR #3) | | PR #5 reconciled them (`e02c217`); its head is the current integration point for that work. |
+
+What this means for a rebase:
+
+- Where the active PRs implement a stronger rule, theirs wins. The
+  policy registry (PR #4) replaces the hosting check; the supervisor's
+  atomic admission replaces the mode-root directory handing; PR #5's
+  `credentialEndpoint` must be the single endpoint helper, extended with the
+  embedded-credential, query and fragment rejection (and applied to config
+  `baseURL` fields) rather than kept as a second function.
+- Genuine deltas that survive a rebase: the conversation owner/mode/kind
+  identity check (finding 1), the per-conversation workspace directory consumed
+  by the supervisor's quarantine (finding 6), the pre-validation JSON body bound
+  and the zod analysis (finding 12), and the baseline reproduction in this
+  document with its regression suite.
+- The branches are mergeable individually against `main` but not verified
+  against each other; PR #4 rewrites `src/models/router.ts` while PR #5 also
+  touches it. The merge order is the owner's decision, and this branch should be
+  rebased after both rather than merged first.
+- No duplicate pull request was opened for this work; PR #4 and PR #5 already
+  own most of these fixes, and `AGENTS.md` forbids duplicate PRs. The pushed
+  branch is the evidence and the rebase base, not a merge candidate on its own.
 
 ## Limitations
 
