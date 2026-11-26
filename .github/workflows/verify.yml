@@ -20,6 +20,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # A permanent, real MongoDB lane. The artifact durability test refuses to
+    # skip when CODERAX_REQUIRE_MONGODB=1, so a missing or unreachable service
+    # fails the required check instead of reporting a green skip. This is a
+    # service container on the existing runner: no managed database is added.
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - "27017:27017"
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +48,10 @@ jobs:
       - name: Build (TypeScript project references)
         run: npm run build
 
-      - name: Tests (unit, contract, integration, security, e2e)
+      - name: Tests (unit, contract, integration, security, e2e, real MongoDB)
+        env:
+          CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
+          CODERAX_REQUIRE_MONGODB: '1'
         run: node --test "dist/tests/**/*.test.js"
 
       - name: Contract drift gate
