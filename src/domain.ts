@@ -57,6 +57,12 @@ export type TaskCheckpoint = {
   /** Partial assistant text already emitted, replayed on resume. */
   text: string;
   /**
+   * Output of the completed steps, kept across a resume so a run that had
+   * already done the work does not repeat it to rebuild its own summary. It is
+   * never streamed to a client, so clearing `text` does not lose the work.
+   */
+  resumeText?: string;
+  /**
    * The full plan is written before the first step. A resume must finish the
    * work it promised, not only the part whose steps already started.
    */

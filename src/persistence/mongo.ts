@@ -43,12 +43,17 @@ export type MongoCollectionLike = {
     },
     options: { returnDocument: 'after'; includeResultMetadata: false },
   ) => Promise<Record<string, unknown> | null>;
+  /**
+   * `$max` is used by the event log's per-task watermark: it advances a value
+   * only forward, so a delayed replica cannot lower a durable sequence.
+   */
   updateOne: (
     filter: MongoFilter,
     update: {
       $set?: Record<string, unknown>;
       $setOnInsert?: Record<string, unknown>;
       $inc?: Record<string, number>;
+      $max?: Record<string, number>;
     },
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;

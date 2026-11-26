@@ -65,6 +65,7 @@ export function createHttpServer(input: {
           method: request.method ?? 'GET',
           path: request.url ?? '/',
           authorization: request.headers.authorization,
+          headers: request.headers as Record<string, string | undefined>,
           bodyText,
           accept: request.headers.accept,
         });
@@ -81,6 +82,13 @@ export function createHttpServer(input: {
         });
         for await (const event of result.events) {
           if (response.destroyed || response.writableEnded) break;
+          // The SSE id carries the per-task sequence, so a browser reconnect sends
+          // Last-Event-ID and resumes after the last frame it actually rendered.
+          const seq =
+            typeof event === 'object' && event !== null
+              ? (event as { seq?: unknown }).seq
+              : undefined;
+          if (typeof seq === 'number') response.write(`id: ${seq}\n`);
           response.write(`data: ${JSON.stringify(event)}\n\n`);
         }
         response.end();

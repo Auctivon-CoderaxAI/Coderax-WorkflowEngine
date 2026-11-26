@@ -34,6 +34,7 @@ import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { EngineRunArbiter } from '../execution/arbiter.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
@@ -592,7 +593,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
     iso: clock.iso,
+    // The log shares the task record's durability tier, so a settlement cannot
+    // announce a terminal event into a stream that a restart will not have.
+    log: persistence.events,
   });
+  const arbiter = new EngineRunArbiter();
   const runner = createTaskRunner({
     lease,
     clock,
@@ -641,8 +646,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
           status: 'ok' as const,
           detail:
             persistence.driver === 'mongo'
-              ? `Tasks, conversations, memory and leases are stored in MongoDB (${config.persistence.database}).`
-              : 'Tasks, conversations, memory and leases are process-local; a restart loses them.',
+              ? `Tasks, conversations, memory, events and leases are stored in MongoDB (${config.persistence.database}).`
+              : 'Tasks, conversations, memory, events and leases are process-local; a restart loses them.',
         }),
       },
       {
@@ -721,6 +726,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     events,
     runner,
     scheduler,
+    arbiter,
     health,
     tools,
     knowledge,

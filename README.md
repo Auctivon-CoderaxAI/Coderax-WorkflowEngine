@@ -61,7 +61,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # unit, contract, integration, security, e2e
+npm test                          # unit, contract, integration, security, e2e (the live MongoDB tier runs in CI)
 npm run openapi:check             # fails if the published contract drifted
 ```
 

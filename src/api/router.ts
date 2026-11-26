@@ -8,6 +8,8 @@ export type RequestContext = {
   principal: Principal;
   params: Record<string, string>;
   query: Record<string, unknown>;
+  /** Lower-cased request headers; a stream reads `last-event-id` from here. */
+  headers: Record<string, string | undefined>;
   body: unknown;
   requestId: string;
   /** The client's Accept header, so a route can negotiate SSE against JSON. */
@@ -26,6 +28,7 @@ export type RawRequest = {
   method: string;
   path: string;
   authorization: string | undefined;
+  headers?: Record<string, string | undefined>;
   bodyText: string;
   accept?: string | undefined;
 };
@@ -177,12 +180,13 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = (match.groups ?? {}) as Record<string, string>;
+        let params = (match.groups ?? {}) as Record<string, string>;
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
+          params = parsed.data as Record<string, string>;
         }
         let parsedQuery: Record<string, unknown> = query;
         if (route.spec.query) {
@@ -191,7 +195,8 @@ export function createRouter(input: {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
           // Hand the handler the coerced values, not the raw URL strings: a
-          // `z.coerce.number()` field must arrive as a number.
+          // `z.coerce.number()` field must arrive as a number, and discarding
+          // that coercion made every event stream start at zero.
           parsedQuery = parsed.data as Record<string, unknown>;
         }
 
@@ -225,6 +230,7 @@ export function createRouter(input: {
             principal: principal ?? { ownerId: input.auth.ownerId, isOwner: true },
             params,
             query: parsedQuery,
+            headers: raw.headers ?? {},
             body,
             requestId,
             accept: raw.accept ?? '',

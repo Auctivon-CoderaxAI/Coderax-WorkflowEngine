@@ -35,7 +35,7 @@ Status vocabulary:
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/log.ts` + `src/persistence/mongo-events.ts`: durable per-task stream, sequence and generation fencing, hydration, bounded retention | Preserved (fake-verified; no live DB) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
@@ -70,9 +70,9 @@ Status vocabulary:
 | Status | Count |
 | --- | --- |
 | Preserved | 23 |
-| Strengthened | 13 |
-| Simplified | 5 |
-| Missing | 7 |
+| Strengthened | 11 |
+| Simplified | 6 |
+| Missing | 6 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 0 |
 
@@ -83,14 +83,13 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27, 28, 31, 34, 36, 40, 44, 46 and
+capability Coderax has today. Until rows 18, 27, 28, 31, 34, 36, 40, 44, 46 and
 47 are closed, migrating a client would remove functionality, which the brief
 forbids.
 
 Dependency order for closing them:
 
-1. Persistent execution events and replay across restart (row 22), then fenced
-   conversation writes (row 18).
+1. Fenced conversation writes (row 18).
 2. Real OpenCode transport and protocol (rows 27–28), then FreeBuff (31). The
    provider-independent model router (rows 29–30) is implemented in `src/models`.
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
@@ -103,10 +102,14 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the head of `feat/durable-recovery`: 134 passed, 0 failed,
+  1 skipped (the opt-in live-MongoDB check), OpenAPI drift clean. See
+  [`durable-recovery.md`](durable-recovery.md) for the per-defect evidence.
 - Durable stores are verified against a semantics-faithful collection fake that
-  enforces unique indexes and cursor semantics. **No live MongoDB has been
-  contacted**; "durable" here means the adapter and wiring are proven, not that a
-  real server has stored a row.
-- No hosted CI run exists: the GitHub Actions job is blocked by account billing.
-  The local run above is the only executed evidence.
+  enforces unique indexes and cursor semantics, and the recovery tests restart a
+  whole application over the same fake database. **No live MongoDB has been
+  contacted**; "durable" here means the adapter, the wiring and the restart path
+  are proven, not that a real server has stored a row. The live-MongoDB test is
+  skipped unless `CODERAX_MONGODB_URI` names an authorized database.
+- Hosted CI is reported at the exact pushed head in the pull request; a local run
+  is the only evidence until that run exists.

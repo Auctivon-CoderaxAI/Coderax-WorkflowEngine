@@ -213,8 +213,15 @@ async function* chatFrames<T extends { text: string }>(reply: T): AsyncIterable<
   });
 
   registry.register('streamTaskEvents', async (context) => {
-    const after = context.query.after;
-    const cursor = typeof after === 'number' ? after : 0;
+    const queryCursor = typeof context.query.after === 'number' ? context.query.after : 0;
+    // A reconnecting EventSource cannot set a query string; it sends the last
+    // sequence it received. The larger cursor wins, so a stale header can never
+    // rewind a client that already asked for a later position.
+    const headerCursor = Number.parseInt(context.headers['last-event-id'] ?? '', 10);
+    const cursor = Math.max(
+      queryCursor,
+      Number.isFinite(headerCursor) && headerCursor > 0 ? headerCursor : 0,
+    );
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'sse', status: 200, events: toEventStream(result.value) };

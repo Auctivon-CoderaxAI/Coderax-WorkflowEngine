@@ -199,7 +199,15 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
-    reissue: async ({ taskId, token, now, leaseExpiresAt, expected, cancelSuspended }): Promise<FencedWriteResult> => {
+    reissue: async ({
+      taskId,
+      token,
+      now,
+      leaseExpiresAt,
+      expected,
+      cancelSuspended,
+      keepCompletedSteps = true,
+    }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
       const task = toTask(current);
@@ -208,6 +216,8 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
           (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
+      const checkpoint = task.checkpoint ?? { completedSteps: [], text: '' };
+      const resumeText = keepCompletedSteps ? (checkpoint.resumeText ?? checkpoint.text) : '';
       // Generation and state are part of the filter: two replicas resuming the
       // same task cannot both issue a new generation.
       const updated = await collection.findOneAndUpdate(
@@ -216,8 +226,18 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
           $set: {
             state: cancelSuspended ? 'cancelled' : 'queued',
             generation: task.generation + 1,
+            // An approval decision keeps the suspended checkpoint as it stands;
+            // a resume continues the plan, while a retry replays all of it.
             checkpoint: expected?.state === 'awaiting_approval'
-              ? task.checkpoint : { ...task.checkpoint, text: '' },
+              ? task.checkpoint
+              : keepCompletedSteps
+                ? {
+                    ...task.checkpoint,
+                    completedSteps: [...checkpoint.completedSteps],
+                    text: '',
+                    ...(resumeText ? { resumeText } : {}),
+                  }
+                : { completedSteps: [], text: '' },
             runToken: token,
             updatedAt: now,
             leaseExpiresAt,
@@ -242,6 +262,15 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
 
     listUnsettled: async () => {
       const documents = await collection.find({ state: { $nin: TERMINAL } }).toArray();
+      return documents.map(toTask);
+    },
+
+    listSettled: async (limit) => {
+      const documents = await collection
+        .find({ state: { $in: TERMINAL } })
+        .sort({ updatedAt: -1 })
+        .limit(Math.max(1, Math.floor(limit)))
+        .toArray();
       return documents.map(toTask);
     },
 

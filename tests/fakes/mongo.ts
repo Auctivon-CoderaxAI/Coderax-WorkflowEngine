@@ -7,6 +7,21 @@ type Index = {
   options?: { unique?: boolean; name?: string };
 };
 
+function comparable(value: unknown): number | string | null {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number' || typeof value === 'string') return value;
+  return null;
+}
+
+function compare(value: unknown, bound: unknown): number | null {
+  const left = comparable(value);
+  const right = comparable(bound);
+  if (left === null || right === null) return null;
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  if (typeof left === 'string' && typeof right === 'string') return left < right ? -1 : left > right ? 1 : 0;
+  return null;
+}
+
 function matches(document: Document, filter: MongoFilter): boolean {
   return Object.entries(filter).every(([field, condition]) => {
     const value = document[field];
@@ -17,20 +32,20 @@ function matches(document: Document, filter: MongoFilter): boolean {
         if (typeof value !== 'number' || !(value < bound)) return false;
       }
       if ('$lte' in operators) {
-        const bound = operators.$lte as Date | number;
-        if (bound instanceof Date) {
-          if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
-        } else if (typeof value !== 'number' || !(value <= bound)) {
-          return false;
-        }
+        const order = compare(value, operators.$lte);
+        if (order === null || order > 0) return false;
+      }
+      if ('$lt' in operators) {
+        const order = compare(value, operators.$lt);
+        if (order === null || order >= 0) return false;
+      }
+      if ('$gte' in operators) {
+        const order = compare(value, operators.$gte);
+        if (order === null || order < 0) return false;
       }
       if ('$gt' in operators) {
-        const bound = operators.$gt as Date | number;
-        if (bound instanceof Date) {
-          if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
-        } else if (typeof value !== 'number' || !(value > bound)) {
-          return false;
-        }
+        const order = compare(value, operators.$gt);
+        if (order === null || order <= 0) return false;
       }
       if ('$ne' in operators && value === operators.$ne) return false;
       if ('$in' in operators) {
@@ -45,6 +60,21 @@ function matches(document: Document, filter: MongoFilter): boolean {
     }
     return value === condition;
   });
+}
+
+function applyUpdate(document: Document, update: Record<string, unknown>): Document {
+  const next: Document = { ...document, ...(update.$set as Document | undefined) };
+  for (const [field, amount] of Object.entries((update.$inc ?? {}) as Record<string, number>)) {
+    next[field] = Number(next[field] ?? 0) + amount;
+  }
+  const maximum = update.$max as Record<string, number> | undefined;
+  if (maximum) {
+    for (const [field, bound] of Object.entries(maximum)) {
+      const current = next[field];
+      if (typeof current !== 'number' || current < bound) next[field] = bound;
+    }
+  }
+  return next;
 }
 
 function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
@@ -134,20 +164,13 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      const next = { ...documents[index], ...update.$set };
-      for (const [field, amount] of Object.entries(update.$inc ?? {})) {
-        next[field] = Number(next[field] ?? 0) + amount;
-      }
-      documents[index] = next;
-      return { ...next };
+      documents[index] = applyUpdate(documents[index] as Document, update);
+      return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);
       if (index !== -1) {
-        const next = { ...documents[index], ...update.$set };
-        for (const [field, amount] of Object.entries(update.$inc ?? {})) {
-          next[field] = Number(next[field] ?? 0) + amount;
-        }
+        const next = applyUpdate(documents[index] as Document, update);
         assertUnique(next, index);
         documents[index] = next;
         return { matchedCount: 1, upsertedCount: 0 };
@@ -162,10 +185,10 @@ export function createFakeCollection(): FakeCollection {
           ([, condition]) => condition === null || typeof condition !== 'object',
         ),
       );
-      const candidate: Document = { ...equality, ...(update.$setOnInsert ?? {}), ...update.$set };
-      for (const [field, amount] of Object.entries(update.$inc ?? {})) {
-        candidate[field] = Number(candidate[field] ?? 0) + amount;
-      }
+      const candidate = applyUpdate(
+        { ...equality, ...(update.$setOnInsert ?? {}) } as Document,
+        update,
+      );
       assertUnique(candidate, -1);
       documents.push(candidate);
       return { matchedCount: 0, upsertedCount: 1 };
