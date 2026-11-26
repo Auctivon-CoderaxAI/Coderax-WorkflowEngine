@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   analyze:
+    # Private repositories require GitHub Code Security to run CodeQL.
+    if: github.event.repository.private == false
     name: Analyze JavaScript/TypeScript
     runs-on: ubuntu-latest
     timeout-minutes: 30
