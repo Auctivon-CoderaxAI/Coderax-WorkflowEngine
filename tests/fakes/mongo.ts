@@ -58,7 +58,10 @@ export function createFakeCollection(): FakeCollection {
       const index = firstIndex(filter);
       return index === -1 ? null : { ...documents[index] };
     },
-    findOneAndUpdate: async (filter, update, _options) => {
+    findOneAndUpdate: async (filter, update, options) => {
+      if (options?.includeResultMetadata !== false || options.returnDocument !== 'after') {
+        throw new Error('Expected the updated document without driver metadata.');
+      }
       const index = firstIndex(filter);
       if (index === -1) return null;
       documents[index] = { ...documents[index], ...update.$set };

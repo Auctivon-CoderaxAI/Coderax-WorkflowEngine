@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { composeApplication, StartupError } from '../../src/bootstrap/compose.js';
 import type { EngineConfig } from '../../src/configuration/schema.js';
-import { MongoUnavailableError } from '../../src/persistence/mongo-connect.js';
+import { createMongoConnector, MongoUnavailableError } from '../../src/persistence/mongo-connect.js';
 import { createFakeCollection } from '../fakes/mongo.js';
 import {
   baseConfig,
@@ -51,6 +51,9 @@ test('selecting mongo puts the composed lease store on the collection', async ()
       persistence: { workRuns: collection },
     });
     assert.deepEqual(app.persistence, { driver: 'mongo' });
+    const probe = (await app.service.health()).checks.find(check => check.name === 'persistence');
+    assert.equal(probe?.status, 'ok');
+    assert.match(probe?.detail ?? '', /Task records are process-local.*until it expires/);
     // Startup bootstrapped the indexes, so the table is usable and not assumed.
     assert.ok(
       collection.indexes.some(
@@ -203,4 +206,41 @@ test('an unknown persistence driver is refused by configuration', () => {
   } finally {
     workspace.cleanup();
   }
+});
+
+test('the Mongo connector requires TLS for remote or discoverable connections', async () => {
+  const seen: Array<boolean | undefined> = [];
+  const result = createFakeCollection();
+  let settings: {
+    tls?: boolean;
+    srvHost?: string;
+    hosts: Array<{ host: string }>;
+  } = { hosts: [{ host: 'db.example.test' }] };
+  const connect = createMongoConnector(async () => ({
+    MongoClient: class {
+      readonly options;
+      constructor(_uri: string, options?: Record<string, unknown>) {
+        this.options = { ...settings, directConnection: options?.directConnection === true };
+      }
+      async connect() {
+        seen.push(this.options.directConnection);
+      }
+      db() {
+        return { command: async () => undefined, collection: () => result };
+      }
+      async close() {}
+    },
+  }));
+  const target = { uri: 'fixture', database: 'engine', collection: 'leases' };
+
+  await assert.rejects(connect(target), /Remote MongoDB connections require TLS/);
+  settings = { hosts: [], srvHost: 'db.example.test', tls: false };
+  await assert.rejects(connect(target), /Remote MongoDB connections require TLS/);
+  assert.deepEqual(seen, []);
+
+  settings = { hosts: [{ host: 'db.example.test' }], tls: true };
+  await (await connect(target)).close();
+  settings = { hosts: [{ host: 'localhost' }] };
+  await (await connect(target)).close();
+  assert.deepEqual(seen, [false, true]);
 });

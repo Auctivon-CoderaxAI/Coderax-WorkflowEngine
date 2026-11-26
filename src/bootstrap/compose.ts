@@ -333,7 +333,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
           status: 'ok' as const,
           detail:
             persistence.driver === 'mongo'
-              ? `Work run leases are stored in MongoDB (${config.persistence.database}.${config.persistence.workRunsCollection}).`
+              ? 'Work run leases are stored in MongoDB. Task records are process-local and lost on restart; ' +
+                'a surviving lease can block new work for its conversation until it expires.'
               : 'Work run leases are process-local; a restart loses them.',
         }),
       },

@@ -1,5 +1,6 @@
 import type { AgentHistoryTurn } from '../agents/types.js';
 import type { StoredMessage } from '../domain.js';
+import { redactContent } from '../observability/redact.js';
 
 export type TranscriptLimits = {
   /** Turns kept; the newest are kept first. */
@@ -35,6 +36,8 @@ function clip(text: string, limit: number): string {
  *   is a partial answer that would read as a completed one.
  * - the current turn is dropped, because it is passed separately as the
  *   objective; repeating it would ask the model to answer it twice.
+ * - credentials are scrubbed after comparing the original objective and before
+ *   clipping, which could otherwise cut a credential before it can be matched.
  * - the oldest turns are dropped before the newest, and a single oversized
  *   newest turn is clipped rather than dropped, so the most recent exchange
  *   always survives the budget.
@@ -64,8 +67,9 @@ export function buildTranscript(
   const kept: AgentHistoryTurn[] = [];
   let used = 0;
   for (let index = recent.length - 1; index >= 0; index -= 1) {
-    const turn = recent[index];
-    if (!turn) continue;
+    const original = recent[index];
+    if (!original) continue;
+    const turn = { role: original.role, text: redactContent(original.text) };
     const remaining = maxChars - used;
     if (remaining <= 0) break;
     if (turn.text.length > remaining) {

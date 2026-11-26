@@ -78,3 +78,14 @@ test('a conversation with nothing but the current turn yields no history', () =>
   const messages = [message({ role: 'user', text: 'First objective' })];
   assert.deepEqual(buildTranscript({ messages, currentText: 'First objective' }), []);
 });
+
+test('history is scrubbed before clipping, after comparing the original objective', () => {
+  const messages = [
+    message({ role: 'assistant', text: 'sk-' + 'a'.repeat(32) }),
+    message({ role: 'user', text: 'password=sample' }),
+  ];
+  assert.deepEqual(
+    buildTranscript({ messages, currentText: 'password=sample', maxChars: 8 }),
+    [{ role: 'assistant', text: '[redact…' }],
+  );
+});
