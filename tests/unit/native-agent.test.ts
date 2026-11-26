@@ -149,6 +149,40 @@ test('a call with an unknown effect is never replayed when approved', async () =
   assert.match(result.ok ? result.summary : '', /effect is unknown/);
 });
 
+test('an approved replay records its result before clearing its pending action', async () => {
+  const writes: string[] = [];
+  const action = { tool: 'echo', input: { text: 'x' } };
+  const digest = createHash('sha256').update(JSON.stringify([action.tool, action.input])).digest('hex').slice(0, 32);
+  const agent = createNativeAgent({
+    enabled: true,
+    gateway: gatewayOf(() => ({ text: '{"final":"done"}' })),
+  });
+  const result = await agent.run(request({
+    context: {
+      plannedSteps: [{ id: 'step-1', title: 'One', dependsOn: [] }],
+      executionState: { observations: {}, executed: [{
+        stepId: 'step-1', digest, tool: 'echo', callId: 'call-old',
+        state: 'awaiting_approval', ok: false, output: '',
+      }] },
+      pendingAction: { stepId: 'step-1', json: JSON.stringify(action), callId: 'call-old' },
+      tools: { runtime: runtime(() => writes.push('tool')), gate: { ensure: async () => ({ decision: 'granted' }) } },
+      saveExecutionState: async (state) => {
+        const entry = state.executed[0];
+        if (entry?.state === 'completed') assert.equal(entry.output, 'echo:x');
+        writes.push(entry?.state ?? 'missing');
+        return true;
+      },
+      savePendingAction: async (pending) => {
+        assert.equal(pending, null);
+        writes.push('clear');
+        return false; // Simulate loss of the fence during the final clear.
+      },
+    },
+  }), () => undefined);
+  assert.equal(result.ok === false && result.code, 'cancelled');
+  assert.deepEqual(writes, ['dispatched', 'tool', 'completed', 'clear']);
+});
+
 test('a native tool call and a JSON action use the same validated execution path', async () => {
   let runs = 0;
   const requests: GatewayRequest[] = [];
