@@ -19,16 +19,16 @@
   implementation remains; the other branch is a moving owner artifact and must
   be closed by its owner, not force-overwritten here.
 
-Verified integration head: `a8956cb68b0e6583b8398169fb5404ff61420405`. The
-final remote SHA is the branch head at publication and is restated in the
-handoff. A later docs-only record commit changes the review head but not the
-code tree; hosted exact-head CI is a separate evidence item (see below).
+Verified integration head: `d6f877c283b64e8a243b862789b3b6e4e5fb6082`. The
+hosted `verify` job passed at this exact SHA. The final remote SHA is the
+branch head at publication and is restated in the handoff; a later docs-only
+record commit changes the review head but not the code tree.
 
 ## Exact-tree acceptance
 
 Command: `npm run verify` with `CODERAX_TEST_MONGO_URI` pointing at a disposable
 real MongoDB started for this run. Exit status: 0 at integration head
-`a8956cb68b0e6583b8398169fb5404ff61420405`.
+`d6f877c283b64e8a243b862789b3b6e4e5fb6082`.
 
 | Gate | Tests | Result |
 | --- | --- | --- |
@@ -143,11 +143,12 @@ no shell-execution path is admitted outside the declared tool seam.
   are disabled.
 - There is no pull request for this branch. The workflow now also triggers on
   pushes to `ci/**` so the gate branch can obtain exact-head hosted evidence;
-  this does not create a second pipeline. A run was created at
-  `a8956cb68b0e6583b8398169fb5404ff61420405` (run `45888302201`, context `verify`)
-  but remained queued with zero executed steps because the account's
-  hosted-Actions capacity is unavailable. The exact-head hosted check therefore
-  exists but has not passed; it is not reported as green.
+  this does not create a second pipeline. Run `45888499599` completed with
+  conclusion `success` at exact head
+  `d6f877c283b64e8a243b862789b3b6e4e5fb6082`; its single `verify` job executed
+  all 18 required steps, including `Real MongoDB integration tests (required,
+  no fake)`, and every step passed. The earlier run `45888302201` was cancelled
+  when the branch advanced; it is not counted as evidence.
 - Creating the PR requires an authorized GitHub write integration. This host has
   no `gh` binary and no GitHub write credential; the unauthenticated API cannot
   create a pull request. No PR, self-approval or independent review was
