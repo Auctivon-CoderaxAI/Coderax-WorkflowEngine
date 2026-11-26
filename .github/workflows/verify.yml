@@ -1,0 +1,50 @@
+name: verify
+
+# The acceptance gate. A passing run at an earlier head is not a pass, so the
+# workflow runs on every push to a pull request and on main after merge.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (TypeScript project references)
+        run: npm run build
+
+      - name: Tests (unit, contract, integration, security, e2e)
+        run: node --test "dist/tests/**/*.test.js"
+
+      - name: Contract drift gate
+        run: npm run openapi:check
+
+      - name: Reject committed secrets and local paths
+        run: |
+          if grep -rIl --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git \
+            -E '(CODERAX_OWNER_TOKEN|CODERAX_INFERENCE_KEY)=[A-Za-z0-9]' .; then
+            echo "A secret value appears to be committed."
+            exit 1
+          fi
+          echo "No committed secret values found."

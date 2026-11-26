@@ -1,0 +1,54 @@
+import type {
+  AgentId,
+  AgentIsolation,
+  Availability,
+  Budget,
+  DataMode,
+  EngineCapabilities,
+  EngineFailureCode,
+  EngineId,
+  ModelRef,
+  Usage,
+} from '@coderax/contracts';
+
+/**
+ * Agents execute an objective inside one confined workspace and report what they
+ * did. They never own persistence, streaming or authorization: the engine passes
+ * an owner-scoped request and a report sink. That is what keeps Native and the
+ * external agents interchangeable without giving any of them a second task
+ * runner or a path to private data.
+ */
+
+export type AgentRunRequest = {
+  ownerId: string;
+  tenantId: string | null;
+  conversationId: string;
+  objective: string;
+  /** Already resolved by the model catalogue; never a raw provider override. */
+  model: ModelRef;
+  mode: DataMode;
+  workspaceRoot: string;
+  maxSteps: number;
+  budget: Budget | null;
+  signal: AbortSignal;
+};
+
+export type AgentReportEvent =
+  | { type: 'step.started'; stepId: string; title: string }
+  | { type: 'step.completed'; stepId: string; title: string }
+  | { type: 'text.delta'; text: string };
+
+export type AgentReport = (event: AgentReportEvent) => void;
+
+export type AgentRunOutcome =
+  | { ok: true; summary: string; usage?: Usage }
+  | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
+
+export type AgentAdapter = {
+  agent: AgentId;
+  engine: EngineId;
+  capabilities: EngineCapabilities;
+  isolation: AgentIsolation;
+  availability: () => Availability;
+  run: (request: AgentRunRequest, report: AgentReport) => Promise<AgentRunOutcome>;
+};
