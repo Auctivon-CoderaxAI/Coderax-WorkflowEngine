@@ -32,6 +32,12 @@ Where the hosting plan cannot enforce a rule, record the equivalent review step 
 the pull request instead of claiming platform enforcement. Do not relax the
 remaining rules to compensate.
 
+**Verified on 2026-11-26:** this repository's plan returns HTTP 403 for both
+`branches/main/protection` and `rulesets` ("Upgrade to GitHub Pro or make this
+repository public"). Protection is therefore not enforceable here; the equivalent
+process policy, the zero-cost reviewer options and the CI options are recorded in
+[`docs/governance.md`](../docs/governance.md).
+
 ## Releases
 
 Releases are cut from a reviewed `main` commit by pushing a `v<semver>` tag. A
