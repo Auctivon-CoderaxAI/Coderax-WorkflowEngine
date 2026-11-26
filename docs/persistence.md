@@ -57,7 +57,10 @@ owner's total unread count even when the page is smaller.
 receipts (90 d), permissions (7 d), checkpoints (30 d) and idempotency records
 (24 h). The sweep runs at startup and on `sweepIntervalMs`, removes at most
 `batchSize` rows per pass (ten passes maximum), and is safe on every replica
-because every delete is conditioned on the row's age.
+because every delete is conditioned on the row's age. Conversations, tasks and
+their messages are deliberately not on an automatic timer: they are removed only
+by the owner-authorized conversation deletion, so a retention bug cannot erase
+user history.
 
 ## Restart evidence
 
