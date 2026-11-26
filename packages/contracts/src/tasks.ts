@@ -1,7 +1,9 @@
 import { z } from 'zod';
+import { ProblemCode } from './errors.js';
 import { Budget } from './models.js';
 import {
   AgentId,
+  CHAT_STREAM_VERSION,
   ConversationId,
   DataMode,
   IsoDateTime,
@@ -22,6 +24,8 @@ export const ChatRequest = z
   })
   .strict();
 export type ChatRequest = z.infer<typeof ChatRequest>;
+/** What a caller may send: defaulted fields are optional on the wire. */
+export type ChatRequestInput = z.input<typeof ChatRequest>;
 
 export const ChatReply = z
   .object({
@@ -35,6 +39,65 @@ export const ChatReply = z
   })
   .strict();
 export type ChatReply = z.infer<typeof ChatReply>;
+
+/**
+ * Chat streaming is a separate, versioned frame type rather than an execution
+ * event. A chat turn is not durable and has no task id, so reusing the event
+ * envelope would teach a client to expect `taskId` and `seq` on something that
+ * can never have them. `chat.completed` and `chat.failed` are terminal.
+ */
+export const ChatStreamEvent = z.discriminatedUnion('type', [
+  z
+    .object({
+      v: z.literal(CHAT_STREAM_VERSION),
+      type: z.literal('chat.started'),
+      conversationId: ConversationId,
+      messageId: MessageId,
+      agent: AgentId,
+      model: ModelRef,
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(CHAT_STREAM_VERSION),
+      type: z.literal('chat.delta'),
+      text: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(CHAT_STREAM_VERSION),
+      type: z.literal('chat.replace'),
+      text: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(CHAT_STREAM_VERSION),
+      type: z.literal('chat.completed'),
+      reply: ChatReply,
+    })
+    .strict(),
+  z
+    .object({
+      v: z.literal(CHAT_STREAM_VERSION),
+      type: z.literal('chat.failed'),
+      code: ProblemCode,
+      detail: z.string().max(1000).optional(),
+      retryable: z.boolean(),
+    })
+    .strict(),
+]);
+export type ChatStreamEvent = z.infer<typeof ChatStreamEvent>;
+
+export const TERMINAL_CHAT_EVENT_TYPES: readonly ChatStreamEvent['type'][] = [
+  'chat.completed',
+  'chat.failed',
+];
+
+export function isTerminalChatEvent(type: ChatStreamEvent['type']): boolean {
+  return TERMINAL_CHAT_EVENT_TYPES.includes(type);
+}
 
 /**
  * Submitting Work creates a durable task. The response is returned as soon as
@@ -52,9 +115,22 @@ export const WorkSubmitRequest = z
     budget: Budget.optional(),
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
+    /**
+     * A caller-chosen key that makes a submission safe to retry. A repeat with
+     * the same key returns the original task instead of starting a second run
+     * for a request whose response the caller never saw.
+     */
+    idempotencyKey: z
+      .string()
+      .trim()
+      .min(8)
+      .max(120)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'idempotencyKey must be url-safe')
+      .optional(),
   })
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
+export type WorkSubmitRequestInput = z.input<typeof WorkSubmitRequest>;
 
 export const Artifact = z
   .object({
@@ -98,6 +174,36 @@ export const TaskStatus = z
   .strict();
 export type TaskStatus = z.infer<typeof TaskStatus>;
 
+/** A list row. Deliberately smaller than TaskStatus: a list is not a detail view. */
+export const TaskSummary = z
+  .object({
+    taskId: TaskId,
+    conversationId: ConversationId,
+    title: z.string().max(300),
+    state: TaskState,
+    agent: AgentId,
+    mode: DataMode,
+    model: ModelRef.optional(),
+    generation: z.number().int().nonnegative(),
+    createdAt: IsoDateTime,
+    updatedAt: IsoDateTime,
+    cancelRequested: z.boolean(),
+  })
+  .strict();
+export type TaskSummary = z.infer<typeof TaskSummary>;
+
+export const TaskListQuery = z
+  .object({
+    state: TaskState.optional(),
+    conversationId: ConversationId.optional(),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+  })
+  .strict();
+export type TaskListQuery = z.infer<typeof TaskListQuery>;
+
+export const TaskList = z.object({ tasks: z.array(TaskSummary) }).strict();
+export type TaskList = z.infer<typeof TaskList>;
+
 export const TaskAccepted = z
   .object({
     taskId: TaskId,
@@ -105,6 +211,8 @@ export const TaskAccepted = z
     state: TaskState,
     generation: z.number().int().nonnegative(),
     eventsPath: z.string().min(1).max(300),
+    /** True when an idempotency key replayed an earlier accepted submission. */
+    replayed: z.boolean().optional(),
   })
   .strict();
 export type TaskAccepted = z.infer<typeof TaskAccepted>;
@@ -188,3 +296,51 @@ export type MemoryEntry = z.infer<typeof MemoryEntry>;
 
 export const MemoryList = z.object({ entries: z.array(MemoryEntry) }).strict();
 export type MemoryList = z.infer<typeof MemoryList>;
+
+export const MemoryWriteRequest = z
+  .object({
+    key: z.string().trim().min(1).max(200),
+    value: z.string().max(20_000),
+    mode: DataMode.default('private'),
+  })
+  .strict();
+export type MemoryWriteRequest = z.infer<typeof MemoryWriteRequest>;
+export type MemoryWriteRequestInput = z.input<typeof MemoryWriteRequest>;
+
+export const MemoryDeleteRequest = z
+  .object({
+    key: z.string().trim().min(1).max(200),
+    mode: DataMode.default('private'),
+  })
+  .strict();
+export type MemoryDeleteRequest = z.infer<typeof MemoryDeleteRequest>;
+export type MemoryDeleteRequestInput = z.input<typeof MemoryDeleteRequest>;
+
+export const MemorySearchQuery = z
+  .object({
+    q: z.string().trim().min(1).max(200),
+    mode: z.enum(['private', 'cloud']).optional(),
+    limit: z.coerce.number().int().min(1).max(50).optional(),
+  })
+  .strict();
+export type MemorySearchQuery = z.infer<typeof MemorySearchQuery>;
+
+export const MemoryMatch = z
+  .object({
+    key: z.string().min(1).max(200),
+    value: z.string().max(20_000),
+    mode: DataMode,
+    updatedAt: IsoDateTime,
+    /** Number of query terms found, then a bounded length tie-break. */
+    score: z.number().nonnegative(),
+  })
+  .strict();
+export type MemoryMatch = z.infer<typeof MemoryMatch>;
+
+export const MemorySearchResult = z
+  .object({
+    query: z.string().min(1).max(200),
+    matches: z.array(MemoryMatch),
+  })
+  .strict();
+export type MemorySearchResult = z.infer<typeof MemorySearchResult>;

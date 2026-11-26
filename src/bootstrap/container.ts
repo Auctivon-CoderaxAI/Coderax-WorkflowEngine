@@ -8,6 +8,9 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { IdempotencyStore } from '../persistence/idempotency.js';
+import type { ArtifactStore } from '../artifacts/store.js';
+import type { ScheduleStore } from '../scheduling/store.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -40,6 +43,9 @@ export type InfrastructureDependencies = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifacts: ArtifactStore;
+  schedules: ScheduleStore;
+  idempotency: IdempotencyStore;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -61,6 +67,9 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'memory',
   'permissions',
   'notifications',
+  'artifacts',
+  'schedules',
+  'idempotency',
   'audit',
   'events',
   'runner',

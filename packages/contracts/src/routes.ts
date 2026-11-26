@@ -1,25 +1,45 @@
-import type { z } from 'zod';
+import { z } from 'zod';
+import {
+  ArtifactContent,
+  ArtifactCreateRequest,
+  ArtifactList,
+  ArtifactRecord,
+} from './artifacts.js';
 import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
+import { CapabilityHandshake, HandshakeQuery, RouteMethodSchema } from './handshake.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
 import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
+import { ConversationId, ArtifactId, ScheduleId, TaskId } from './primitives.js';
+import {
+  Schedule,
+  ScheduleControlRequest,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleList,
+  ScheduleRemoval,
+} from './schedules.js';
 import {
   CancelRequest,
   ChatReply,
   ChatRequest,
   Conversation,
   ConversationList,
+  MemoryDeleteRequest,
   MemoryList,
+  MemorySearchQuery,
+  MemorySearchResult,
+  MemoryWriteRequest,
   ResumeRequest,
   RetryRequest,
   TaskAccepted,
   TaskControlResult,
+  TaskList,
+  TaskListQuery,
   TaskStatus,
   WorkSubmitRequest,
 } from './tasks.js';
-import { z as zod } from 'zod';
-import { ConversationId, TaskId } from './primitives.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -28,9 +48,14 @@ import { ConversationId, TaskId } from './primitives.js';
  * asserts the registered table and this catalogue are the same set. The OpenAPI
  * document is generated from this list, so documentation, server validation and
  * the SDK cannot drift apart.
+ *
+ * An operation is published only when a handler is registered for it: the
+ * composition root refuses to start when the catalogue advertises an operation
+ * nothing implements, and the handshake reports the registry rather than this
+ * list.
  */
 
-export type RouteMethod = 'GET' | 'POST';
+export type RouteMethod = z.infer<typeof RouteMethodSchema>;
 
 export type RouteAuth = 'owner' | 'public';
 
@@ -46,12 +71,19 @@ export type RouteSpec = {
   body?: z.ZodTypeAny;
   /** The success response; every operation can also answer with a Problem. */
   response: { status: number; description: string; schema: z.ZodTypeAny };
-  /** Server-sent events rather than a single JSON body. */
+  /** The success response is server-sent events rather than a single JSON body. */
   stream?: boolean;
+  /**
+   * The success response is SSE when the caller accepts `text/event-stream` and
+   * the JSON `response` otherwise. Only meaningful together with `stream`.
+   */
+  negotiated?: boolean;
 };
 
-const TaskParams = zod.object({ taskId: TaskId }).strict();
-const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
+const TaskParams = z.object({ taskId: TaskId }).strict();
+const ConversationParams = z.object({ conversationId: ConversationId }).strict();
+const ScheduleParams = z.object({ scheduleId: ScheduleId }).strict();
+const ArtifactParams = z.object({ taskId: TaskId, artifactId: ArtifactId }).strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
@@ -71,6 +103,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['health'],
     auth: 'public',
     response: { status: 200, description: 'Readiness report', schema: ReadinessReport },
+  },
+  {
+    operationId: 'getHandshake',
+    method: 'GET',
+    path: '/v1/handshake',
+    summary: 'Contract version, negotiated version and the operations this build serves.',
+    tags: ['handshake'],
+    auth: 'owner',
+    query: HandshakeQuery,
+    response: { status: 200, description: 'Capability handshake', schema: CapabilityHandshake },
   },
   {
     operationId: 'listAgents',
@@ -94,11 +136,12 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     operationId: 'submitChat',
     method: 'POST',
     path: '/v1/chat',
-    summary: 'One Chat turn. Streams SSE frames when the client accepts them.',
+    summary: 'One Chat turn. Answers with SSE frames when the caller accepts them.',
     tags: ['chat'],
     auth: 'owner',
     body: ChatRequest,
     stream: true,
+    negotiated: true,
     response: { status: 200, description: 'Chat reply', schema: ChatReply },
   },
   {
@@ -110,6 +153,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     auth: 'owner',
     body: WorkSubmitRequest,
     response: { status: 202, description: 'Task accepted', schema: TaskAccepted },
+  },
+  {
+    operationId: 'listTasks',
+    method: 'GET',
+    path: '/v1/work',
+    summary: 'The owner task read model, newest first.',
+    tags: ['work'],
+    auth: 'owner',
+    query: TaskListQuery,
+    response: { status: 200, description: 'Task list', schema: TaskList },
   },
   {
     operationId: 'getTask',
@@ -162,9 +215,40 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['events'],
     auth: 'owner',
     params: TaskParams,
-    query: zod.object({ after: zod.coerce.number().int().nonnegative().optional() }).strict(),
+    query: z.object({ after: z.coerce.number().int().nonnegative().optional() }).strict(),
     stream: true,
-    response: { status: 200, description: 'Server-sent execution events', schema: zod.any() },
+    response: { status: 200, description: 'Server-sent execution events', schema: z.any() },
+  },
+  {
+    operationId: 'listArtifacts',
+    method: 'GET',
+    path: '/v1/work/{taskId}/artifacts',
+    summary: 'Artifacts a task produced or the owner attached, with their digests.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: TaskParams,
+    response: { status: 200, description: 'Artifact list', schema: ArtifactList },
+  },
+  {
+    operationId: 'createArtifact',
+    method: 'POST',
+    path: '/v1/work/{taskId}/artifacts',
+    summary: 'Attach an owner artifact to a task; the engine computes its digest.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: TaskParams,
+    body: ArtifactCreateRequest,
+    response: { status: 201, description: 'Artifact record', schema: ArtifactRecord },
+  },
+  {
+    operationId: 'getArtifact',
+    method: 'GET',
+    path: '/v1/work/{taskId}/artifacts/{artifactId}',
+    summary: 'Read one artifact with its recorded digest and encoding.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    response: { status: 200, description: 'Artifact content', schema: ArtifactContent },
   },
   {
     operationId: 'listConversations',
@@ -192,8 +276,38 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     summary: 'Owner-scoped memory for the requested data mode.',
     tags: ['memory'],
     auth: 'owner',
-    query: zod.object({ mode: zod.enum(['private', 'cloud']).optional() }).strict(),
+    query: z.object({ mode: z.enum(['private', 'cloud']).optional() }).strict(),
     response: { status: 200, description: 'Memory entries', schema: MemoryList },
+  },
+  {
+    operationId: 'writeMemory',
+    method: 'POST',
+    path: '/v1/memory',
+    summary: 'Write one memory entry inside a single data mode.',
+    tags: ['memory'],
+    auth: 'owner',
+    body: MemoryWriteRequest,
+    response: { status: 200, description: 'Memory entries', schema: MemoryList },
+  },
+  {
+    operationId: 'deleteMemory',
+    method: 'POST',
+    path: '/v1/memory/delete',
+    summary: 'Delete one memory entry from one data mode.',
+    tags: ['memory'],
+    auth: 'owner',
+    body: MemoryDeleteRequest,
+    response: { status: 200, description: 'Memory entries', schema: MemoryList },
+  },
+  {
+    operationId: 'searchMemory',
+    method: 'GET',
+    path: '/v1/memory/search',
+    summary: 'Lexical retrieval over the owner memory partition.',
+    tags: ['memory'],
+    auth: 'owner',
+    query: MemorySearchQuery,
+    response: { status: 200, description: 'Memory search result', schema: MemorySearchResult },
   },
   {
     operationId: 'listPermissions',
@@ -224,6 +338,56 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['notifications'],
     auth: 'owner',
     response: { status: 200, description: 'Notification list', schema: NotificationList },
+  },
+  {
+    operationId: 'markNotificationRead',
+    method: 'POST',
+    path: '/v1/notifications/{taskId}',
+    summary: 'Mark the notification for one finished task as read.',
+    tags: ['notifications'],
+    auth: 'owner',
+    params: TaskParams,
+    response: { status: 200, description: 'Notification list', schema: NotificationList },
+  },
+  {
+    operationId: 'listSchedules',
+    method: 'GET',
+    path: '/v1/schedules',
+    summary: 'Schedules that submit Work on an interval.',
+    tags: ['schedules'],
+    auth: 'owner',
+    response: { status: 200, description: 'Schedule list', schema: ScheduleList },
+  },
+  {
+    operationId: 'createSchedule',
+    method: 'POST',
+    path: '/v1/schedules',
+    summary: 'Create a durable schedule; validates the agent and model up front.',
+    tags: ['schedules'],
+    auth: 'owner',
+    body: ScheduleCreateRequest,
+    response: { status: 201, description: 'Schedule', schema: Schedule },
+  },
+  {
+    operationId: 'controlSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'Pause or resume one schedule.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleControlRequest,
+    response: { status: 200, description: 'Schedule control outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'deleteSchedule',
+    method: 'DELETE',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'Delete one schedule. A run already started keeps running.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Schedule removal outcome', schema: ScheduleRemoval },
   },
 ]);
 

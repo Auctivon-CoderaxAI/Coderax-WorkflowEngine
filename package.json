@@ -22,10 +22,13 @@
     "test:security": "npm run build && node --test \"dist/tests/security/*.test.js\"",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
-    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
+    "sdk:bundle": "npm run build && node dist/scripts/sdk-bundle.js --write",
+    "sdk:check": "npm run build && node dist/scripts/sdk-bundle.js --check",
+    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js && node dist/scripts/sdk-bundle.js --check"
   },
   "dependencies": {
     "@coderax/contracts": "*",
+    "@coderax/sdk": "*",
     "zod": "^3.25.67"
   },
   "devDependencies": {

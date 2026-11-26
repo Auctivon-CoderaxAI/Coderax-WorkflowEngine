@@ -40,6 +40,9 @@ jobs:
       - name: Contract drift gate
         run: npm run openapi:check
 
+      - name: SDK artifact drift gate
+        run: npm run sdk:check
+
       - name: Reject committed secrets and local paths
         run: |
           if grep -rIl --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git \

@@ -113,6 +113,45 @@ export type MemoryRecord = {
   updatedAt: IsoDateTime;
 };
 
+/**
+ * A stored artifact. The bytes live with the record because the engine, not a
+ * client, computes and reports the digest the record claims.
+ */
+export type ArtifactBlob = {
+  artifactId: string;
+  taskId: string;
+  conversationId: string;
+  path: string;
+  mediaType: string;
+  bytes: number;
+  digest: string;
+  origin: 'engine' | 'owner';
+  createdAt: IsoDateTime;
+  content: Buffer;
+};
+
+/**
+ * A durable schedule. It holds no lease and owns no run: a firing submits Work
+ * and the ordinary execution invariants take over from there.
+ */
+export type ScheduleRecord = {
+  scheduleId: string;
+  ownerId: string;
+  objective: string;
+  agent: AgentId;
+  mode: DataMode;
+  intervalMs: number;
+  enabled: boolean;
+  conversationId: string | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  nextRunAt: IsoDateTime | null;
+  lastRunAt: IsoDateTime | null;
+  lastTaskId: string | null;
+  runs: number;
+  skipped: number;
+};
+
 export type NotificationRecord = {
   taskId: string;
   ownerId: string;

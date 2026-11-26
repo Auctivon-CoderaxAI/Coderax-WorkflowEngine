@@ -1,0 +1,205 @@
+{
+  "schema": 1,
+  "name": "@coderax/sdk",
+  "version": "1.1.0",
+  "contractVersion": "1.1.0",
+  "eventSchemaVersion": 1,
+  "chatStreamVersion": 1,
+  "path": "artifacts/coderax-sdk-1.1.0.tgz",
+  "sha256": "cda3fbe122f4242d96ce2eca8c7392abf2212c2c2b239332d77dc3cb7cf907a4",
+  "bytes": 32311,
+  "reproducible": true,
+  "files": [
+    {
+      "path": "package/dist/compat.d.ts",
+      "sha256": "41f06cf14f8a0226ad8d5f991feb1fc0898bf661f8dfdd4cdd22a2d50a267e75",
+      "bytes": 1025
+    },
+    {
+      "path": "package/dist/compat.js",
+      "sha256": "f2f0841b6d5ec1710c5feeda245e0b774d326e0908301de554f1e2741f6215df",
+      "bytes": 1768
+    },
+    {
+      "path": "package/dist/index.d.ts",
+      "sha256": "b1361bdbfd9861f161284cde251447fa27bfa270b4e128503245a1d413f74678",
+      "bytes": 6680
+    },
+    {
+      "path": "package/dist/index.js",
+      "sha256": "b6dee1a01f038171f36d0923585317c93b0e98ffc3cfc6f7889025bdeb195a23",
+      "bytes": 17139
+    },
+    {
+      "path": "package/dist/version.d.ts",
+      "sha256": "3f0c25de1289adfe8db7149c696850e66533b852605e2b64acc295d7228e97c2",
+      "bytes": 1146
+    },
+    {
+      "path": "package/dist/version.js",
+      "sha256": "e3a53449b0cb61839ddc94af2cfb9bd46f1c4556aa587f35a6ab182185e72ca7",
+      "bytes": 1385
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/artifacts.d.ts",
+      "sha256": "a6d1423fbf57e0193c445c718079087f3ad5e6fcb1f48996edcc28dd936cf38c",
+      "bytes": 6021
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/artifacts.js",
+      "sha256": "2664aefd9ef2ba0f3771bedb053f2747ff2150c9b782cfab6ac5313ffb1b934f",
+      "bytes": 2007
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/capabilities.d.ts",
+      "sha256": "57cce3b5dddaa3e7f5bc4186387fd8601356cba35ddf54661a230e13d2170c7a",
+      "bytes": 12112
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/capabilities.js",
+      "sha256": "6c51910e8a77b037511811b9e483c3bfad071d0feb4dc06a4d054e3ffa080154",
+      "bytes": 1668
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/errors.d.ts",
+      "sha256": "2d4b0f2e14f5c652121e07501ca2094715fef4c6cbc022416ff1a113abf1d2e6",
+      "bytes": 2313
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/errors.js",
+      "sha256": "6f17a84910ddc77e5b03217ecb2b78187cdcc7cc408729756f29ec92c88f15a0",
+      "bytes": 1494
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/events.d.ts",
+      "sha256": "3bba7063eac7935898657092639d92cf505152860ea4f956584af5a8104c8600",
+      "bytes": 21547
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/events.js",
+      "sha256": "35f17406d983970212ffbf420719f2ba755ae586e48ddff9dbea2463e6eae0bc",
+      "bytes": 5422
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/handshake.d.ts",
+      "sha256": "66b66ba006b99e246c848e9b6e1243fda2504a0a247484cae7ed224fd7448be8",
+      "bytes": 13694
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/handshake.js",
+      "sha256": "ece374e562a2ad10118fcfa9835eb929a002b02e1632a1a08a8a6691d7a1eb07",
+      "bytes": 5470
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/health.d.ts",
+      "sha256": "65d26a5912006db0d68c1d8219d57a11e03e2f3d02174c3e07745c95c350a140",
+      "bytes": 6951
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/health.js",
+      "sha256": "6a5560538ba2a2be0724f4f2af7b4022e93c567347047b2216b86eeb8e9766e9",
+      "bytes": 1038
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/index.d.ts",
+      "sha256": "1b2a25de5daac9be2584d51419fe76b17f33954a668ebdb6aad2ccc3fd1b6d49",
+      "bytes": 470
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/index.js",
+      "sha256": "418712a927aa65bec244887fb0c0e238e983509f140a396085d952232b44f2a8",
+      "bytes": 468
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/json-schema.d.ts",
+      "sha256": "8b05d40c6e6e8b6ad519c2b8c3e197aa15913fbcf65717b894aaaf3df23ba188",
+      "bytes": 554
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/json-schema.js",
+      "sha256": "39b6b50730cf2c292d9c2174bbb53e2672ec136a9c0bab69770ec0f8665781ae",
+      "bytes": 3977
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/models.d.ts",
+      "sha256": "375287d2658eb5644cbaaf5b14ceee37bc447a6d01d7ff9f83076c792359d648",
+      "bytes": 11748
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/models.js",
+      "sha256": "006b621f706ca8fcf1e5df29b41e5729d8b59b9bf39ee713ba270290fe7c3902",
+      "bytes": 1735
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/openapi.d.ts",
+      "sha256": "01120127def104ba213d7b26ea5e8df3bbe593d38f8a439767df940548b533ae",
+      "bytes": 1073
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/openapi.js",
+      "sha256": "b7764c24fac1ed32df3debc25d971339b337b2ad12a1ac66491ccd8c4711eace",
+      "bytes": 3670
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/permissions.d.ts",
+      "sha256": "60e26dea44876f9f57eb62ad7ea94ff28e2ebf5c976bf956e0b74eec6fe06f70",
+      "bytes": 8572
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/permissions.js",
+      "sha256": "fa81b972ff386b55a4d93da713c7bc154bfa6ac13833eabb69807f66818503e7",
+      "bytes": 2094
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/primitives.d.ts",
+      "sha256": "11ee1b593cc77e725b442c0b713154b6bb7553db0fa83ed0208b68f71bfb8a04",
+      "bytes": 5077
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/primitives.js",
+      "sha256": "71c5f4c08da18d92cfaffe12c4118ead7d51b8e86fa2132130d4737378ea6e13",
+      "bytes": 4679
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/routes.d.ts",
+      "sha256": "0cee82c5af7f1a7af1e97e0a8ca385d3e21caff9e6f7f19a0010cdbb6884e934",
+      "bytes": 3170
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/routes.js",
+      "sha256": "a068af6969ae3ed2f98fb1566c69e78ad415a1f365b4646b157b3fac00a19aec",
+      "bytes": 12497
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/schedules.d.ts",
+      "sha256": "6a62cec86cb90bf3d8143428933ac2c4d45566b6255b53455cdca7816cb47408",
+      "bytes": 7864
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/schedules.js",
+      "sha256": "9adc180d8e86eea9d6fcbb9b7aedae0366351fbca6838202d6ea2e23b72e750b",
+      "bytes": 2783
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/tasks.d.ts",
+      "sha256": "a93e709c6d8bf2ab444d291b0705919c2f6a117a8e02d6d3632bde7324daf3f9",
+      "bytes": 35275
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/tasks.js",
+      "sha256": "b01c2a22fc2a3f932d89ef6693c32c104014c49323ff89ea6a01a8a3891a0bec",
+      "bytes": 8556
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/package.json",
+      "sha256": "e21568cc7a26e604b4ba0c6431e306943ea78b8151f9f55d6c82efdac3d085d2",
+      "bytes": 388
+    },
+    {
+      "path": "package/package.json",
+      "sha256": "283fe2fc4e6ed2fba2538e774a126bb8841b4c4c79497be578bbc627fc9015d5",
+      "bytes": 770
+    }
+  ],
+  "install": "npm install packages/sdk/artifacts/coderax-sdk-1.1.0.tgz"
+}

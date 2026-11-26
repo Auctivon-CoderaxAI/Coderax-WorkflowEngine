@@ -1,41 +1,76 @@
 import type {
   AgentId,
   AgentList,
+  ArtifactContent,
+  ArtifactCreateRequest,
+  ArtifactList,
+  ArtifactRecord,
   BudgetState,
   ChatReply,
   ChatRequest,
+  ChatStreamEvent,
   Conversation,
   ConversationList,
   DataMode,
+  ExecutionEvent,
+  MemoryDeleteRequest,
   MemoryList,
+  MemorySearchQuery,
+  MemorySearchResult,
+  MemoryWriteRequest,
   ModelList,
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
+  Schedule,
+  ScheduleAction,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleList,
+  ScheduleRemoval,
   TaskAccepted,
   TaskControlResult,
+  TaskList,
+  TaskListQuery,
   TaskStatus,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import { isTerminalState, modelKey } from '@coderax/contracts';
+import {
+  CHAT_STREAM_VERSION,
+  EVENT_SCHEMA_VERSION,
+  isTerminalEvent,
+  isTerminalState,
+  modelKey,
+} from '@coderax/contracts';
+import type { EngineFailureCode, ModelDescriptor, ProblemCode } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskRecord } from '../domain.js';
+import type { ScheduleRecord, TaskRecord } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { IdempotencyStore } from '../persistence/idempotency.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
 import type { AgentRegistry } from '../agents/registry.js';
-import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
+import type {
+  AgentAdapter,
+  AgentHistoryTurn,
+  AgentReport,
+  AgentReportEvent,
+  AgentRunOutcome,
+} from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
+import type { ArtifactStore } from '../artifacts/store.js';
+import { encodingFor, toArtifactRecord } from '../artifacts/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
+import type { ScheduleStore } from '../scheduling/store.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
@@ -58,6 +93,9 @@ export type ApplicationServiceDeps = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifacts: ArtifactStore;
+  schedules: ScheduleStore;
+  idempotency: IdempotencyStore;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -69,6 +107,18 @@ export type EventStream = {
   replay: Replay;
   subscribe: (listener: (event: unknown) => void) => Unsubscribe;
   lastSeq: number;
+  /**
+   * Present when the requested cursor is older than the retained window. The
+   * stream sends it first so a client knows the events that follow are not the
+   * whole history rather than silently rendering a gap.
+   */
+  truncatedEvent: ExecutionEvent | null;
+  /**
+   * True when the replay already contains the terminal event, or when the task
+   * is terminal and the cursor is at the end of the log. The stream then closes
+   * instead of waiting for a frame that will never be published again.
+   */
+  closedAfterReplay: boolean;
 };
 
 export type ApplicationService = {
@@ -80,6 +130,7 @@ export type ApplicationService = {
     principal: Principal,
     request: WorkSubmitRequest,
   ) => Promise<ServiceResult<TaskAccepted>>;
+  tasks: (principal: Principal, query: TaskListQuery) => Promise<TaskList>;
   task: (principal: Principal, taskId: string) => Promise<ServiceResult<TaskStatus>>;
   cancelTask: (
     principal: Principal,
@@ -97,12 +148,23 @@ export type ApplicationService = {
     generation: number,
   ) => Promise<ServiceResult<TaskControlResult>>;
   chat: (principal: Principal, request: ChatRequest) => Promise<ServiceResult<ChatReply>>;
+  /** The same turn, reported as versioned frames instead of one reply. */
+  chatStream: (
+    principal: Principal,
+    request: ChatRequest,
+  ) => Promise<ServiceResult<AsyncIterable<ChatStreamEvent>>>;
   conversations: (principal: Principal) => Promise<ConversationList>;
   conversation: (
     principal: Principal,
     conversationId: string,
   ) => Promise<ServiceResult<Conversation>>;
   memory: (principal: Principal, mode: DataMode) => Promise<MemoryList>;
+  writeMemory: (
+    principal: Principal,
+    body: MemoryWriteRequest,
+  ) => Promise<ServiceResult<MemoryList>>;
+  deleteMemory: (principal: Principal, body: MemoryDeleteRequest) => Promise<MemoryList>;
+  searchMemory: (principal: Principal, query: MemorySearchQuery) => Promise<MemorySearchResult>;
   permissions: (principal: Principal, taskId: string) => Promise<ServiceResult<PermissionList>>;
   decidePermission: (
     principal: Principal,
@@ -110,6 +172,37 @@ export type ApplicationService = {
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
   notifications: (principal: Principal) => Promise<NotificationList>;
+  markNotificationRead: (
+    principal: Principal,
+    taskId: string,
+  ) => Promise<ServiceResult<NotificationList>>;
+  artifacts: (principal: Principal, taskId: string) => Promise<ServiceResult<ArtifactList>>;
+  artifact: (
+    principal: Principal,
+    taskId: string,
+    artifactId: string,
+  ) => Promise<ServiceResult<ArtifactContent>>;
+  createArtifact: (
+    principal: Principal,
+    taskId: string,
+    body: ArtifactCreateRequest,
+  ) => Promise<ServiceResult<ArtifactRecord>>;
+  schedules: (principal: Principal) => Promise<ScheduleList>;
+  createSchedule: (
+    principal: Principal,
+    request: ScheduleCreateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  controlSchedule: (
+    principal: Principal,
+    scheduleId: string,
+    action: ScheduleAction,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  removeSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleRemoval>>;
+  /** Submits every due schedule. Called by the engine's timer, not by a client. */
+  tickSchedules: () => Promise<{ started: number; skipped: number }>;
   events: (
     principal: Principal,
     taskId: string,
@@ -126,6 +219,58 @@ function scopeOf(task: TaskRecord): RunScope {
     ownerId: task.ownerId,
     tenantId: task.tenantId,
     conversationId: task.conversationId,
+  };
+}
+
+/** An engine failure is reported to Chat clients with a stable Problem code. */
+function problemCodeFor(code: EngineFailureCode): ProblemCode {
+  switch (code) {
+    case 'cancelled':
+      return 'cancelled';
+    case 'workspace_denied':
+      return 'workspace_denied';
+    case 'not_configured':
+      return 'engine_not_configured';
+    case 'busy':
+      return 'busy';
+    case 'budget_exhausted':
+      return 'budget_exhausted';
+    case 'paid_model_refused':
+      return 'paid_model_refused';
+    case 'protocol_error':
+      return 'protocol_error';
+    default:
+      return 'engine_unavailable';
+  }
+}
+
+type ChatPrepared = {
+  adapter: AgentAdapter;
+  model: ModelDescriptor;
+  conversationId: string;
+  tenantId: string | null;
+  mode: DataMode;
+  workspaceRoot: string;
+  messageId: string;
+  history: AgentHistoryTurn[];
+};
+
+function toSchedule(record: ScheduleRecord): Schedule {
+  return {
+    scheduleId: record.scheduleId,
+    objective: record.objective,
+    agent: record.agent,
+    mode: record.mode,
+    intervalMs: record.intervalMs,
+    enabled: record.enabled,
+    ...(record.conversationId ? { conversationId: record.conversationId } : {}),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    ...(record.nextRunAt ? { nextRunAt: record.nextRunAt } : {}),
+    ...(record.lastRunAt ? { lastRunAt: record.lastRunAt } : {}),
+    ...(record.lastTaskId ? { lastTaskId: record.lastTaskId } : {}),
+    runs: record.runs,
+    skipped: record.skipped,
   };
 }
 
@@ -218,6 +363,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
   }
 
+  function acceptedFor(task: TaskRecord, replayed?: boolean): TaskAccepted {
+    return {
+      taskId: task.taskId,
+      conversationId: task.conversationId,
+      state: task.state,
+      generation: task.generation,
+      eventsPath: `/v1/work/${task.taskId}/events`,
+      ...(replayed ? { replayed: true } : {}),
+    };
+  }
+
   function ownedTask(task: TaskRecord | null, principal: Principal): ServiceResult<TaskRecord> {
     if (!task || task.ownerId !== principal.ownerId) {
       return fail('not_found', 'That task does not exist for this owner.');
@@ -250,6 +406,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   }
 
   /**
+   * The transcript is the run's visible output, so it is also its artifact. A
+   * completion with no text produces no artifact rather than an empty one.
+   * A store failure costs the artifact, never the settlement.
+   */
+  async function completedArtifacts(
+    task: TaskRecord,
+    text: string,
+  ): Promise<Array<{ path: string; bytes: number; digest: string }>> {
+    if (text.length === 0) return [];
+    const stored = await deps.artifacts
+      .write({
+        taskId: task.taskId,
+        conversationId: task.conversationId,
+        path: 'result.md',
+        mediaType: 'text/markdown; charset=utf-8',
+        content: Buffer.from(text, 'utf8'),
+        origin: 'engine',
+      })
+      .catch(() => null);
+    if (!stored || !stored.ok) return [];
+    return [{ path: stored.value.path, bytes: stored.value.bytes, digest: stored.value.digest }];
+  }
+
+  /**
    * Persists a terminal outcome only while this generation still owns the task.
    * When ownership was lost the function writes nothing at all: a superseded run
    * must never overwrite the state a newer generation owns.
@@ -264,28 +444,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const now = deps.clock.iso();
-    const patch =
-      outcome.kind === 'completed'
-        ? {
-            state: 'completed' as const,
-            updatedAt: now,
-            result: {
-              summary: outcome.summary.slice(0, 20_000),
-              artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
-            },
-            ...(outcome.usage ? { usage: outcome.usage } : {}),
-          }
-        : outcome.kind === 'cancelled'
-          ? { state: 'cancelled' as const, updatedAt: now }
-          : {
-              state: 'failed' as const,
-              updatedAt: now,
-              failure: {
-                code: outcome.code,
-                detail: outcome.detail,
-                retryable: outcome.retryable,
-              },
-            };
+    let patch: Parameters<TaskRepository['updateFenced']>[0]['patch'];
+    if (outcome.kind === 'completed') {
+      const summary = outcome.summary.slice(0, 20_000);
+      patch = {
+        state: 'completed',
+        updatedAt: now,
+        result: {
+          summary,
+          artifacts: await completedArtifacts(task, checkpoint?.text ?? ''),
+        },
+        ...(outcome.usage ? { usage: outcome.usage } : {}),
+      };
+    } else if (outcome.kind === 'cancelled') {
+      patch = { state: 'cancelled', updatedAt: now };
+    } else {
+      patch = {
+        state: 'failed',
+        updatedAt: now,
+        failure: {
+          code: outcome.code,
+          detail: outcome.detail,
+          retryable: outcome.retryable,
+        },
+      };
+    }
 
     const applied = await deps.tasks.updateFenced({
       taskId: task.taskId,
@@ -574,6 +757,250 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
+  async function prepareChat(
+    principal: Principal,
+    request: ChatRequest,
+  ): Promise<ServiceResult<ChatPrepared>> {
+    const adapter = deps.agents.resolve(request.agent);
+    if (!adapter.ok) return adapter;
+    const model = deps.models.resolve(request.model, request.mode);
+    if (!model.ok) return model;
+
+    const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+    if (!reservation.allowed) {
+      return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
+    }
+    const workspace = await resolveEngineWorkspace({
+      mode: request.mode,
+      roots: workspaceRoots(deps.config.workspaces),
+    });
+    if (!workspace.ok) return workspace;
+
+    const now = deps.clock.iso();
+    const conversationId = request.conversationId ?? deps.ids.conversationId();
+    const conversation = await deps.conversations.ensure({
+      conversationId,
+      ownerId: principal.ownerId,
+      tenantId: null,
+      mode: request.mode,
+      isWork: false,
+      agent: request.agent,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await deps.conversations.appendMessage({
+      messageId: deps.ids.messageId(),
+      conversationId,
+      role: 'user',
+      text: request.message,
+      createdAt: now,
+    });
+
+    return ok({
+      adapter: adapter.value,
+      model: model.value,
+      conversationId,
+      tenantId: conversation.tenantId,
+      mode: request.mode,
+      workspaceRoot: workspace.value.root,
+      messageId: deps.ids.messageId(),
+      history: await historyFor(conversationId, request.message),
+    });
+  }
+
+  function runPreparedChat(
+    prepared: ChatPrepared,
+    principal: Principal,
+    request: ChatRequest,
+    report: AgentReport,
+  ): Promise<AgentRunOutcome> {
+    const controller = new AbortController();
+    return prepared.adapter.run(
+      {
+        ownerId: principal.ownerId,
+        tenantId: prepared.tenantId,
+        conversationId: prepared.conversationId,
+        objective: request.message,
+        history: prepared.history,
+        model: prepared.model.ref,
+        mode: prepared.mode,
+        workspaceRoot: prepared.workspaceRoot,
+        maxSteps: 1,
+        budget: null,
+        signal: controller.signal,
+      },
+      report,
+    );
+  }
+
+  /** One place that records the reply, so streaming and JSON cannot diverge. */
+  async function finishChat(
+    prepared: ChatPrepared,
+    principal: Principal,
+    request: ChatRequest,
+    outcome: AgentRunOutcome,
+  ): Promise<ServiceResult<ChatReply>> {
+    if (!outcome.ok) {
+      return fail(problemCodeFor(outcome.code), outcome.detail, outcome.retryable);
+    }
+    deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+    const createdAt = deps.clock.iso();
+    await deps.conversations.appendMessage({
+      messageId: prepared.messageId,
+      conversationId: prepared.conversationId,
+      role: 'assistant',
+      text: outcome.summary,
+      createdAt,
+      agent: request.agent,
+    });
+    return ok({
+      conversationId: prepared.conversationId,
+      messageId: prepared.messageId,
+      text: outcome.summary,
+      agent: request.agent,
+      model: prepared.model.ref,
+      ...(outcome.usage ? { usage: outcome.usage } : {}),
+      createdAt,
+    });
+  }
+
+  /**
+   * Streams the same turn as frames.
+   *
+   * Text is redacted up to the last whitespace boundary before it is sent, for
+   * the same reason the Work stream does it: a credential split across two
+   * deltas would otherwise reach the client in pieces that match nothing.
+   */
+  async function* streamChat(
+    prepared: ChatPrepared,
+    principal: Principal,
+    request: ChatRequest,
+  ): AsyncGenerator<ChatStreamEvent> {
+    yield {
+      v: CHAT_STREAM_VERSION,
+      type: 'chat.started',
+      conversationId: prepared.conversationId,
+      messageId: prepared.messageId,
+      agent: request.agent,
+      model: prepared.model.ref,
+    };
+
+    const queue: ChatStreamEvent[] = [];
+    let wake: (() => void) | null = null;
+    let finished = false;
+    let raw = '';
+    let sent = '';
+    const box: { outcome: AgentRunOutcome | null } = { outcome: null };
+
+    const push = (frame: ChatStreamEvent): void => {
+      queue.push(frame);
+      wake?.();
+    };
+    const flush = (final: boolean): void => {
+      let end = raw.length;
+      if (!final) {
+        while (end > 0 && !/\s/.test(raw.charAt(end - 1))) end -= 1;
+      }
+      const safe = redactContent(raw.slice(0, end));
+      if (safe === sent) return;
+      if (safe.startsWith(sent)) {
+        push({ v: CHAT_STREAM_VERSION, type: 'chat.delta', text: safe.slice(sent.length) });
+      } else {
+        push({ v: CHAT_STREAM_VERSION, type: 'chat.replace', text: safe });
+      }
+      sent = safe;
+    };
+
+    const running = runPreparedChat(prepared, principal, request, (event) => {
+      if (event.type === 'text.delta') {
+        raw += event.text;
+        flush(false);
+        return;
+      }
+      if (event.type === 'text.replace') {
+        raw = event.text;
+        sent = '';
+        push({ v: CHAT_STREAM_VERSION, type: 'chat.replace', text: redactContent(raw) });
+        sent = redactContent(raw);
+      }
+      // Step, tool and approval reports belong to a durable Work task. A Chat
+      // turn has no task, so they are not translated into frames it cannot own.
+    })
+      .then((outcome) => {
+        box.outcome = outcome;
+      })
+      .catch(() => {
+        box.outcome = {
+          ok: false,
+          code: 'provider_error',
+          detail: 'The agent failed unexpectedly.',
+          retryable: false,
+        };
+      })
+      .finally(() => {
+        finished = true;
+        wake?.();
+      });
+
+    for (;;) {
+      const next = queue.shift();
+      if (next) {
+        yield next;
+        continue;
+      }
+      if (finished) break;
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+        const timer = setTimeout(resolve, 30_000);
+        timer.unref();
+      });
+      wake = null;
+    }
+    await running;
+
+    const outcome = box.outcome;
+    if (!outcome) {
+      yield {
+        v: CHAT_STREAM_VERSION,
+        type: 'chat.failed',
+        code: 'internal_error',
+        detail: 'The turn ended without a result.',
+        retryable: true,
+      };
+      return;
+    }
+    if (!outcome.ok) {
+      yield {
+        v: CHAT_STREAM_VERSION,
+        type: 'chat.failed',
+        code: problemCodeFor(outcome.code),
+        detail: outcome.detail,
+        retryable: outcome.retryable,
+      };
+      return;
+    }
+
+    // The adapter's summary is authoritative; any unflushed tail is sent now.
+    flush(true);
+    const finalText = redactContent(outcome.summary);
+    if (finalText !== sent && finalText.startsWith(sent) && finalText.length > sent.length) {
+      push({ v: CHAT_STREAM_VERSION, type: 'chat.delta', text: finalText.slice(sent.length) });
+      sent = finalText;
+    }
+    const finishedReply = await finishChat(prepared, principal, request, outcome);
+    if (!finishedReply.ok) {
+      yield {
+        v: CHAT_STREAM_VERSION,
+        type: 'chat.failed',
+        code: finishedReply.code,
+        detail: finishedReply.detail,
+        retryable: finishedReply.retryable,
+      };
+      return;
+    }
+    yield { v: CHAT_STREAM_VERSION, type: 'chat.completed', reply: finishedReply.value };
+  }
+
   const service: ApplicationService = {
     health: () => deps.health.report(),
     readiness: () => deps.health.readiness(),
@@ -588,8 +1015,42 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
+      const idempotencyKey = request.idempotencyKey?.trim();
+      const taskId = deps.ids.taskId();
+
+      // A key is checked before a budget slot is spent: a retried submission is
+      // the same intent, and charging it twice would let a network retry exhaust
+      // the owner's daily budget.
+      let reservedKey = false;
+      if (idempotencyKey) {
+        const existing = await deps.idempotency.lookup(principal.ownerId, idempotencyKey);
+        if (existing) {
+          const prior = await deps.tasks.get(existing);
+          if (prior && prior.ownerId === principal.ownerId) return ok(acceptedFor(prior, true));
+          await deps.idempotency.release(principal.ownerId, idempotencyKey);
+        }
+        const reservation = await deps.idempotency.reserve({
+          ownerId: principal.ownerId,
+          key: idempotencyKey,
+          taskId,
+        });
+        if (!reservation.ok) {
+          const prior = await deps.tasks.get(reservation.taskId);
+          if (prior && prior.ownerId === principal.ownerId) return ok(acceptedFor(prior, true));
+          await deps.idempotency.release(principal.ownerId, idempotencyKey);
+        } else {
+          reservedKey = true;
+        }
+      }
+      const releaseKey = async (): Promise<void> => {
+        if (reservedKey && idempotencyKey) {
+          await deps.idempotency.release(principal.ownerId, idempotencyKey);
+        }
+      };
+
       const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
+        await releaseKey();
         return fail(
           'budget_exhausted',
           'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -618,7 +1079,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
 
       const task: TaskRecord = {
-        taskId: deps.ids.taskId(),
+        taskId,
         ownerId: principal.ownerId,
         tenantId: null,
         conversationId,
@@ -661,6 +1122,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         expiresAt: new Date(claimedAt.getTime() + deps.config.execution.leaseTtlMs),
       });
       if (!claimed) {
+        await releaseKey();
         return fail('busy', 'This conversation already has a live Work run.');
       }
 
@@ -673,6 +1135,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!created.ok) {
         await deps.lease.release({ key, token }).catch(() => false);
+        await releaseKey();
         return fail(
           'busy',
           created.reason === 'conversation_busy'
@@ -693,13 +1156,34 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       deps.scheduler.enqueue(() => execute(task.taskId, token));
 
-      return ok({
-        taskId: task.taskId,
-        conversationId,
-        state: 'queued',
-        generation: 1,
-        eventsPath: `/v1/work/${task.taskId}/events`,
-      });
+      return ok(acceptedFor(created.task));
+    },
+
+    tasks: async (principal, query) => {
+      const all = await deps.tasks.listByOwner(principal.ownerId);
+      const filtered = all
+        .filter((task) => query.state === undefined || task.state === query.state)
+        .filter(
+          (task) =>
+            query.conversationId === undefined || task.conversationId === query.conversationId,
+        )
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const limit = query.limit ?? 50;
+      return {
+        tasks: filtered.slice(0, limit).map((task) => ({
+          taskId: task.taskId,
+          conversationId: task.conversationId,
+          title: task.objective.slice(0, 300),
+          state: task.state,
+          agent: task.agent,
+          mode: task.mode,
+          ...(task.model ? { model: task.model } : {}),
+          generation: task.generation,
+          createdAt: task.createdAt,
+          updatedAt: task.updatedAt,
+          cancelRequested: task.cancelRequested,
+        })),
+      };
     },
 
     task: async (principal, taskId) => {
@@ -878,85 +1362,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     chat: async (principal, request) => {
-      const adapter = deps.agents.resolve(request.agent);
-      if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model, request.mode);
-      if (!model.ok) return model;
+      const prepared = await prepareChat(principal, request);
+      if (!prepared.ok) return prepared;
+      const outcome = await runPreparedChat(prepared.value, principal, request, () => undefined);
+      return finishChat(prepared.value, principal, request, outcome);
+    },
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
-      if (!reservation.allowed) {
-        return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
-      }
-      const workspace = await resolveEngineWorkspace({
-        mode: request.mode,
-        roots: workspaceRoots(deps.config.workspaces),
-      });
-      if (!workspace.ok) return workspace;
-
-      const now = deps.clock.iso();
-      const conversationId = request.conversationId ?? deps.ids.conversationId();
-      const conversation = await deps.conversations.ensure({
-        conversationId,
-        ownerId: principal.ownerId,
-        tenantId: null,
-        mode: request.mode,
-        isWork: false,
-        agent: request.agent,
-        createdAt: now,
-        updatedAt: now,
-      });
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId,
-        role: 'user',
-        text: request.message,
-        createdAt: now,
-      });
-
-      const history = await historyFor(conversationId, request.message);
-      const controller = new AbortController();
-      const outcome = await adapter.value.run(
-        {
-          ownerId: principal.ownerId,
-          tenantId: conversation.tenantId,
-          conversationId,
-          objective: request.message,
-          history,
-          model: model.value.ref,
-          mode: request.mode,
-          workspaceRoot: workspace.value.root,
-          maxSteps: 1,
-          budget: null,
-          signal: controller.signal,
-        },
-        () => undefined,
-      );
-      if (!outcome.ok) {
-        return fail(
-          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          outcome.detail,
-          outcome.retryable,
-        );
-      }
-      deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
-      const messageId = deps.ids.messageId();
-      await deps.conversations.appendMessage({
-        messageId,
-        conversationId,
-        role: 'assistant',
-        text: outcome.summary,
-        createdAt: deps.clock.iso(),
-        agent: request.agent,
-      });
-      return ok({
-        conversationId,
-        messageId,
-        text: outcome.summary,
-        agent: request.agent,
-        model: model.value.ref,
-        ...(outcome.usage ? { usage: outcome.usage } : {}),
-        createdAt: deps.clock.iso(),
-      });
+    chatStream: async (principal, request) => {
+      // Everything that can be a Problem is decided before the first frame, so a
+      // client either gets SSE or a normal error body, never a 200 that fails.
+      const prepared = await prepareChat(principal, request);
+      if (!prepared.ok) return prepared;
+      return ok(streamChat(prepared.value, principal, request));
     },
 
     conversations: (principal) => deps.conversations.list(principal.ownerId),
@@ -968,6 +1385,38 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     memory: (principal, mode) => deps.memory.list({ ownerId: principal.ownerId, mode }),
+
+    writeMemory: async (principal, body) => {
+      try {
+        await deps.memory.put({
+          ownerId: principal.ownerId,
+          tenantId: null,
+          mode: body.mode,
+          key: body.key,
+          value: body.value,
+        });
+      } catch {
+        return fail('validation_failed', 'That memory value exceeds the configured bound.');
+      }
+      return ok(await deps.memory.list({ ownerId: principal.ownerId, mode: body.mode }));
+    },
+
+    deleteMemory: async (principal, body) => {
+      await deps.memory.delete({
+        ownerId: principal.ownerId,
+        mode: body.mode,
+        key: body.key,
+      });
+      return deps.memory.list({ ownerId: principal.ownerId, mode: body.mode });
+    },
+
+    searchMemory: (principal, query) =>
+      deps.memory.search({
+        ownerId: principal.ownerId,
+        mode: query.mode ?? 'private',
+        query: query.q,
+        limit: query.limit ?? 20,
+      }),
 
     permissions: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
@@ -989,13 +1438,197 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     notifications: (principal) => deps.notifications.list(principal.ownerId),
 
-    events: async (principal, taskId, after) => {
+    markNotificationRead: async (principal, taskId) => {
+      const marked = await deps.notifications.markRead(principal.ownerId, taskId);
+      if (!marked) return fail('not_found', 'That notification does not exist for this owner.');
+      return ok(await deps.notifications.list(principal.ownerId));
+    },
+
+    artifacts: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       return ok({
-        replay: deps.events.replay(taskId, after),
+        artifacts: (await deps.artifacts.list(taskId)).map(toArtifactRecord),
+      });
+    },
+
+    artifact: async (principal, taskId, artifactId) => {
+      const found = ownedTask(await deps.tasks.get(taskId), principal);
+      if (!found.ok) return found;
+      const blob = await deps.artifacts.get(taskId, artifactId);
+      if (!blob) return fail('not_found', 'That artifact does not exist for this task.');
+      const encoding = encodingFor(blob);
+      return ok({
+        artifact: toArtifactRecord(blob),
+        encoding,
+        content: blob.content.toString(encoding === 'base64' ? 'base64' : 'utf8'),
+      });
+    },
+
+    createArtifact: async (principal, taskId, body) => {
+      const found = ownedTask(await deps.tasks.get(taskId), principal);
+      if (!found.ok) return found;
+      let content: Buffer;
+      if (body.encoding === 'base64') {
+        const normalized = body.content.replace(/\s+/g, '');
+        content = Buffer.from(normalized, 'base64');
+        // Buffer.from is lenient about malformed base64; a round-trip is not.
+        if (content.toString('base64').replace(/=+$/, '') !== normalized.replace(/=+$/, '')) {
+          return fail('validation_failed', 'content is not valid base64.');
+        }
+      } else {
+        content = Buffer.from(body.content, 'utf8');
+      }
+      const stored = await deps.artifacts.write({
+        taskId,
+        conversationId: found.value.conversationId,
+        path: body.path,
+        mediaType: body.mediaType,
+        content,
+        origin: 'owner',
+      });
+      if (!stored.ok) return stored;
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'artifact.created',
+        taskId,
+        conversationId: found.value.conversationId,
+        outcome: 'accepted',
+        detail: `path=${body.path} bytes=${stored.value.bytes}`,
+      });
+      return ok(toArtifactRecord(stored.value));
+    },
+
+    schedules: async (principal) => ({
+      schedules: deps.schedules.list(principal.ownerId).map(toSchedule),
+    }),
+
+    createSchedule: async (principal, request) => {
+      const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
+      const adapter = deps.agents.resolve(agentId);
+      if (!adapter.ok) return adapter;
+      // A schedule that can never run is refused now, not discovered at the first
+      // firing when no client is watching.
+      const model = deps.models.resolve(null, request.mode);
+      if (!model.ok) return model;
+
+      const record = deps.schedules.create({
+        ownerId: principal.ownerId,
+        objective: request.objective,
+        agent: agentId,
+        mode: request.mode,
+        intervalMs: request.intervalMs,
+        enabled: request.enabled,
+        startAt: request.startAt ?? null,
+        conversationId: request.conversationId ?? null,
+      });
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.created',
+        outcome: 'accepted',
+        detail: `agent=${agentId} intervalMs=${request.intervalMs}`,
+      });
+      return ok(toSchedule(record));
+    },
+
+    controlSchedule: async (principal, scheduleId, action) => {
+      const enabled = action === 'resume';
+      const record = deps.schedules.setEnabled({
+        ownerId: principal.ownerId,
+        scheduleId,
+        enabled,
+      });
+      if (!record) return fail('not_found', 'That schedule does not exist for this owner.');
+      return ok({
+        scheduleId: record.scheduleId,
+        enabled: record.enabled,
+        ...(record.nextRunAt ? { nextRunAt: record.nextRunAt } : {}),
+        runs: record.runs,
+        outcome: 'accepted',
+      });
+    },
+
+    removeSchedule: async (principal, scheduleId) => {
+      const removed = deps.schedules.remove(principal.ownerId, scheduleId);
+      return ok({
+        scheduleId,
+        outcome: removed ? 'deleted' : 'not_found',
+      });
+    },
+
+    tickSchedules: async () => {
+      const due = deps.schedules.due(deps.clock.now());
+      let started = 0;
+      let skipped = 0;
+      for (const schedule of due) {
+        const principal: Principal = { ownerId: schedule.ownerId, isOwner: true };
+        // The firing time is part of the idempotency key, so a tick that overlaps
+        // another tick cannot submit the same slot twice.
+        const submitted = await service.submitWork(principal, {
+          objective: schedule.objective,
+          agent: schedule.agent,
+          mode: schedule.mode,
+          requireApproval: true,
+          ...(schedule.conversationId ? { conversationId: schedule.conversationId } : {}),
+          idempotencyKey: `schedule:${schedule.scheduleId}:${schedule.nextRunAt ?? ''}`,
+        });
+        const at = deps.clock.iso();
+        const nextRunAt = new Date(
+          deps.clock.now().getTime() + schedule.intervalMs,
+        ).toISOString();
+        if (submitted.ok) {
+          deps.schedules.markRun({
+            scheduleId: schedule.scheduleId,
+            at,
+            taskId: submitted.value.taskId,
+            nextRunAt,
+          });
+          started += 1;
+        } else {
+          // Busy or refused: move to the next slot instead of hammering the
+          // conversation every tick.
+          deps.schedules.markSkipped({ scheduleId: schedule.scheduleId, at, nextRunAt });
+          deps.audit.record({
+            actor: schedule.ownerId,
+            action: 'schedule.skipped',
+            outcome: 'refused',
+            detail: submitted.code,
+          });
+          skipped += 1;
+        }
+      }
+      return { started, skipped };
+    },
+
+    events: async (principal, taskId, after) => {
+      const found = ownedTask(await deps.tasks.get(taskId), principal);
+      if (!found.ok) return found;
+      const replay = deps.events.replay(taskId, after);
+      const oldest = replay.events[0]?.seq;
+      const truncatedEvent: ExecutionEvent | null =
+        replay.truncated && oldest !== undefined && oldest > 1
+          ? ({
+              v: EVENT_SCHEMA_VERSION,
+              eventId: `evt_truncated_${taskId}_${after}`,
+              taskId,
+              seq: oldest - 1,
+              at: deps.clock.iso(),
+              agent: found.value.agent,
+              generation: found.value.generation,
+              type: 'stream.truncated',
+              payload: { after, oldestSeq: oldest },
+            } as ExecutionEvent)
+          : null;
+      const lastSeq = deps.events.lastSeq(taskId);
+      const terminalInReplay =
+        replay.truncated || replay.events.some((event) => isTerminalEvent(event.type));
+      return ok({
+        replay,
         subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
-        lastSeq: deps.events.lastSeq(taskId),
+        lastSeq,
+        truncatedEvent,
+        closedAfterReplay:
+          terminalInReplay || (isTerminalState(found.value.state) && after >= lastSeq),
       });
     },
 

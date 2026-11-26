@@ -10,7 +10,8 @@ import type { NotificationRecord } from '../domain.js';
 export type NotificationStore = {
   record: (notification: NotificationRecord) => Promise<void>;
   list: (ownerId: string) => Promise<NotificationList>;
-  markRead: (ownerId: string, taskId: string) => Promise<void>;
+  /** Returns false when no notification exists for that owner and task. */
+  markRead: (ownerId: string, taskId: string) => Promise<boolean>;
 };
 
 export function createNotificationStore(): NotificationStore {
@@ -40,9 +41,9 @@ export function createNotificationStore(): NotificationStore {
     },
     markRead: async (ownerId, taskId) => {
       const entry = notifications.get(taskId);
-      if (entry && entry.ownerId === ownerId) {
-        entry.read = true;
-      }
+      if (!entry || entry.ownerId !== ownerId) return false;
+      entry.read = true;
+      return true;
     },
   };
 }

@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { CoderaxClient } from '@coderax/sdk';
 import type { ModelGateway } from '../src/agents/native/types.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
@@ -126,6 +127,15 @@ export async function startTestApp(options: {
       workspace.cleanup();
     },
   };
+}
+
+/**
+ * The cross-repository harness must use the published client, not a second
+ * implementation of it, so every assertion exercises the same SDK the UI and
+ * CLI consume.
+ */
+export function clientFor(url: string, token = OWNER_TOKEN): CoderaxClient {
+  return new CoderaxClient({ baseUrl: url, token });
 }
 
 export async function waitFor<T>(

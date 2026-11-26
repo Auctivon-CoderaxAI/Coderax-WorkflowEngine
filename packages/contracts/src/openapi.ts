@@ -62,6 +62,18 @@ function queryParameters(route: RouteSpec): Array<Record<string, unknown>> | und
   }));
 }
 
+function successContent(route: RouteSpec): Record<string, unknown> {
+  const json = {
+    'application/json': { schema: toJsonSchema(route.response.schema) },
+  };
+  const sse = { 'text/event-stream': { schema: { type: 'string' } } };
+  // A negotiated operation serves both: the client picks with `Accept`, and the
+  // document must not advertise only one of the two shapes it really returns.
+  if (route.stream && route.negotiated) return { ...sse, ...json };
+  if (route.stream) return sse;
+  return json;
+}
+
 export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): OpenApiDocument {
   const paths: Record<string, Record<string, OpenApiOperation>> = {};
   const schemas: Record<string, unknown> = { Problem: toJsonSchema(Problem) };
@@ -73,17 +85,10 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
       tags: route.tags,
       security: route.auth === 'owner' ? [{ bearerAuth: [] }] : [],
       responses: {
-        [String(route.response.status)]: route.stream
-          ? {
-              description: route.response.description,
-              content: { 'text/event-stream': { schema: { type: 'string' } } },
-            }
-          : {
-              description: route.response.description,
-              content: {
-                'application/json': { schema: toJsonSchema(route.response.schema) },
-              },
-            },
+        [String(route.response.status)]: {
+          description: route.response.description,
+          content: successContent(route),
+        },
         '4XX': ERROR_RESPONSE,
         '5XX': ERROR_RESPONSE,
       },

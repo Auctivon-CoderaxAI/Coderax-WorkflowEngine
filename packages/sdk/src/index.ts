@@ -1,36 +1,58 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  ArtifactContent,
+  ArtifactList,
+  ArtifactRecord,
+  CapabilityHandshake,
   ChatReply,
+  ChatStreamEvent,
   Conversation,
   ConversationList,
   ExecutionEvent,
   HealthReport,
   MemoryList,
+  MemorySearchResult,
   ModelList,
   NotificationList,
   PermissionList,
   Problem,
   ReadinessReport,
+  ROUTE_INDEX,
+  Schedule,
+  ScheduleControlResult,
+  ScheduleList,
+  ScheduleRemoval,
   TaskAccepted,
   TaskControlResult,
+  TaskList,
   TaskStatus,
+  isTerminalChatEvent,
 } from '@coderax/contracts';
 import type {
-  ChatRequest,
+  ArtifactCreateRequestInput,
+  ChatRequestInput,
   DataMode,
+  MemoryDeleteRequestInput,
+  MemoryWriteRequestInput,
   PermissionDecisionRequest,
-  WorkSubmitRequest,
+  ScheduleAction,
+  ScheduleCreateRequestInput,
+  TaskListQuery,
+  WorkSubmitRequestInput,
 } from '@coderax/contracts';
+import { checkCompatibility, type CompatibilityReport } from './compat.js';
+import { SDK_CONTRACT_VERSION, sdkMetadata, type SdkVersionMetadata } from './version.js';
 
 /**
- * The one client both Coderax (web) and Coderax-CLI consume.
+ * The one client both Coderax (web) and CoderaxCLI consume.
  *
- * Every response is parsed with the same zod schema the server validated
- * against, so a deployment that drifts from the contract fails at the client
- * boundary with a named contract error instead of producing subtly wrong UI. The
- * client performs no retries, follows no redirects, keeps no cookie jar and never
- * places the token in a URL or an error message.
+ * Every request body is validated against the route catalogue before it is sent,
+ * and every response and streamed frame is parsed with the same schema the
+ * server validated against. A deployment that drifts from the contract fails at
+ * the client boundary with a named contract error instead of producing subtly
+ * wrong UI. The client performs no retries, follows no redirects, keeps no cookie
+ * jar and never places the token in a URL or an error message.
  */
 
 export class CoderaxApiError extends Error {
@@ -69,13 +91,56 @@ export type CoderaxClientOptions = {
   timeoutMs?: number;
 };
 
+type RequestMethod = 'GET' | 'POST' | 'DELETE';
+
 type RequestInput = {
-  method: 'GET' | 'POST';
+  method: RequestMethod;
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   signal?: AbortSignal;
 };
+
+/**
+ * Which SDK method serves which published operation.
+ *
+ * `tests/contract/sdk-coverage.test.ts` asserts this table covers the route
+ * catalogue exactly, and the cross-repository harness calls the server through
+ * these methods only. A new operation without a client method fails that test,
+ * so the clients cannot be left behind by the engine.
+ */
+export const SDK_OPERATION_COVERAGE: Readonly<Record<string, string>> = Object.freeze({
+  getHealth: 'health',
+  getReadiness: 'readiness',
+  getHandshake: 'handshake',
+  listAgents: 'agents',
+  listModels: 'models',
+  submitChat: 'chat',
+  submitWork: 'submitWork',
+  listTasks: 'tasks',
+  getTask: 'task',
+  cancelTask: 'cancel',
+  resumeTask: 'resume',
+  retryTask: 'retry',
+  streamTaskEvents: 'events',
+  listArtifacts: 'artifacts',
+  createArtifact: 'createArtifact',
+  getArtifact: 'artifact',
+  listConversations: 'conversations',
+  getConversation: 'conversation',
+  listMemory: 'memory',
+  writeMemory: 'writeMemory',
+  deleteMemory: 'deleteMemory',
+  searchMemory: 'searchMemory',
+  listPermissions: 'permissions',
+  decidePermission: 'decidePermission',
+  listNotifications: 'notifications',
+  markNotificationRead: 'markNotificationRead',
+  listSchedules: 'schedules',
+  createSchedule: 'createSchedule',
+  controlSchedule: 'controlSchedule',
+  deleteSchedule: 'deleteSchedule',
+});
 
 function joinUrl(baseUrl: string, path: string, query?: RequestInput['query']): string {
   const base = baseUrl.replace(/\/+$/, '');
@@ -134,11 +199,38 @@ export class CoderaxClient {
     };
   }
 
+  /** The version this client was built against. */
+  static readonly metadata: SdkVersionMetadata = sdkMetadata();
+
   private headers(accept = 'application/json'): Record<string, string> {
     return {
       accept,
       authorization: `Bearer ${this.options.token}`,
     };
+  }
+
+  /**
+   * Validates a request body against the operation's published schema before it
+   * leaves the process. The server would reject it anyway; failing here turns a
+   * round trip into a named error and makes the catalogue the only description
+   * of a payload on both sides.
+   */
+  private encodeBody(operationId: string, value: unknown): unknown {
+    const spec = ROUTE_INDEX.get(operationId);
+    if (!spec?.body) {
+      throw new CoderaxContractError(`operation ${operationId} publishes no request body`);
+    }
+    const parsed = spec.body.safeParse(value);
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      const where = first && first.path.length > 0 ? first.path.join('.') : 'body';
+      throw new CoderaxContractError(
+        `the request for ${operationId} does not match the published contract (${where}: ${
+          first?.message ?? 'invalid'
+        })`,
+      );
+    }
+    return parsed.data;
   }
 
   private async send(input: RequestInput): Promise<Response> {
@@ -191,10 +283,7 @@ export class CoderaxClient {
     return parsed.data as T;
   }
 
-  private async request<T>(
-    schema: z.ZodTypeAny,
-    input: RequestInput,
-  ): Promise<T> {
+  private async request<T>(schema: z.ZodTypeAny, input: RequestInput): Promise<T> {
     return this.parse<T>(schema, await this.send(input), input.path);
   }
 
@@ -206,6 +295,28 @@ export class CoderaxClient {
     return this.request<ReadinessReport>(ReadinessReport, { method: 'GET', path: '/v1/ready' });
   }
 
+  /** Contract negotiation. Omit `contract` to read the served version only. */
+  handshake(options: { contract?: string } = {}): Promise<CapabilityHandshake> {
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+      ...(options.contract === undefined ? {} : { query: { contract: options.contract } }),
+    });
+  }
+
+  /**
+   * Negotiates this build's contract version and reports every reason the server
+   * cannot serve it. Call this once at startup rather than discovering a gap on
+   * the first failed operation.
+   */
+  async compatibility(): Promise<CompatibilityReport> {
+    const handshake = await this.handshake({ contract: SDK_CONTRACT_VERSION });
+    return checkCompatibility({
+      handshake,
+      requiredOperations: Object.keys(SDK_OPERATION_COVERAGE),
+    });
+  }
+
   agents(): Promise<AgentList> {
     return this.request<AgentList>(AgentList, { method: 'GET', path: '/v1/agents' });
   }
@@ -214,19 +325,64 @@ export class CoderaxClient {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
   }
 
-  chat(request: ChatRequest): Promise<ChatReply> {
+  chat(request: ChatRequestInput): Promise<ChatReply> {
     return this.request<ChatReply>(ChatReply, {
       method: 'POST',
       path: '/v1/chat',
-      body: request,
+      body: this.encodeBody('submitChat', request),
     });
   }
 
-  submitWork(request: WorkSubmitRequest): Promise<TaskAccepted> {
+  /**
+   * The same Chat turn as versioned frames. The stream ends at `chat.completed`
+   * or `chat.failed`; a dropped connection does not cancel a turn the server has
+   * already started.
+   */
+  async *chatStream(
+    request: ChatRequestInput,
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<ChatStreamEvent> {
+    const path = '/v1/chat';
+    const body = this.encodeBody('submitChat', request);
+    const response = await this.options.fetchImpl(joinUrl(this.options.baseUrl, path), {
+      method: 'POST',
+      headers: { ...this.headers('text/event-stream'), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      redirect: 'error',
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!response.ok || !response.body) {
+      await this.parse(ChatReply, response, path);
+      throw new CoderaxContractError('the chat stream had no body');
+    }
+    for await (const frame of parseSse(response.body)) {
+      const parsed = ChatStreamEvent.safeParse(frame);
+      if (!parsed.success) {
+        throw new CoderaxContractError('a chat frame did not match the published stream schema');
+      }
+      yield parsed.data;
+      if (isTerminalChatEvent(parsed.data.type)) return;
+    }
+  }
+
+  submitWork(request: WorkSubmitRequestInput): Promise<TaskAccepted> {
     return this.request<TaskAccepted>(TaskAccepted, {
       method: 'POST',
       path: '/v1/work',
-      body: request,
+      body: this.encodeBody('submitWork', request),
+    });
+  }
+
+  /** The owner task read model, newest first. */
+  tasks(query: TaskListQuery = {}): Promise<TaskList> {
+    return this.request<TaskList>(TaskList, {
+      method: 'GET',
+      path: '/v1/work',
+      query: {
+        state: query.state,
+        conversationId: query.conversationId,
+        limit: query.limit,
+      },
     });
   }
 
@@ -241,7 +397,7 @@ export class CoderaxClient {
     return this.request<TaskControlResult>(TaskControlResult, {
       method: 'POST',
       path: `/v1/work/${encodeURIComponent(taskId)}/cancel`,
-      body: reason ? { reason } : {},
+      body: this.encodeBody('cancelTask', reason ? { reason } : {}),
     });
   }
 
@@ -249,7 +405,7 @@ export class CoderaxClient {
     return this.request<TaskControlResult>(TaskControlResult, {
       method: 'POST',
       path: `/v1/work/${encodeURIComponent(taskId)}/resume`,
-      body: { generation },
+      body: this.encodeBody('resumeTask', { generation }),
     });
   }
 
@@ -257,7 +413,29 @@ export class CoderaxClient {
     return this.request<TaskControlResult>(TaskControlResult, {
       method: 'POST',
       path: `/v1/work/${encodeURIComponent(taskId)}/retry`,
-      body: { generation },
+      body: this.encodeBody('retryTask', { generation }),
+    });
+  }
+
+  artifacts(taskId: string): Promise<ArtifactList> {
+    return this.request<ArtifactList>(ArtifactList, {
+      method: 'GET',
+      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
+    });
+  }
+
+  artifact(taskId: string, artifactId: string): Promise<ArtifactContent> {
+    return this.request<ArtifactContent>(ArtifactContent, {
+      method: 'GET',
+      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}`,
+    });
+  }
+
+  createArtifact(taskId: string, request: ArtifactCreateRequestInput): Promise<ArtifactRecord> {
+    return this.request<ArtifactRecord>(ArtifactRecord, {
+      method: 'POST',
+      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
+      body: this.encodeBody('createArtifact', request),
     });
   }
 
@@ -283,6 +461,30 @@ export class CoderaxClient {
     });
   }
 
+  writeMemory(request: MemoryWriteRequestInput): Promise<MemoryList> {
+    return this.request<MemoryList>(MemoryList, {
+      method: 'POST',
+      path: '/v1/memory',
+      body: this.encodeBody('writeMemory', request),
+    });
+  }
+
+  deleteMemory(request: MemoryDeleteRequestInput): Promise<MemoryList> {
+    return this.request<MemoryList>(MemoryList, {
+      method: 'POST',
+      path: '/v1/memory/delete',
+      body: this.encodeBody('deleteMemory', request),
+    });
+  }
+
+  searchMemory(query: { q: string; mode?: DataMode; limit?: number }): Promise<MemorySearchResult> {
+    return this.request<MemorySearchResult>(MemorySearchResult, {
+      method: 'GET',
+      path: '/v1/memory/search',
+      query: { q: query.q, mode: query.mode, limit: query.limit },
+    });
+  }
+
   permissions(taskId: string): Promise<PermissionList> {
     return this.request<PermissionList>(PermissionList, {
       method: 'GET',
@@ -297,7 +499,7 @@ export class CoderaxClient {
     return this.request<PermissionList>(PermissionList, {
       method: 'POST',
       path: `/v1/work/${encodeURIComponent(taskId)}/permissions`,
-      body: request,
+      body: this.encodeBody('decidePermission', request),
     });
   }
 
@@ -308,7 +510,49 @@ export class CoderaxClient {
     });
   }
 
-  /** Replays and tails execution events from a sequence cursor. */
+  markNotificationRead(taskId: string): Promise<NotificationList> {
+    return this.request<NotificationList>(NotificationList, {
+      method: 'POST',
+      path: `/v1/notifications/${encodeURIComponent(taskId)}`,
+    });
+  }
+
+  schedules(): Promise<ScheduleList> {
+    return this.request<ScheduleList>(ScheduleList, {
+      method: 'GET',
+      path: '/v1/schedules',
+    });
+  }
+
+  createSchedule(request: ScheduleCreateRequestInput): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'POST',
+      path: '/v1/schedules',
+      body: this.encodeBody('createSchedule', request),
+    });
+  }
+
+  controlSchedule(scheduleId: string, action: ScheduleAction): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+      body: this.encodeBody('controlSchedule', { action }),
+    });
+  }
+
+  deleteSchedule(scheduleId: string): Promise<ScheduleRemoval> {
+    return this.request<ScheduleRemoval>(ScheduleRemoval, {
+      method: 'DELETE',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+    });
+  }
+
+  /**
+   * Replays and tails execution events from a sequence cursor.
+   *
+   * Pass the last `seq` you consumed as `after`. The first frame is
+   * `stream.truncated` when the retained window no longer covers that cursor.
+   */
   async *events(
     taskId: string,
     options: { after?: number; signal?: AbortSignal } = {},
@@ -337,4 +581,29 @@ export class CoderaxClient {
   }
 }
 
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };
+export { checkCompatibility, type CompatibilityReport } from './compat.js';
+export {
+  SDK_CHAT_STREAM_VERSION,
+  SDK_CONTRACT_MAJOR,
+  SDK_CONTRACT_VERSION,
+  SDK_EVENT_SCHEMA_VERSION,
+  SDK_NAME,
+  SDK_SUPPORTED_CONTRACT_VERSIONS,
+  SDK_VERSION,
+  sdkMetadata,
+  type SdkVersionMetadata,
+} from './version.js';
+
+// Consumers get the input shapes, where defaulted fields may be omitted.
+export type {
+  ArtifactCreateRequestInput as ArtifactCreateRequest,
+  ChatRequestInput as ChatRequest,
+  DataMode,
+  MemoryDeleteRequestInput as MemoryDeleteRequest,
+  MemoryWriteRequestInput as MemoryWriteRequest,
+  PermissionDecisionRequest,
+  ScheduleAction,
+  ScheduleCreateRequestInput as ScheduleCreateRequest,
+  TaskListQuery,
+  WorkSubmitRequestInput as WorkSubmitRequest,
+};

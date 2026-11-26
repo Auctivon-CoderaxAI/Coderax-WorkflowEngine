@@ -48,7 +48,8 @@ export type PersistenceInput = {
 
 const NO_CLOSE = async (): Promise<void> => undefined;
 
-const MEMORY_VALUE_LIMIT = 20_000;
+/** Shared with the handshake so a client learns the bound before writing. */
+export const MEMORY_VALUE_LIMIT = 20_000;
 
 function collectionName(config: EngineConfig, base: string): string {
   return `${config.persistence.collectionPrefix}${base}`;

@@ -390,6 +390,59 @@ export function createMongoMemoryStore(input: {
       const document = await input.collection.findOne({ ownerId, mode, key });
       return document ? toMemory(document) : null;
     },
+
+    delete: async ({ ownerId, mode, key }) => {
+      const result = await input.collection.deleteOne({ ownerId, mode, key });
+      return result.deletedCount === 1;
+    },
+
+    search: async ({ ownerId, mode, query, limit }) => {
+      // The filter is pushed into the database so a partition is never read whole.
+      const wanted = query
+        .toLowerCase()
+        .split(/[^a-z0-9_]+/)
+        .filter((term) => term.length > 0);
+      if (wanted.length === 0) return { query, matches: [] };
+      const documents = await input.collection
+        .find({
+          ownerId,
+          mode,
+          $or: wanted.flatMap((term) => [
+            { key: { $regex: term, $options: 'i' } },
+            { value: { $regex: term, $options: 'i' } },
+          ]),
+        })
+        .limit(limit * 4)
+        .toArray();
+      const unique = [...new Set(wanted)];
+      const matches = documents
+        .map(toMemory)
+        .map((entry) => {
+          const keyText = entry.key.toLowerCase();
+          const valueText = entry.value.toLowerCase();
+          let score = 0;
+          for (const term of unique) {
+            if (keyText.includes(term)) score += 2;
+            else if (valueText.includes(term)) score += 1;
+          }
+          return { entry, score };
+        })
+        .filter((candidate) => candidate.score > 0)
+        .sort(
+          (left, right) =>
+            right.score - left.score ||
+            right.entry.updatedAt.localeCompare(left.entry.updatedAt),
+        )
+        .slice(0, limit)
+        .map(({ entry, score }) => ({
+          key: entry.key,
+          value: entry.value,
+          mode: entry.mode,
+          updatedAt: entry.updatedAt,
+          score,
+        }));
+      return { query, matches };
+    },
   };
 }
 
@@ -422,7 +475,10 @@ export function createMongoNotificationStore(collection: MongoCollectionLike): N
     },
 
     markRead: async (ownerId, taskId) => {
+      const existing = await collection.findOne({ taskId, ownerId });
+      if (!existing) return false;
       await collection.updateOne({ taskId, ownerId }, { $set: { read: true } }, { upsert: false });
+      return true;
     },
   };
 }

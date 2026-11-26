@@ -31,6 +31,12 @@ export const ExecutionEventType = z.enum([
   'task.failed',
   'task.cancelled',
   'task.interrupted',
+  /**
+   * A synthetic first frame telling a reconnecting client that the cursor it
+   * asked for predates the retained window, so the events that follow are not
+   * the whole story. It is emitted by the server, not by a run.
+   */
+  'stream.truncated',
 ]);
 export type ExecutionEventType = z.infer<typeof ExecutionEventType>;
 
@@ -167,6 +173,18 @@ export const ExecutionEvent = z.discriminatedUnion('type', [
       ...envelope,
       type: z.literal('task.interrupted'),
       payload: z.object({ detail: z.string().max(500) }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...envelope,
+      type: z.literal('stream.truncated'),
+      payload: z
+        .object({
+          after: z.number().int().nonnegative(),
+          oldestSeq: z.number().int().positive(),
+        })
+        .strict(),
     })
     .strict(),
 ]);

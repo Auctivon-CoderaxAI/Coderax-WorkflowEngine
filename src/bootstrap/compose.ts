@@ -1,4 +1,9 @@
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
+import {
+  ARTIFACT_MAX_BYTES,
+  ARTIFACT_MAX_PER_TASK,
+  SCHEDULE_MIN_INTERVAL_MS,
+} from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
@@ -33,7 +38,11 @@ import {
   type ApplicationDependencies,
   type InfrastructureDependencies,
 } from './container.js';
-import { buildPersistence } from './persistence.js';
+import { buildPersistence, MEMORY_VALUE_LIMIT } from './persistence.js';
+import { createArtifactStore } from '../artifacts/store.js';
+import { createScheduleStore, SCHEDULE_TICK_MS } from '../scheduling/store.js';
+import { createIdempotencyStore } from '../persistence/idempotency.js';
+import { ENGINE_NAME, ENGINE_VERSION } from '../version.js';
 import { StartupError } from './startup-error.js';
 
 export { StartupError } from './startup-error.js';
@@ -131,6 +140,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const { config } = input;
   const clock = createClock();
   const ids = createIdGenerator();
+  const startedAt = clock.iso();
 
   let auth;
   try {
@@ -200,6 +210,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const memory = persistence.memory;
   const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
+  const artifacts = createArtifactStore({
+    clock,
+    maxBytes: ARTIFACT_MAX_BYTES,
+    maxPerTask: ARTIFACT_MAX_PER_TASK,
+  });
+  const schedules = createScheduleStore({ clock });
+  const idempotency = createIdempotencyStore({ clock });
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
@@ -301,6 +318,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    artifacts,
+    schedules,
+    idempotency,
     audit,
     events,
     runner,
@@ -319,7 +339,17 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
 
   const registry = createRouteRegistry();
-  registerRoutes(registry, service);
+  registerRoutes(registry, service, {
+    server: { name: ENGINE_NAME, version: ENGINE_VERSION, startedAt },
+    limits: {
+      maxBodyBytes: 1_048_576,
+      eventBufferSize: config.execution.eventBufferSize,
+      maxConcurrentTasks: config.execution.maxConcurrentTasks,
+      scheduleMinIntervalMs: SCHEDULE_MIN_INTERVAL_MS,
+      artifactMaxBytes: ARTIFACT_MAX_BYTES,
+      memoryMaxValueLength: MEMORY_VALUE_LIMIT,
+    },
+  });
   const missingRoutes = registry.missing();
   if (missingRoutes.length > 0) {
     throw new StartupError(
@@ -361,6 +391,14 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     port: config.server.port,
   });
 
+  // Schedules are driven by the engine, not by a client: a browser that is closed
+  // cannot be the reason a recurring task stops running. The timer is unref'd so
+  // it never holds the process open on its own.
+  const scheduleTimer = setInterval(() => {
+    void service.tickSchedules().catch(() => undefined);
+  }, SCHEDULE_TICK_MS);
+  scheduleTimer.unref();
+
   return {
     dependencies: finalContainer.dependencies,
     service,
@@ -375,6 +413,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       return { url };
     },
     stop: async () => {
+      clearInterval(scheduleTimer);
       await service.shutdown();
       await server.close();
       await persistence.close();

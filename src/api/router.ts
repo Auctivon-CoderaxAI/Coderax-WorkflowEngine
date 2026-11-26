@@ -1,5 +1,5 @@
 import type { RouteSpec } from '@coderax/contracts';
-import { ROUTE_INDEX } from '@coderax/contracts';
+import { HTTP_STATUS_FOR_CODE, ROUTE_INDEX } from '@coderax/contracts';
 import { buildOpenApiDocument, type OpenApiDocument } from '@coderax/contracts';
 import type { ProblemCode } from '@coderax/contracts';
 import type { AuthService, Principal } from '../security/auth.js';
@@ -10,6 +10,8 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
+  /** Raw `Accept` header, so a negotiated operation can pick SSE or JSON. */
+  accept: string | undefined;
 };
 
 export type HandlerResult =
@@ -24,6 +26,7 @@ export type RawRequest = {
   method: string;
   path: string;
   authorization: string | undefined;
+  accept: string | undefined;
   bodyText: string;
 };
 
@@ -89,28 +92,9 @@ function problem(
   requestId: string,
   retryable = false,
 ): { kind: 'json'; status: number; body: unknown } {
-  const status =
-    code === 'unauthorized'
-      ? 401
-      : code === 'forbidden' || code === 'workspace_denied'
-        ? 403
-        : code === 'not_found'
-          ? 404
-          : code === 'validation_failed'
-            ? 400
-            : code === 'conflict' || code === 'busy' || code === 'permission_required' || code === 'cancelled'
-              ? 409
-              : code === 'budget_exhausted'
-                ? 429
-                : code === 'paid_model_refused'
-                  ? 402
-                  : code === 'not_ready' ||
-                      code === 'engine_unavailable' ||
-                      code === 'engine_not_configured'
-                    ? 503
-                    : code === 'protocol_error'
-                      ? 502
-                      : 500;
+  // One mapping, in the contracts, so a client never has to guess a status for a
+  // code and the router cannot drift from the published table.
+  const status = HTTP_STATUS_FOR_CODE[code];
   return {
     kind: 'json',
     status,
@@ -135,6 +119,18 @@ function compilePath(pattern: string): RegExp {
     })
     .join('/');
   return new RegExp(`^${escaped}$`);
+}
+
+function decodeParams(groups: Record<string, string>): Record<string, string> {
+  const decoded: Record<string, string> = {};
+  for (const [key, value] of Object.entries(groups)) {
+    try {
+      decoded[key] = decodeURIComponent(value);
+    } catch {
+      decoded[key] = value;
+    }
+  }
+  return decoded;
 }
 
 /** Exported so a route can answer with the problem body without restating statuses. */
@@ -174,18 +170,26 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = (match.groups ?? {}) as Record<string, string>;
+        const params = decodeParams((match.groups ?? {}) as Record<string, string>);
+        let parsedParams: Record<string, string> = params;
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
+          parsedParams = parsed.data as Record<string, string>;
         }
+
+        let parsedQuery: Record<string, unknown> = query;
         if (route.spec.query) {
+          // The parsed value is what the handler receives: handing it the raw
+          // string map would silently defeat every coercion in the schema, which
+          // is exactly how an event cursor collapsed to zero.
           const parsed = route.spec.query.safeParse(query);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
+          parsedQuery = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;
@@ -216,10 +220,11 @@ export function createRouter(input: {
         try {
           result = await route.handler({
             principal: principal ?? { ownerId: input.auth.ownerId, isOwner: true },
-            params,
-            query,
+            params: parsedParams,
+            query: parsedQuery,
             body,
             requestId,
+            accept: raw.accept,
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);
