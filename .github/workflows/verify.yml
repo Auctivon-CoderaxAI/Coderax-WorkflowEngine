@@ -5,7 +5,9 @@ name: verify
 
 on:
   pull_request:
-    branches: [main]
+    # The integration branch is a merge target for stacked work, so a pull
+    # request into it runs the gate (and the live MongoDB tier) too.
+    branches: [main, feat/intelligence-core]
   push:
     branches: [main]
 
