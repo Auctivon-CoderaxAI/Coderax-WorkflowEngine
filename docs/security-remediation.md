@@ -14,7 +14,8 @@ decision, which `AGENTS.md` forbids. Its findings are recorded at the end as
 follow-ups, not silently claimed as fixed.
 
 Baseline reproduction was executed, not inferred: a clean worktree at `808dfd3`
-(`npm ci && npm run build`) ran `repro.mjs` against the real services and gateway
+(`npm ci && npm run build`) ran the script preserved at
+`docs/evidence/baseline-808dfd3-repro.mjs` against the real services and gateway
 ports. Every result below was `true` on the baseline, meaning the defect was
 present; the corresponding regression test is green at the pushed head.
 
