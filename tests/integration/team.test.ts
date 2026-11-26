@@ -409,6 +409,64 @@ test('team execution is bounded by member count, parallelism and the deadline', 
   }
 });
 
+test('cancelling while a suspended team drains still settles it cancelled', async () => {
+  const started = await start({ gateway: teamGateway() });
+  let releaseFlush: () => void = () => undefined;
+  const flushGate = new Promise<void>((resolve) => {
+    releaseFlush = resolve;
+  });
+  let reachedSuspendedFlush = false;
+  let teamId = '';
+
+  // Hold the flush that follows the `awaiting_approval` write. The execution
+  // context is still in `active` here, but its run token is already null: this
+  // is the window where cancellation must settle the team itself.
+  const events = started.app.dependencies.events;
+  const originalFlush = events.flush.bind(events);
+  events.flush = async (flushingTeamId) => {
+    if (flushingTeamId === teamId) {
+      const status = await started.app.service.team(principal, flushingTeamId);
+      if (status.ok && status.value.state === 'awaiting_approval') {
+        reachedSuspendedFlush = true;
+        await flushGate;
+      }
+    }
+    return originalFlush(flushingTeamId);
+  };
+
+  try {
+    await writeFile(path.join(started.workspace.cloudRoot, 'late.txt'), 'late');
+    const submitted = await started.app.service.submitTeam(principal, {
+      objective: 'Cancel while the context drains',
+      mode: 'cloud',
+      members: [
+        { memberId: 'late', agent: 'coderax', objective: 'Read late', dependsOn: [], resources: ['late.txt'] },
+      ],
+    });
+    assert.equal(submitted.ok, true);
+    if (!submitted.ok) return;
+    teamId = submitted.value.teamId;
+
+    await waitFor(async () => (reachedSuspendedFlush ? true : null), 5_000);
+
+    const cancellation = started.app.service.cancelTeam(principal, teamId);
+    const terminal = await waitFor(async () => {
+      const status = await started.app.service.team(principal, teamId);
+      return status.ok && status.value.state === 'cancelled' ? status.value : null;
+    }, 2_000);
+    releaseFlush();
+    const cancelled = await cancellation;
+    assert.equal(cancelled.ok, true);
+    assert.equal(terminal.failure?.code, 'cancelled');
+
+    const resumed = await started.app.service.resumeTeam(principal, teamId, terminal.generation);
+    assert.equal(resumed.ok, false, 'a late-cancelled team cannot be resumed');
+  } finally {
+    releaseFlush();
+    await started.close();
+  }
+});
+
 test('a lock held by another replica refuses the member that needs the resource', async () => {
   const database = createFakeDatabase();
   const workspace = createWorkspaces();
