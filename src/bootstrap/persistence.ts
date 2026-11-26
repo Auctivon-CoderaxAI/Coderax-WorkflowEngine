@@ -21,6 +21,9 @@ import { createPermissionTable } from '../persistence/permissions.js';
 import { createPermissionStore } from '../permissions/store.js';
 import { createScheduleRepository } from '../persistence/schedules.js';
 import { createArtifactRepository } from '../artifacts/store.js';
+import { createMemoryEventLog } from '../events/log.js';
+import type { EventLog } from '../events/log.js';
+import { createMongoEventLog, ensureEventIndexes } from '../persistence/mongo-events.js';
 import {
   createMongoArtifactRepository,
   createMongoPermissionTable,
@@ -52,6 +55,8 @@ export type PersistenceStores = {
   permissions: PermissionStore;
   schedules: ScheduleRepository;
   artifacts: ArtifactRepository;
+  /** Durable execution events; the payload side of the event stream. */
+  events: EventLog;
   close: () => Promise<void>;
 };
 
@@ -127,6 +132,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       }),
       schedules: createScheduleRepository(),
       artifacts: createArtifactRepository(),
+      events: createMemoryEventLog(),
       close: NO_CLOSE,
     };
   }
@@ -142,6 +148,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const permissions = database.collection(collectionName(config, 'permissions'));
   const schedules = database.collection(collectionName(config, 'schedules'));
   const artifacts = database.collection(collectionName(config, 'artifacts'));
+  const events = database.collection(collectionName(config, 'events'));
+  const eventHeads = database.collection(collectionName(config, 'event_heads'));
 
   try {
     await ensureWorkRunIndexes(workRuns);
@@ -153,6 +161,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensurePermissionIndexes(permissions);
     await ensureScheduleIndexes(schedules);
     await ensureArtifactIndexes(artifacts);
+    await ensureEventIndexes({ events, heads: eventHeads });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -178,6 +187,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     }),
     schedules: createMongoScheduleRepository(schedules),
     artifacts: createMongoArtifactRepository(artifacts),
+    events: createMongoEventLog({ events, heads: eventHeads }),
     close: database.close,
   };
 }

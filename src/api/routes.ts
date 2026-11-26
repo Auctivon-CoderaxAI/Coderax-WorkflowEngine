@@ -216,9 +216,12 @@ async function* chatFrames(reply: { text: string }): AsyncIterable<SseFrame> {
     // An explicit `after` wins; otherwise Last-Event-ID resumes the cursor the
     // client last received. A malformed header is ignored rather than trusted.
     const after = context.query.after;
-    const header = context.lastEventId ?? '';
-    const headerCursor = /^\d+$/.test(header) ? Number(header) : 0;
-    const cursor = typeof after === 'number' ? after : headerCursor;
+    // SSE clients resume with `Last-Event-ID`; `after` is kept for plain HTTP
+    // clients. The larger of the two wins so a stale query cannot rewind a
+    // client that already received newer events.
+    const fromQuery = typeof after === 'number' ? after : 0;
+    const fromHeader = context.lastEventId ? Number(context.lastEventId) : 0;
+    const cursor = Number.isFinite(fromHeader) ? Math.max(fromQuery, fromHeader) : fromQuery;
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
     return {

@@ -32,7 +32,7 @@ way for a client to decide whether it can talk to a deployment.
     "chat": { "state": "available", "detail": "..." },
     "chatStreaming": { "state": "available", "detail": "..." },
     "work": { "state": "available", "detail": "..." },
-    "durableEvents": { "state": "unconfigured", "detail": "..." },
+    "durableEvents": { "state": "available", "detail": "..." },
     "eventReplay": { "state": "available", "detail": "..." },
     "scheduling": { "state": "available", "detail": "..." },
     "artifacts": { "state": "available", "detail": "..." },
@@ -57,8 +57,9 @@ registered. A client must assert the operations it needs are present. States are
 - `available`: the operation exists and is tested over HTTP.
 - `unsupported`: the engine does not implement it and no route is published.
 - `unconfigured`: the route exists but a backing dependency is not enabled in this
-  deployment (currently `durableEvents`, whose replay window is process-local on
-  `main`).
+  deployment. `durableEvents` is `unconfigured` only under
+  `persistence.driver=memory`, where the event log is process-local; it is
+  `available` under MongoDB.
 
 `@coderax/sdk` calls this endpoint in `negotiate()` and throws
 `CoderaxCompatibilityError` unless the contract major matches, the engine contract
@@ -156,7 +157,7 @@ caller cannot append a second user message.
 Schedules derive their key from `scheduleId` and due time, so a tick crash between
 submission and recording cannot duplicate a run.
 
-## Persistent permissions, schedules and artifacts
+## Persistent permissions, schedules, events and artifacts
 
 These were process-local or absent on `main` and are reconstructed here:
 
@@ -167,6 +168,12 @@ These were process-local or absent on `main` and are reconstructed here:
   stable idempotency key, leaves a busy conversation due for retry, and records
   `lastTaskId`/`lastError`. One-shot schedules settle as `submitted`; repeating
   ones reschedule from the tick time. At most 50 active schedules per owner.
+- Execution events are durable when `persistence.driver = mongo`. The bus
+  flushes before a terminal task write and before releasing the lease, so the
+  task record cannot say a run finished while its stream is missing the events
+  that led to it. `GET /v1/work/{taskId}/events` reads the stored stream, so a
+  restarted process or a different replica replays it from `after` or
+  `Last-Event-ID`; the handshake advertises `durableEvents: available`.
 - Artifact metadata is durable; bytes are written under
   `<workspace-root>/.coderax-artifacts/<artifactId>.bin` at mode 0600, never at a
   caller-chosen path. The engine computes and re-verifies `sha256:<hex>`; `path`
@@ -183,7 +190,6 @@ implementation. Do not code against them:
 | Tools and routing report | implementation lives on an unmerged branch | PR #2 / `feat/intelligence-core` (`listTools`, `getRouting`) |
 | Multimodal input | no image or audio path | unassigned |
 | Multi-agent collaboration | bounded team orchestration is unmerged | PR #8 (`submitTeam`, `getTeam`, `resumeTeam`, `cancelTeam`, `listTeamPermissions`, `decideTeamPermission`) |
-| Durable event storage | replay is process-local on `main` | `feat/durable-events-integration` |
 | Schedule editing and occurrence history | only create/list/get/cancel are implemented | PR #9 (`updateSchedule`, `pauseSchedule`, `resumeSchedule`, `getScheduleUpcoming`, `listScheduleExecutions`, `triggerSchedule`, `dispatchScheduleEvent`) |
 | Model-driven reasoning planner | deterministic planner only | PR #3 / `feat/native-reasoning-planner` |
 
@@ -240,8 +246,9 @@ authorizes that separately.
 
 ## Coordination with active owners
 
-Audited on 2026-11-26. These branches are unmerged and were **not** rewritten or
-force-pushed by this work:
+Audited on 2026-11-26. None of these branches was rewritten or force-pushed by
+this work; the durable-events integration is merged into this branch, the rest
+remain unmerged:
 
 | Branch | Head | Contract interaction |
 | --- | --- | --- |
@@ -249,7 +256,7 @@ force-pushed by this work:
 | `feat/zero-cost-model-router` / PR #4 | `43f3581` / `b6e002b` | router internals; no new route ids |
 | `feat/native-reasoning-planner` / PR #3 | `c241bae` / `90b87db` | permission producer; no new route ids |
 | `feat/durable-events` | `9b3fd7d` | snapshots only |
-| `feat/durable-events-integration` | `2554edc` | adds the persistent event log behind `streamTaskEvents`; not merged |
+| `feat/durable-events-integration` | `2554edc` | merged into this integration branch; adds the persistent event log behind `streamTaskEvents` |
 | `feat/execution-supervisor` / PR #5 | `a4fabac` / `13d4b4f` | supervisor internals; no new route ids |
 | PR #7 | `9b4cb5c` | competing 1.1.0 surface; superseded by this catalogue |
 | PR #8 | `ffec08f` | reserves six team operations |

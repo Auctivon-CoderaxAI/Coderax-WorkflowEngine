@@ -5,7 +5,20 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { ensureWorkRunIndexes } from '../../src/persistence/mongo.js';
-import { createFakeCollection } from '../fakes/mongo.js';
+import { ensureEventIndexes } from '../../src/persistence/mongo-events.js';
+import {
+  ensureArtifactIndexes,
+  ensurePermissionIndexes,
+  ensureScheduleIndexes,
+} from '../../src/persistence/mongo-records.js';
+import {
+  ensureConversationIndexes,
+  ensureIdempotencyIndexes,
+  ensureMemoryIndexes,
+  ensureNotificationIndexes,
+  ensureTaskIndexes,
+} from '../../src/persistence/mongo-tables.js';
+import { createFakeCollection, type FakeCollection } from '../fakes/mongo.js';
 import { DATABASE_MIGRATIONS } from '../../scripts/release/migrations.js';
 import { parseReleaseManifest } from '../../scripts/release/manifest.js';
 
@@ -16,16 +29,79 @@ function committedManifest() {
 }
 
 test('the declared migrations are exactly the indexes the engine creates', async () => {
-  const collection = createFakeCollection();
-  await ensureWorkRunIndexes(collection);
-  assert.equal(collection.indexes.length, DATABASE_MIGRATIONS.length);
-  for (const [index, migration] of DATABASE_MIGRATIONS.entries()) {
-    const created = collection.indexes[index];
-    assert.ok(created, `index ${index} was not created`);
-    assert.deepEqual(created.keys, migration.keys);
-    assert.equal(created.options?.name, migration.name);
-    assert.equal(created.options?.unique ?? false, migration.unique);
+  const actual: Array<{
+    collection: string;
+    keys: Record<string, 1 | -1>;
+    unique: boolean;
+    name: string;
+  }> = [];
+  function record(collectionName: string, collection: FakeCollection): void {
+    for (const index of collection.indexes) {
+      assert.ok(index.options?.name, `an index on ${collectionName} has no name`);
+      actual.push({
+        collection: collectionName,
+        keys: index.keys,
+        unique: index.options?.unique ?? false,
+        name: index.options.name,
+      });
+    }
   }
+
+  const workRuns = createFakeCollection();
+  await ensureWorkRunIndexes(workRuns);
+  record('work_runs', workRuns);
+
+  const tasks = createFakeCollection();
+  await ensureTaskIndexes(tasks);
+  record('tasks', tasks);
+
+  const idempotency = createFakeCollection();
+  await ensureIdempotencyIndexes(idempotency);
+  record('idempotency', idempotency);
+
+  const conversations = createFakeCollection();
+  const messages = createFakeCollection();
+  await ensureConversationIndexes({ conversations, messages });
+  record('conversations', conversations);
+  record('messages', messages);
+
+  const memory = createFakeCollection();
+  await ensureMemoryIndexes(memory);
+  record('memory', memory);
+
+  const notifications = createFakeCollection();
+  await ensureNotificationIndexes(notifications);
+  record('notifications', notifications);
+
+  const permissions = createFakeCollection();
+  await ensurePermissionIndexes(permissions);
+  record('permissions', permissions);
+
+  const schedules = createFakeCollection();
+  await ensureScheduleIndexes(schedules);
+  record('schedules', schedules);
+
+  const artifacts = createFakeCollection();
+  await ensureArtifactIndexes(artifacts);
+  record('artifacts', artifacts);
+
+  const events = createFakeCollection();
+  const heads = createFakeCollection();
+  await ensureEventIndexes({ events, heads });
+  record('events', events);
+  record('event_heads', heads);
+
+  const declared = DATABASE_MIGRATIONS.map((migration) => ({
+    collection: migration.collection,
+    keys: migration.keys,
+    unique: migration.unique,
+    name: migration.name,
+  }));
+  assert.deepEqual(
+    actual,
+    declared,
+    'every index the engine creates must be declared, and no declared index may be uncreated',
+  );
 });
 
 test('the committed matrix publishes the same migrations as the engine', () => {

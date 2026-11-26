@@ -72,6 +72,334 @@
         "required": true,
         "reversible": true,
         "rollback": "drop the work_run_expires index; no data is deleted"
+      },
+      {
+        "id": "mongo.tasks.id",
+        "collection": "tasks",
+        "operation": "createIndex",
+        "keys": {
+          "taskId": 1
+        },
+        "unique": true,
+        "name": "task_id",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the task_id index; task rows remain readable by other indexes"
+      },
+      {
+        "id": "mongo.tasks.conversation_state",
+        "collection": "tasks",
+        "operation": "createIndex",
+        "keys": {
+          "conversationId": 1,
+          "state": 1
+        },
+        "unique": false,
+        "name": "task_conversation_state",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the task_conversation_state index; no data is deleted"
+      },
+      {
+        "id": "mongo.tasks.owner",
+        "collection": "tasks",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1
+        },
+        "unique": false,
+        "name": "task_owner",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the task_owner index; no data is deleted"
+      },
+      {
+        "id": "mongo.idempotency.key",
+        "collection": "idempotency",
+        "operation": "createIndex",
+        "keys": {
+          "key": 1
+        },
+        "unique": true,
+        "name": "idempotency_key",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the idempotency_key index; stored idempotency rows remain"
+      },
+      {
+        "id": "mongo.idempotency.created",
+        "collection": "idempotency",
+        "operation": "createIndex",
+        "keys": {
+          "createdAt": 1
+        },
+        "unique": false,
+        "name": "idempotency_created",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the idempotency_created index; no data is deleted"
+      },
+      {
+        "id": "mongo.conversations.id",
+        "collection": "conversations",
+        "operation": "createIndex",
+        "keys": {
+          "conversationId": 1
+        },
+        "unique": true,
+        "name": "conversation_id",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the conversation_id index; conversation rows remain readable"
+      },
+      {
+        "id": "mongo.conversations.owner_updated",
+        "collection": "conversations",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1,
+          "updatedAt": -1
+        },
+        "unique": false,
+        "name": "conversation_owner_updated",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the conversation_owner_updated index; no data is deleted"
+      },
+      {
+        "id": "mongo.messages.id",
+        "collection": "messages",
+        "operation": "createIndex",
+        "keys": {
+          "messageId": 1
+        },
+        "unique": true,
+        "name": "message_id",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the message_id index; message rows remain readable"
+      },
+      {
+        "id": "mongo.messages.conversation_created",
+        "collection": "messages",
+        "operation": "createIndex",
+        "keys": {
+          "conversationId": 1,
+          "createdAt": 1
+        },
+        "unique": false,
+        "name": "message_conversation_created",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the message_conversation_created index; no data is deleted"
+      },
+      {
+        "id": "mongo.memory.partition",
+        "collection": "memory",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1,
+          "mode": 1,
+          "key": 1
+        },
+        "unique": true,
+        "name": "memory_partition",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the memory_partition index; memory rows remain readable"
+      },
+      {
+        "id": "mongo.notifications.task",
+        "collection": "notifications",
+        "operation": "createIndex",
+        "keys": {
+          "taskId": 1
+        },
+        "unique": true,
+        "name": "notification_task",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the notification_task index; notification rows remain readable"
+      },
+      {
+        "id": "mongo.notifications.owner_created",
+        "collection": "notifications",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1,
+          "createdAt": -1
+        },
+        "unique": false,
+        "name": "notification_owner_created",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the notification_owner_created index; no data is deleted"
+      },
+      {
+        "id": "mongo.permissions.request",
+        "collection": "permissions",
+        "operation": "createIndex",
+        "keys": {
+          "requestId": 1
+        },
+        "unique": true,
+        "name": "permission_request",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the permission_request index; permission rows remain readable"
+      },
+      {
+        "id": "mongo.permissions.task",
+        "collection": "permissions",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1,
+          "taskId": 1,
+          "requestedAt": 1
+        },
+        "unique": false,
+        "name": "permission_task",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the permission_task index; no data is deleted"
+      },
+      {
+        "id": "mongo.permissions.pending",
+        "collection": "permissions",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1,
+          "decision": 1
+        },
+        "unique": false,
+        "name": "permission_pending",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the permission_pending index; no data is deleted"
+      },
+      {
+        "id": "mongo.schedules.id",
+        "collection": "schedules",
+        "operation": "createIndex",
+        "keys": {
+          "scheduleId": 1
+        },
+        "unique": true,
+        "name": "schedule_id",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the schedule_id index; schedule rows remain readable"
+      },
+      {
+        "id": "mongo.schedules.due",
+        "collection": "schedules",
+        "operation": "createIndex",
+        "keys": {
+          "state": 1,
+          "nextRunAt": 1
+        },
+        "unique": false,
+        "name": "schedule_due",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the schedule_due index; no data is deleted"
+      },
+      {
+        "id": "mongo.schedules.owner",
+        "collection": "schedules",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1,
+          "createdAt": -1
+        },
+        "unique": false,
+        "name": "schedule_owner",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the schedule_owner index; no data is deleted"
+      },
+      {
+        "id": "mongo.artifacts.id",
+        "collection": "artifacts",
+        "operation": "createIndex",
+        "keys": {
+          "artifactId": 1
+        },
+        "unique": true,
+        "name": "artifact_id",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the artifact_id index; artifact metadata remains readable"
+      },
+      {
+        "id": "mongo.artifacts.task",
+        "collection": "artifacts",
+        "operation": "createIndex",
+        "keys": {
+          "ownerId": 1,
+          "taskId": 1,
+          "createdAt": 1
+        },
+        "unique": false,
+        "name": "artifact_task",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the artifact_task index; no data is deleted"
+      },
+      {
+        "id": "mongo.events.task_seq",
+        "collection": "events",
+        "operation": "createIndex",
+        "keys": {
+          "taskId": 1,
+          "seq": 1
+        },
+        "unique": true,
+        "name": "event_task_seq",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the event_task_seq index; stored events remain readable"
+      },
+      {
+        "id": "mongo.events.task_id",
+        "collection": "events",
+        "operation": "createIndex",
+        "keys": {
+          "taskId": 1,
+          "eventId": 1
+        },
+        "unique": true,
+        "name": "event_task_id",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the event_task_id index; stored events remain readable"
+      },
+      {
+        "id": "mongo.events.task_tail",
+        "collection": "events",
+        "operation": "createIndex",
+        "keys": {
+          "taskId": 1,
+          "seq": -1
+        },
+        "unique": false,
+        "name": "event_task_tail",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the event_task_tail index; no data is deleted"
+      },
+      {
+        "id": "mongo.event_heads.task",
+        "collection": "event_heads",
+        "operation": "createIndex",
+        "keys": {
+          "taskId": 1
+        },
+        "unique": true,
+        "name": "event_head_task",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the event_head_task index; generation head rows remain readable"
       }
     ],
     "requiredChecks": [
@@ -330,37 +658,6 @@
     ]
   },
   "unpublished": [
-    {
-      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
-      "branch": "feat/durable-events-integration",
-      "commit": "2554edcfd99d85ab6e330f948663490460757017",
-      "ahead": 2,
-      "behind": 0,
-      "disposition": "pending-merge",
-      "summary": "Clean integration of durable execution events, notification mark-read and workspace quarantine, based directly on main. Adds POST /v1/notifications/read and an SDK method without changing CONTRACT_VERSION or EVENT_SCHEMA_VERSION.",
-      "supersededBy": null,
-      "exclusion": null,
-      "evidence": [
-        {
-          "path": "docs/durable-events.md",
-          "line": 1,
-          "statement": "The branch documents durable events, notification mark-read and quarantine as a reconciliation of the preserved change set.",
-          "sha256": "1c6f3ac514fc183caffd26162c836be2c3548b6e718bcea3b53a72b1f106c4a2"
-        },
-        {
-          "path": "packages/contracts/src/routes.ts",
-          "line": 234,
-          "statement": "The branch adds the markNotificationsRead operation to the route catalogue.",
-          "sha256": "bfdbda586520a373ba6113b2a22fad0cc69b04a9240dc08e496c07342d4b647d"
-        },
-        {
-          "path": "docs/parity-matrix.md",
-          "line": 1,
-          "statement": "The branch closes parity rows 18, 22 and 23 in the tracked matrix.",
-          "sha256": "a7df317448b9b5fa9bde2f20d3d8d22f0dc51199db1de8f83f1186ad5880880c"
-        }
-      ]
-    },
     {
       "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
       "branch": "feat/durable-events",

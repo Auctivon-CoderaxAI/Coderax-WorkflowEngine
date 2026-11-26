@@ -24,14 +24,16 @@ import {
  * real database with two independently composed applications, each with its own
  * driver connection and its own workspace root.
  *
- * It also records the boundaries that are *not* durable yet, with assertions
+ * It also records the boundaries that are still replica-local, with assertions
  * that will fail when the owning branch lands:
- * - execution events replay only inside the process that published them
- *   (`durableEvents` is `unconfigured`);
  * - artifact metadata is shared, artifact bytes are still on the writing
  *   replica's workspace;
  * - the daily inference budget is a process-local ledger, so two replicas each
  *   enforce their own copy until PR #4's durable quota lands.
+ *
+ * Execution events are durable: a replica that never ran the task reads the
+ * stored stream from `after: 0` and from a mid-stream cursor, and the handshake
+ * advertises `durableEvents: available` because the log lives in MongoDB.
  */
 
 const MONGO_URI = process.env.CODERAX_TEST_MONGODB_URI?.trim() ?? '';
@@ -104,6 +106,41 @@ async function dropPrefix(prefix: string): Promise<void> {
 
 function sha256(content: string): string {
   return `sha256:${createHash('sha256').update(content).digest('hex')}`;
+}
+
+type ReplayResult = {
+  events: ExecutionEvent[];
+  lastSeq: number;
+  truncated: boolean;
+};
+
+/**
+ * Reads an event stream to its end. A finished task closes the stream on its
+ * terminal event; the timeout is a failure guard, not part of the assertion.
+ */
+async function replayEvents(
+  replica: Replica,
+  taskId: string,
+  options: { after?: number; lastEventId?: number },
+): Promise<ReplayResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const stream = await replica.api.openEvents(taskId, {
+      ...options,
+      signal: controller.signal,
+    });
+    const events: ExecutionEvent[] = [];
+    for await (const event of stream.events) events.push(event);
+    return { events, lastSeq: stream.lastSeq, truncated: stream.truncated };
+  } catch (error) {
+    const aborted =
+      error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+    if (!aborted) throw error;
+    throw new Error('the durable replay did not close on the task terminal event');
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 test(
@@ -269,29 +306,51 @@ test(
       const handshake = await after.api.negotiate();
       assert.equal(
         handshake.capabilities.durableEvents.state,
-        'unconfigured',
-        'persistent event storage is still owned by feat/durable-events-integration',
+        'available',
+        'a Mongo-backed replica must advertise durable event replay',
       );
-      const replayAbort = new AbortController();
-      const stopReplay = setTimeout(() => replayAbort.abort(), 500);
-      const replayed: ExecutionEvent[] = [];
-      try {
-        const stream = await after.api.openEvents(taskId, {
-          after: 0,
-          signal: replayAbort.signal,
-        });
-        for await (const event of stream.events) replayed.push(event);
-      } catch (error) {
-        const aborted =
-          error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
-        if (!aborted) throw error;
-      } finally {
-        clearTimeout(stopReplay);
-      }
+      assert.match(
+        handshake.capabilities.durableEvents.detail ?? '',
+        /MongoDB/,
+        'the capability must name the durable store',
+      );
+
+      // The replica that answers this request did not execute the task: the
+      // stream can only come from the shared event log.
+      const full = await replayEvents(after, taskId, { after: 0 });
+      assert.ok(full.events.length >= 3, 'queued, started and completed must be replayed');
+      assert.equal(full.events[0]?.type, 'task.queued', 'replay starts at the accepted event');
+      assert.equal(full.events.at(-1)?.type, 'task.completed', 'the stream ends at the terminal event');
+      assert.ok(
+        full.events.every((event) => event.taskId === taskId && event.generation === 1),
+        'every replayed event belongs to the task and its one generation',
+      );
+      assert.equal(full.events[0]?.seq, 1, 'the first sequence number is durable');
+      assert.ok(
+        full.events.every((event, index) => index === 0 || event.seq > full.events[index - 1]!.seq),
+        'replay preserves the durable sequence order',
+      );
+      assert.equal(full.lastSeq, full.events.at(-1)?.seq, 'the header reports the durable watermark');
+      assert.equal(full.truncated, false);
+
+      const midpoint =
+        full.events.find((event) => event.type === 'task.started') ??
+        full.events[Math.floor(full.events.length / 2)]!;
+      const expectedTail = full.events.filter((event) => event.seq > midpoint.seq);
+      assert.ok(expectedTail.length > 0, 'the midpoint must leave events in the tail');
+
+      const midTail = await replayEvents(after, taskId, { after: midpoint.seq });
       assert.deepEqual(
-        replayed,
-        [],
-        'a second process cannot replay events it did not publish; this assertion changes when durable events lands',
+        midTail.events.map((event) => event.eventId),
+        expectedTail.map((event) => event.eventId),
+        'an explicit after cursor resumes mid-stream on the replaying replica',
+      );
+
+      const headerTail = await replayEvents(after, taskId, { lastEventId: midpoint.seq });
+      assert.deepEqual(
+        headerTail.events.map((event) => event.eventId),
+        expectedTail.map((event) => event.eventId),
+        'Last-Event-ID resumes the same durable cursor',
       );
     } finally {
       await after.close();

@@ -35,7 +35,7 @@ Last evaluated on 2026-11-26 at `87a765b73ade337917e463aa7ce785d7c900c195`:
 | Event schema version | **PASS** | `EVENT_SCHEMA_VERSION = 1` |
 | Web compatibility | **FAIL** | Coderax `main` does not consume `@coderax/sdk`; its open gateway branch `feat/workflow-engine-gateway-v1@19bdb150` mirrors contract `1.0.0` with 17 operation ids and is not merged |
 | CLI compatibility | **FAIL** | CoderaxCLI `main` targets a Coderax deployment (`/api/ask/agents`, `/api/work/chat`), not the engine `/v1` API; PR #5 and PR #6 add a private `packages/workflow-sdk` for that other API |
-| Database migration requirements | **PASS** | the two declared additive, reversible `work_runs` indexes equal `ensureWorkRunIndexes`; task, approval, schedule and artifact indexes are created at startup but are not yet declared in the matrix |
+| Database migration requirements | **PASS** | all 26 additive, reversible indexes created by the engine's `ensure*Indexes` functions are declared, including execution events and their generation heads; the coupling test compares the full set, not a subset |
 | Required GitHub Actions checks | **FAIL** | no successful run recorded at any pinned SHA; hosted Actions is billing-blocked on the engine; client conclusions are unknown |
 | Independent review status | **FAIL** | no independent approval for any of the three commits |
 | Deployment readiness | **FAIL** | engine is not deployed; live web `/health` returns `503 API proxy is not configured`; no CLI release |
@@ -89,12 +89,12 @@ The engine's own workflows are audited live on every run. The new
 
 ### 3. Unpublished integration commits
 
-Eight engine branches are not ancestors of `main`:
+Seven engine branches are not ancestors of `main`. The durable-events
+integration was merged into this integration branch; the remaining inventory is:
 
 | Branch | Commit | Ahead/behind | Disposition |
 | --- | --- | --- | --- |
-| `feat/durable-events-integration` | `2554edc` | 2 / 0 | pending merge or owner exclusion |
-| `feat/durable-events` | `9b3fd7d` | 8 / 1 | superseded by `2554edc` (base64 snapshot carrier) |
+| `feat/durable-events` | `9b3fd7d` | 8 / 1 | superseded by `2554edc` (base64 snapshot carrier; `2554edc` is merged here) |
 | `feat/intelligence-core` | `24c90e0` | 7 / 0 | pending merge or owner exclusion (PR #2 head `e14e4b7`) |
 | `feat/native-reasoning-planner` | `c241bae` | 4 / 0 | pending merge or owner exclusion (PR #3) |
 | `feat/zero-cost-model-router` | `43f3581` | 3 / 0 | pending merge or owner exclusion (PR #4) |
@@ -105,9 +105,9 @@ Eight engine branches are not ancestors of `main`:
 Measured with `git merge-tree`, the integration branch conflicts with
 `feat/intelligence-core` in `packages/contracts/src/routes.ts`,
 `src/bootstrap/compose.ts`, `src/bootstrap/container.ts`,
-`src/orchestration/service.ts` and `docs/parity-matrix.md`. It conflicts with the
-other two branches only in `docs/parity-matrix.md`. The integration branch adds
-`POST /v1/notifications/read` and an SDK method; it does not bump
+`src/orchestration/service.ts` and `docs/parity-matrix.md`. The merged
+durable-events integration adds `POST /v1/notifications/read` and an SDK method;
+it does not bump
 `CONTRACT_VERSION` or `EVENT_SCHEMA_VERSION`, which is allowed for an additive
 operation but must be reconciled before the contract surface is frozen.
 
@@ -146,17 +146,24 @@ waiver path and no deploy command.
 
 ## Database requirement
 
-The engine creates two indexes on the `work_runs` collection:
-`work_run_key` (unique, the arbiter of a concurrent claim) and
-`work_run_expires` (the bounded sweep). Both are additive and reversible;
-dropping either deletes no data. The requirement is coupled to the actual
-bootstrap by `tests/release/evidence.test.ts`, so the matrix cannot claim a
-migration the engine does not apply.
+The engine creates 26 indexes across 12 collections: `work_runs`, `tasks`,
+`idempotency`, `conversations`, `messages`, `memory`, `notifications`,
+`permissions`, `schedules`, `artifacts`, `events` and `event_heads`. They cover
+lease arbitration, task and transcript lookup, idempotency, memory partitions,
+notifications, approvals, schedules, artifact metadata, and the durable event
+stream (`event_task_seq` and `event_task_id` unique; `event_head_task` unique).
+Every entry is additive and reversible; dropping one deletes no data. The
+requirement is coupled to the actual bootstrap by
+`tests/release/evidence.test.ts`, which executes every `ensure*Indexes` function
+and compares the complete created set with the matrix, so the matrix cannot
+claim a migration the engine does not apply or omit one it does.
 
 ## What would make this train ready
 
-1. Merge or exclude the four pending engine branches, then re-stamp the manifest
-   at the resulting `main` commit.
+1. Merge or exclude the remaining pending engine branches
+   (`feat/intelligence-core`, `feat/native-reasoning-planner`,
+   `feat/zero-cost-model-router`, PR #8, PR #9), then re-stamp the manifest at
+   the resulting `main` commit.
 2. Move the five production credentials out of the pull-request-triggered Coderax
    job, split release-only publish workflows, and have each CI owner record a
    sign-off and the authorized release paths.

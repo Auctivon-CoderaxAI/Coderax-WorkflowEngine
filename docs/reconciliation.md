@@ -67,7 +67,7 @@ Measured against `origin/main` at `808dfd3` and the heads below on 2026-11-26.
 | Branch / PR | Head | Contract delta | Decision |
 | --- | --- | --- | --- |
 | `release` train (`freebuff/4fc2df…`) | `6e70c5d` | none | **adopted**. Its release gate is merged, repinned to 1.1.0 and kept authoritative for the three repositories. Its 1.0.0 SDK artifact and its three-file packer were removed in favour of the canonical package. |
-| `feat/durable-events-integration` | `2554edc` | none (adds the event log behind `streamTaskEvents`) | **not merged.** Nine textual conflicts, including settlement ordering in `src/orchestration/service.ts` and the event bus. Its `EventLog` port and Mongo implementation are the designated owner for persistent events; merging it requires a dedicated reconciliation with its tests, not a conflict resolution rushed here. Capability stays `unconfigured`. |
+| `feat/durable-events-integration` | `2554edc` | none (adds the event log behind `streamTaskEvents`) | **merged.** The nine textual conflicts were resolved in favour of the authoritative v1.1 catalogue while adopting the owner's `EventLog` port, MongoDB implementation, async bus, quarantine registry, settlement flush barriers and terminal-event repair. Capability is `available` under `persistence.driver=mongo`; the live two-replica suite proves replay from `after: 0` and a mid-stream cursor. |
 | PR #2 / `feat/intelligence-core` | `e14e4b7` / `24c90e0` | reserves `ChatFrame`, `negotiated`, 5 intelligence operations | **not merged.** Its shapes were adopted; routes stay reserved. |
 | PR #3 / `feat/native-reasoning-planner` | `90b87db` / `c241bae` | no new ids | **not merged.** Behavior-only change to the native agent. |
 | PR #4 / `feat/zero-cost-model-router` | `b6e002b` / `43f3581` | no new ids | **not merged.** Router internals; provider eligibility and durable quotas remain its ownership. |
@@ -94,14 +94,15 @@ with separate driver connections and workspace roots, one database.
 - after the creating replica stops, a new replica reads the completed task, the
   two-message transcript, private memory, the pending approval (and decides it),
   the schedule (and cancels it), the notification, and artifact metadata;
-- the canonical SDK negotiates with each replica and every response is schema
-  validated.
+- the same restarted replica replays the full execution stream from `after: 0`,
+  then a mid-stream tail both from an explicit `after` cursor and from
+  `Last-Event-ID`; the replayed events are ordered, belong to the task's one
+  generation, and end at `task.completed`;
+- the handshake advertises `durableEvents: available` under MongoDB, and the
+  canonical SDK negotiates with each replica and validates every response.
 
 It also pins the honest boundaries:
 
-- `durableEvents` is `unconfigured`; a second process replays zero events for a
-  task the first process published. Durable events remain with
-  `feat/durable-events-integration`.
 - artifact metadata is shared but bytes are per-replica; a second replica
   returns `404 not_found` for content. Durable Artifacts owns blob sharing and
   reference counting.
