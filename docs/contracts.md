@@ -79,6 +79,15 @@ starting a second run. A `trigger` or `scheduleEvent` response therefore reports
 the authoritative execution state, including `refused` or `skipped`, rather than
 pretending every request was accepted for execution.
 
+`PATCH /v1/schedules/{scheduleId}` deliberately omits `agent`, `mode`, `model`
+and `objective`. Those fields are the execution identity the owner authorized;
+scheduling them is safe, redirecting them is not. A client that needs a different
+identity creates a new schedule, which produces a new owner decision.
+
+Schedule notices (completion, failure, missed run, refusal) are returned in the
+same `NotificationList` as Work completions, under `schedules`, and the one
+`POST /v1/notifications/read` marks both kinds. The unread count covers both.
+
 ## SDK rules
 
 `@coderax/sdk` is the only client. It:

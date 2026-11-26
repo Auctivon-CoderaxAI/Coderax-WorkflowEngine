@@ -13,6 +13,16 @@ import type { ServiceFailure } from '../support/result.js';
  * reaches a repository, an adapter or a provider directly.
  */
 
+/** The router validates a query string but hands handlers the raw values. */
+function queryNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
 function fromFailure(failure: ServiceFailure, requestId: string) {
   return problemResult(failure.code, failure.detail, requestId, failure.retryable);
 }
@@ -208,6 +218,12 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     body: await service.notifications(context.principal),
   }));
 
+  registry.register('markNotificationsRead', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.markNotificationsRead(context.principal),
+  }));
+
   registry.register('createSchedule', async (context) => {
     const result = await service.createSchedule(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -220,20 +236,6 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     body: await service.schedules(context.principal),
   }));
 
-  // Static paths are registered before `/v1/schedules/{scheduleId}` so a
-  // parameterised route can never swallow a named operation.
-  registry.register('listScheduleNotifications', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.scheduleNotifications(context.principal),
-  }));
-
-  registry.register('markScheduleNotificationsRead', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.markScheduleNotificationsRead(context.principal),
-  }));
-
   registry.register('dispatchScheduleEvent', async (context) => {
     const result = await service.scheduleEvent(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -242,6 +244,27 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
 
   registry.register('getSchedule', async (context) => {
     const result = await service.schedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('updateSchedule', async (context) => {
+    const result = await service.updateSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getScheduleUpcoming', async (context) => {
+    const limit = queryNumber(context.query.limit);
+    const result = await service.scheduleUpcoming(
+      context.principal,
+      context.params.scheduleId ?? '',
+      limit,
+    );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
@@ -276,7 +299,7 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
   });
 
   registry.register('listScheduleExecutions', async (context) => {
-    const limit = typeof context.query.limit === 'number' ? context.query.limit : undefined;
+    const limit = queryNumber(context.query.limit);
     const result = await service.scheduleExecutions(
       context.principal,
       context.params.scheduleId ?? '',

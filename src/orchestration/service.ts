@@ -21,8 +21,9 @@ import type {
   ScheduleExecution,
   ScheduleExecutionList,
   ScheduleList,
-  ScheduleNoticeList,
   ScheduleTriggerRequest,
+  ScheduleUpcoming,
+  ScheduleUpdateRequest,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
@@ -51,7 +52,8 @@ import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import { createScheduleEngine } from '../scheduling/engine.js';
 import type { SchedulePort, ScheduleTickReport } from '../scheduling/engine.js';
-import { nextOccurrence } from '../scheduling/calendar.js';
+import { nextOccurrence, previewOccurrences } from '../scheduling/calendar.js';
+import { scheduleSideEffectRefusal } from '../scheduling/policy.js';
 import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
@@ -165,8 +167,17 @@ export type ApplicationService = {
     principal: Principal,
     request: ScheduleEventRequest,
   ) => Promise<ServiceResult<ScheduleEventResult>>;
-  scheduleNotifications: (principal: Principal) => Promise<ScheduleNoticeList>;
-  markScheduleNotificationsRead: (principal: Principal) => Promise<ScheduleNoticeList>;
+  updateSchedule: (
+    principal: Principal,
+    scheduleId: string,
+    request: ScheduleUpdateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  scheduleUpcoming: (
+    principal: Principal,
+    scheduleId: string,
+    limit?: number,
+  ) => Promise<ServiceResult<ScheduleUpcoming>>;
+  markNotificationsRead: (principal: Principal) => Promise<NotificationList>;
   /** The background loop that discharges schedules without a client connected. */
   startSchedules: () => void;
   stopSchedules: () => Promise<void>;
@@ -792,6 +803,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (current.state === 'cancelled') {
         return { ok: false, reason: 'refused', detail: 'That schedule is cancelled.' };
       }
+      const adapter = deps.agents.resolve(current.agent);
+      if (!adapter.ok) {
+        return { ok: false, reason: 'refused', detail: adapter.detail };
+      }
+      if (scheduleSideEffectRefusal(adapter.value.sideEffects)) {
+        // Defense in depth: a schedule created before this guard existed must
+        // not start an ungated run after an upgrade.
+        return {
+          ok: false,
+          reason: 'refused',
+          detail: 'This agent is not gateable by owner approval and cannot run from a schedule.',
+        };
+      }
       const accepted = await acceptTask(
         { ownerId: schedule.ownerId, isOwner: true },
         {
@@ -1209,7 +1233,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    notifications: (principal) => deps.notifications.list(principal.ownerId),
+    notifications: async (principal) => {
+      const [work, schedule] = await Promise.all([
+        deps.notifications.list(principal.ownerId),
+        deps.scheduleNotices.list(principal.ownerId, deps.config.schedules.historyLimit),
+      ]);
+      // One owner-facing list and one unread count. A schedule can fail before a
+      // Work task exists, so its notices are a second record kind, not a second
+      // notification endpoint.
+      return {
+        notifications: work.notifications,
+        schedules: schedule.notifications,
+        unread: work.unread + schedule.unread,
+      };
+    },
+
+    markNotificationsRead: async (principal) => {
+      const work = await deps.notifications.list(principal.ownerId);
+      for (const notification of work.notifications) {
+        if (!notification.read) {
+          await deps.notifications.markRead(principal.ownerId, notification.taskId);
+        }
+      }
+      await deps.scheduleNotices.markAllRead(principal.ownerId);
+      return service.notifications(principal);
+    },
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
@@ -1253,6 +1301,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
+      const sideEffectRefusal = scheduleSideEffectRefusal(adapter.value.sideEffects);
+      if (sideEffectRefusal) {
+        // Nobody is watching a scheduled occurrence. An adapter this engine
+        // cannot gate per action would let a recurrence act without a scoped
+        // owner decision, so scheduling refuses it instead of pretending the
+        // task-level approval flag protects it.
+        return fail('validation_failed', sideEffectRefusal);
+      }
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
@@ -1487,12 +1543,78 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return ok({ event: request.event, dispatched });
     },
 
-    scheduleNotifications: (principal) =>
-      deps.scheduleNotices.list(principal.ownerId, deps.config.schedules.historyLimit),
+    updateSchedule: async (principal, scheduleId, request) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      if (record.state === 'cancelled' || record.state === 'exhausted') {
+        return fail('conflict', 'A terminal schedule cannot be edited.');
+      }
 
-    markScheduleNotificationsRead: async (principal) => {
-      await deps.scheduleNotices.markAllRead(principal.ownerId);
-      return deps.scheduleNotices.list(principal.ownerId, deps.config.schedules.historyLimit);
+      const now = deps.clock.now();
+      const timing = request.timing ?? record.timing;
+      if (timing.kind === 'once' && new Date(timing.at).getTime() <= now.getTime()) {
+        return fail('validation_failed', 'A one-time schedule must be in the future.');
+      }
+
+      const enabled = request.enabled ?? record.state === 'active';
+      const timingChanged = request.timing !== undefined;
+      const enabledChanged = enabled !== (record.state === 'active');
+      let nextRunAt = record.nextRunAt;
+      if (!enabled) {
+        nextRunAt = null;
+      } else if (timingChanged || enabledChanged || nextRunAt === null) {
+        const next = nextOccurrence(timing, now, new Date(record.createdAt));
+        if (timing.kind !== 'event' && !next) {
+          return fail(
+            'validation_failed',
+            'That timing rule has no future occurrence; the schedule was not changed.',
+          );
+        }
+        nextRunAt = next ? next.toISOString() : null;
+      }
+
+      const nowIso = now.toISOString();
+      const applied = await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          name: request.name ?? record.name,
+          timing,
+          condition: request.condition ?? record.condition,
+          retry: request.retry ?? record.retry,
+          priority: request.priority ?? record.priority,
+          limits: request.limits ?? record.limits,
+          missedRunPolicy: request.missedRunPolicy ?? record.missedRunPolicy,
+          state: enabled ? 'active' : 'paused',
+          nextRunAt,
+          pausedAt: enabled ? null : (record.pausedAt ?? nowIso),
+          updatedAt: nowIso,
+        },
+      });
+      if (!applied.applied || !applied.schedule) {
+        return fail('conflict', 'The schedule changed while this edit was applied; retry.');
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.updated',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(toSchedule(applied.schedule));
+    },
+
+    scheduleUpcoming: async (principal, scheduleId, limit) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      if (found.value.state === 'cancelled' || found.value.state === 'exhausted') {
+        return ok({ scheduleId, occurrences: [] });
+      }
+      const bounded = Math.min(Math.max(1, limit ?? 5), 20);
+      return ok({
+        scheduleId,
+        occurrences: previewOccurrences(found.value, deps.clock.now(), bounded),
+      });
     },
 
     startSchedules: () => scheduleEngine.start(),

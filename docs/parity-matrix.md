@@ -57,7 +57,7 @@ Status vocabulary:
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
-| 44 | Schedules (cron) | `croner` + Mongo, in-process | `src/scheduling` (once, interval, calendar in an IANA zone, named events) + durable receipts and Mongo store | Strengthened — cross-replica idempotency, missed-run policy, pause/resume/cancel, priorities, run and inference budgets, durable notices |
+| 44 | Schedules (cron) | `croner` + Mongo, in-process | `src/scheduling` (once, interval, hourly, calendar in an IANA zone, monthly, named events) + durable receipts and Mongo store | Strengthened — cross-replica idempotency, missed-run policy, pause/resume/cancel, edit with an immutable execution identity, upcoming preview, priorities, run and inference budgets, notices merged into `/v1/notifications` |
 | 45 | Cloud browser orchestration | none | none | Not started (both) |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
 | 47 | Tool/plugin execution | Coderax tools | none | Missing |
@@ -102,7 +102,7 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 133/133 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head: 142/142 tests, OpenAPI drift clean.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a

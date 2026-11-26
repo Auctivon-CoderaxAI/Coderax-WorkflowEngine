@@ -73,6 +73,13 @@ export type AgentAdapter = {
   agent: AgentId;
   engine: EngineId;
   capabilities: EngineCapabilities;
+  /**
+   * How this adapter's side effects are authorized. `none` means it has no side
+   * effects at all; `gated` means every one goes through the permission store;
+   * `ungated` means it can act without a scoped owner decision. A durable
+   * schedule may only target `none` or `gated`, because nobody is watching it.
+   */
+  sideEffects: 'none' | 'gated' | 'ungated';
   isolation: AgentIsolation;
   availability: () => Availability;
   /**

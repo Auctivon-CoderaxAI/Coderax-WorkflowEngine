@@ -417,6 +417,7 @@ export function createMongoNotificationStore(collection: MongoCollectionLike): N
           createdAt: entry.createdAt,
           read: entry.read,
         })),
+        schedules: [],
         unread: owned.filter((entry) => !entry.read).length,
       };
     },

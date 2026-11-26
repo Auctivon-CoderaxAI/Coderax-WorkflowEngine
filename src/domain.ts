@@ -169,6 +169,13 @@ export type ScheduleRecord = {
 export type SchedulePatch = Partial<
   Pick<
     ScheduleRecord,
+    | 'name'
+    | 'timing'
+    | 'condition'
+    | 'retry'
+    | 'priority'
+    | 'limits'
+    | 'missedRunPolicy'
     | 'state'
     | 'nextRunAt'
     | 'lastRunAt'

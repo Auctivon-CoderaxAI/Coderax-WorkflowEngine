@@ -54,6 +54,8 @@ export function createNativeAgent(input: {
     agent: 'coderax',
     engine: 'native',
     capabilities,
+    // Native only produces text in this tree; it exposes no side-effecting tool.
+    sideEffects: 'none',
     isolation: {
       workspace: 'isolated',
       memory: 'granted',

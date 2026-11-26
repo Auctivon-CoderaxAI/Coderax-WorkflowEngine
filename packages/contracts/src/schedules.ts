@@ -108,6 +108,31 @@ export const ScheduleCalendarTiming = z
   .strict();
 export type ScheduleCalendarTiming = z.infer<typeof ScheduleCalendarTiming>;
 
+export const ScheduleHourlyTiming = z
+  .object({
+    kind: z.literal('hourly'),
+    timeZone: TimeZone,
+    /** Every hour at this wall-clock minute in `timeZone`. */
+    minute: z.number().int().min(0).max(59),
+  })
+  .strict();
+export type ScheduleHourlyTiming = z.infer<typeof ScheduleHourlyTiming>;
+
+/**
+ * Monthly runs are limited to the first 28 days so every month has the day. A
+ * rule for the 31st would silently skip February instead of telling the owner.
+ */
+export const ScheduleMonthlyTiming = z
+  .object({
+    kind: z.literal('monthly'),
+    timeZone: TimeZone,
+    dayOfMonth: z.number().int().min(1).max(28),
+    hour: z.number().int().min(0).max(23),
+    minute: z.number().int().min(0).max(59),
+  })
+  .strict();
+export type ScheduleMonthlyTiming = z.infer<typeof ScheduleMonthlyTiming>;
+
 export const ScheduleEventTiming = z
   .object({
     kind: z.literal('event'),
@@ -121,6 +146,8 @@ export const ScheduleTiming = z.discriminatedUnion('kind', [
   ScheduleOnceTiming,
   ScheduleIntervalTiming,
   ScheduleCalendarTiming,
+  ScheduleHourlyTiming,
+  ScheduleMonthlyTiming,
   ScheduleEventTiming,
 ]);
 export type ScheduleTiming = z.infer<typeof ScheduleTiming>;
@@ -210,6 +237,37 @@ export const ScheduleCreateRequest = z
 export type ScheduleCreateRequest = z.infer<typeof ScheduleCreateRequest>;
 /** Request shape with server defaults optional, for clients that omit them. */
 export type ScheduleCreateInput = z.input<typeof ScheduleCreateRequest>;
+
+/**
+ * Editing is deliberately narrower than creation.
+ *
+ * The agent, mode, model and objective are the execution identity that the owner
+ * authorized. Excluding them means a PATCH can reschedule or change a condition
+ * but can never redirect an already-authorized schedule at a different agent,
+ * data mode or objective. Widening requires a new schedule and a new decision.
+ */
+export const ScheduleUpdateRequest = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    timing: ScheduleTiming.optional(),
+    condition: ScheduleCondition.optional(),
+    retry: ScheduleRetry.optional(),
+    priority: z.number().int().min(0).max(9).optional(),
+    limits: ScheduleLimits.optional(),
+    missedRunPolicy: MissedRunPolicy.optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+export type ScheduleUpdateRequest = z.infer<typeof ScheduleUpdateRequest>;
+
+/** A preview is computed from the rule; it creates no receipt and no task. */
+export const ScheduleUpcoming = z
+  .object({
+    scheduleId: ScheduleId,
+    occurrences: z.array(IsoDateTime).max(20),
+  })
+  .strict();
+export type ScheduleUpcoming = z.infer<typeof ScheduleUpcoming>;
 
 export const Schedule = z
   .object({
@@ -351,3 +409,6 @@ export const ScheduleNoticeList = z
   })
   .strict();
 export type ScheduleNoticeList = z.infer<typeof ScheduleNoticeList>;
+
+/** A preview is bounded: it answers "what runs next?", not a calendar export. */
+export const SCHEDULE_PREVIEW_LIMIT = 20;

@@ -31,10 +31,10 @@ are clients of the same versioned API.
 | Heartbeat, crash detection, interrupted-task recovery | Implemented | `src/execution/runner.ts`, `src/orchestration/service.ts` |
 | Cancellation, resume, bounded same-engine retry | Implemented | `src/orchestration/service.ts`, e2e tests |
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
-| Durable schedules: one-time, interval, calendar (IANA zone) and named events | Implemented | `src/scheduling`, `src/persistence/schedules.ts` |
+| Durable schedules: one-time, interval, hourly, daily/weekly calendar (IANA zone), monthly and named events | Implemented | `src/scheduling`, `src/persistence/schedules.ts` |
 | Cross-replica schedule idempotency: unique receipt key, deterministic task id, Work lease | Implemented; Mongo adapter fake-verified, not live-verified | `src/scheduling/identity.ts`, `src/persistence/mongo-schedules.ts`, two-replica test |
-| Schedule retry, missed-run recovery, pause/resume/cancel, priority, run and inference budgets | Implemented | `src/scheduling/engine.ts`, schedule tests |
-| Schedule completion, failure, missed-run and refusal notices | Implemented | `/v1/schedules/notifications`, schedule notice stores |
+| Schedule retry, missed-run recovery, pause/resume/cancel, edit, upcoming preview, priority, run and inference budgets | Implemented | `src/scheduling/engine.ts`, schedule tests |
+| Schedule completion, failure, missed-run and refusal notices | Implemented | `/v1/notifications` (merged list and mark-read), schedule notice stores |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
@@ -58,7 +58,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 133 tests: unit, contract, integration, security, e2e
+npm test                          # 142 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -126,9 +126,11 @@ its own collaborators.
 ## Scheduling
 
 A schedule is a durable owner record, not a client timer. `POST /v1/schedules`
-accepts a one-time instant, an interval, a calendar rule in an IANA time zone, or
-a named event. The engine's own loop discharges due occurrences even when no web
-or CLI client is connected.
+accepts a one-time instant, an interval, an hourly rule, a daily or weekly
+calendar rule in an IANA time zone, a monthly rule, or a named event. An interval
+with an explicit anchor is the custom recurrence. `GET /v1/schedules/{id}/upcoming`
+previews the next occurrences without writing a receipt. The engine's own loop
+discharges due occurrences even when no web or CLI client is connected.
 
 - **One occurrence, one receipt, one task.** An occurrence is written as a receipt
   whose `executionKey` is unique before any Work is submitted. The task id is
@@ -141,15 +143,23 @@ or CLI client is connected.
 - **Missed runs are decisions, not storms.** A late occurrence is recorded once and
   the schedule advances beyond the outage; `missedRunPolicy: run_once` opts into a
   single catch-up run.
-- **No widened autonomy.** A scheduled Work submission is always created with
-  `requireApproval: true`. Purchases, outbound messages, account changes and
-  infrastructure changes still require a scoped, single-use owner grant from the
-  permission store.
-- **Time zones are resolved, not offset.** Calendar rules use `Intl` in the named
-  zone, including the spring-forward gap.
+- **No widened autonomy.** The agent, mode, model and objective are the
+  authorized execution identity; `PATCH /v1/schedules/{id}` cannot change them, so
+  an edit cannot silently redirect an authorized schedule or expand its
+  permissions. Changing them requires a new schedule and a new owner decision.
+- **Ungated side effects are refused.** A schedule may only target an adapter that
+  is either side-effect free or whose every action is gated by the permission
+  store. An adapter that can act without a scoped owner decision is refused at
+  creation and again at dispatch; a task-level `requireApproval` flag is not
+  treated as a gate.
+- **Time zones are resolved, not offset.** Calendar, hourly and monthly rules use
+  `Intl` in the named zone, including the spring-forward gap and the repeated
+  fall-back hour.
 
-The engine exposes pause, resume, permanent cancel, a deduplicated manual trigger,
-an event ingress, durable execution history and durable notices. `src/scheduling`
+The engine exposes pause, resume, permanent cancel, edit, upcoming preview, a
+deduplicated manual trigger, an event ingress, durable execution history and
+durable notices. Notices appear in the one `/v1/notifications` list and its
+mark-read operation, so clients keep a single unread indicator. `src/scheduling`
 never writes task state itself: orchestration reconciles its receipts against the
 authoritative task repository.
 

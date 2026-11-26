@@ -7,6 +7,7 @@ import {
   RequestId,
   TaskId,
 } from './primitives.js';
+import { ScheduleNotice } from './schedules.js';
 
 /**
  * A permission request is the only way an agent obtains something it was not
@@ -77,6 +78,13 @@ export type CompletionNotification = z.infer<typeof CompletionNotification>;
 export const NotificationList = z
   .object({
     notifications: z.array(CompletionNotification),
+    /**
+     * Schedule notices share this endpoint and this unread count. A schedule can
+     * fail before a Work task exists, so it cannot be represented as a
+     * CompletionNotification; it is not a second notification authority, just a
+     * second record kind behind the same owner-facing surface.
+     */
+    schedules: z.array(ScheduleNotice).default([]),
     unread: z.number().int().nonnegative(),
   })
   .strict();

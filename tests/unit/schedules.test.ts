@@ -17,9 +17,11 @@ import {
   decideDue,
   evaluateCondition,
   nextOccurrence,
+  previewOccurrences,
   utcDayStart,
   zonedWallTimeToInstant,
 } from '../../src/scheduling/calendar.js';
+import { scheduleSideEffectRefusal } from '../../src/scheduling/policy.js';
 import { createScheduleEngine } from '../../src/scheduling/engine.js';
 import type {
   ScheduleDispatchOutcome,
@@ -663,4 +665,159 @@ test('the daily window starts at UTC midnight', () => {
     utcDayStart(new Date('2026-11-26T23:59:59.000Z')).toISOString(),
     '2026-11-26T00:00:00.000Z',
   );
+});
+
+test('hourly rules fire at the wall-clock minute and never duplicate the repeated hour', () => {
+  const timing: ScheduleTiming = { kind: 'hourly', timeZone: 'America/New_York', minute: 30 };
+  const createdAt = new Date('2026-01-01T00:00:00.000Z');
+
+  // 01:45 EST on the spring-forward day: 02:30 does not exist, so the rule
+  // resolves to the first real instant at or after it (03:30 EDT, 07:30Z).
+  assert.equal(
+    nextOccurrence(timing, new Date('2026-03-08T06:45:00.000Z'), createdAt)?.toISOString(),
+    '2026-03-08T07:30:00.000Z',
+  );
+  assert.equal(
+    nextOccurrence(timing, new Date('2026-03-08T07:30:00.000Z'), createdAt)?.toISOString(),
+    '2026-03-08T08:30:00.000Z',
+  );
+
+  // On the fall-back day 01:30 occurs twice; the rule resolves one instant and
+  // the next call strictly advances, so one wall time is never run twice.
+  const first = nextOccurrence(timing, new Date('2026-11-01T04:00:00.000Z'), createdAt);
+  const second = nextOccurrence(timing, first ?? new Date(), createdAt);
+  assert.ok(first && second);
+  assert.ok((second?.getTime() ?? 0) > (first?.getTime() ?? 0));
+});
+
+test('monthly rules keep their wall-clock time across a DST change', () => {
+  const winter: ScheduleTiming = {
+    kind: 'monthly',
+    timeZone: 'America/New_York',
+    dayOfMonth: 15,
+    hour: 9,
+    minute: 0,
+  };
+  assert.equal(
+    nextOccurrence(winter, new Date('2026-11-26T12:00:00.000Z'), new Date('2026-01-01T00:00:00.000Z'))
+      ?.toISOString(),
+    '2026-12-15T14:00:00.000Z',
+  );
+  assert.equal(
+    nextOccurrence(winter, new Date('2026-12-15T14:00:00.000Z'), new Date('2026-01-01T00:00:00.000Z'))
+      ?.toISOString(),
+    '2027-01-15T14:00:00.000Z',
+  );
+  assert.equal(
+    nextOccurrence(winter, new Date('2026-06-01T00:00:00.000Z'), new Date('2026-01-01T00:00:00.000Z'))
+      ?.toISOString(),
+    '2026-06-15T13:00:00.000Z',
+  );
+});
+
+test('a preview is pure, bounded and stops when the rule has no next instant', () => {
+  const hourly = scheduleRecord({
+    timing: { kind: 'interval', everySeconds: 3_600, anchor: NOW },
+  });
+  assert.deepEqual(previewOccurrences(hourly, new Date(NOW), 3), [
+    '2026-11-26T13:00:00.000Z',
+    '2026-11-26T14:00:00.000Z',
+    '2026-11-26T15:00:00.000Z',
+  ]);
+
+  const once = scheduleRecord({ timing: { kind: 'once', at: '2026-11-27T09:00:00.000Z' } });
+  assert.deepEqual(previewOccurrences(once, new Date(NOW), 5), ['2026-11-27T09:00:00.000Z']);
+
+  const event = scheduleRecord({ timing: { kind: 'event', event: 'deploy.finished' } });
+  assert.deepEqual(previewOccurrences(event, new Date(NOW), 5), []);
+});
+
+test('replicas with skewed clocks still dispatch one occurrence', async () => {
+  const store = createScheduleRepository();
+  const schedule = scheduleRecord({ nextRunAt: '2026-11-26T12:00:00.000Z' });
+  await store.create(schedule);
+  const notices = createScheduleNoticeStore();
+  const fastPort = testPort();
+  const slowPort = testPort();
+  const fast = engineFor({
+    store,
+    notices,
+    port: fastPort.port,
+    clock: testClock('2026-11-26T12:00:00.500Z').clock,
+  });
+  const slow = engineFor({
+    store,
+    notices,
+    port: slowPort.port,
+    clock: testClock('2026-11-26T11:59:59.500Z').clock,
+  });
+
+  await Promise.all([fast.tick(), slow.tick()]);
+  assert.equal(fastPort.calls.length + slowPort.calls.length, 1);
+  assert.equal((await store.listExecutions(schedule.scheduleId, 10)).length, 1);
+});
+
+test('a crash during dispatch leaves one receipt and recovers to one task', async () => {
+  const store = createScheduleRepository();
+  const schedule = scheduleRecord({ nextRunAt: NOW });
+  await store.create(schedule);
+  const port = testPort();
+  let attempts = 0;
+  port.port.dispatch = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('database connection reset');
+    return { ok: true };
+  };
+  const clock = testClock(NOW);
+  const engine = engineFor({
+    store,
+    port: port.port,
+    clock: clock.clock,
+    // Recovery waits for the dispatch window to expire, so the test advances
+    // past it instead of re-submitting on the very next tick.
+    settings: { dispatchTimeoutMs: 100 },
+  });
+
+  await assert.rejects(engine.tick(), /database connection reset/);
+  const claimed = await store.listExecutions(schedule.scheduleId, 10);
+  assert.equal(claimed.length, 1);
+  assert.equal(claimed[0]?.state, 'claimed', 'the receipt survives the crash');
+
+  // The next tick reconciles the abandoned receipt and re-submits the same
+  // deterministic task id; the duplicate does not create a second task.
+  clock.advance(200);
+  await engine.tick();
+  assert.equal(attempts, 2);
+  const recovered = await store.listExecutions(schedule.scheduleId, 10);
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0]?.state, 'dispatched');
+});
+
+test('a transient store failure is reported and the next tick still runs', async () => {
+  const store = createScheduleRepository();
+  let fail = true;
+  const flaky = {
+    ...store,
+    listDue: async (input: { now: string; limit: number }) => {
+      if (fail) {
+        fail = false;
+        throw new Error('database unavailable');
+      }
+      return store.listDue(input);
+    },
+  };
+  const clock = testClock(NOW);
+  const engine = engineFor({ store: flaky, port: testPort().port, clock: clock.clock });
+
+  await assert.rejects(engine.tick(), /database unavailable/);
+  assert.match(engine.lastTick().error ?? '', /database unavailable/);
+  const report = await engine.tick();
+  assert.equal(report.due, 0);
+  assert.equal(engine.lastTick().error, null);
+});
+
+test('an adapter with ungated side effects is refused for a schedule', () => {
+  assert.match(scheduleSideEffectRefusal('ungated') ?? '', /not gated by owner approval/);
+  assert.equal(scheduleSideEffectRefusal('none'), null);
+  assert.equal(scheduleSideEffectRefusal('gated'), null);
 });

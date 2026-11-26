@@ -18,7 +18,7 @@ import {
   ScheduleEventResult,
   ScheduleExecutionList,
   ScheduleList,
-  ScheduleNoticeList,
+  ScheduleUpcoming,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
@@ -28,6 +28,7 @@ import type {
   DataMode,
   PermissionDecisionRequest,
   ScheduleCreateInput,
+  ScheduleUpdateRequest,
   ScheduleEventRequest,
   ScheduleTriggerRequest,
   WorkSubmitRequest,
@@ -80,7 +81,7 @@ export type CoderaxClientOptions = {
 };
 
 type RequestInput = {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PATCH';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
@@ -385,17 +386,26 @@ export class CoderaxClient {
     });
   }
 
-  scheduleNotifications(): Promise<ScheduleNoticeList> {
-    return this.request<ScheduleNoticeList>(ScheduleNoticeList, {
-      method: 'GET',
-      path: '/v1/schedules/notifications',
+  updateSchedule(scheduleId: string, request: ScheduleUpdateRequest): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'PATCH',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+      body: request,
     });
   }
 
-  markScheduleNotificationsRead(): Promise<ScheduleNoticeList> {
-    return this.request<ScheduleNoticeList>(ScheduleNoticeList, {
+  scheduleUpcoming(scheduleId: string, limit?: number): Promise<ScheduleUpcoming> {
+    return this.request<ScheduleUpcoming>(ScheduleUpcoming, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/upcoming`,
+      query: { limit },
+    });
+  }
+
+  markNotificationsRead(): Promise<NotificationList> {
+    return this.request<NotificationList>(NotificationList, {
       method: 'POST',
-      path: '/v1/schedules/notifications/read',
+      path: '/v1/notifications/read',
     });
   }
 
@@ -433,6 +443,7 @@ export type {
   DataMode,
   PermissionDecisionRequest,
   ScheduleCreateInput,
+  ScheduleUpdateRequest,
   ScheduleEventRequest,
   ScheduleTriggerRequest,
   WorkSubmitRequest,

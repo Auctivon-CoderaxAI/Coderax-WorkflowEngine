@@ -38,6 +38,7 @@ function adapter(run: AgentAdapter['run']): AgentAdapter {
   return {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities: {
       streaming: true,
       tools: false,

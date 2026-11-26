@@ -28,8 +28,9 @@ import {
   ScheduleEventResult,
   ScheduleExecutionList,
   ScheduleList,
-  ScheduleNoticeList,
   ScheduleTriggerRequest,
+  ScheduleUpcoming,
+  ScheduleUpdateRequest,
 } from './schedules.js';
 import { ConversationId, ScheduleId, TaskId } from './primitives.js';
 
@@ -42,7 +43,7 @@ import { ConversationId, ScheduleId, TaskId } from './primitives.js';
  * the SDK cannot drift apart.
  */
 
-export type RouteMethod = 'GET' | 'POST';
+export type RouteMethod = 'GET' | 'POST' | 'PATCH';
 
 export type RouteAuth = 'owner' | 'public';
 
@@ -67,6 +68,9 @@ const ConversationParams = zod.object({ conversationId: ConversationId }).strict
 const ScheduleParams = zod.object({ scheduleId: ScheduleId }).strict();
 const ExecutionHistoryQuery = zod
   .object({ limit: zod.coerce.number().int().positive().max(500).optional() })
+  .strict();
+const UpcomingQuery = zod
+  .object({ limit: zod.coerce.number().int().positive().max(20).optional() })
   .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
@@ -261,22 +265,13 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Schedule list', schema: ScheduleList },
   },
   {
-    operationId: 'listScheduleNotifications',
-    method: 'GET',
-    path: '/v1/schedules/notifications',
-    summary: 'Durable schedule completion, failure, missed-run and refusal notices.',
-    tags: ['schedules'],
-    auth: 'owner',
-    response: { status: 200, description: 'Schedule notice list', schema: ScheduleNoticeList },
-  },
-  {
-    operationId: 'markScheduleNotificationsRead',
+    operationId: 'markNotificationsRead',
     method: 'POST',
-    path: '/v1/schedules/notifications/read',
-    summary: 'Mark every schedule notice for this owner as read.',
-    tags: ['schedules'],
+    path: '/v1/notifications/read',
+    summary: 'Mark every completion notification and schedule notice for this owner as read.',
+    tags: ['notifications'],
     auth: 'owner',
-    response: { status: 200, description: 'Schedule notice list', schema: ScheduleNoticeList },
+    response: { status: 200, description: 'Notification list', schema: NotificationList },
   },
   {
     operationId: 'dispatchScheduleEvent',
@@ -297,6 +292,28 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     auth: 'owner',
     params: ScheduleParams,
     response: { status: 200, description: 'Schedule', schema: Schedule },
+  },
+  {
+    operationId: 'getScheduleUpcoming',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}/upcoming',
+    summary: 'Preview the next occurrences without creating a receipt or a task.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    query: UpcomingQuery,
+    response: { status: 200, description: 'Upcoming occurrences', schema: ScheduleUpcoming },
+  },
+  {
+    operationId: 'updateSchedule',
+    method: 'PATCH',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'Edit timing, condition, retry or limits; the execution identity cannot be widened.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleUpdateRequest,
+    response: { status: 200, description: 'Updated schedule', schema: Schedule },
   },
   {
     operationId: 'pauseSchedule',

@@ -71,13 +71,17 @@ test('a one-time schedule runs and notifies without any client polling', async (
     assert.equal(schedule.runsTotal, 1);
     assert.equal(schedule.nextRunAt, null);
 
-    const notices = await api.scheduleNotifications();
-    assert.equal(notices.unread, 1);
-    assert.equal(notices.notifications[0]?.kind, 'completed');
-    assert.equal(notices.notifications[0]?.scheduleId, created.scheduleId);
+    // One owner-facing notification surface carries the Work completion and the
+    // schedule notice, so a client needs a single unread indicator.
+    const notices = await api.notifications();
+    assert.equal(notices.schedules[0]?.kind, 'completed');
+    assert.equal(notices.schedules[0]?.scheduleId, created.scheduleId);
+    assert.equal(notices.unread, 2);
 
-    const read = await api.markScheduleNotificationsRead();
+    const read = await api.markNotificationsRead();
     assert.equal(read.unread, 0);
+    assert.ok(read.schedules.every((entry) => entry.read));
+    assert.ok(read.notifications.every((entry) => entry.read));
 
     // The scheduled run's inference is charged to the same daily ledger as Chat.
     const budget = started.app.service.budget({ ownerId: OWNER_ID, isOwner: true });
@@ -206,8 +210,8 @@ test('a failed scheduled run produces one failure notice and no retry when final
     assert.equal(schedule.consecutiveFailures, 1);
     assert.equal(schedule.state, 'exhausted');
 
-    const notices = await api.scheduleNotifications();
-    assert.equal(notices.notifications.filter((entry) => entry.kind === 'failed').length, 1);
+    const notices = await api.notifications();
+    assert.equal(notices.schedules.filter((entry) => entry.kind === 'failed').length, 1);
   } finally {
     await started.close();
   }
@@ -313,5 +317,75 @@ test('two replicas sharing durable storage execute one occurrence exactly once',
     await first.stop();
     await second.stop();
     workspace.cleanup();
+  }
+});
+
+test('an edit cannot widen the authorized execution identity, and previews match the rule', async () => {
+  const started = await startTestApp({ config: { schedules: FAST_SCHEDULES } });
+  const api = client(started.url);
+  try {
+    const created = await api.createSchedule({
+      name: 'Hourly inspection',
+      objective: 'Inspect the deployment',
+      timing: { kind: 'interval', everySeconds: 3_600 },
+    });
+
+    const upcoming = await api.scheduleUpcoming(created.scheduleId, 3);
+    assert.equal(upcoming.occurrences.length, 3);
+    assert.ok(upcoming.occurrences[0] && upcoming.occurrences[1]);
+    assert.ok(upcoming.occurrences[1] > upcoming.occurrences[0]);
+
+    // The update schema omits agent/mode/model/objective, and the router
+    // validates strictly, so an edit cannot redirect an authorized schedule.
+    await assert.rejects(
+      api.updateSchedule(created.scheduleId, { agent: 'opencode' } as never),
+      (error: unknown) => error instanceof CoderaxApiError && error.code === 'validation_failed',
+    );
+
+    const edited = await api.updateSchedule(created.scheduleId, {
+      name: 'Monthly inspection',
+      timing: { kind: 'monthly', timeZone: 'UTC', dayOfMonth: 15, hour: 9, minute: 0 },
+    });
+    assert.equal(edited.name, 'Monthly inspection');
+    assert.equal(edited.agent, created.agent);
+    assert.equal(edited.mode, created.mode);
+    assert.equal(edited.objective, created.objective);
+    assert.ok(edited.nextRunAt?.endsWith('T09:00:00.000Z'));
+
+    const preview = await api.scheduleUpcoming(edited.scheduleId, 2);
+    assert.equal(preview.occurrences.length, 2);
+    assert.ok(preview.occurrences.every((at) => at.endsWith('T09:00:00.000Z')));
+
+    await api.cancelSchedule(edited.scheduleId);
+    await assert.rejects(
+      api.updateSchedule(edited.scheduleId, { name: 'After cancel' }),
+      (error: unknown) => error instanceof CoderaxApiError && error.status === 409,
+    );
+  } finally {
+    await started.close();
+  }
+});
+
+test('editing a paused schedule preserves the pause and resume computes the next run', async () => {
+  const started = await startTestApp({ config: { schedules: FAST_SCHEDULES } });
+  const api = client(started.url);
+  try {
+    const created = await api.createSchedule({
+      name: 'Paused inspection',
+      objective: 'Inspect the deployment',
+      timing: { kind: 'interval', everySeconds: 3_600 },
+    });
+    const paused = await api.pauseSchedule(created.scheduleId);
+    assert.equal(paused.state, 'paused');
+
+    const edited = await api.updateSchedule(created.scheduleId, { name: 'Still paused' });
+    assert.equal(edited.state, 'paused');
+    assert.equal(edited.nextRunAt, null);
+
+    const resumed = await api.resumeSchedule(created.scheduleId);
+    assert.equal(resumed.state, 'active');
+    assert.ok((await api.schedule(created.scheduleId)).nextRunAt);
+  } finally {
+    await started.close();
   }
 });

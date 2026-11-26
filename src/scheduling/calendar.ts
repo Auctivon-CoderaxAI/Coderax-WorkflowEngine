@@ -141,6 +141,58 @@ function nextCalendar(timing: Extract<ScheduleTiming, { kind: 'calendar' }>, aft
   return null;
 }
 
+/**
+ * Every hour at a wall-clock minute. Two days are scanned because the current
+ * local day may already have passed the minute, and the spring-forward gap can
+ * move today's target. The wall-time resolver returns at most one instant for a
+ * repeated fall-back hour, so a schedule never fires twice for one wall time.
+ */
+function nextHourly(timing: Extract<ScheduleTiming, { kind: 'hourly' }>, after: Date): Date | null {
+  const start = localParts(after, timing.timeZone);
+  for (let offset = 0; offset <= 2; offset += 1) {
+    const day = new Date(Date.UTC(start.year, start.month - 1, start.day + offset));
+    for (let hour = 0; hour < 24; hour += 1) {
+      const instant = zonedWallTimeToInstant(
+        {
+          year: day.getUTCFullYear(),
+          month: day.getUTCMonth() + 1,
+          day: day.getUTCDate(),
+          hour,
+          minute: timing.minute,
+        },
+        timing.timeZone,
+      );
+      if (instant && instant.getTime() > after.getTime()) return instant;
+    }
+  }
+  return null;
+}
+
+/** A monthly rule on a day every month has, at a wall-clock time in a zone. */
+function nextMonthly(
+  timing: Extract<ScheduleTiming, { kind: 'monthly' }>,
+  after: Date,
+): Date | null {
+  const start = localParts(after, timing.timeZone);
+  for (let offset = 0; offset <= 2; offset += 1) {
+    const monthIndex = start.month - 1 + offset;
+    const year = start.year + Math.floor(monthIndex / 12);
+    const month = ((monthIndex % 12) + 12) % 12 + 1;
+    const instant = zonedWallTimeToInstant(
+      {
+        year,
+        month,
+        day: timing.dayOfMonth,
+        hour: timing.hour,
+        minute: timing.minute,
+      },
+      timing.timeZone,
+    );
+    if (instant && instant.getTime() > after.getTime()) return instant;
+  }
+  return null;
+}
+
 /** The first occurrence strictly after `after`, or null when there is none. */
 export function nextOccurrence(
   timing: ScheduleTiming,
@@ -161,6 +213,10 @@ export function nextOccurrence(
     }
     case 'calendar':
       return nextCalendar(timing, after);
+    case 'hourly':
+      return nextHourly(timing, after);
+    case 'monthly':
+      return nextMonthly(timing, after);
     case 'event':
       return null;
   }
@@ -169,6 +225,29 @@ export function nextOccurrence(
 /** The next occurrence in the schedule's own recurrence, from `after`. */
 export function nextScheduleRun(schedule: ScheduleRecord, after: Date): Date | null {
   return nextOccurrence(schedule.timing, after, new Date(schedule.createdAt));
+}
+
+/**
+ * A bounded look-ahead for the owner-facing preview. It is pure: nothing is
+ * persisted, and the same record produces the same preview on every replica.
+ * The strict-increase guard prevents a malformed clock or rule from looping.
+ */
+export function previewOccurrences(
+  schedule: Pick<ScheduleRecord, 'timing' | 'createdAt'>,
+  from: Date,
+  limit: number,
+): string[] {
+  const out: string[] = [];
+  let cursor = from;
+  for (let index = 0; index < Math.max(0, limit); index += 1) {
+    const next = nextOccurrence(schedule.timing, cursor, new Date(schedule.createdAt));
+    if (!next) break;
+    const iso = next.toISOString();
+    if (out.includes(iso)) break;
+    out.push(iso);
+    cursor = next;
+  }
+  return out;
 }
 
 export function evaluateCondition(
