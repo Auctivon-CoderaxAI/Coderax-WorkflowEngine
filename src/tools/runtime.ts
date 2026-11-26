@@ -93,7 +93,7 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
           description: tool.description,
           tool: tool.name,
           binding: createHash('sha256').update(JSON.stringify([tool.name, request.context.mode, parsed.data])).digest('hex'),
-          consume: tool.approval === 'always',
+          consume: true,
         });
         if (decision.decision === 'pending') {
           return {
@@ -118,6 +118,11 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
       }
     }
 
+    // An abort that raced the approval must not be recorded as tool use, and a
+    // revoked execution must not run the tool at all.
+    if (request.context.signal.aborted || (guard && !guard.live())) {
+      return { result: failure('cancelled', 'The run was cancelled.'), approval };
+    }
     if (guard) {
       for (const scope of tool.scopes) {
         guard.recordUse({ scope, resource, spawnsProcesses: tool.spawnsProcesses === true });

@@ -47,6 +47,7 @@ export function buildActionPrompt(input: {
   steps: PlanStep[];
   step: PlanStep;
   completed: string[];
+  outputs: Array<{ stepId: string; text: string }>;
   history: AgentHistoryTurn[];
   observations: string[];
   memory: string[];
@@ -65,6 +66,7 @@ export function buildActionPrompt(input: {
   sections.push(
     `Completed steps: ${input.completed.length > 0 ? input.completed.join(', ') : 'none'}`,
   );
+  if (input.outputs.length) sections.push(`Completed step results:\n${JSON.stringify(input.outputs)}`);
   if (input.memory.length > 0) {
     sections.push(`Owner memory:\n${input.memory.map((entry) => `- ${entry}`).join('\n')}`);
   }

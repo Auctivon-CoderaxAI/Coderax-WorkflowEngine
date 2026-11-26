@@ -15,9 +15,20 @@ export type TaskStep = {
   state: TaskState;
 };
 
+export type PendingAction = {
+  stepId: string;
+  json: string;
+  observations?: string[];
+  priorActions?: number;
+  invalidAnswers?: number;
+};
+
+export type StepOutput = { stepId: string; text: string };
+
 export type TaskCheckpoint = {
   /** Steps whose work is durably complete; a resume skips exactly these. */
   completedSteps: string[];
+  outputs?: StepOutput[];
   /** Partial assistant text already emitted, replayed on resume. */
   text: string;
 };
@@ -53,7 +64,7 @@ export type TaskRecord = {
   generation: number;
   runToken: string | null;
   steps: TaskStep[];
-  pendingAction?: { stepId: string; json: string } | null;
+  pendingAction?: PendingAction | null;
   checkpoint: TaskCheckpoint;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
