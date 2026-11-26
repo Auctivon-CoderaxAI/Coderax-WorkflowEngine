@@ -22,6 +22,8 @@ npm ci && npm run verify
 - Build:
 - Tests (count and result):
 - `npm run openapi:check`:
+- `node dist/scripts/run-gates.js coverage`:
+- `mongo-live` (real database, or state why it could not run):
 - Manual observation (if any):
 
 A component passing its own unit tests is not evidence for the UI-to-API-to-engine

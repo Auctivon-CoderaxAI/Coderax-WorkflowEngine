@@ -54,9 +54,12 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 48 tests: unit, contract, integration, security, e2e
+npm run verify                    # build + all non-live quality gates
 npm run openapi:check             # fails if the published contract drifted
 ```
+
+The gate matrix, the real-MongoDB job and the coordination notes are in
+`docs/quality-gates.md`.
 
 Run the engine (it refuses to start until every startup check passes):
 
