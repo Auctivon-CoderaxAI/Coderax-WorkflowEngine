@@ -1,5 +1,6 @@
 import type { NotificationList } from '@coderax/contracts';
 import type { NotificationRecord } from '../domain.js';
+import { redactContent } from '../observability/redact.js';
 
 /**
  * Notifications are durable because the client that should show the blue dot may
@@ -18,7 +19,12 @@ export function createNotificationStore(): NotificationStore {
 
   return {
     record: async (notification) => {
-      notifications.set(notification.taskId, { ...notification });
+      notifications.set(notification.taskId, {
+        ...notification,
+        ...(notification.summary !== undefined
+          ? { summary: redactContent(notification.summary) }
+          : {}),
+      });
     },
     list: async (ownerId) => {
       const owned = [...notifications.values()]

@@ -87,6 +87,7 @@ test('a cancelled run stops waiting when the adapter ignores its abort', async (
   assert.deepEqual(result, {
     outcome: { kind: 'cancelled', abandoned: true },
     ownershipLost: false,
+    terminated: false,
   });
   assert.ok(Date.now() - started < 1_000, 'the grace bound must end the wait');
 });
@@ -112,7 +113,11 @@ test('an adapter that stops on abort is settled without using the grace bound', 
   });
   setTimeout(() => external.abort(), 5);
 
-  assert.deepEqual(await running, { outcome: { kind: 'cancelled' }, ownershipLost: false });
+  assert.deepEqual(await running, {
+    outcome: { kind: 'cancelled' },
+    ownershipLost: false,
+    terminated: true,
+  });
 });
 
 test('a lost lease aborts a hung adapter and settles as interrupted', async () => {
@@ -147,5 +152,6 @@ test('a completed run is not cut short by the grace bound', async () => {
   assert.deepEqual(result, {
     outcome: { kind: 'completed', summary: 'finished' },
     ownershipLost: false,
+    terminated: true,
   });
 });

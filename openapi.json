@@ -796,7 +796,8 @@
                       "coderax",
                       "opencode",
                       "freebuff"
-                    ]
+                    ],
+                    "default": "coderax"
                   },
                   "model": {
                     "type": "object",
@@ -823,7 +824,8 @@
                     "enum": [
                       "private",
                       "cloud"
-                    ]
+                    ],
+                    "default": "private"
                   }
                 },
                 "required": [
@@ -971,7 +973,8 @@
                     "enum": [
                       "private",
                       "cloud"
-                    ]
+                    ],
+                    "default": "cloud"
                   },
                   "budget": {
                     "type": "object",
@@ -1000,7 +1003,8 @@
                     "additionalProperties": false
                   },
                   "requireApproval": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "default": true
                   }
                 },
                 "required": [

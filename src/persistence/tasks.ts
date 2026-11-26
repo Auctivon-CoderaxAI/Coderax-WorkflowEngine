@@ -1,6 +1,23 @@
 import { isTerminalState } from '@coderax/contracts';
 import type { TaskPatch, TaskRecord } from '../domain.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
+import { redactContent } from '../observability/redact.js';
+
+/**
+ * A task record is durable and readable by every replica, so failure text and a
+ * result summary are scrubbed before they are written. Adapters and providers
+ * write both, and neither is trusted to have removed a credential first.
+ */
+export function sanitizeTaskPatch(patch: TaskPatch): TaskPatch {
+  const next: TaskPatch = { ...patch };
+  if (next.failure?.detail !== undefined) {
+    next.failure = { ...next.failure, detail: redactContent(next.failure.detail) };
+  }
+  if (next.result?.summary !== undefined) {
+    next.result = { ...next.result, summary: redactContent(next.result.summary) };
+  }
+  return next;
+}
 
 export type CreateTaskResult =
   | { ok: true; task: TaskRecord }
@@ -65,7 +82,7 @@ export function createTaskRepository(): TaskRepository {
           return { ok: false, reason: 'conversation_busy' };
         }
       }
-      tasks.set(task.taskId, { ...task });
+      tasks.set(task.taskId, { ...task, ...sanitizeTaskPatch({ failure: task.failure, result: task.result }) });
       if (!isTerminalState(task.state)) {
         activeByConversation.set(task.conversationId, task.taskId);
       }
@@ -75,7 +92,8 @@ export function createTaskRepository(): TaskRepository {
       const task = tasks.get(taskId);
       return task ? { ...task } : null;
     },
-    updateFenced: async ({ taskId, token, patch }) => {
+    updateFenced: async ({ taskId, token, patch: rawPatch }) => {
+      const patch = sanitizeTaskPatch(rawPatch);
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
       if (!isAuthorizedGeneration(task.runToken, token)) {
