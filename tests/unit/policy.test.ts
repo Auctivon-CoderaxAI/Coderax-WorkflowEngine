@@ -411,6 +411,27 @@ test('a private grant requires no stored retention, no training and a declared l
   }
 });
 
+test('a private-only deployment is ready without exposing a cloud route', async () => {
+  const hosted = adapter({});
+  const engine = router({
+    adapters: [hosted],
+    policies: [
+      policyFor('hosted', {
+        modes: ['private'],
+        grants: [grant('chat', 'private')],
+      }),
+    ],
+  });
+  await engine.refresh();
+
+  // The discovery view is cloud/chat and is correctly empty.
+  assert.deepEqual(engine.route(), []);
+  // Readiness is a different question: private/chat is authorized.
+  assert.equal(engine.hasVerifiedFreeRoute(), true);
+  assert.equal(engine.resolve(null, 'private', { operation: 'chat' }).ok, true);
+  assert.equal(engine.resolve(null, 'cloud', { operation: 'chat' }).ok, false);
+});
+
 test('a private-approved provider actually completes without leaking to the error path', async () => {
   const hosted = adapter({});
   const engine = router({ adapters: [hosted], policies: [policyFor('hosted')] });

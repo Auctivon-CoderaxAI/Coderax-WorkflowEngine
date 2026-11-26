@@ -1341,9 +1341,15 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
   }
 
   function hasVerifiedFreeRoute(): boolean {
-    // Readiness must use the same default context/output admission as route().
-    // A tiny-context model is not a usable route merely because it is free.
-    return route('auto').length > 0;
+    // Readiness must use the same default context/output admission as route(),
+    // and it must not require cloud authorization: a deployment approved only for
+    // private processing is usable, while one with no authorized mode is not.
+    const at = now();
+    const readiness = { operation: 'chat' as const, routing: 'auto' as const };
+    return (
+      eligible({ mode: 'cloud', ...readiness }, at).length > 0 ||
+      eligible({ mode: 'private', ...readiness }, at).length > 0
+    );
   }
 
   return {
