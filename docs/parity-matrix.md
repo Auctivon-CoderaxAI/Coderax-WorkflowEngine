@@ -31,12 +31,12 @@ Status vocabulary:
 | 15 | Lease TTL / retention / sweep bound | 30 s / 24 h / 100 | same constants | Preserved |
 | 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap, selected at startup by `persistence.driver` | Preserved (verified against a fake; no live DB) |
 | 17 | Fenced terminal write for the task record | `fenceWorkRun` on the conversation row | `TaskRepository.updateFenced` on the task row | Preserved |
-| 18 | Fenced conversation write | `fenceWorkRun` | not implemented; conversations are written after settlement | Missing |
+| 18 | Fenced conversation write | `fenceWorkRun` | the transcript append re-checks `runToken` and writes nothing when superseded | Simplified — a check-then-write, not one atomic fenced update |
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
-| 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/log.ts` (port) + `src/persistence/mongo-events.ts`, wired through the bus; SSE resume honours `Last-Event-ID` | Preserved (fake-verified; no live DB) |
+| 23 | Completion notifications | client polling of conversation state | notification store + list/mark-read endpoints, persisted with the same driver | Preserved |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
@@ -69,10 +69,10 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 22 |
+| Preserved | 23 |
 | Strengthened | 10 |
-| Simplified | 5 |
-| Missing | 10 |
+| Simplified | 6 |
+| Missing | 8 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 1 |
 
@@ -83,14 +83,15 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
-are closed, migrating a client would remove functionality, which the brief
-forbids.
+capability Coderax has today. Until rows 27–31, 34, 36, 44, 46 and 47 are closed,
+and rows 18 and 40 are strengthened, migrating a client would remove
+functionality, which the brief forbids.
 
 Dependency order for closing them:
 
-1. Persistent execution events and replay across restart (row 22), then fenced
-   conversation writes (row 18).
+1. ~~Persistent execution events and replay across restart (row 22)~~ — closed
+   by `docs/durable-events.md`; the remaining part of row 18 is an atomic fenced
+   conversation write.
 2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
    and the one that decides whether Coderax Native can replace the LibreChat
@@ -102,7 +103,8 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head of `feat/durable-events-integration`:
+  114/114 tests, OpenAPI drift clean.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a

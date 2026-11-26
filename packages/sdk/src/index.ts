@@ -308,6 +308,15 @@ export class CoderaxClient {
     });
   }
 
+  /** Clears the blue dot for the named terminal tasks. */
+  markNotificationsRead(taskIds: string[]): Promise<NotificationList> {
+    return this.request<NotificationList>(NotificationList, {
+      method: 'POST',
+      path: '/v1/notifications/read',
+      body: { taskIds },
+    });
+  }
+
   /** Replays and tails execution events from a sequence cursor. */
   async *events(
     taskId: string,
