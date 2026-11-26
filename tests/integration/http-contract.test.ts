@@ -57,7 +57,16 @@ test('contract negotiation and the capability handshake agree with the server', 
     assert.equal(older.negotiatedContractVersion, '1.0.0');
     assert.equal(older.negotiation, 'client_supported');
 
-    const ahead = await client.handshake({ contract: '1.2.0' });
+    // The fingerprint pins the catalogue, so a shared version string is not enough.
+    assert.match(exact.contractFingerprint, /^sha256:[0-9a-f]{64}$/);
+    const mismatched = await client.handshake({
+      contract: CONTRACT_VERSION,
+      fingerprint: `sha256:${'0'.repeat(64)}`,
+    });
+    assert.equal(mismatched.compatible, false);
+    assert.equal(mismatched.negotiation, 'fingerprint_mismatch');
+
+    const ahead = await client.handshake({ contract: '1.3.0' });
     assert.equal(ahead.compatible, false);
     assert.equal(ahead.negotiation, 'client_ahead');
     assert.equal(ahead.negotiatedContractVersion, CONTRACT_VERSION);

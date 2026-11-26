@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import {
+  CONTRACT_FINGERPRINT,
   AgentList,
   ArtifactContent,
   ArtifactList,
@@ -118,6 +119,7 @@ export const SDK_OPERATION_COVERAGE: Readonly<Record<string, string>> = Object.f
   submitChat: 'chat',
   submitWork: 'submitWork',
   listTasks: 'tasks',
+  listWork: 'listWork',
   getTask: 'task',
   cancelTask: 'cancel',
   resumeTask: 'resume',
@@ -296,11 +298,14 @@ export class CoderaxClient {
   }
 
   /** Contract negotiation. Omit `contract` to read the served version only. */
-  handshake(options: { contract?: string } = {}): Promise<CapabilityHandshake> {
+  handshake(options: { contract?: string; fingerprint?: string } = {}): Promise<CapabilityHandshake> {
+    const query: Record<string, string> = {};
+    if (options.contract !== undefined) query.contract = options.contract;
+    if (options.fingerprint !== undefined) query.fingerprint = options.fingerprint;
     return this.request<CapabilityHandshake>(CapabilityHandshake, {
       method: 'GET',
       path: '/v1/handshake',
-      ...(options.contract === undefined ? {} : { query: { contract: options.contract } }),
+      ...(Object.keys(query).length === 0 ? {} : { query }),
     });
   }
 
@@ -310,7 +315,11 @@ export class CoderaxClient {
    * the first failed operation.
    */
   async compatibility(): Promise<CompatibilityReport> {
-    const handshake = await this.handshake({ contract: SDK_CONTRACT_VERSION });
+    const handshake = await this.handshake({
+      contract: SDK_CONTRACT_VERSION,
+      // A matching version string is not proof of a matching catalogue.
+      fingerprint: CONTRACT_FINGERPRINT,
+    });
     return checkCompatibility({
       handshake,
       requiredOperations: Object.keys(SDK_OPERATION_COVERAGE),
@@ -375,6 +384,23 @@ export class CoderaxClient {
 
   /** The owner task read model, newest first. */
   tasks(query: TaskListQuery = {}): Promise<TaskList> {
+    return this.request<TaskList>(TaskList, {
+      method: 'GET',
+      path: '/v1/tasks',
+      query: {
+        state: query.state,
+        conversationId: query.conversationId,
+        limit: query.limit,
+      },
+    });
+  }
+
+  /**
+   * The same read model at the address `1.1.0` published. It exists so a client
+   * that has not moved to `GET /v1/tasks` keeps working; it is an alias over the
+   * same handler, not a second implementation.
+   */
+  listWork(query: TaskListQuery = {}): Promise<TaskList> {
     return this.request<TaskList>(TaskList, {
       method: 'GET',
       path: '/v1/work',

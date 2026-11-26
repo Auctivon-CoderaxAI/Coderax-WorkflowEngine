@@ -157,9 +157,21 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
     operationId: 'listTasks',
     method: 'GET',
-    path: '/v1/work',
+    path: '/v1/tasks',
     summary: 'The owner task read model, newest first.',
-    tags: ['work'],
+    tags: ['tasks'],
+    auth: 'owner',
+    query: TaskListQuery,
+    response: { status: 200, description: 'Task list', schema: TaskList },
+  },
+  {
+    // Compatibility alias: the same read model, still reachable where 1.1.0
+    // published it. Two operation ids over one handler, never two handlers.
+    operationId: 'listWork',
+    method: 'GET',
+    path: '/v1/work',
+    summary: 'Compatibility alias for the task read model at GET /v1/tasks.',
+    tags: ['tasks'],
     auth: 'owner',
     query: TaskListQuery,
     response: { status: 200, description: 'Task list', schema: TaskList },

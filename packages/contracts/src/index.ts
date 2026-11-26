@@ -12,3 +12,4 @@ export * from './handshake.js';
 export * from './routes.js';
 export * from './json-schema.js';
 export * from './openapi.js';
+export * from './fingerprint.js';

@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "name": "@coderax/sdk",
-  "version": "1.1.0",
-  "contractVersion": "1.1.0",
+  "version": "1.2.0",
+  "contractVersion": "1.2.0",
   "eventSchemaVersion": 1,
   "chatStreamVersion": 1,
-  "path": "artifacts/coderax-sdk-1.1.0.tgz",
-  "sha256": "520a0cf89532a71dec40b571615d7a08ac6d7f1f4427732f1b95854d4bc573db",
-  "bytes": 32581,
+  "path": "artifacts/coderax-sdk-1.2.0.tgz",
+  "sha256": "995e1f0b255845ba19caddb147e138bc08469a9440a0bf1a221294636ab4ec69",
+  "bytes": 33864,
   "reproducible": true,
   "files": [
     {
@@ -22,22 +22,22 @@
     },
     {
       "path": "package/dist/index.d.ts",
-      "sha256": "b1361bdbfd9861f161284cde251447fa27bfa270b4e128503245a1d413f74678",
-      "bytes": 6680
+      "sha256": "27588d41495446113f066d522dfdd1d80e05ef629e0364b0e49afdec561eefa8",
+      "bytes": 6999
     },
     {
       "path": "package/dist/index.js",
-      "sha256": "b6dee1a01f038171f36d0923585317c93b0e98ffc3cfc6f7889025bdeb195a23",
-      "bytes": 17139
+      "sha256": "f3c58e8a3309820b3a5f835ac47f86f1572d8520ddecbbc7d45927bf6b18dfd8",
+      "bytes": 18058
     },
     {
       "path": "package/dist/version.d.ts",
-      "sha256": "3f0c25de1289adfe8db7149c696850e66533b852605e2b64acc295d7228e97c2",
+      "sha256": "a0bc751ab2d1e1a6285ad21000d989da5f134fe875a101f2b4ea8b2837c728e1",
       "bytes": 1146
     },
     {
       "path": "package/dist/version.js",
-      "sha256": "e3a53449b0cb61839ddc94af2cfb9bd46f1c4556aa587f35a6ab182185e72ca7",
+      "sha256": "6a41877d98968b60a1ce8462889f26164c111c5701c1cb33dca95eeccf224dc9",
       "bytes": 1385
     },
     {
@@ -81,18 +81,28 @@
       "bytes": 5422
     },
     {
+      "path": "package/node_modules/@coderax/contracts/dist/fingerprint.d.ts",
+      "sha256": "5bde746f5e46141e22143eed1fedefb2c901dd12be25c889e8b29268a4e2e017",
+      "bytes": 902
+    },
+    {
+      "path": "package/node_modules/@coderax/contracts/dist/fingerprint.js",
+      "sha256": "644b47cdcf4d3eac4b74aae0994ad8b6a6f2d08ad367527d06f994ace12666f3",
+      "bytes": 1201
+    },
+    {
       "path": "package/node_modules/@coderax/contracts/dist/handshake.d.ts",
-      "sha256": "f972591ca83d68d327e97b29af30bb03060214be9763ec3fabf1e6eddc3da2ef",
-      "bytes": 13694
+      "sha256": "019494318f48c44602b4714fe1aff7c666c13c149917975fb5d423615563ef01",
+      "bytes": 14222
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/handshake.js",
-      "sha256": "3b1c745d7c6bc01e668b003172e1c5bcbd568dd7f0832ddbd07d8e2de067801e",
-      "bytes": 6172
+      "sha256": "cc8346a6e7123bdc3c600269234cf3c820119526a9cc065f83349a08899e4dc4",
+      "bytes": 6993
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/health.d.ts",
-      "sha256": "9d28e87af808bf5bd512fc15e3f45501cfd97731af3cd5d5f84c828304982607",
+      "sha256": "3431627d90a4507cb23ecd5aa5377b5ea943f5213fb4f02602282e509e862ad1",
       "bytes": 6951
     },
     {
@@ -102,13 +112,13 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/index.d.ts",
-      "sha256": "1b2a25de5daac9be2584d51419fe76b17f33954a668ebdb6aad2ccc3fd1b6d49",
-      "bytes": 470
+      "sha256": "7e6df689d8895719111b20a295e43ef47941aade3461eeb0517df96827b2e0dd",
+      "bytes": 504
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/index.js",
-      "sha256": "418712a927aa65bec244887fb0c0e238e983509f140a396085d952232b44f2a8",
-      "bytes": 468
+      "sha256": "3a5c3993378833ad8079937e42342a45e8843994d0178d51ce83ad017c5e852f",
+      "bytes": 502
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/json-schema.d.ts",
@@ -152,13 +162,13 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/primitives.d.ts",
-      "sha256": "11ee1b593cc77e725b442c0b713154b6bb7553db0fa83ed0208b68f71bfb8a04",
-      "bytes": 5077
+      "sha256": "1afae431f2a773cba2aafa83baea425b74408fd129cb43cd052b777e9648baa0",
+      "bytes": 5292
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/primitives.js",
-      "sha256": "71c5f4c08da18d92cfaffe12c4118ead7d51b8e86fa2132130d4737378ea6e13",
-      "bytes": 4679
+      "sha256": "16754f02c7f9b8584403ee43b378b9ae42b68d74e48e13258a7540d6b2d76500",
+      "bytes": 4894
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/routes.d.ts",
@@ -167,12 +177,12 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/routes.js",
-      "sha256": "a068af6969ae3ed2f98fb1566c69e78ad415a1f365b4646b157b3fac00a19aec",
-      "bytes": 12497
+      "sha256": "8fea0e4c06418d9e9e624bf4c98efb5c4f63eeb78d842d87455c01696e1aede6",
+      "bytes": 12995
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/schedules.d.ts",
-      "sha256": "a76b8257bccd14562c1716bb853510880ad8bb5f44ebe35bd3548cddbe203d3e",
+      "sha256": "8f2715a0238feb9c0b15b3a5bbbaa8f0323d2a32a1beae6d3a8778f27f64356b",
       "bytes": 7864
     },
     {
@@ -192,14 +202,14 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/package.json",
-      "sha256": "e21568cc7a26e604b4ba0c6431e306943ea78b8151f9f55d6c82efdac3d085d2",
+      "sha256": "aeb764d8ef5e872ccd963d84c0199f2a285b6c0a004b0c98976b917137a99400",
       "bytes": 388
     },
     {
       "path": "package/package.json",
-      "sha256": "283fe2fc4e6ed2fba2538e774a126bb8841b4c4c79497be578bbc627fc9015d5",
+      "sha256": "8cfbb8dc354007cbe2fd45a7832b35a8d5df6401bf139020afd16015b2b192ef",
       "bytes": 770
     }
   ],
-  "install": "npm install packages/sdk/artifacts/coderax-sdk-1.1.0.tgz"
+  "install": "npm install packages/sdk/artifacts/coderax-sdk-1.2.0.tgz"
 }

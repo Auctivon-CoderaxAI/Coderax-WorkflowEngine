@@ -17,7 +17,7 @@ import {
  * the tarball's filename, its manifest and its runtime metadata cannot disagree.
  */
 export const SDK_NAME = '@coderax/sdk';
-export const SDK_VERSION = '1.1.0';
+export const SDK_VERSION = '1.2.0';
 export const SDK_CONTRACT_VERSION = CONTRACT_VERSION;
 export const SDK_CONTRACT_MAJOR = CONTRACT_MAJOR;
 export const SDK_EVENT_SCHEMA_VERSION = EVENT_SCHEMA_VERSION;

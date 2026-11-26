@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CONTRACT_VERSION, negotiateContract } from '@coderax/contracts';
+import { CONTRACT_FINGERPRINT, CONTRACT_VERSION, negotiateContract } from '@coderax/contracts';
 
 test('the handshake names an advertised version, never the one it echoed back', () => {
   // 1.0.x is compatible with this build but 1.0.7 is not a version it serves.
@@ -9,13 +9,34 @@ test('the handshake names an advertised version, never the one it echoed back', 
   assert.equal(patch.negotiation, 'client_supported');
   assert.equal(patch.negotiatedContractVersion, '1.0.0');
 
-  // An unadvertised patch above the current minor still lands on a served version.
+  // A patch above an advertised minor lands on that minor, not on the newest one.
   const newer = negotiateContract('1.1.9');
   assert.equal(newer.compatible, true);
-  assert.equal(newer.negotiatedContractVersion, CONTRACT_VERSION);
+  assert.equal(newer.negotiatedContractVersion, '1.1.0');
+
+  const newestPatch = negotiateContract('1.2.9');
+  assert.equal(newestPatch.compatible, true);
+  assert.equal(newestPatch.negotiatedContractVersion, CONTRACT_VERSION);
 
   // The exact served version is still reported as exact.
   const exact = negotiateContract(CONTRACT_VERSION);
   assert.equal(exact.negotiation, 'exact');
   assert.equal(exact.negotiatedContractVersion, CONTRACT_VERSION);
+});
+
+test('a catalogue that shares the version string but not the wire is refused', () => {
+  const agreed = negotiateContract(CONTRACT_VERSION, {
+    provided: CONTRACT_FINGERPRINT,
+    expected: CONTRACT_FINGERPRINT,
+  });
+  assert.equal(agreed.compatible, true);
+  assert.equal(agreed.negotiation, 'exact');
+
+  const different = negotiateContract(CONTRACT_VERSION, {
+    provided: `sha256:${'0'.repeat(64)}`,
+    expected: CONTRACT_FINGERPRINT,
+  });
+  assert.equal(different.compatible, false);
+  assert.equal(different.negotiation, 'fingerprint_mismatch');
+  assert.equal(different.negotiatedContractVersion, CONTRACT_VERSION);
 });

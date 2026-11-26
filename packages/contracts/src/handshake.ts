@@ -99,6 +99,8 @@ export const CapabilityHandshake = z
     eventSchemaVersion: z.literal(EVENT_SCHEMA_VERSION),
     chatStreamVersion: z.literal(CHAT_STREAM_VERSION),
     apiPrefix: z.literal(API_PREFIX),
+    /** Identity of the served catalogue; see `contractFingerprint`. */
+    contractFingerprint: z.string().min(1).max(120),
     supportedContractVersions: z.array(z.string().min(1).max(20)),
     /** Present only when the caller negotiated a version. */
     requestedContractVersion: z.string().min(1).max(20).optional(),
@@ -111,6 +113,9 @@ export const CapabilityHandshake = z
       'client_ahead',
       'unsupported_major',
       'unparseable',
+      // The version string matches but the catalogue does not: same number,
+      // different wire. Refused rather than served.
+      'fingerprint_mismatch',
     ]),
     server: ServerIdentity,
     operations: z.array(OperationDescriptor),
@@ -121,7 +126,11 @@ export const CapabilityHandshake = z
 export type CapabilityHandshake = z.infer<typeof CapabilityHandshake>;
 
 export const HandshakeQuery = z
-  .object({ contract: z.string().trim().min(1).max(20).optional() })
+  .object({
+    contract: z.string().trim().min(1).max(20).optional(),
+    /** Optional; when sent with the current version it must match the served catalogue. */
+    fingerprint: z.string().trim().min(1).max(120).optional(),
+  })
   .strict();
 export type HandshakeQuery = z.infer<typeof HandshakeQuery>;
 
@@ -140,7 +149,10 @@ export function supportedContractVersions(): string[] {
  * minor than the client asked for only when the difference is additive, and it
  * never pretends to speak a version it does not implement.
  */
-export function negotiateContract(requested: string | undefined): ContractNegotiation {
+export function negotiateContract(
+  requested: string | undefined,
+  fingerprint?: { provided?: string; expected?: string },
+): ContractNegotiation {
   if (requested === undefined) {
     return {
       compatible: true,
@@ -172,6 +184,17 @@ export function negotiateContract(requested: string | undefined): ContractNegoti
     };
   }
   if (requested === CONTRACT_VERSION) {
+    if (
+      fingerprint?.provided !== undefined &&
+      fingerprint.expected !== undefined &&
+      fingerprint.provided !== fingerprint.expected
+    ) {
+      return {
+        compatible: false,
+        negotiatedContractVersion: CONTRACT_VERSION,
+        negotiation: 'fingerprint_mismatch',
+      };
+    }
     return { compatible: true, negotiatedContractVersion: CONTRACT_VERSION, negotiation: 'exact' };
   }
   return {

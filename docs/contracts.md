@@ -29,17 +29,28 @@ the successful response; failures use the shared `Problem` body.
 
 | Surface | Version | Where |
 | --- | --- | --- |
-| HTTP contracts | `CONTRACT_VERSION = '1.1.0'`, served at `/v1` | `primitives.ts` |
+| HTTP contracts | `CONTRACT_VERSION = '1.2.0'`, served at `/v1` | `primitives.ts` |
 | Execution events | `EVENT_SCHEMA_VERSION = 1` | `events.ts` |
 | Chat stream frames | `CHAT_STREAM_VERSION = 1` | `tasks.ts` |
 | Contracts package | matches `CONTRACT_VERSION` | `packages/contracts/package.json` |
 | SDK | matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
 
-`1.1.0` is additive over `1.0.0`: new operations and new optional request
-fields only. A `1.0.0` client is therefore still accepted, and the handshake says
-so (`negotiation: client_supported`). A newer minor is refused with
-`negotiation: client_ahead` rather than failing one operation at a time, and a
-new major with `unsupported_major`.
+`1.1.0` is additive over `1.0.0`: new operations and new optional request fields
+only.
+
+`1.2.0` moves the canonical task read model from `GET /v1/work` to
+`GET /v1/tasks`. That is a breaking move for a client built against the `1.1.0`
+draft, so `GET /v1/work` stays published as `listWork`: an alias over the same
+handler returning the same `TaskList`. Nothing was removed, re-typed or silently
+reinterpreted, and no version is advertised that this build does not serve.
+
+A version string alone cannot prove two catalogues agree, so the handshake also
+returns `contractFingerprint`, a SHA-256 over every operation id with its method
+and path. A client sends it back as `?fingerprint=` with the current version; a
+catalogue that shares the number but not the wire is refused with
+`negotiation: fingerprint_mismatch` instead of being served. An older minor is
+still accepted (`client_supported`), a newer one is `client_ahead`, and a new
+major is `unsupported_major`.
 
 ## Handshake and negotiation
 

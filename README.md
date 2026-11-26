@@ -34,7 +34,7 @@ are clients of the same versioned API.
 | Version and capability handshake, contract negotiation | Implemented | `GET /v1/handshake`, `tests/contract/handshake.test.ts` |
 | Typed Chat streaming (SSE) with a JSON fallback | Implemented | `src/api/routes.ts`, `CoderaxClient.chatStream` |
 | Cursor replay with an explicit truncation frame | Implemented | `stream.truncated`, `tests/integration/streaming.test.ts` |
-| Task list read model, notification read, memory write/search | Implemented | `/v1/work`, `/v1/notifications/{taskId}`, `/v1/memory` |
+| Task list read model, notification read, memory write/search | Implemented | `/v1/tasks` (`/v1/work` alias), `/v1/notifications/{taskId}`, `/v1/memory` |
 | Schedule operations (create, list, pause, resume, delete) | Implemented, process-local | `src/scheduling`, `tests/integration/lifecycle.test.ts` |
 | Artifact operations with engine-computed sha256 digests | Implemented, process-local | `src/artifacts`, `src/api/routes.ts` |
 | Idempotent task submission | Implemented | `src/persistence/idempotency.ts` |

@@ -7,6 +7,7 @@ import type {
 import {
   API_PREFIX,
   CHAT_STREAM_VERSION,
+  CONTRACT_FINGERPRINT,
   CONTRACT_MAJOR,
   CONTRACT_VERSION,
   EVENT_SCHEMA_VERSION,
@@ -174,7 +175,12 @@ export function registerRoutes(
   registry.register('getHandshake', async (context) => {
     const requested =
       typeof context.query.contract === 'string' ? context.query.contract : undefined;
-    const negotiation = negotiateContract(requested);
+    const fingerprint =
+      typeof context.query.fingerprint === 'string' ? context.query.fingerprint : undefined;
+    const negotiation = negotiateContract(requested, {
+      ...(fingerprint !== undefined ? { provided: fingerprint } : {}),
+      expected: CONTRACT_FINGERPRINT,
+    });
     const registered = registry.list().map((route) => route.spec);
     const operationIds = new Set(registered.map((spec) => spec.operationId));
     const has = (operationId: string): boolean => operationIds.has(operationId);
@@ -217,6 +223,7 @@ export function registerRoutes(
         eventSchemaVersion: EVENT_SCHEMA_VERSION,
         chatStreamVersion: CHAT_STREAM_VERSION,
         apiPrefix: API_PREFIX,
+        contractFingerprint: CONTRACT_FINGERPRINT,
         supportedContractVersions: supportedContractVersions(),
         ...(requested ? { requestedContractVersion: requested } : {}),
         compatible: negotiation.compatible,
@@ -268,6 +275,13 @@ export function registerRoutes(
   });
 
   registry.register('listTasks', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.tasks(context.principal, context.query as never),
+  }));
+
+  // The compatibility address for the same read model. One handler, two specs.
+  registry.register('listWork', async (context) => ({
     kind: 'json',
     status: 200,
     body: await service.tasks(context.principal, context.query as never),

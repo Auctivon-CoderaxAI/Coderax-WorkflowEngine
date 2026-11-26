@@ -5,15 +5,19 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-export const CONTRACT_VERSION = '1.1.0' as const;
+export const CONTRACT_VERSION = '1.2.0' as const;
 /** Majors the server can still speak; a new major needs a new `/vN` prefix. */
 export const CONTRACT_MAJOR = 1 as const;
 /**
  * `1.0.0` was the first published surface. `1.1.0` is strictly additive: new
- * optional request fields and new operations. An operation is never removed or
- * re-typed inside one major, so a `1.0.0` client keeps working.
+ * optional request fields and new operations.
+ *
+ * `1.2.0` moves the canonical task read model to `GET /v1/tasks`. That is a
+ * breaking move for a client built against the `1.1.0` draft, so `GET /v1/work`
+ * stays published as the `listWork` compatibility alias serving the same
+ * `TaskList`. No operation is removed or re-typed inside one major.
  */
-export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0', '1.1.0'] as const;
+export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0'] as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
 /** Chat streaming frames are versioned separately from both HTTP and events. */

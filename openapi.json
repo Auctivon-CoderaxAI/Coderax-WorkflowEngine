@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Coderax WorkflowEngine API",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Authoritative HTTP surface for Coderax Native intelligence, agent orchestration and durable Work execution. Every operation is generated from the versioned route catalogue."
   },
   "servers": [
@@ -109,7 +109,7 @@
                       ]
                     },
                     "contractVersion": {
-                      "const": "1.1.0"
+                      "const": "1.2.0"
                     },
                     "startedAt": {
                       "type": "string",
@@ -387,7 +387,7 @@
                   "type": "object",
                   "properties": {
                     "contractVersion": {
-                      "const": "1.1.0"
+                      "const": "1.2.0"
                     },
                     "contractMajor": {
                       "const": 1
@@ -400,6 +400,11 @@
                     },
                     "apiPrefix": {
                       "const": "/v1"
+                    },
+                    "contractFingerprint": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
                     },
                     "supportedContractVersions": {
                       "type": "array",
@@ -430,7 +435,8 @@
                         "client_supported",
                         "client_ahead",
                         "unsupported_major",
-                        "unparseable"
+                        "unparseable",
+                        "fingerprint_mismatch"
                       ]
                     },
                     "server": {
@@ -652,6 +658,7 @@
                     "eventSchemaVersion",
                     "chatStreamVersion",
                     "apiPrefix",
+                    "contractFingerprint",
                     "supportedContractVersions",
                     "compatible",
                     "negotiatedContractVersion",
@@ -696,6 +703,16 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 20
+            }
+          },
+          {
+            "name": "fingerprint",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
             }
           }
         ]
@@ -1431,10 +1448,198 @@
         }
       },
       "get": {
+        "operationId": "listWork",
+        "summary": "Compatibility alias for the task read model at GET /v1/tasks.",
+        "tags": [
+          "tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tasks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "taskId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "conversationId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "queued",
+                              "running",
+                              "awaiting_approval",
+                              "completed",
+                              "failed",
+                              "cancelled",
+                              "interrupted"
+                            ]
+                          },
+                          "agent": {
+                            "type": "string",
+                            "enum": [
+                              "coderax",
+                              "opencode",
+                              "freebuff"
+                            ]
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "cloud"
+                            ]
+                          },
+                          "model": {
+                            "type": "object",
+                            "properties": {
+                              "providerId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 64
+                              },
+                              "modelId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 160
+                              }
+                            },
+                            "required": [
+                              "providerId",
+                              "modelId"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "generation": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "cancelRequested": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "taskId",
+                          "conversationId",
+                          "title",
+                          "state",
+                          "agent",
+                          "mode",
+                          "generation",
+                          "createdAt",
+                          "updatedAt",
+                          "cancelRequested"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "tasks"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "running",
+                "awaiting_approval",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            }
+          },
+          {
+            "name": "conversationId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ]
+      }
+    },
+    "/v1/tasks": {
+      "get": {
         "operationId": "listTasks",
         "summary": "The owner task read model, newest first.",
         "tags": [
-          "work"
+          "tasks"
         ],
         "security": [
           {
