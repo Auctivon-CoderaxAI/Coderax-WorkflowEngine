@@ -287,11 +287,11 @@ container, so the real-database lane cannot silently disappear. Hosted execution
 is evidence only when the `verify` workflow has actually run at the exact head;
 a local green run does not imply a hosted run.
 
-At the artifact branch head, `npm run verify` passed **166/166 tests with zero
+At the artifact branch head, `npm run verify` passed **167/167 tests with zero
 skips** against a real mongod, and `openapi:check` passed. The durable restart
-test, the eleven real-Mongo concurrency/recovery tests and the failure-injection
-tests are the evidence for the claims above; no production database has been
-exercised.
+test, the eleven real-Mongo concurrency/recovery tests, the generator integration
+test and the failure-injection tests are the evidence for the claims above; no
+production database has been exercised.
 
 ### Concurrency and recovery
 
@@ -351,19 +351,29 @@ source trees into a workspace folder. The stable contract for that generator is:
 5. A task result projects `relativePath ?? filename`, so a completed generation
    reports the tree it produced without a second metadata copy.
 
-The repository now ships that adapter: `src/artifacts/tree.ts`
-(`createArtifactTreeWriter`). It validates the whole batch before writing,
-rejects duplicate, case-folded and file-directory path conflicts, maps an
-existing path to `uploadArtifactVersion` rather than a second file, uploads new
-files with project/conversation/task associations, and returns the version-pinned
-manifest. `tests/unit/artifacts-tree.test.ts` persists DOCX, PDF, XLSX, PPTX and
-a multi-file source tree, versions an edit and restores the earlier version.
+The repository now ships the complete persistence adapter in
+`src/artifacts/tree.ts` (`createArtifactTreeWriter`) and the generator bridge in
+`src/artifacts/generate.ts` (`createArtifactGenerator`). The bridge calls the
+artifact-intelligence renderers for DOCX, PDF, XLSX, PPTX and software trees,
+checks their objective verification, and only then writes the batch. The tree
+adapter validates the whole batch, rejects duplicate, case-folded and
+file-directory path conflicts, maps an existing path to
+`uploadArtifactVersion` rather than a second file, uploads new files with
+project/conversation/task associations, and returns the version-pinned manifest.
+
+`tests/integration/artifacts-generate.test.ts` runs the bridge against a real
+MongoDB: it generates all five artifact forms, downloads their bytes, edits each
+by a second immutable version, restores version one, and compares the restored
+content byte-for-byte with the original. `tests/unit/artifacts-tree.test.ts`
+covers the same path-conflict rules without a database.
 
 The branch's local `Artifact` type is a generation-time shape. It maps to this
 contract at the adapter boundary; it must not become a second store, a second
-descriptor or a second quota ledger. This repository does not modify another
-branch, and the generator still needs to call this adapter or the equivalent
-HTTP operations.
+descriptor or a second quota ledger. The full `toolkit.ts` workspace producer and
+its HTTP surface were not merged; `createArtifactGenerator` is the durable,
+programmatic seam. Document `base` paths and HTML output remain unsupported
+because a workspace path is not an artifact identity and HTML is not an accepted
+durable media type.
 
 ## Canonical API status
 
@@ -413,12 +423,13 @@ verified.
 - Coderax Web and CoderaxCLI live in other repositories and were not accessible
   here. They can use the shared SDK's artifact methods, but no client change or
   cross-client test was made in this repository.
-- The Native agent returns text; artifacts are stored when a client or a task
-  uploads them or associates them with a task. Nothing generates files on its
-  own.
-- `npm audit --omit=dev` reports one high finding, `GHSA-mrhx-c7xc-m3w5` /
-  CVE-2023-54404, for the installed `zod 3.25.76` (patched only in 4.6.6). The
-  CVE was rejected by its CNA; exploitation needs an unbounded array schema and
-  no request-size limit, while this API is owner-only and capped at 1 MiB (16 MiB
-  on artifact routes). It is not suppressed. The Zod 4 migration is owned by the
-  quality-gate workstream and was not duplicated here.
+- The Native agent still returns text; artifacts are stored when a client or a
+  task uploads them or associates them with a task. `createArtifactGenerator` is
+  an explicit programmatic path, not an agent tool or HTTP route.
+- `npm audit --omit=dev` reports five findings (three high): `zod 3.25.76`
+  (`GHSA-mrhx-c7xc-m3w5` / CVE-2023-54404), `image-size` through `pptxgenjs`, and
+  `uuid` through `exceljs`; `exceljs` and `uuid` also have moderate findings. The
+  Zod CVE was rejected by its CNA, and the owner-only API has a hard body cap;
+  the generator paths do not accept arbitrary images or UUID buffers. Nothing is
+  suppressed, and the Zod 4 migration remains owned by the quality-gate
+  workstream rather than being duplicated here.

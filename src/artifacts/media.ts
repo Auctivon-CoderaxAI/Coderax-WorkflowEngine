@@ -5,6 +5,7 @@ import {
   MAX_ARTIFACT_BASE64_CHARS,
   MAX_ARTIFACT_BYTES,
 } from '@coderax/contracts';
+import { zipEntryNames, zipEntryText } from './zip.js';
 
 /**
  * Content validation for stored artifacts.
@@ -276,22 +277,25 @@ function mp4Family(bytes: Uint8Array): MediaFamily | null {
 }
 
 function officeContainer(bytes: Uint8Array, declared: ArtifactMediaType): boolean {
-  const head = Buffer.from(bytes.subarray(0, Math.min(bytes.length, 8192)));
-  if (OOXML_MEDIA.has(declared)) {
-    if (!head.includes(Buffer.from('[Content_Types].xml', 'latin1'))) return false;
-    if (declared === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      return head.includes(Buffer.from('word/', 'latin1'));
+  try {
+    const names = zipEntryNames(Buffer.from(bytes));
+    if (OOXML_MEDIA.has(declared)) {
+      if (!names.has('[Content_Types].xml')) return false;
+      const prefix =
+        declared === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          ? 'word/'
+          : declared === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            ? 'xl/'
+            : 'ppt/';
+      return [...names].some((name) => name.startsWith(prefix));
     }
-    if (declared === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-      return head.includes(Buffer.from('xl/', 'latin1'));
+    if (ODF_MEDIA.has(declared)) {
+      return zipEntryText(Buffer.from(bytes), 'mimetype', 128)?.trim() === declared;
     }
-    return head.includes(Buffer.from('ppt/', 'latin1'));
+    return false;
+  } catch {
+    return false;
   }
-  if (ODF_MEDIA.has(declared)) {
-    const marker = head.toString('latin1');
-    return marker.includes('mimetype') && marker.includes(declared);
-  }
-  return false;
 }
 
 export function detectFamily(bytes: Uint8Array): MediaFamily | 'unknown' {

@@ -88,5 +88,5 @@ Fallbacks, cheapest first:
 | PR for `feat/durable-artifacts` | None |
 | Hosted CI at `bf2e9b2` | No run: no PR exists, and `verify` triggers on PR/main |
 | Local verification at `bf2e9b2` | build 0, 157/157 tests, contract gate clean; real MongoDB |
-| Local verification after the artifact integration | build 0, 166/166 tests, contract gate clean; real MongoDB |
-| Dependency audit | `npm audit --omit=dev` reports one high finding, `GHSA-mrhx-c7xc-m3w5` / CVE-2023-54404 for `zod <4.6.6`; the CVE was rejected by its CNA, the owner-only API has a hard request-body limit, and the Zod 4 migration belongs to the quality-gate owner. Not suppressed. |
+| Local verification after the artifact integration | build 0, 167/167 tests, contract gate clean; real MongoDB |
+| Dependency audit | `npm audit --omit=dev` reports five findings (three high): the zod advisory, `image-size` via `pptxgenjs`, and `uuid` via `exceljs`; the owner-only API has a hard request-body limit, and the generator does not accept arbitrary images or UUID buffers. Not suppressed; the Zod 4 migration belongs to the quality-gate owner. |

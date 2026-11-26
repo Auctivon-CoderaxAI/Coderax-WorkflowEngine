@@ -5,6 +5,28 @@ export * from './models.js';
 export * from './health.js';
 export * from './tasks.js';
 export * from './artifacts.js';
+export {
+  ChartSpec,
+  ColumnSpec,
+  Deliverable,
+  DeliverableRequest,
+  DocumentBlock,
+  DocumentEdit,
+  DocumentRequest,
+  PresentationRequest,
+  SheetRequest,
+  SlideRequest,
+  SoftwareRequest,
+  SourceFile,
+  SpreadsheetRequest,
+  StoredDocument,
+  VerificationCheck,
+} from './deliverables.js';
+export type {
+  CapabilityReport,
+  DeliverableRequestInput,
+  VerificationReport,
+} from './deliverables.js';
 export * from './events.js';
 export * from './permissions.js';
 export * from './routes.js';
