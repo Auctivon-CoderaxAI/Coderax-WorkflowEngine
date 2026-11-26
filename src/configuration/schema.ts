@@ -182,6 +182,8 @@ export const ExecutionConfig = z
      * writing alongside code this process can no longer observe.
      */
     containmentHoldMs: z.number().int().min(1_000).max(600_000).default(60_000),
+    /** Events kept per task after it settles; older ones are pruned. */
+    eventRetain: z.number().int().min(16).max(100_000).default(5_000),
   })
   .strict();
 

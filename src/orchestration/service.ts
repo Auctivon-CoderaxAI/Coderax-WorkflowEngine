@@ -146,6 +146,10 @@ export type ApplicationService = {
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
   notifications: (principal: Principal) => Promise<NotificationList>;
+  markNotificationsRead: (
+    principal: Principal,
+    taskIds: string[],
+  ) => Promise<NotificationList>;
   events: (
     principal: Principal,
     taskId: string,
@@ -407,6 +411,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (outcome.kind === 'interrupted') {
       return;
     }
+    // Barrier: everything the run published is stored before the task record
+    // says the run is over, so a client cannot read a terminal task whose
+    // stream is missing the events that led to it.
+    await deps.events.flush(task.taskId).catch(() => undefined);
     const now = deps.clock.iso();
     if (outcome.kind === 'suspended') {
       // A suspension keeps the task alive: the owner decides, and resume claims a
@@ -492,6 +500,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const text = checkpoint?.text ?? '';
       if (text.length > 0) {
+        // Second fence. The terminal write proves this generation owned the task
+        // at that instant; a resume can reissue a generation immediately after, so
+        // the transcript append re-checks the token instead of trusting the
+        // earlier read. A superseded run adds nothing to a newer run's history.
+        const current = await deps.tasks.get(task.taskId);
+        if (!current || current.runToken !== token) {
+          return;
+        }
         await deps.conversations.appendMessage({
           messageId: deps.ids.messageId(),
           conversationId: task.conversationId,
@@ -513,6 +529,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
     } finally {
+      // The terminal event is durable before the lease can be reissued, so a new
+      // generation never starts behind an unfinished stream.
+      await deps.events.flush(settled.taskId).catch(() => undefined);
       await releaseLease(task, token);
     }
   }
@@ -573,7 +592,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       return;
     }
-
     const started = await deps.tasks.updateFenced({
       taskId,
       token,
@@ -585,6 +603,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
     });
     if (!started.applied) return;
+    // Continue the sequence after anything a previous process already stored.
+    await deps.events.hydrate(taskId).catch(() => 0);
     publish(started.task, 'task.started');
 
     const steps = [...started.task.steps];
@@ -782,6 +802,46 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     await settle(started.task, token, outcome, { completedSteps: completed, text: safeText, outputs });
   }
 
+  const TERMINAL_EVENT = new Set([
+    'task.completed',
+    'task.failed',
+    'task.cancelled',
+    'task.interrupted',
+  ]);
+
+  /**
+   * Repairs the one contradiction a crash can leave behind: a task record that
+   * says it finished, and a stream that never received the terminal event. The
+   * client reads the stream, so the stream is completed here from the
+   * authoritative task record — never the other way around.
+   */
+  async function ensureTerminalEvent(task: TaskRecord): Promise<void> {
+    if (!isTerminalState(task.state)) return;
+    const last = deps.events.lastSeq(task.taskId);
+    const tail = await deps.events.read(task.taskId, Math.max(0, last - 1));
+    if (tail.events.some((event) => TERMINAL_EVENT.has(event.type))) return;
+    if (task.state === 'completed') {
+      publish(task, 'task.completed', {
+        ...(task.result?.summary ? { summary: task.result.summary } : {}),
+        ...(task.model ? { model: task.model } : {}),
+        ...(task.usage ? { usage: task.usage } : {}),
+      });
+    } else if (task.state === 'cancelled') {
+      publish(task, 'task.cancelled', {});
+    } else if (task.state === 'failed') {
+      publish(task, 'task.failed', {
+        code: task.failure?.code ?? 'provider_error',
+        ...(task.failure?.detail ? { detail: task.failure.detail } : {}),
+        retryable: task.failure?.retryable ?? false,
+      });
+    } else {
+      publish(task, 'task.interrupted', {
+        detail: task.failure?.detail ?? 'The run stopped before it could report a terminal event.',
+      });
+    }
+    await deps.events.flush(task.taskId).catch(() => undefined);
+  }
+
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
     if (isTerminalState(task.state) || task.state === 'awaiting_approval') {
       return task;
@@ -806,6 +866,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
+        await deps.events.flush(applied.task.taskId).catch(() => undefined);
         await notifyTerminal(applied.task, 'interrupted');
         deps.audit.record({
           actor: task.ownerId,
@@ -939,6 +1000,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         );
       }
 
+      await deps.events.hydrate(task.taskId).catch(() => 0);
       publish(created.task, 'task.queued');
       deps.audit.record({
         actor: principal.ownerId,
@@ -1047,6 +1109,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
+      await deps.events.flush(applied.task.taskId).catch(() => undefined);
       await notifyTerminal(applied.task, 'interrupted');
       return ok({
         taskId: task.taskId,
@@ -1335,11 +1398,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     notifications: (principal) => deps.notifications.list(principal.ownerId),
 
+    markNotificationsRead: async (principal, taskIds) => {
+      for (const taskId of new Set(taskIds)) {
+        await deps.notifications.markRead(principal.ownerId, taskId);
+      }
+      return deps.notifications.list(principal.ownerId);
+    },
+
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
+      await ensureTerminalEvent(found.value);
+      // The durable read is what makes a reconnect after a restart replay the
+      // events the previous process wrote, not just this process's window.
       return ok({
-        replay: deps.events.replay(taskId, after),
+        replay: await deps.events.read(taskId, after),
         subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
         lastSeq: deps.events.lastSeq(taskId),
       });
@@ -1386,6 +1459,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       await deps.supervisor.shutdown();
       deps.scheduler.stop();
       executionsByTask.clear();
+      // Flush before the process releases the database, so a shutdown does not
+      // lose the tail of a run that already reported it.
+      await deps.events.close().catch(() => undefined);
     },
   };
 

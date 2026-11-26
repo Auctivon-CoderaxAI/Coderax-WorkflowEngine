@@ -1,0 +1,173 @@
+import type { Usage } from '@coderax/contracts';
+
+/**
+ * The zero-cost budget is a reservation ledger, not a warning counter.
+ *
+ * A request reserves one request slot and an estimated input+output token
+ * allowance before the provider is called. A skipped candidate is released; a
+ * completed call is settled with its actual usage. Tokens reserved but not yet
+ * settled count against the day, so concurrent callers cannot each see the same
+ * remaining allowance.
+ */
+export type BudgetReservation = {
+  id: string;
+  ownerId: string;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type BudgetSnapshot = {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type ReserveOutcome =
+  | { allowed: true; reservation: BudgetReservation; requests: number }
+  | {
+      allowed: false;
+      reason: 'requests' | 'tokens';
+      detail: string;
+      requests: number;
+    };
+
+export type BudgetLedger = {
+  available: (ownerId: string, at: Date) => boolean;
+  reserve: (input: {
+    ownerId: string;
+    at: Date;
+    inputTokens: number;
+    outputTokens: number;
+  }) => ReserveOutcome;
+  settle: (reservationId: string, usage: Usage) => void;
+  release: (reservationId: string) => void;
+  /** Charge an external engine that did not go through the router. */
+  charge: (ownerId: string, usage: Usage, at: Date) => void;
+  snapshot: (ownerId: string, at: Date) => BudgetSnapshot;
+};
+
+export function createBudgetLedger(input: {
+  maxRequestsPerDay: number;
+  maxTokensPerDay: number;
+}): BudgetLedger {
+  type Day = {
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    reservedRequests: number;
+    reservedInput: number;
+    reservedOutput: number;
+  };
+  const days = new Map<string, Day>();
+  const reservations = new Map<string, { key: string; reservation: BudgetReservation }>();
+  let nextId = 0;
+
+  const dayKey = (ownerId: string, at: Date): string =>
+    `${ownerId}:${at.toISOString().slice(0, 10)}`;
+
+  function day(ownerId: string, at: Date): Day {
+    const key = dayKey(ownerId, at);
+    const existing = days.get(key);
+    if (existing) return existing;
+    const created: Day = {
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      reservedRequests: 0,
+      reservedInput: 0,
+      reservedOutput: 0,
+    };
+    days.set(key, created);
+    return created;
+  }
+
+  function usedTokens(state: Day): number {
+    return state.inputTokens + state.outputTokens + state.reservedInput + state.reservedOutput;
+  }
+
+  return {
+    available: (ownerId, at) => {
+      const state = day(ownerId, at);
+      if (state.requests + state.reservedRequests >= input.maxRequestsPerDay) return false;
+      return usedTokens(state) < input.maxTokensPerDay;
+    },
+
+    reserve: ({ ownerId, at, inputTokens, outputTokens }) => {
+      const state = day(ownerId, at);
+      const inTokens = Math.max(0, Math.ceil(inputTokens));
+      const outTokens = Math.max(0, Math.ceil(outputTokens));
+      if (state.requests + state.reservedRequests >= input.maxRequestsPerDay) {
+        return {
+          allowed: false,
+          reason: 'requests',
+          detail: 'The daily zero-cost request budget is exhausted.',
+          requests: state.requests,
+        };
+      }
+      if (usedTokens(state) + inTokens + outTokens > input.maxTokensPerDay) {
+        return {
+          allowed: false,
+          reason: 'tokens',
+          detail: 'The daily zero-cost token budget cannot cover this request.',
+          requests: state.requests,
+        };
+      }
+      const reservation: BudgetReservation = {
+        id: `budget_${++nextId}`,
+        ownerId,
+        inputTokens: inTokens,
+        outputTokens: outTokens,
+      };
+      state.reservedRequests += 1;
+      state.reservedInput += inTokens;
+      state.reservedOutput += outTokens;
+      reservations.set(reservation.id, { key: dayKey(ownerId, at), reservation });
+      return {
+        allowed: true,
+        reservation,
+        requests: state.requests + state.reservedRequests,
+      };
+    },
+
+    settle: (reservationId, usage) => {
+      const held = reservations.get(reservationId);
+      if (!held) return;
+      reservations.delete(reservationId);
+      const state = days.get(held.key);
+      if (!state) return;
+      state.reservedRequests = Math.max(0, state.reservedRequests - 1);
+      state.reservedInput = Math.max(0, state.reservedInput - held.reservation.inputTokens);
+      state.reservedOutput = Math.max(0, state.reservedOutput - held.reservation.outputTokens);
+      state.requests += 1;
+      state.inputTokens += Math.max(0, usage.inputTokens ?? 0);
+      state.outputTokens += Math.max(0, usage.outputTokens ?? 0);
+    },
+
+    release: (reservationId) => {
+      const held = reservations.get(reservationId);
+      if (!held) return;
+      reservations.delete(reservationId);
+      const state = days.get(held.key);
+      if (!state) return;
+      state.reservedRequests = Math.max(0, state.reservedRequests - 1);
+      state.reservedInput = Math.max(0, state.reservedInput - held.reservation.inputTokens);
+      state.reservedOutput = Math.max(0, state.reservedOutput - held.reservation.outputTokens);
+    },
+
+    charge: (ownerId, usage, at) => {
+      const state = day(ownerId, at);
+      state.requests += 1;
+      state.inputTokens += Math.max(0, usage.inputTokens ?? 0);
+      state.outputTokens += Math.max(0, usage.outputTokens ?? 0);
+    },
+
+    snapshot: (ownerId, at) => {
+      const state = day(ownerId, at);
+      return {
+        requests: state.requests,
+        inputTokens: state.inputTokens,
+        outputTokens: state.outputTokens,
+      };
+    },
+  };
+}

@@ -66,6 +66,9 @@ export function createHttpServer(input: {
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
+          ...(typeof request.headers['last-event-id'] === 'string'
+            ? { lastEventId: request.headers['last-event-id'] }
+            : {}),
         });
 
         if (result.kind === 'json') {

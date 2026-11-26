@@ -323,6 +323,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
     iso: clock.iso,
+    log: persistence.events,
+    retain: config.execution.eventRetain,
   });
   const runner = createTaskRunner({
     lease,

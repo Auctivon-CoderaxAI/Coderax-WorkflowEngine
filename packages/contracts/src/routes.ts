@@ -11,7 +11,12 @@ import {
   RoutingReport,
   ToolList,
 } from './intelligence.js';
-import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
+import {
+  NotificationList,
+  NotificationReadRequest,
+  PermissionDecisionRequest,
+  PermissionList,
+} from './permissions.js';
 import {
   CancelRequest,
   ChatReply,
@@ -288,6 +293,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     summary: 'Durable completion notifications, including unread count.',
     tags: ['notifications'],
     auth: 'owner',
+    response: { status: 200, description: 'Notification list', schema: NotificationList },
+  },
+  {
+    operationId: 'markNotificationsRead',
+    method: 'POST',
+    path: '/v1/notifications/read',
+    summary: 'Clear the unread flag for the named terminal notifications.',
+    tags: ['notifications'],
+    auth: 'owner',
+    body: NotificationReadRequest,
     response: { status: 200, description: 'Notification list', schema: NotificationList },
   },
 ]);

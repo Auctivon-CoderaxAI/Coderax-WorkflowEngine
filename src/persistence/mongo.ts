@@ -41,7 +41,12 @@ export type MongoCollectionLike = {
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown>; $setOnInsert?: Record<string, unknown> },
+    update: {
+      $set?: Record<string, unknown>;
+      $setOnInsert?: Record<string, unknown>;
+      /** Monotonic update used by the event head; never lowers a value. */
+      $max?: Record<string, unknown>;
+    },
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
