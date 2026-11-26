@@ -1261,7 +1261,17 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "includeSchedules",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "true"
+            }
+          }
+        ]
       }
     },
     "/v1/notifications/read": {
@@ -1434,7 +1444,17 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "includeSchedules",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "true"
+            }
+          }
+        ]
       }
     },
     "/v1/ready": {

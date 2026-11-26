@@ -3,7 +3,7 @@ import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
-import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
+import { NotificationResponse, PermissionDecisionRequest, PermissionList } from './permissions.js';
 import {
   CancelRequest,
   ChatReply,
@@ -243,7 +243,8 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     summary: 'Durable completion notifications, including unread count.',
     tags: ['notifications'],
     auth: 'owner',
-    response: { status: 200, description: 'Notification list', schema: NotificationList },
+    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
+    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
   },
   {
     operationId: 'createSchedule',
@@ -271,7 +272,8 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     summary: 'Mark every completion notification and schedule notice for this owner as read.',
     tags: ['notifications'],
     auth: 'owner',
-    response: { status: 200, description: 'Notification list', schema: NotificationList },
+    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
+    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
   },
   {
     operationId: 'dispatchScheduleEvent',

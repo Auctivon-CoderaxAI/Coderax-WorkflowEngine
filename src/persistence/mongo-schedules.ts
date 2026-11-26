@@ -29,6 +29,8 @@ import type {
 function strip(document: Record<string, unknown>): Record<string, unknown> {
   const copy = { ...document };
   delete copy._id;
+  delete copy.slot;
+  delete copy.occupiesSlot;
   return copy;
 }
 
@@ -102,6 +104,11 @@ export async function ensureScheduleIndexes(input: {
     { state: 1, createdAt: 1 },
     { name: 'execution_state_created' },
   );
+  for (const field of ['slot', 'scheduleId']) {
+    await input.executions.createIndex({ [field]: 1 }, {
+      unique: true, name: `execution_occupied_${field}`, partialFilterExpression: { occupiesSlot: true },
+    });
+  }
   await input.notices.createIndex(
     { noticeId: 1 },
     { unique: true, name: 'notice_id' },
@@ -172,6 +179,36 @@ export function createMongoScheduleRepository(input: {
         : { applied: false, schedule: null };
     },
 
+    claim: async (record, cap, retry) => {
+      // Receipts written before slot indexes existed must drain before their
+      // capacity can be reused. Also account for slots above a lowered cap.
+      const active = await executions.find({ state: { $in: ['claimed', 'dispatched'] } }).toArray();
+      const outside = active.filter(e => e.occupiesSlot !== true || Number(e.slot) >= cap);
+      if (outside.length) return null;
+      for (let slot = 0; slot < cap; slot++) {
+        try {
+          const fields = { ...record, occupiesSlot: true, slot };
+          if (retry) {
+            const updated = await executions.findOneAndUpdate(
+              { executionId: record.executionId, state: 'retry_wait', attempt: record.attempt },
+              { $set: fields }, { returnDocument: 'after', includeResultMetadata: false },
+            );
+            if (!updated) return null;
+          } else {
+            await executions.insertOne(fields);
+          }
+          return { created: true, execution: record };
+        } catch (error) {
+          if (!isDuplicateKey(error)) throw error;
+          if (!retry) {
+            const existing = await executions.findOne({ executionKey: record.executionKey });
+            if (existing) return { created: false, execution: toExecution(existing) };
+          }
+        }
+      }
+      return null;
+    },
+
     createExecution: async (execution): Promise<ExecutionCreateResult> => {
       try {
         await executions.insertOne({ ...execution });
@@ -192,11 +229,17 @@ export function createMongoScheduleRepository(input: {
     updateExecution: async ({ executionId, from, patch }) => {
       const updated = await executions.findOneAndUpdate(
         { executionId, state: { $in: [...from] } },
-        { $set: defined(patch as ScheduleExecutionPatch) },
+        { $set: { ...defined(patch as ScheduleExecutionPatch),
+          ...(patch.state && !['claimed', 'dispatched'].includes(patch.state) ? { occupiesSlot: false } : {}),
+        } },
         { returnDocument: 'after', includeResultMetadata: false },
       );
       return updated ? toExecution(updated) : null;
     },
+
+    listPending: async (scheduleId) => (await executions.find({
+      scheduleId, state: { $in: ['retry_wait', 'claimed', 'dispatched'] },
+    }).toArray()).map(toExecution),
 
     listExecutions: async (scheduleId, limit) => {
       const documents = await executions

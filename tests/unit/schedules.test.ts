@@ -861,3 +861,66 @@ test('an adapter with ungated side effects is refused for a schedule', () => {
   assert.equal(scheduleSideEffectRefusal('none'), null);
   assert.equal(scheduleSideEffectRefusal('gated'), null);
 });
+
+test('a fresh claim and a retry compete atomically for the last slot', async () => {
+  const collections = { schedules: createFakeCollection(), executions: createFakeCollection(), notices: createFakeCollection() };
+  await ensureScheduleIndexes(collections);
+  for (const store of [createScheduleRepository(), createMongoScheduleRepository(collections)]) {
+    const fresh = executionRecord(scheduleRecord(), { state: 'claimed' });
+    const retry = { ...fresh, executionKey: 'retry', executionId: 'retry', scheduleId: 'other', attempt: 2 };
+    await store.createExecution({ ...retry, state: 'retry_wait' });
+    const results = await Promise.all([store.claim(fresh, 1, false), store.claim(retry, 1, true)]);
+    assert.equal(results.filter(Boolean).length, 1);
+    assert.equal(await store.countActive(), 1);
+    const winner = results[0] ? fresh : retry;
+    await store.updateExecution({ executionId: winner.executionId, from: ['claimed'], patch: { state: 'completed' } });
+    assert.ok(await store.claim(results[0] ? retry : fresh, 1, !!results[0]));
+  }
+});
+
+test('a recent retry claim retains its recovery window after a long backoff', async () => {
+  const store = createScheduleRepository();
+  const schedule = scheduleRecord({ nextRunAt: null });
+  await store.create(schedule);
+  const createdAt = '2026-11-26T11:58:00.000Z';
+  await store.createExecution(executionRecord(schedule, {
+    createdAt, updatedAt: NOW, state: 'claimed', taskId: 'task_retry', attempt: 2,
+  }));
+  const port = testPort();
+  const clock = testClock(NOW);
+  const engine = engineFor({ store, port: port.port, clock: clock.clock, settings: { dispatchTimeoutMs: 100 } });
+  await engine.tick();
+  assert.equal(port.calls.length, 0);
+  clock.advance(150);
+  await engine.tick();
+  assert.equal(port.calls.length, 1);
+  assert.equal((await store.listExecutions(schedule.scheduleId, 1))[0]?.createdAt, createdAt);
+});
+
+test('a delayed advance preserves a newer cursor or timing revision', async () => {
+  for (const timingEdit of [false, true]) {
+    const store = createScheduleRepository();
+    const schedule = scheduleRecord();
+    await store.create(schedule);
+    const cursor = timingEdit ? NOW : '2026-11-26T13:00:00.000Z';
+    const port = testPort();
+    port.port.dispatch = async () => {
+      await store.update({ scheduleId: schedule.scheduleId, expectedVersion: 0, patch: {
+        nextRunAt: cursor, ...(timingEdit ? { timingRevision: 1 } : {}),
+      } });
+      return { ok: true };
+    };
+    await engineFor({ store, port: port.port, clock: testClock().clock }).tick();
+    assert.equal((await store.get(schedule.scheduleId))?.nextRunAt, cursor);
+  }
+});
+
+test('a stale limit decision cannot exhaust a schedule whose cap was raised', async () => {
+  const store = createScheduleRepository();
+  const stale = scheduleRecord({ limits: { maxRunsTotal: 1, maxRunsPerDay: 24 }, runsTotal: 1 });
+  await store.create({ ...stale, limits: { ...stale.limits, maxRunsTotal: 2 } });
+  const engine = engineFor({ store, port: testPort().port, clock: testClock().clock });
+  const dispatch = await engine.trigger({ schedule: stale, trigger: 'manual', occurrenceKey: 'manual:1' });
+  assert.equal(dispatch.state, 'dispatched');
+  assert.equal((await store.get(stale.scheduleId))?.state, 'active');
+});

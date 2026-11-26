@@ -316,6 +316,7 @@ export class CoderaxClient {
     return this.request<NotificationList>(NotificationList, {
       method: 'GET',
       path: '/v1/notifications',
+      query: { includeSchedules: 'true' },
     });
   }
 
@@ -406,6 +407,7 @@ export class CoderaxClient {
     return this.request<NotificationList>(NotificationList, {
       method: 'POST',
       path: '/v1/notifications/read',
+      query: { includeSchedules: 'true' },
     });
   }
 

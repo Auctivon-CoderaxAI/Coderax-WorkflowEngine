@@ -144,6 +144,7 @@ export type ScheduleRecord = {
   model: ModelRef | null;
   mode: DataMode;
   timing: ScheduleTiming;
+  timingRevision?: number;
   condition: ScheduleCondition;
   retry: ScheduleRetry;
   priority: number;
@@ -170,6 +171,7 @@ export type SchedulePatch = Partial<
   Pick<
     ScheduleRecord,
     | 'name'
+    | 'timingRevision'
     | 'timing'
     | 'condition'
     | 'retry'
@@ -197,6 +199,7 @@ export type SchedulePatch = Partial<
 export type ScheduleExecutionRecord = {
   executionId: string;
   executionKey: string;
+  selectedTimingRevision?: number;
   scheduleId: string;
   ownerId: string;
   occurrenceKey: string;

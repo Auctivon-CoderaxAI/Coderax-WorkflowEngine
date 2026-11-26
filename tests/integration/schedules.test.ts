@@ -78,6 +78,17 @@ test('a one-time schedule runs and notifies without any client polling', async (
     assert.equal(notices.schedules[0]?.scheduleId, created.scheduleId);
     assert.equal(notices.unread, 2);
 
+    const headers = { authorization: `Bearer ${OWNER_TOKEN}` };
+    for (const method of ['GET', 'POST']) {
+      const path = method === 'POST' ? '/v1/notifications/read' : '/v1/notifications';
+      const response = await fetch(started.url + path, { method, headers });
+      assert.equal(response.status, 200);
+      const legacy = await response.json();
+      assert.ok(legacy && typeof legacy === "object" && "unread" in legacy);
+      assert.deepEqual(Object.keys(legacy).sort(), ['notifications', 'unread']);
+      assert.equal(legacy.unread, method === 'POST' ? 0 : 1);
+    }
+    assert.equal((await api.notifications()).unread, 1);
     const read = await api.markNotificationsRead();
     assert.equal(read.unread, 0);
     assert.ok(read.schedules.every((entry) => entry.read));
@@ -242,8 +253,14 @@ test('cancelling a schedule cancels the Work task it started', async () => {
       return task.state === 'running' ? task : null;
     });
 
+    const store = started.app.dependencies.schedules;
+    const list = store.listPending;
+    store.listPending = async () => { throw new Error('temporary store outage'); };
+    await assert.rejects(api.cancelSchedule(created.scheduleId), CoderaxApiError);
+    assert.equal((await api.schedule(created.scheduleId)).state, 'cancelled');
+    store.listPending = list;
     const cancelled = await api.cancelSchedule(created.scheduleId);
-    assert.equal(cancelled.outcome, 'accepted');
+    assert.equal(cancelled.state, 'cancelled');
 
     const task = await waitFor(async () => {
       const current = await api.task(taskId);
@@ -414,6 +431,72 @@ test('a partial limits edit preserves the stored daily cap and run budget', asyn
       maxOutputTokens: 1_000,
     });
     assert.equal(edited.limits.maxRunsTotal, 10);
+  } finally {
+    await started.close();
+  }
+});
+
+test('dispatch rechecks an edited event and preserves explicit paused triggers', async () => {
+  const started = await startTestApp();
+  const api = client(started.url);
+  try {
+    const { schedules } = started.app.dependencies;
+    const rule = await api.createSchedule({ name: 'Release', objective: 'Report release', timing: { kind: 'event', event: 'old' } });
+    const list = schedules.listActive;
+    schedules.listActive = async () => {
+      const selected = await list();
+      await api.updateSchedule(rule.scheduleId, { timing: { kind: 'event', event: 'new' } });
+      return selected;
+    };
+    const event = await api.scheduleEvent({ event: 'old', idempotencyKey: 'release' });
+    assert.equal(event.dispatched[0]?.state, 'refused');
+    await api.pauseSchedule(rule.scheduleId);
+    assert.equal((await api.triggerSchedule(rule.scheduleId)).state, 'dispatched');
+  } finally {
+    await started.close();
+  }
+});
+
+test('cancellation during task insertion prevents enqueue', async () => {
+  const started = await startTestApp();
+  const api = client(started.url);
+  try {
+    const { tasks, scheduler } = started.app.dependencies;
+    const rule = await api.createSchedule({ name: 'Release', objective: 'Report release', timing: { kind: 'event', event: 'release' } });
+    const create = tasks.create;
+    tasks.create = async record => {
+      await api.cancelSchedule(rule.scheduleId);
+      return create(record);
+    };
+    scheduler.enqueue = () => assert.fail('cancelled Work must never be enqueued');
+    await api.triggerSchedule(rule.scheduleId);
+    const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
+    assert.equal(receipt?.state, 'cancelled');
+    assert.ok(receipt.taskId);
+    assert.equal((await api.task(receipt.taskId)).state, 'cancelled');
+  } finally {
+    await started.close();
+  }
+});
+
+test('recovery winning a stalled submission charges and appends just once', async () => {
+  const started = await startTestApp({ config: { schedules: { ...FAST_SCHEDULES, dispatchTimeoutMs: 1000, tickMs: 60000 } } });
+  const api = client(started.url);
+  try {
+    const rule = await api.createSchedule({ name: 'Release', objective: 'Report release', timing: { kind: 'event', event: 'release' } });
+    const { conversations } = started.app.dependencies;
+    const ensure = conversations.ensure;
+    conversations.ensure = async record => {
+      conversations.ensure = ensure;
+      await sleep(1100);
+      await started.app.service.tickSchedules();
+      return ensure(record);
+    };
+    await api.triggerSchedule(rule.scheduleId);
+    const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
+    assert.ok(receipt);
+    assert.equal((await conversations.messages(receipt.conversationId)).filter(m => m.role === 'user').length, 1);
+    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
   } finally {
     await started.close();
   }

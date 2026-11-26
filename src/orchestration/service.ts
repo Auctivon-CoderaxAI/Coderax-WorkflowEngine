@@ -128,7 +128,7 @@ export type ApplicationService = {
     taskId: string,
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
-  notifications: (principal: Principal) => Promise<NotificationList>;
+  notifications: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
   events: (
     principal: Principal,
     taskId: string,
@@ -177,7 +177,7 @@ export type ApplicationService = {
     scheduleId: string,
     limit?: number,
   ) => Promise<ServiceResult<ScheduleUpcoming>>;
-  markNotificationsRead: (principal: Principal) => Promise<NotificationList>;
+  markNotificationsRead: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
   /** The background loop that discharges schedules without a client connected. */
   startSchedules: () => void;
   stopSchedules: () => Promise<void>;
@@ -648,7 +648,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
-  type SubmitOptions = { taskId?: string; conversationId?: string };
+  type SubmitOptions = { eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
 
   /**
    * The one Work acceptance path, shared by a client request and a scheduled
@@ -679,8 +679,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const model = deps.models.resolve(request.model, request.mode);
     if (!model.ok) return model;
 
-    const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
-    if (!reservation.allowed) {
+    const reserve = () => deps.budget.reserve(principal.ownerId, deps.clock.now()).allowed;
+    if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
       return fail(
         'budget_exhausted',
         'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -701,13 +701,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       createdAt: now,
       updatedAt: now,
     });
-    await deps.conversations.appendMessage({
+    const appendObjective = () => deps.conversations.appendMessage({
       messageId: deps.ids.messageId(),
       conversationId,
       role: 'user',
       text: request.objective,
       createdAt: now,
     });
+
+    if (!options.taskId) await appendObjective();
 
     const task: TaskRecord = {
       taskId: options.taskId ?? deps.ids.taskId(),
@@ -770,6 +772,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         : fail('conflict', 'That task identity is already in use.');
     }
 
+    if (options.taskId) {
+      // The unique task insert elects the only writer of admission effects.
+      // The task is now visible to cancellation, but cannot execute until enqueue.
+      if (options.eligible && !(await options.eligible())) {
+        await settle(created.task, token, { kind: 'cancelled' });
+        return fail('validation_failed', 'That occurrence is no longer eligible.');
+      }
+      if (!reserve()) {
+        await settle(created.task, token, { kind: 'failed', code: 'budget_exhausted', detail: 'The daily request budget is exhausted.', retryable: false });
+        return fail('budget_exhausted', 'The daily request budget is exhausted.');
+      }
+      await appendObjective();
+    }
+
     publish(created.task, 'task.queued');
     deps.audit.record({
       actor: principal.ownerId,
@@ -792,7 +808,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   }
 
   const schedulePort: SchedulePort = {
-    dispatch: async ({ schedule, taskId, conversationId }) => {
+    dispatch: async ({ schedule, taskId, conversationId, trigger, selectedTimingRevision, occurrenceKey }) => {
       // A dispatch can race the owner's cancellation. The receipt was already
       // written, but no Work may start for a schedule that is no longer active
       // in the cancelled sense.
@@ -803,6 +819,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (current.state === 'cancelled') {
         return { ok: false, reason: 'refused', detail: 'That schedule is cancelled.' };
       }
+      const eligible = (record: ScheduleRecord | null) => !!record && record.state !== 'cancelled' &&
+        (trigger === 'manual' || trigger === 'retry' ||
+          (record.state === 'active' && (record.timingRevision ?? 0) === selectedTimingRevision &&
+            (trigger !== 'schedule' || record.nextRunAt === occurrenceKey)));
+      if (!eligible(current)) return { ok: false, reason: 'refused', detail: 'That occurrence is no longer eligible.' };
       const adapter = deps.agents.resolve(current.agent);
       if (!adapter.ok) {
         return { ok: false, reason: 'refused', detail: adapter.detail };
@@ -817,39 +838,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         };
       }
       const accepted = await acceptTask(
-        { ownerId: schedule.ownerId, isOwner: true },
+        { ownerId: current.ownerId, isOwner: true },
         {
-          objective: schedule.objective,
-          agent: schedule.agent,
-          ...(schedule.model ? { model: schedule.model } : {}),
-          mode: schedule.mode,
-          ...(schedule.limits.budget ? { budget: schedule.limits.budget } : {}),
+          objective: current.objective,
+          agent: current.agent,
+          ...(current.model ? { model: current.model } : {}),
+          mode: current.mode,
+          ...(current.limits.budget ? { budget: current.limits.budget } : {}),
           // A schedule never widens autonomy: every side effect still needs a
           // scoped owner decision from the permission store.
           requireApproval: true,
           conversationId,
         },
-        { taskId, conversationId },
+        { taskId, conversationId, eligible: async () => eligible(await deps.schedules.get(current.scheduleId)) },
       );
-      if (accepted.ok) {
-        // Cancellation may have committed while acceptTask was creating the
-        // task. Re-read after acceptance and stop the task we just created; the
-        // receipt is still `claimed`, so cancellation marks it terminal.
-        const after = await deps.schedules.get(schedule.scheduleId);
-        if (!after || after.state === 'cancelled') {
-          await service.cancelTask(
-            { ownerId: schedule.ownerId, isOwner: true },
-            accepted.value.taskId,
-            'The schedule was cancelled during dispatch.',
-          );
-          return {
-            ok: false,
-            reason: 'refused',
-            detail: 'That schedule was cancelled during dispatch.',
-          };
-        }
-        return { ok: true };
-      }
+      if (accepted.ok) return { ok: true };
       if (accepted.code === 'busy') {
         return { ok: false, reason: 'busy', detail: accepted.detail };
       }
@@ -1251,7 +1254,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    notifications: async (principal) => {
+    notifications: async (principal, includeSchedules = true) => {
+      if (!includeSchedules) return deps.notifications.list(principal.ownerId);
       const [work, schedule] = await Promise.all([
         deps.notifications.list(principal.ownerId),
         deps.scheduleNotices.list(principal.ownerId, deps.config.schedules.historyLimit),
@@ -1266,15 +1270,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       };
     },
 
-    markNotificationsRead: async (principal) => {
+    markNotificationsRead: async (principal, includeSchedules = true) => {
       const work = await deps.notifications.list(principal.ownerId);
       for (const notification of work.notifications) {
         if (!notification.read) {
           await deps.notifications.markRead(principal.ownerId, notification.taskId);
         }
       }
-      await deps.scheduleNotices.markAllRead(principal.ownerId);
-      return service.notifications(principal);
+      if (includeSchedules) await deps.scheduleNotices.markAllRead(principal.ownerId);
+      return service.notifications(principal, includeSchedules);
     },
 
     events: async (principal, taskId, after) => {
@@ -1396,6 +1400,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         scheduleId,
         expectedVersion: record.version,
         patch: {
+          timingRevision: record.version + 1,
           state: 'paused',
           nextRunAt: null,
           pausedAt: deps.clock.iso(),
@@ -1432,6 +1437,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         scheduleId,
         expectedVersion: record.version,
         patch: {
+          timingRevision: record.version + 1,
           state: 'active',
           nextRunAt: next ? next.toISOString() : null,
           pausedAt: null,
@@ -1451,10 +1457,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const found = await ownedSchedule(scheduleId, principal);
       if (!found.ok) return found;
       const record = found.value;
-      if (record.state === 'cancelled') return ok(control(record, 'already_terminal'));
+      const alreadyCancelled = record.state === 'cancelled';
 
       const now = deps.clock.iso();
-      const applied = await deps.schedules.update({
+      const applied = alreadyCancelled ? { applied: true, schedule: record } : await deps.schedules.update({
         scheduleId,
         expectedVersion: record.version,
         patch: {
@@ -1471,17 +1477,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         // client can retry against the new version.
         const latest = await deps.schedules.get(scheduleId);
         if (!latest) return fail('not_found', 'That schedule no longer exists.');
-        if (latest.state === 'cancelled') return ok(control(latest, 'already_terminal'));
+        if (latest.state === 'cancelled') return service.cancelSchedule(principal, scheduleId);
         return fail('conflict', 'The schedule changed while it was being cancelled; retry.');
       }
       const cancelled = applied.schedule ?? record;
 
       // A live run is stopped through the durable lease, not by writing its task
       // record here: only the generation that holds the token may settle it.
-      const executions = await deps.schedules.listExecutions(
-        scheduleId,
-        deps.config.schedules.historyLimit,
-      );
+      const executions = await deps.schedules.listPending(scheduleId);
       for (const execution of executions) {
         if (isTerminalExecution(execution.state)) continue;
         if (execution.state === 'retry_wait' || execution.state === 'claimed') {
@@ -1515,7 +1518,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         outcome: 'accepted',
         detail: `schedule=${scheduleId}`,
       });
-      return ok(control(cancelled, 'accepted'));
+      return ok(control(cancelled, alreadyCancelled ? 'already_terminal' : 'accepted'));
     },
 
     triggerSchedule: async (principal, scheduleId, request) => {
@@ -1615,6 +1618,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         patch: {
           name: request.name ?? record.name,
           timing,
+          ...(timingChanged || enabledChanged ? { timingRevision: record.version + 1 } : {}),
           condition: request.condition ?? record.condition,
           retry: request.retry ?? record.retry,
           priority: request.priority ?? record.priority,

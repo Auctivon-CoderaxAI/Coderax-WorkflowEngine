@@ -61,6 +61,9 @@ export type SchedulePort = {
     taskId: string;
     conversationId: string;
     attempt: number;
+    trigger: ScheduleExecutionRecord['trigger'];
+    selectedTimingRevision: number;
+    occurrenceKey: string;
   }) => Promise<ScheduleDispatchOutcome>;
   taskSnapshot: (taskId: string) => Promise<ScheduleTaskSnapshot | null>;
 };
@@ -195,7 +198,8 @@ export function createScheduleEngine(input: {
     patch: Partial<ScheduleRecord> = {},
   ): Promise<boolean> {
     const current = await store.get(schedule.scheduleId);
-    if (!current || current.state !== 'active') return false;
+    if (!current || current.state !== 'active' || current.nextRunAt !== schedule.nextRunAt ||
+        (current.timingRevision ?? 0) !== (schedule.timingRevision ?? 0)) return false;
     const next = nextScheduleRun(current, from);
     const applied = await store.update({
       scheduleId: schedule.scheduleId,
@@ -228,6 +232,7 @@ export function createScheduleEngine(input: {
       scheduleId: plan.schedule.scheduleId,
       ownerId: plan.schedule.ownerId,
       occurrenceKey: plan.occurrenceKey,
+      selectedTimingRevision: plan.schedule.timingRevision ?? 0,
       trigger: plan.trigger,
       scheduledFor: plan.scheduledFor.toISOString(),
       state: fields.state,
@@ -321,11 +326,16 @@ export function createScheduleEngine(input: {
     ) {
       // Only an active schedule may exhaust. A concurrent cancellation is
       // terminal and must never be overwritten by an in-flight admission.
-      await patchSchedule(schedule.scheduleId, (current) =>
-        current.state !== 'active'
+      const latest = await patchSchedule(schedule.scheduleId, (current) =>
+        current.state !== 'active' || current.limits.maxRunsTotal === undefined ||
+          current.runsTotal < current.limits.maxRunsTotal
           ? null
           : { state: 'exhausted', nextRunAt: null, updatedAt: iso() },
       );
+      if (latest?.state === 'active' && (latest.limits.maxRunsTotal === undefined ||
+          latest.runsTotal < latest.limits.maxRunsTotal)) {
+        return admission({ ...plan, schedule: latest }, now);
+      }
       return {
         kind: 'refuse',
         dispatch: await refuseOccurrence(
@@ -431,7 +441,11 @@ export function createScheduleEngine(input: {
       condition: 'not_evaluated',
       finishedAt: null,
     });
-    const created = await store.createExecution(execution);
+    const created = await store.claim(execution, settings.maxConcurrentRuns, false);
+    if (!created) {
+      const dispatch = await skipOccurrence(plan, 'The scheduled run capacity is occupied.');
+      return { dispatch, created: dispatch !== null, submitted: false, advanceHandled: false };
+    }
     if (!created.created) {
       // Another replica owns this occurrence. It also owns the schedule advance;
       // this caller must not submit a second run.
@@ -445,6 +459,7 @@ export function createScheduleEngine(input: {
 
     const outcome = await port.dispatch({
       schedule: plan.schedule,
+      trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0, occurrenceKey: plan.occurrenceKey,
       taskId,
       conversationId,
       attempt,
@@ -598,7 +613,8 @@ export function createScheduleEngine(input: {
     const snapshot = await port.taskSnapshot(taskId);
     if (!snapshot) {
       if (execution.state !== 'claimed') return;
-      const age = now.getTime() - new Date(execution.createdAt).getTime();
+      // updatedAt is persisted on every entry to claimed, including retry claims.
+      const age = now.getTime() - new Date(execution.updatedAt).getTime();
       if (age <= settings.dispatchTimeoutMs) return;
       if (age > settings.dispatchTimeoutMs * 5) {
         const schedule = await store.get(execution.scheduleId);
@@ -643,6 +659,8 @@ export function createScheduleEngine(input: {
       }
       const outcome = await port.dispatch({
         schedule,
+        trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: execution.occurrenceKey,
+        selectedTimingRevision: execution.selectedTimingRevision ?? 0,
         taskId,
         conversationId: execution.conversationId,
         attempt: execution.attempt,
@@ -831,15 +849,15 @@ export function createScheduleEngine(input: {
       if ((await store.countActiveExecutions(schedule.scheduleId)) > 0) continue;
       if ((await store.countActive()) >= settings.maxConcurrentRuns) break;
 
-      const claimed = await store.updateExecution({
-        executionId: execution.executionId,
-        from: ['retry_wait'],
-        patch: { state: 'claimed', nextAttemptAt: null, updatedAt: iso() },
-      });
+      const claim = await store.claim({
+        ...execution, state: 'claimed', nextAttemptAt: null, updatedAt: iso(),
+      }, settings.maxConcurrentRuns, true);
+      const claimed = claim?.execution;
       if (!claimed || !claimed.taskId) continue;
 
       const outcome = await port.dispatch({
         schedule,
+        trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurrenceKey: execution.occurrenceKey,
         taskId: claimed.taskId,
         conversationId: claimed.conversationId,
         attempt: claimed.attempt,

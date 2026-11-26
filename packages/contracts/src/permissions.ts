@@ -75,7 +75,7 @@ export const CompletionNotification = z
   .strict();
 export type CompletionNotification = z.infer<typeof CompletionNotification>;
 
-export const NotificationList = z
+export const NotificationResponse = z
   .object({
     notifications: z.array(CompletionNotification),
     /**
@@ -84,8 +84,9 @@ export const NotificationList = z
      * CompletionNotification; it is not a second notification authority, just a
      * second record kind behind the same owner-facing surface.
      */
-    schedules: z.array(ScheduleNotice).default([]),
+    schedules: z.array(ScheduleNotice).optional(),
     unread: z.number().int().nonnegative(),
   })
   .strict();
+export const NotificationList = NotificationResponse.extend({ schedules: z.array(ScheduleNotice).default([]) });
 export type NotificationList = z.infer<typeof NotificationList>;

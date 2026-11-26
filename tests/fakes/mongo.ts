@@ -4,7 +4,7 @@ import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 type Document = Record<string, unknown>;
 type Index = {
   keys: Record<string, 1 | -1>;
-  options?: { unique?: boolean; name?: string };
+  options?: { unique?: boolean; name?: string; partialFilterExpression?: MongoFilter };
 };
 
 /**
@@ -83,9 +83,11 @@ export function createFakeCollection(): FakeCollection {
   function assertUnique(candidate: Document, skip: number): void {
     for (const index of indexes) {
       if (!index.options?.unique) continue;
+      const partial = index.options.partialFilterExpression;
+      if (partial && !matches(candidate, partial)) continue;
       const key = indexValue(candidate, index.keys);
       const clash = documents.some(
-        (document, position) => position !== skip && indexValue(document, index.keys) === key,
+        (document, position) => position !== skip && (!partial || matches(document, partial)) && indexValue(document, index.keys) === key,
       );
       if (clash) throw duplicateKey();
     }
@@ -138,7 +140,9 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = { ...documents[index], ...update.$set };
+      const next = { ...documents[index], ...update.$set };
+      assertUnique(next, index);
+      documents[index] = next;
       return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {

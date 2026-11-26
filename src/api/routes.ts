@@ -212,17 +212,17 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
-  registry.register('listNotifications', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.notifications(context.principal),
-  }));
+  registry.register('listNotifications', async (context) => {
+    const include = context.query.includeSchedules === 'true';
+    const list = await service.notifications(context.principal, include);
+    return { kind: 'json', status: 200, body: include ? list : { notifications: list.notifications, unread: list.unread } };
+  });
 
-  registry.register('markNotificationsRead', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.markNotificationsRead(context.principal),
-  }));
+  registry.register('markNotificationsRead', async (context) => {
+    const include = context.query.includeSchedules === 'true';
+    const list = await service.markNotificationsRead(context.principal, include);
+    return { kind: 'json', status: 200, body: include ? list : { notifications: list.notifications, unread: list.unread } };
+  });
 
   registry.register('createSchedule', async (context) => {
     const result = await service.createSchedule(context.principal, context.body as never);

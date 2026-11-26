@@ -48,6 +48,8 @@ export type ScheduleRepository = {
     patch: SchedulePatch;
   }) => Promise<ScheduleUpdateResult>;
 
+  /** Returns null when all slots are occupied or a retry lost its state fence. */
+  claim: (execution: ScheduleExecutionRecord, cap: number, retry: boolean) => Promise<ExecutionCreateResult | null>;
   createExecution: (execution: ScheduleExecutionRecord) => Promise<ExecutionCreateResult>;
   getExecution: (executionId: string) => Promise<ScheduleExecutionRecord | null>;
   /** Applies a patch only while the receipt is still in one of `from`. */
@@ -56,6 +58,7 @@ export type ScheduleRepository = {
     from: readonly ScheduleExecutionState[];
     patch: ScheduleExecutionPatch;
   }) => Promise<ScheduleExecutionRecord | null>;
+  listPending: (scheduleId: string) => Promise<ScheduleExecutionRecord[]>;
   listExecutions: (scheduleId: string, limit: number) => Promise<ScheduleExecutionRecord[]>;
   listExecutionsByState: (
     states: readonly ScheduleExecutionState[],
@@ -172,6 +175,18 @@ export function createScheduleRepository(): ScheduleRepository {
       return { applied: true, schedule: clone(next) };
     },
 
+    claim: async (record, cap, retry) => {
+      const existingId = byExecutionKey.get(record.executionKey);
+      const existing = existingId && executions.get(existingId);
+      if (existing && !retry) return { created: false, execution: clone(existing) };
+      if (retry && (!existing || existing.state !== 'retry_wait' || existing.attempt !== record.attempt)) return null;
+      const active = [...executions.values()].filter(e => e.state === 'claimed' || e.state === 'dispatched');
+      if (active.length >= cap || active.some(e => e.scheduleId === record.scheduleId)) return null;
+      executions.set(record.executionId, clone(record));
+      byExecutionKey.set(record.executionKey, record.executionId);
+      return { created: true, execution: clone(record) };
+    },
+
     createExecution: async (execution) => {
       const existingId = byExecutionKey.get(execution.executionKey);
       if (existingId) {
@@ -195,6 +210,8 @@ export function createScheduleRepository(): ScheduleRepository {
       executions.set(executionId, next);
       return clone(next);
     },
+
+    listPending: async (scheduleId) => [...executions.values()].filter(e => e.scheduleId === scheduleId && ['retry_wait', 'claimed', 'dispatched'].includes(e.state)).map(clone),
 
     listExecutions: async (scheduleId, limit) =>
       [...executions.values()]

@@ -7,6 +7,7 @@ import type { Usage } from '@coderax/contracts';
  * boundary, which is what the provider's published free tier uses.
  */
 export type BudgetLedger = {
+  available: (ownerId: string, at: Date) => boolean;
   reserve: (ownerId: string, at: Date) => { allowed: boolean; requests: number };
   consume: (ownerId: string, usage: Usage, at: Date) => void;
   snapshot: (ownerId: string, at: Date) => {
@@ -36,6 +37,10 @@ export function createBudgetLedger(input: {
   }
 
   return {
+    available: (ownerId, at) => {
+      const state = day(ownerId, at);
+      return state.requests < input.maxRequestsPerDay && state.inputTokens + state.outputTokens < input.maxTokensPerDay;
+    },
     reserve: (ownerId, at) => {
       const state = day(ownerId, at);
       const tokens = state.inputTokens + state.outputTokens;
