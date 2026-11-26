@@ -49,6 +49,11 @@ export type TaskRecord = {
   mode: DataMode;
   objective: string;
   model: ModelRef | null;
+  /**
+   * True only when the owner named the model. A route-chosen model stays
+   * replaceable by a bounded fallback, including after a resume.
+   */
+  modelPinned?: boolean;
   state: TaskState;
   generation: number;
   runToken: string | null;

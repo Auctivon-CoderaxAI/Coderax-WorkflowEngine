@@ -1,17 +1,26 @@
-import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
+import type { AgentIsolation, EngineCapabilities } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
 import { createNativeAgent } from '../agents/native/agent.js';
-import { createOpenAiCompatibleGateway } from '../agents/native/gateway.js';
-import type { ModelGateway } from '../agents/native/types.js';
 import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
 import { probeAgents } from '../agents/probe.js';
-import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
+import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js';
+import { createGeminiProvider } from '../models/providers/gemini.js';
+import { createOpenAiProvider } from '../models/providers/openai.js';
+import { createModelRouter, type ModelRouter } from '../models/router.js';
+import { createProviderPolicyRegistry, type ProviderPolicy } from '../models/policy.js';
+import type {
+  BenchmarkScore,
+  FreeTierAttestation,
+  ProviderAdapter,
+  ProviderSettings,
+  RegisteredProvider,
+} from '../models/types.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionStore } from '../permissions/store.js';
 import { createAuditLog } from '../observability/audit.js';
@@ -43,6 +52,8 @@ export type Application = {
   service: ApplicationService;
   router: Router;
   server: HttpServer;
+  /** The single router, exposed for the benchmark harness and health tests. */
+  modelRouter: ModelRouter;
   /** Which lease table the validated persistence setting selected. */
   persistence: { driver: 'memory' | 'mongo' };
   /** Everything is validated before this resolves. */
@@ -50,11 +61,21 @@ export type Application = {
   stop: () => Promise<void>;
 };
 
+/** Test injection: the real router still performs verification and routing. */
+export type InjectedProvider = {
+  adapter: ProviderAdapter;
+  settings?: Partial<ProviderSettings>;
+};
+
 export type ComposeInput = {
   config: EngineConfig;
   env?: NodeJS.ProcessEnv;
-  /** Test and future-adapter injection; nothing here changes production defaults. */
-  gateway?: ModelGateway | null;
+  /** Provider adapters for fixtures and future adapters; never a routing shortcut. */
+  providers?: InjectedProvider[];
+  /** Benchmark scores for tests; production loads them from the configured file. */
+  benchmarks?: BenchmarkScore[];
+  /** Provider policy records for fixtures; production reads `models.policy`. */
+  policies?: readonly ProviderPolicy[];
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
   fetchImpl?: typeof fetch;
   /**
@@ -84,47 +105,155 @@ const EXTERNAL_ISOLATION: AgentIsolation = {
   conversations: 'none',
 };
 
-function buildGateway(input: ComposeInput): ModelGateway | null {
-  if (input.gateway !== undefined) return input.gateway;
-  const env = input.env ?? process.env;
-  const baseURL = env.CODERAX_INFERENCE_BASE_URL;
-  const apiKey = env.CODERAX_INFERENCE_KEY;
-  if (!baseURL || !apiKey) return null;
-  return createOpenAiCompatibleGateway({
-    baseURL,
-    apiKey,
-    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-  });
+const PROVIDER_DEFAULTS: ProviderSettings = {
+  requestsPerMinute: 15,
+  tokensPerMinute: 100_000,
+  maxConcurrency: 2,
+  requestTimeoutMs: 60_000,
+  discoveryIntervalMs: 600_000,
+};
+
+/**
+ * Providers are configured by URL and credential-variable name. Standard
+ * variables make a deployment work without a config entry, but a present key is
+ * only authentication: the router still verifies that a model is free.
+ */
+const ENV_PROVIDERS: ReadonlyArray<{
+  id: string;
+  kind: 'openai' | 'gemini';
+  baseURL: string;
+  keyEnvs: readonly string[];
+}> = Object.freeze([
+  {
+    id: 'openrouter',
+    kind: 'openai',
+    baseURL: 'https://openrouter.ai/api/v1',
+    keyEnvs: ['OPENROUTER_API_KEY', 'OPENROUTER_KEY'],
+  },
+  {
+    id: 'gemini',
+    kind: 'gemini',
+    baseURL: 'https://generativelanguage.googleapis.com/v1beta',
+    keyEnvs: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  },
+  {
+    id: 'groq',
+    kind: 'openai',
+    baseURL: 'https://api.groq.com/openai/v1',
+    keyEnvs: ['GROQ_API_KEY'],
+  },
+  {
+    id: 'cerebras',
+    kind: 'openai',
+    baseURL: 'https://api.cerebras.ai/v1',
+    keyEnvs: ['CEREBRAS_API_KEY'],
+  },
+]);
+
+function buildProviders(input: {
+  config: EngineConfig;
+  env: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+}): { registrations: RegisteredProvider[]; issues: string[] } {
+  const issues: string[] = [];
+  const registrations: RegisteredProvider[] = [];
+  const configured = new Set<string>();
+  const discoveryIntervalMs = input.config.models.routing.discoveryIntervalMs;
+
+  for (const provider of input.config.models.providers) {
+    configured.add(provider.id);
+    const key = input.env[provider.apiKeyEnv];
+    if (!key) {
+      issues.push(
+        `models.providers ${provider.id} requires environment variable ${provider.apiKeyEnv}`,
+      );
+      continue;
+    }
+    const common = {
+      id: provider.id,
+      baseURL: provider.baseURL,
+      apiKey: key,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    };
+    const adapter =
+      provider.kind === 'gemini'
+        ? createGeminiProvider(common)
+        : createOpenAiProvider(common);
+    registrations.push({
+      adapter,
+      settings: {
+        requestsPerMinute: provider.requestsPerMinute,
+        tokensPerMinute: provider.tokensPerMinute,
+        maxConcurrency: provider.maxConcurrency,
+        requestTimeoutMs: provider.requestTimeoutMs,
+        discoveryIntervalMs,
+      },
+    });
+  }
+
+  for (const provider of ENV_PROVIDERS) {
+    if (configured.has(provider.id)) continue;
+    const keyEnv = provider.keyEnvs.find((name) => Boolean(input.env[name]));
+    if (!keyEnv) continue;
+    const common = {
+      id: provider.id,
+      baseURL: provider.baseURL,
+      apiKey: input.env[keyEnv] ?? '',
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    };
+    const adapter =
+      provider.kind === 'gemini'
+        ? createGeminiProvider(common)
+        : createOpenAiProvider(common);
+    registrations.push({
+      adapter,
+      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
+    });
+    configured.add(provider.id);
+  }
+
+  const customBase = input.env.CODERAX_INFERENCE_BASE_URL;
+  const customKey = input.env.CODERAX_INFERENCE_KEY;
+  if (customBase && customKey && !configured.has('custom')) {
+    registrations.push({
+      adapter: createOpenAiProvider({
+        id: 'custom',
+        baseURL: customBase,
+        apiKey: customKey,
+        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+      }),
+      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
+    });
+  }
+
+  return { registrations, issues };
 }
 
-function modelDescriptors(input: {
+function buildBenchmarks(input: {
   config: EngineConfig;
-  gateway: ModelGateway | null;
-}): ModelDescriptor[] {
-  return input.config.models.route.map((ref) => ({
-    ref,
-    label: `${ref.providerId} ${ref.modelId}`,
-    costClass: 'free' as const,
-    toolCalling: false,
-    streaming: false,
-    availability: input.gateway
-      ? { available: true, reason: 'ready' as const, detail: 'Verified zero-cost endpoint.' }
-      : {
-          available: false,
-          reason: 'not_configured' as const,
-          detail: 'No zero-cost inference endpoint is configured.',
-        },
-  }));
+  injected?: BenchmarkScore[];
+}): BenchmarkScore[] {
+  if (input.injected) return input.injected;
+  const path = input.config.models.benchmarkResultsPath;
+  if (!path) return [];
+  try {
+    return loadBenchmarkScores(path);
+  } catch (error) {
+    if (error instanceof BenchmarkFileError) {
+      throw new StartupError([error.message]);
+    }
+    throw error;
+  }
 }
 
 /**
  * The composition root.
  *
- * Order matters and is explicit: configuration, identity, agents, routing,
- * persistence, execution, then the service, the route table and the transport.
- * Startup fails closed — an invalid configuration, an unusable workspace root, a
- * missing dependency or an incomplete route table stops the engine before it
- * accepts a request, and says which check failed.
+ * Order matters and is explicit: configuration, identity, model discovery,
+ * agents, persistence, execution, then the service, the route table and the
+ * transport. Startup fails closed — an invalid configuration, an unusable
+ * workspace root, a missing provider credential, a missing dependency or an
+ * incomplete route table stops the engine before it accepts a request.
  */
 export async function composeApplication(input: ComposeInput): Promise<Application> {
   const env = input.env ?? process.env;
@@ -142,8 +271,78 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     throw error;
   }
 
-  const gateway = buildGateway(input);
-  const native = createNativeAgent({ enabled: config.engines.native.enabled, gateway });
+  const budget = createBudgetLedger({
+    maxRequestsPerDay: config.models.dailyRequestBudget,
+    maxTokensPerDay: config.models.dailyTokenBudget,
+  });
+
+  const providerBuild = input.providers
+    ? {
+        registrations: input.providers.map((entry) => ({
+          adapter: entry.adapter,
+          settings: { ...PROVIDER_DEFAULTS, ...entry.settings, discoveryIntervalMs: entry.settings?.discoveryIntervalMs ?? config.models.routing.discoveryIntervalMs },
+        })),
+        issues: [] as string[],
+      }
+    : buildProviders({ config, env, ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
+  if (providerBuild.issues.length > 0) {
+    throw new StartupError(providerBuild.issues);
+  }
+
+  const benchmarks = buildBenchmarks({
+    config,
+    ...(input.benchmarks === undefined ? {} : { injected: input.benchmarks }),
+  });
+  const attestations: FreeTierAttestation[] = config.models.attestations.map((entry) => ({
+    providerId: entry.providerId,
+    modelId: entry.modelId,
+    evidenceUrl: entry.evidenceUrl,
+    verifiedAt: entry.verifiedAt,
+    expiresAt: entry.expiresAt,
+  }));
+
+  const policy = createProviderPolicyRegistry(input.policies ?? config.models.policy);
+  // A configured provider without a policy record cannot route. Failing startup
+  // is louder than a deployment that silently has no authorized inference.
+  const unauthorized = providerBuild.registrations
+    .map((registration) => registration.adapter.id)
+    .filter((providerId) => policy.get(providerId) === null);
+  if (unauthorized.length > 0) {
+    throw new StartupError(
+      unauthorized.map(
+        (providerId) =>
+          `models.policy has no owner-approved record for provider ${providerId}; hosted inference is refused until one exists`,
+      ),
+    );
+  }
+
+  const models: ModelRouter = createModelRouter({
+    providers: providerBuild.registrations,
+    policy,
+    attestations,
+    benchmarks,
+    preferredRoute: config.models.route,
+    budget,
+    maxCandidates: config.models.routing.maxCandidates,
+    maxFallbacks: config.models.routing.maxFallbacks,
+    failureThreshold: config.models.routing.failureThreshold,
+    cooldownMs: config.models.routing.cooldownMs,
+    discoveryIntervalMs: config.models.routing.discoveryIntervalMs,
+    defaultMaxOutputTokens: config.models.routing.defaultMaxOutputTokens,
+    contextMarginTokens: config.models.routing.contextMarginTokens,
+    now: () => clock.now(),
+  });
+  await models.refresh();
+
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway: providerBuild.registrations.length > 0 ? models : null,
+    modelsAvailable: () => models.hasVerifiedFreeRoute(),
+    unavailableDetail:
+      providerBuild.registrations.length === 0
+        ? 'No inference provider is configured; add a provider credential or models.providers entry. A key alone would not make a model free.'
+        : 'No verified zero-cost model is currently routable.',
+  });
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
@@ -170,22 +369,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const adapters: AgentAdapter[] = [native, opencode, freebuff];
   const agents = createAgentRegistry({
     adapters,
-    defaultAgent: config.engines.default === 'opencode'
-      ? 'opencode'
-      : config.engines.default === 'freebuff'
-        ? 'freebuff'
-        : 'coderax',
-  });
-
-  const models = createModelCatalog({
-    descriptors: modelDescriptors({ config, gateway }),
-    route: config.models.route,
-    allowPaid: false,
-  });
-
-  const budget = createBudgetLedger({
-    maxRequestsPerDay: config.models.dailyRequestBudget,
-    maxTokensPerDay: config.models.dailyTokenBudget,
+    defaultAgent:
+      config.engines.default === 'opencode'
+        ? 'opencode'
+        : config.engines.default === 'freebuff'
+          ? 'freebuff'
+          : 'coderax',
   });
 
   const persistence = await buildPersistence({
@@ -259,6 +448,23 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         }),
       },
       {
+        name: 'models',
+        required: false,
+        check: async () => {
+          const snapshot = models.health();
+          return snapshot.verifiedFree > 0
+            ? {
+                status: 'ok' as const,
+                detail: `${snapshot.verifiedFree} verified zero-cost model(s) are routable.`,
+              }
+            : {
+                status: 'failed' as const,
+                detail:
+                  'No verified zero-cost model is routable; paid endpoints are never used as a substitute.',
+              };
+        },
+      },
+      {
         name: 'engine',
         required: true,
         check: async () => {
@@ -273,7 +479,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
             : {
                 status: 'failed' as const,
                 detail:
-                  'No agent is available: configure a zero-cost inference endpoint or an injected external transport.',
+                  'No agent is available: verify a zero-cost model route or configure an injected external transport.',
               };
         },
       },
@@ -366,15 +572,18 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     service,
     router,
     server,
+    modelRouter: models,
     persistence: { driver: persistence.driver },
     start: async () => {
       const { url } = await server.listen();
+      models.start();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
       return { url };
     },
     stop: async () => {
+      models.stop();
       await service.shutdown();
       await server.close();
       await persistence.close();

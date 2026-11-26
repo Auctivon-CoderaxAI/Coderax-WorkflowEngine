@@ -27,6 +27,7 @@
     "test:artifacts": "npm run build && node --test \"dist/tests/artifacts/*.test.js\"",
     "test:e2e": "npm run build && node --test \"dist/tests/e2e/*.test.js\"",
     "test:live": "npm run build && node --test \"dist/tests/live/*.test.js\"",
+    "benchmark": "npm run build && node dist/scripts/benchmark.js",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
     "check:architecture": "npm run build && node dist/scripts/check-architecture.js",
