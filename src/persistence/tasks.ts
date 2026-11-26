@@ -29,16 +29,22 @@ export type TaskRepository = {
    * generation owns, so it cannot be used to bypass fencing.
    */
   abandon: (input: { taskId: string; patch: TaskPatch }) => Promise<boolean>;
-  /** Claim a new generation for resume/retry; refuses a live task. */
+  /**
+   * Claims a new generation for resume/retry. `keepCompletedSteps` is what
+   * separates the two: a resume continues the plan, a retry replays all of it.
+   */
   reissue: (input: {
     taskId: string;
     token: string;
     now: string;
     leaseExpiresAt: string;
+    keepCompletedSteps?: boolean;
   }) => Promise<FencedWriteResult>;
   listByConversation: (conversationId: string) => Promise<TaskRecord[]>;
   /** Tasks that are not terminal, used by startup ownership verification. */
   listUnsettled: () => Promise<TaskRecord[]>;
+  /** Most recently settled tasks, used to repair derived records after a crash. */
+  listSettled: (limit: number) => Promise<TaskRecord[]>;
   listByOwner: (ownerId: string) => Promise<TaskRecord[]>;
 };
 
@@ -99,17 +105,23 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(next.state)) settle(next);
       return true;
     },
-    reissue: async ({ taskId, token, now, leaseExpiresAt }) => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, keepCompletedSteps = true }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
       if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
         return { applied: false, reason: 'superseded' };
       }
+      const checkpoint = task.checkpoint ?? { completedSteps: [], text: '' };
+      const resumeText = keepCompletedSteps ? (checkpoint.resumeText ?? checkpoint.text) : '';
       const next: TaskRecord = {
         ...task,
         state: 'queued',
         generation: task.generation + 1,
-        checkpoint: { ...task.checkpoint, text: '' },
+        checkpoint: {
+          completedSteps: keepCompletedSteps ? checkpoint.completedSteps : [],
+          text: '',
+          ...(resumeText ? { resumeText } : {}),
+        },
         runToken: token,
         updatedAt: now,
         leaseExpiresAt,
@@ -128,6 +140,12 @@ export function createTaskRepository(): TaskRepository {
         .map((task) => ({ ...task })),
     listUnsettled: async () =>
       [...tasks.values()].filter((task) => !isTerminalState(task.state)).map((t) => ({ ...t })),
+    listSettled: async (limit) =>
+      [...tasks.values()]
+        .filter((task) => isTerminalState(task.state))
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        .slice(0, Math.max(1, limit))
+        .map((task) => ({ ...task })),
     listByOwner: async (ownerId) =>
       [...tasks.values()].filter((task) => task.ownerId === ownerId).map((t) => ({ ...t })),
   };

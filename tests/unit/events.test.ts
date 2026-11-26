@@ -15,6 +15,7 @@ test('sequence numbers are assigned by the bus and increase by one', () => {
   const events = bus();
   const first = events.publish({ taskId: 't1', agent: 'coderax', generation: 1, type: 'task.queued' });
   const second = events.publish({ taskId: 't1', agent: 'coderax', generation: 1, type: 'task.started' });
+  assert.ok(first && second);
   assert.equal(first.seq, 1);
   assert.equal(second.seq, 2);
   assert.equal(events.lastSeq('t1'), 2);
@@ -28,6 +29,7 @@ test('a replayed event is accepted once and then reported as a duplicate', () =>
     generation: 1,
     type: 'task.queued',
   });
+  assert.ok(published);
   // The exact same event delivered twice is a duplicate, not forward progress.
   assert.deepEqual(events.accept({ ...published }), { accepted: false, reason: 'duplicate' });
   // A new id at a sequence already consumed is stale and must not be applied.
@@ -49,6 +51,7 @@ test('an out-of-order event never regresses the cursor', () => {
     generation: 1,
     type: 'task.started',
   });
+  assert.ok(current);
   const stale = { ...current, seq: 1, eventId: 'stale-1' };
   assert.deepEqual(events.accept(stale), { accepted: false, reason: 'out_of_order' });
   assert.equal(events.lastSeq('t1'), 2);
@@ -65,6 +68,17 @@ test('replay honours a cursor and reports truncation past the retained window', 
 
   const tooOld = events.replay('t1', 0);
   assert.equal(tooOld.truncated, true);
+});
+
+test('a superseded generation cannot append to the stream', () => {
+  const events = bus();
+  assert.ok(events.publish({ taskId: 't1', agent: 'coderax', generation: 2, type: 'task.queued' }));
+  assert.equal(
+    events.publish({ taskId: 't1', agent: 'coderax', generation: 1, type: 'text.delta', payload: { text: 'stale' } }),
+    null,
+  );
+  assert.equal(events.lastSeq('t1'), 1);
+  assert.deepEqual(events.replay('t1', 0).events.map((event) => event.type), ['task.queued']);
 });
 
 test('a subscriber sees only events after its cursor and stops on unsubscribe', () => {

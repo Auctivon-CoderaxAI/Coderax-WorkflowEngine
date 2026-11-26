@@ -4,6 +4,7 @@ import type {
   ExecutionEventType,
 } from '@coderax/contracts';
 import { EVENT_SCHEMA_VERSION } from '@coderax/contracts';
+import type { EventLog, StoredReplay } from './log.js';
 
 export type EventDraft = {
   taskId: string;
@@ -13,6 +14,8 @@ export type EventDraft = {
   payload?: unknown;
   /** Defaults to the bus clock; a recovery replay supplies the original time. */
   at?: string;
+  /** Set for a derived repair so a redelivery of the same fact is idempotent. */
+  eventId?: string;
 };
 
 export type Replay = {
@@ -28,66 +31,193 @@ export type AcceptResult =
 export type Unsubscribe = () => void;
 
 /**
- * One bus per process, one ordered log per task.
+ * A stream opened atomically: the subscription starts before the durable read,
+ * and anything published while that read is in flight is buffered and delivered
+ * by `subscribe` before live events. That closes the replay-to-subscribe gap: a
+ * cursor is never advanced past an event the client did not receive.
+ */
+export type OpenedStream = {
+  replay: Replay;
+  subscribe: (listener: (event: ExecutionEvent) => void) => Unsubscribe;
+};
+
+/**
+ * One bus per process, one ordered durable log per task.
  *
  * `seq` is assigned here and never by a caller, so two producers cannot create a
- * tie. A replayed event is accepted only when its id is new and its sequence is
- * beyond what has been seen; anything else is reported rather than applied. A
- * subscriber that disconnects does not stop the run: publishing is independent
- * of any listener.
+ * tie. It continues the durable watermark loaded by `hydrate`, so a restart does
+ * not reset a client's cursor. Delivery to a live subscriber is synchronous;
+ * `flush` is the durability barrier, and settlement awaits it before announcing
+ * a terminal state.
+ *
+ * A generation that is older than the watermark is refused (`publish` returns
+ * `null`): a superseded run cannot append to the stream its successor owns.
  */
 export type EventBus = {
-  publish: (draft: EventDraft) => ExecutionEvent;
+  publish: (draft: EventDraft) => ExecutionEvent | null;
   /** Applies an externally produced event (replay or recovery) exactly once. */
   accept: (event: ExecutionEvent) => AcceptResult;
+  /** In-process window; kept for synchronous inspection and existing callers. */
   replay: (taskId: string, after: number) => Replay;
+  /** Durable replay, merged with anything published while the read ran. */
+  read: (taskId: string, after: number, limit?: number) => Promise<Replay>;
+  /** Replay plus a subscription established before the read, with no gap. */
+  open: (taskId: string, after: number, limit?: number) => Promise<OpenedStream>;
   subscribe: (taskId: string, after: number, listener: (event: ExecutionEvent) => void) => Unsubscribe;
   lastSeq: (taskId: string) => number;
+  /** Loads the durable watermark once per task; required before publishing. */
+  hydrate: (taskId: string) => Promise<void>;
+  /** Waits for every append queued so far and rethrows the first failure. */
+  flush: (taskId: string) => Promise<void>;
+  /** Bounded retention sweep over the durable log. */
+  prune: (input: { before: string; limit: number }) => Promise<number>;
+  close: () => Promise<void>;
+};
+
+type Subscriber = {
+  cursor: number;
+  listener: ((event: ExecutionEvent) => void) | null;
+  backlog: ExecutionEvent[];
 };
 
 type Stream = {
   events: ExecutionEvent[];
   seq: number;
+  generation: number;
   seen: Set<string>;
-  listeners: Set<{ cursor: number; listener: (event: ExecutionEvent) => void }>;
+  listeners: Set<Subscriber>;
+  /** Serialized durable appends; the tail is the flush barrier. */
+  appends: Promise<void>;
+  failure: Error | null;
+  hydrating: Promise<void> | null;
 };
 
 export function createEventBus(input: {
   bufferSize: number;
   eventId: () => string;
   iso: () => string;
+  /** Absent means the bus is process-local; it is then never called durable. */
+  log?: EventLog;
 }): EventBus {
   const streams = new Map<string, Stream>();
 
   function stream(taskId: string): Stream {
     const existing = streams.get(taskId);
     if (existing) return existing;
-    const created: Stream = { events: [], seq: 0, seen: new Set(), listeners: new Set() };
+    const created: Stream = {
+      events: [],
+      seq: 0,
+      generation: 0,
+      seen: new Set(),
+      listeners: new Set(),
+      appends: Promise.resolve(),
+      failure: null,
+      hydrating: null,
+    };
     streams.set(taskId, created);
     return created;
   }
 
-  function append(state: Stream, event: ExecutionEvent): void {
+  function deliver(state: Stream, event: ExecutionEvent): void {
+    for (const subscriber of state.listeners) {
+      if (event.seq <= subscriber.cursor) continue;
+      subscriber.cursor = event.seq;
+      if (subscriber.listener) subscriber.listener(event);
+      else subscriber.backlog.push(event);
+    }
+  }
+
+  function retain(state: Stream, event: ExecutionEvent): void {
     state.events.push(event);
     state.seen.add(event.eventId);
     if (state.events.length > input.bufferSize) {
-      state.events.splice(0, state.events.length - input.bufferSize);
+      const removed = state.events.splice(0, state.events.length - input.bufferSize);
+      for (const gone of removed) state.seen.delete(gone.eventId);
     }
-    for (const subscriber of state.listeners) {
-      if (event.seq > subscriber.cursor) {
-        subscriber.cursor = event.seq;
-        subscriber.listener(event);
-      }
+    deliver(state, event);
+  }
+
+  function persist(state: Stream, event: ExecutionEvent): void {
+    const log = input.log;
+    if (!log) return;
+    state.appends = state.appends
+      .then(async () => {
+        const outcome = await log.append(event);
+        // A stale generation was refused by the store. The event stays out of
+        // the durable stream, which is the guarantee that matters; the local
+        // delivery already happened and a live client may have seen it, so the
+        // caller is told through `flush` only when the store actually failed.
+        if (!outcome.appended && outcome.reason === 'stale_generation') {
+          state.failure ??= new Error(
+            `event ${event.eventId} was refused as a stale generation`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        state.failure ??= error instanceof Error ? error : new Error(String(error));
+      });
+  }
+
+  async function hydrate(taskId: string): Promise<void> {
+    const state = stream(taskId);
+    if (!input.log) return;
+    if (state.hydrating) return state.hydrating;
+    const running = (async () => {
+      const watermark = await input.log?.watermark(taskId);
+      if (!watermark) return;
+      // A durable sequence is authoritative: never go backwards, even when this
+      // process already published something locally.
+      if (watermark.seq > state.seq) state.seq = watermark.seq;
+      if (watermark.generation > state.generation) state.generation = watermark.generation;
+    })().catch((error: unknown) => {
+      // A failed hydration must be retryable; leaving a rejected promise cached
+      // would make every later publish silently start from sequence zero.
+      state.hydrating = null;
+      throw error;
+    });
+    state.hydrating = running;
+    return running;
+  }
+
+  async function readDurable(taskId: string, after: number, limit?: number): Promise<Replay> {
+    const state = stream(taskId);
+    await hydrate(taskId);
+    if (!input.log) {
+      const local = state.events.filter((event) => event.seq > after);
+      const oldest = state.events[0]?.seq ?? 0;
+      return {
+        events: local,
+        truncated: state.events.length > 0 && oldest > after + 1,
+      };
     }
+    const stored: StoredReplay = await input.log.read({
+      taskId,
+      after,
+      limit: limit ?? input.bufferSize,
+    });
+    // Anything published while the read was in flight is newer than the last
+    // stored event; appending it is what makes replay and tail one stream.
+    const local = state.events.filter((event) => event.seq > after);
+    const lastStored = stored.events[stored.events.length - 1]?.seq ?? after;
+    const extra = local.filter((event) => event.seq > lastStored);
+    return {
+      events: extra.length > 0 ? [...stored.events, ...extra] : stored.events,
+      truncated: stored.truncated,
+    };
   }
 
   return {
     publish: (draft) => {
       const state = stream(draft.taskId);
+      // A superseded generation is refused before it consumes a sequence: a gap
+      // in the stream must mean a dropped event, never a fenced one.
+      if (draft.generation < state.generation) return null;
+
       state.seq += 1;
+      state.generation = draft.generation;
       const event = {
         v: EVENT_SCHEMA_VERSION,
-        eventId: input.eventId(),
+        eventId: draft.eventId ?? input.eventId(),
         taskId: draft.taskId,
         seq: state.seq,
         at: draft.at || input.iso(),
@@ -96,9 +226,11 @@ export function createEventBus(input: {
         type: draft.type,
         ...(draft.payload === undefined ? {} : { payload: draft.payload }),
       } as ExecutionEvent;
-      append(state, event);
+      retain(state, event);
+      persist(state, event);
       return event;
     },
+
     accept: (event) => {
       const state = stream(event.taskId);
       if (state.seen.has(event.eventId)) {
@@ -107,16 +239,20 @@ export function createEventBus(input: {
       if (event.seq <= state.seq) {
         return { accepted: false, reason: 'out_of_order' };
       }
+      if (event.generation < state.generation) {
+        return { accepted: false, reason: 'out_of_order' };
+      }
       state.seq = event.seq;
-      append(state, event);
+      state.generation = event.generation;
+      retain(state, event);
+      persist(state, event);
       return { accepted: true, event };
     },
+
     replay: (taskId, after) => {
       const state = streams.get(taskId);
       if (!state) return { events: [], truncated: false };
       const oldest = state.events[0]?.seq ?? 0;
-      // The consumer's next needed sequence is `after + 1`; if that predates the
-      // retained window, some events are gone and the caller must be told.
       if (oldest > 1 && after + 1 < oldest) {
         return { events: state.events, truncated: true };
       }
@@ -125,14 +261,68 @@ export function createEventBus(input: {
         truncated: false,
       };
     },
+
+    read: (taskId, after, limit) => readDurable(taskId, after, limit),
+
+    open: async (taskId, after, limit) => {
+      const state = stream(taskId);
+      await hydrate(taskId);
+      // Subscribe before the read. `cursor` starts at what this process already
+      // knows, so only genuinely new events are buffered, and the replay covers
+      // everything at or below that point.
+      const subscriber: Subscriber = { cursor: state.seq, listener: null, backlog: [] };
+      state.listeners.add(subscriber);
+      let replay: Replay;
+      try {
+        replay = await readDurable(taskId, after, limit);
+      } catch (error) {
+        state.listeners.delete(subscriber);
+        throw error;
+      }
+      return {
+        replay,
+        subscribe: (listener) => {
+          // Runs to completion without awaiting, so draining the backlog and
+          // going live cannot interleave with a publish.
+          for (const event of subscriber.backlog) listener(event);
+          subscriber.backlog.length = 0;
+          subscriber.listener = listener;
+          return () => {
+            state.listeners.delete(subscriber);
+          };
+        },
+      };
+    },
+
     subscribe: (taskId, after, listener) => {
       const state = stream(taskId);
-      const entry = { cursor: after, listener };
+      const entry: Subscriber = { cursor: after, listener, backlog: [] };
       state.listeners.add(entry);
       return () => {
         state.listeners.delete(entry);
       };
     },
+
     lastSeq: (taskId) => streams.get(taskId)?.seq ?? 0,
+
+    hydrate,
+
+    flush: async (taskId) => {
+      const state = streams.get(taskId);
+      if (!state) return;
+      await state.appends;
+      if (state.failure) throw state.failure;
+    },
+
+    prune: async (range) => {
+      const log = input.log;
+      if (!log) return 0;
+      return log.prune(range);
+    },
+
+    close: async () => {
+      await Promise.allSettled([...streams.values()].map((state) => state.appends));
+      await input.log?.close();
+    },
   };
 }

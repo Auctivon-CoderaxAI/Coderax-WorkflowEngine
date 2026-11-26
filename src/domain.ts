@@ -18,8 +18,14 @@ export type TaskStep = {
 export type TaskCheckpoint = {
   /** Steps whose work is durably complete; a resume skips exactly these. */
   completedSteps: string[];
-  /** Partial assistant text already emitted, replayed on resume. */
+  /** Partial assistant text already emitted, cleared when a new generation starts. */
   text: string;
+  /**
+   * Output of the completed steps, kept across a resume so a run that had
+   * already done the work does not repeat it to rebuild its own summary. It is
+   * never streamed to a client, so clearing `text` does not lose the work.
+   */
+  resumeText?: string;
 };
 
 export type TaskResult = {

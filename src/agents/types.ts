@@ -45,6 +45,12 @@ export type AgentRunRequest = {
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
+  /**
+   * Present when this run continues an interrupted one. `completedSteps` are
+   * already done and must not be executed again; `priorText` is their output,
+   * kept so the resumed run can report a complete result without redoing work.
+   */
+  resume?: { completedSteps: string[]; priorText?: string };
 };
 
 export type AgentReportEvent =

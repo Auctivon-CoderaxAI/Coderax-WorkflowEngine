@@ -90,12 +90,20 @@ export function createNativeAgent(input: {
 
       const steps = planner.plan({ objective: request.objective, maxSteps: request.maxSteps });
       const history = request.history ?? [];
-      const completed: string[] = [];
+      // A resumed generation continues the plan. Steps that were already
+      // completed are not planned again, and their output seeds the summary so
+      // the run reports the whole result. Re-executing them would repeat effects
+      // the engine already recorded as done.
+      const resume = request.resume;
+      const alreadyDone = new Set(resume?.completedSteps ?? []);
+      const completed: string[] = [...alreadyDone];
       const sections: string[] = [];
+      if (resume?.priorText) sections.push(resume.priorText);
       let usageIn: number | undefined;
       let usageOut: number | undefined;
 
       for (const step of steps) {
+        if (alreadyDone.has(step.id)) continue;
         if (request.signal.aborted) {
           return { ok: false, code: 'cancelled', detail: 'The run was cancelled.', retryable: false };
         }
@@ -145,7 +153,10 @@ export function createNativeAgent(input: {
 
       return {
         ok: true,
-        summary: sections.join('\n\n'),
+        summary:
+          sections.length > 0
+            ? sections.join('\n\n')
+            : 'The planned steps were already completed before this run resumed.',
         ...(usageIn !== undefined || usageOut !== undefined
           ? {
               usage: {

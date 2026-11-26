@@ -8,6 +8,8 @@ export type RequestContext = {
   principal: Principal;
   params: Record<string, string>;
   query: Record<string, unknown>;
+  /** Lower-cased request headers; a stream reads `last-event-id` from here. */
+  headers: Record<string, string | undefined>;
   body: unknown;
   requestId: string;
 };
@@ -24,6 +26,7 @@ export type RawRequest = {
   method: string;
   path: string;
   authorization: string | undefined;
+  headers?: Record<string, string | undefined>;
   bodyText: string;
 };
 
@@ -174,18 +177,24 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = (match.groups ?? {}) as Record<string, string>;
+        let params = (match.groups ?? {}) as Record<string, string>;
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
+          params = parsed.data as Record<string, string>;
         }
+        let validatedQuery: Record<string, unknown> = query;
         if (route.spec.query) {
           const parsed = route.spec.query.safeParse(query);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
+          // The handler receives the parsed value, not the raw string map: a
+          // coerced `after` cursor is a number, and discarding that coercion made
+          // every event stream start at zero.
+          validatedQuery = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;
@@ -217,7 +226,8 @@ export function createRouter(input: {
           result = await route.handler({
             principal: principal ?? { ownerId: input.auth.ownerId, isOwner: true },
             params,
-            query,
+            query: validatedQuery,
+            headers: raw.headers ?? {},
             body,
             requestId,
           });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxClient } from '@coderax/sdk';
-import { failingGateway, OWNER_TOKEN, slowGateway, startTestApp, waitFor } from '../helpers.js';
+import { OWNER_TOKEN, slowGateway, startTestApp, waitFor } from '../helpers.js';
 
 function client(url: string): CoderaxClient {
   return new CoderaxClient({ baseUrl: url, token: OWNER_TOKEN });
@@ -89,10 +89,29 @@ test('a cancelled task settles as cancelled and is not left running', async () =
   }
 });
 
-test('a failed task can be retried on the same agent with a new generation', async () => {
-  const started = await startTestApp({ gateway: failingGateway(1) });
+test('a failure the adapter marked retryable is retried on the same agent with a new generation', async () => {
+  const started = await startTestApp();
   const api = client(started.url);
   try {
+    // The retry precondition is the adapter's own proof that nothing dispatched.
+    // A provider error after a step started is deliberately not retryable.
+    const agent = started.app.dependencies.agents.get('coderax');
+    assert.ok(agent);
+    const nativeRun = agent.run;
+    let attempts = 0;
+    agent.run = async (request, report) => {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          ok: false,
+          code: 'server_unavailable',
+          detail: 'The endpoint refused the connection before dispatch.',
+          retryable: true,
+        };
+      }
+      return nativeRun(request, report);
+    };
+
     const accepted = await api.submitWork({
       objective: 'Retryable work',
       agent: 'coderax',
@@ -105,7 +124,7 @@ test('a failed task can be retried on the same agent with a new generation', asy
       return status.state === 'failed' ? status : null;
     });
     assert.equal(failed.generation, 1);
-    assert.equal(failed.failure?.code, 'provider_error');
+    assert.equal(failed.failure?.code, 'server_unavailable');
 
     const retried = await api.retry(accepted.taskId, failed.generation);
     assert.equal(retried.outcome, 'accepted');
@@ -116,7 +135,7 @@ test('a failed task can be retried on the same agent with a new generation', asy
       return status.state === 'completed' ? status : null;
     });
     assert.equal(completed.generation, 2);
-    assert.ok(completed.result?.summary?.startsWith('Recovered result.'));
+    assert.ok(completed.result?.summary?.startsWith('A verified result.'));
   } finally {
     await started.close();
   }

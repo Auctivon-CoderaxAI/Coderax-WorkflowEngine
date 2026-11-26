@@ -17,9 +17,18 @@ import type {
   TaskStatus,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import { isTerminalState, modelKey } from '@coderax/contracts';
+import { isTerminalEvent, isTerminalState, modelKey } from '@coderax/contracts';
+import type { EngineFailureCode, ExecutionEvent } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskRecord } from '../domain.js';
+import type { TaskPatch, TaskRecord } from '../domain.js';
+import type { EngineRunArbiter } from '../execution/arbiter.js';
+import {
+  canRetryWithin,
+  isRetryableStartFailure,
+  normalizeRetryPolicy,
+  wait,
+  type RetryPolicy,
+} from '../execution/retry.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -62,6 +71,8 @@ export type ApplicationServiceDeps = {
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
+  /** In-process admission for one execution of one generation. */
+  arbiter: EngineRunArbiter;
   health: HealthService;
 };
 
@@ -116,8 +127,11 @@ export type ApplicationService = {
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
   budget: (principal: Principal) => BudgetState;
-  /** Startup ownership verification: retires runs whose lease is gone. */
-  recoverInterrupted: () => Promise<{ interrupted: number }>;
+  /**
+   * Startup recovery: retires runs whose lease is gone, repairs the derived
+   * records of settled tasks, and applies bounded retention.
+   */
+  recoverInterrupted: () => Promise<{ interrupted: number; repaired: number }>;
   shutdown: () => Promise<void>;
 };
 
@@ -131,6 +145,15 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  /** Bounded repair window: the most recent settled tasks checked at startup. */
+  const REPAIR_WINDOW = 100;
+  const PRUNE_BOUND = 100;
+  /**
+   * True while the process is stopping. An abort during shutdown is not an owner
+   * cancellation, so the run is retired as `interrupted` by the reclaim pass
+   * instead of being recorded as `cancelled`.
+   */
+  let stopping = false;
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -151,12 +174,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
   }
 
+  /**
+   * Publishes on behalf of one generation. A superseded generation is refused by
+   * the bus before it consumes a sequence, so a late report from an abandoned
+   * adapter cannot create a hole in the durable stream.
+   */
   function publish(
     task: TaskRecord,
     type: Parameters<EventBus['publish']>[0]['type'],
     payload?: unknown,
-  ): void {
-    deps.events.publish({
+  ): ExecutionEvent | null {
+    return deps.events.publish({
       taskId: task.taskId,
       agent: task.agent,
       generation: task.generation,
@@ -176,6 +204,25 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return payload;
     }
     return { ...(payload as Record<string, unknown>), detail: redactText(detail, [], 1000) };
+  }
+
+  /**
+   * Automatic retry is the same generation and the same engine. It is allowed
+   * only when the adapter proved the start never dispatched, because replaying a
+   * run that already produced effects would duplicate them.
+   */
+  function shouldRetry(
+    outcome: RunOutcome,
+    attempt: number,
+    policy: RetryPolicy,
+  ): boolean {
+    if (outcome.kind !== 'failed') return false;
+    if (attempt >= policy.maxAttempts) return false;
+    return isRetryableStartFailure({
+      code: outcome.code,
+      retryable: outcome.retryable,
+      hasCleanup: false,
+    });
   }
 
   function toStatus(task: TaskRecord): TaskStatus {
@@ -254,6 +301,104 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    * When ownership was lost the function writes nothing at all: a superseded run
    * must never overwrite the state a newer generation owns.
    */
+  /**
+   * Completes the derived records of an already settled task.
+   *
+   * The task record is authoritative; the terminal event, the transcript message
+   * and the notification are derived. A crash can therefore leave a completed
+   * task whose stream never ended or whose blue dot was never written, and this
+   * restores them from the record alone. Every write here is idempotent: the
+   * message id is derived from the task and generation, the notification is an
+   * upsert, and the terminal event carries a stable repair id.
+   */
+  async function repair(task: TaskRecord): Promise<boolean> {
+    if (!isTerminalState(task.state)) return false;
+    let repaired = false;
+    const terminal = task.state as 'completed' | 'failed' | 'cancelled' | 'interrupted';
+    const checkpoint = task.checkpoint ?? { completedSteps: [], text: '' };
+
+    try {
+      await deps.events.hydrate(task.taskId);
+      const existing = await deps.events.read(task.taskId, 0, deps.config.execution.eventBufferSize);
+      if (!existing.events.some((event) => isTerminalEvent(event.type))) {
+        const base = {
+          taskId: task.taskId,
+          agent: task.agent,
+          generation: task.generation,
+          at: task.updatedAt,
+          eventId: `repair_${task.taskId}_g${task.generation}`,
+        };
+        if (task.state === 'completed') {
+          deps.events.publish({
+            ...base,
+            type: 'task.completed',
+            payload: {
+              ...(task.result?.summary ? { summary: task.result.summary } : {}),
+              ...(task.model ? { model: task.model } : {}),
+              ...(task.usage ? { usage: task.usage } : {}),
+            },
+          });
+        } else if (task.state === 'cancelled') {
+          deps.events.publish({ ...base, type: 'task.cancelled', payload: {} });
+        } else if (task.state === 'failed') {
+          deps.events.publish({
+            ...base,
+            type: 'task.failed',
+            payload: {
+              code: (task.failure?.code ?? 'provider_error') as EngineFailureCode,
+              ...(task.failure?.detail ? { detail: task.failure.detail } : {}),
+              retryable: task.failure?.retryable === true,
+            },
+          });
+        } else {
+          deps.events.publish({
+            ...base,
+            type: 'task.interrupted',
+            payload: { detail: 'The run stopped before it settled; the record was repaired.' },
+          });
+        }
+        repaired = true;
+      }
+      await deps.events.flush(task.taskId).catch(() => undefined);
+    } catch {
+      // A repair that cannot reach the event log is retried by the next pass.
+    }
+
+    // Only answer text belongs in the transcript. A failure detail is diagnostic
+    // state, not an assistant answer, and the summary is already on the result.
+    const text = (checkpoint.resumeText || checkpoint.text || '').slice(0, 20_000);
+    if (text.length > 0) {
+      try {
+        const appended = await deps.conversations.appendMessage({
+          messageId: `${task.taskId}:g${task.generation}:assistant`,
+          conversationId: task.conversationId,
+          role: 'assistant',
+          text,
+          createdAt: task.updatedAt,
+          agent: task.agent,
+        });
+        repaired = appended || repaired;
+      } catch {
+        // A transcript write is retried, never allowed to fail a settled run.
+      }
+    }
+
+    try {
+      const listed = await deps.notifications.list(task.ownerId);
+      if (!listed.notifications.some((entry) => entry.taskId === task.taskId)) {
+        await notifyTerminal(
+          task,
+          terminal,
+          task.result?.summary ?? task.failure?.detail,
+        );
+        repaired = true;
+      }
+    } catch {
+      // Same rule: the notification is repaired on the next pass.
+    }
+    return repaired;
+  }
+
   async function settle(
     task: TaskRecord,
     token: string,
@@ -287,6 +432,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               },
             };
 
+    // The task record is written first and is the source of truth. A crash after
+    // this point is repaired from the record by `repair`, so no derived write can
+    // leave a task saying it finished without a recoverable trace.
     const applied = await deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
@@ -315,16 +463,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
+      // Durability barrier: the terminal event is stored before the settlement
+      // is announced and before the lease can be reissued. A failure here is not
+      // fatal because the record already lets the next pass repair the stream.
+      await deps.events.flush(settled.taskId).catch(() => undefined);
+
       const text = checkpoint?.text ?? '';
       if (text.length > 0) {
         await deps.conversations.appendMessage({
-          messageId: deps.ids.messageId(),
+          // Deterministic so a repair or a duplicate settlement cannot append the
+          // same answer twice.
+          messageId: `${settled.taskId}:g${settled.generation}:assistant`,
           conversationId: task.conversationId,
           role: 'assistant',
           text,
           createdAt: now,
           agent: task.agent,
-        }).catch(() => undefined);
+        }).catch(() => false);
       }
       const detail = outcome.kind === 'completed' ? outcome.summary
         : outcome.kind === 'failed' ? outcome.detail : undefined;
@@ -345,6 +500,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   async function execute(taskId: string, token: string): Promise<void> {
     const task = await deps.tasks.get(taskId);
     if (!task || task.runToken !== token) return;
+
+    // Sequence numbers continue the durable watermark, so a run that starts after
+    // a restart cannot reset a client's cursor to one.
+    try {
+      await deps.events.hydrate(taskId);
+    } catch {
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'server_unavailable',
+        detail: 'The execution event log is unavailable; the run was not started.',
+        retryable: true,
+      });
+      return;
+    }
 
     const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
     if (!lease || !lease.live) {
@@ -372,6 +541,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
+    // One execution per generation in this process. The lease is the authority
+    // across replicas; this is the local admission that refuses a double start of
+    // the same generation (a scheduler retry, for example). A newer generation
+    // has its own key and is therefore never blocked by an abandoned predecessor.
+    const arbitrationKey = `${workRunKey(scopeOf(task))}:${token}`;
+    const arbitration = deps.arbiter.acquire(arbitrationKey, adapter.value.engine);
+    if (!arbitration.ok) return;
+
+    try {
     const model = task.model
       ? deps.models.resolve(task.model, task.mode)
       : deps.models.resolve(null, task.mode);
@@ -416,9 +594,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     controllers.set(taskId, controller);
 
     const steps = [...started.task.steps];
-    const completed: string[] = [...started.task.checkpoint.completedSteps];
+    const completed: string[] = [...(started.task.checkpoint?.completedSteps ?? [])];
     let text = '';
     let visible = text;
+    // Checkpoint writes are serialized: a later `step.started` cannot land before
+    // an earlier `step.completed`, and the chain is awaited before settlement so
+    // the durable checkpoint is at least as new as the terminal record.
+    let checkpointChain: Promise<void> = Promise.resolve();
+    const persistCheckpoint = (patch: TaskPatch): void => {
+      checkpointChain = checkpointChain
+        .then(async () => {
+          await deps.tasks.updateFenced({ taskId, token, patch });
+        })
+        .catch(() => undefined);
+    };
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
       else if (next !== visible) publish(started.task, 'text.delta', { text: next.slice(visible.length) });
@@ -432,11 +621,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'running';
         else steps.push({ id: event.stepId, title: event.title, state: 'running' });
         publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
-        });
+        persistCheckpoint({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'step.completed') {
@@ -444,14 +629,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'completed';
         completed.push(event.stepId);
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            checkpoint: { completedSteps: [...completed], text: visible },
-            updatedAt: deps.clock.iso(),
+        // A step boundary is a complete unit of text, so the whole redacted
+        // output is safe to persist; the streaming path holds the trailing token
+        // back only because a later delta could still complete a credential.
+        const stepText = redactContent(text);
+        persistCheckpoint({
+          steps,
+          checkpoint: {
+            completedSteps: [...completed],
+            text: stepText,
+            resumeText: stepText,
           },
+          updatedAt: deps.clock.iso(),
         });
         return;
       }
@@ -501,27 +690,74 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
 
     const history = await historyFor(task.conversationId, task.objective);
-    const result = await deps.runner.run({
-      scope: scopeOf(started.task),
-      token,
-      adapter: adapter.value as AgentAdapter,
-      request: {
-        ownerId: task.ownerId,
-        tenantId: task.tenantId,
-        conversationId: task.conversationId,
-        objective: task.objective,
-        history,
-        model: model.value.ref,
-        mode: task.mode,
-        workspaceRoot: workspace.value.root,
-        maxSteps: deps.config.engines.native.maxSteps,
-        budget: task.budget,
-        signal: controller.signal,
-      },
-      report,
+    const policy = normalizeRetryPolicy({
+      maxAttempts: deps.config.execution.maxAttempts,
+      delayMs: deps.config.execution.retryDelayMs,
     });
+    const claimedAt = deps.clock.now().getTime();
+    const runOnce = (): ReturnType<TaskRunner['run']> =>
+      deps.runner.run({
+        scope: scopeOf(started.task),
+        token,
+        adapter: adapter.value as AgentAdapter,
+        generation: started.task.generation,
+        request: {
+          ownerId: task.ownerId,
+          tenantId: task.tenantId,
+          conversationId: task.conversationId,
+          objective: task.objective,
+          history,
+          model: model.value.ref,
+          mode: task.mode,
+          workspaceRoot: workspace.value.root,
+          maxSteps: deps.config.engines.native.maxSteps,
+          budget: task.budget,
+          signal: controller.signal,
+          // A resume continues the plan instead of replaying it. `priorText` is
+          // the output of the steps that already completed, kept out of the
+          // client stream but available so the run does not rebuild it by
+          // repeating work.
+          resume: {
+            completedSteps: [...completed],
+            priorText: started.task.checkpoint?.resumeText ?? '',
+          },
+        },
+        report,
+      });
+
+    let attempt = 1;
+    let result = await runOnce();
+    while (
+      !stopping &&
+      !controller.signal.aborted &&
+      shouldRetry(result.outcome, attempt, policy) &&
+      // A retry must fit comfortably inside the lease this run already holds;
+      // another replica may claim an expired lease at any moment.
+      canRetryWithin(claimedAt, policy.delayMs, deps.config.execution.leaseTtlMs)
+    ) {
+      attempt += 1;
+      // The failed attempt produced no durable effect, but it may have streamed
+      // text. Clear it so the replay does not render the same answer twice.
+      if (text.length > 0) {
+        text = '';
+        emitText('', true);
+      }
+      await wait(policy.delayMs);
+      if (controller.signal.aborted) break;
+      result = await runOnce();
+    }
     if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
+
+    // Settlement must never observe a checkpoint older than the work it reports.
+    await checkpointChain;
+
+    if (stopping && result.outcome.kind === 'cancelled') {
+      // The shutdown reclaim pass writes `interrupted` under the same fence and
+      // releases the lease; writing `cancelled` here would misreport an engine
+      // restart as an owner cancellation.
+      return;
+    }
 
     if (result.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer
@@ -534,44 +770,55 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
       : result.outcome;
     await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    } finally {
+      deps.arbiter.release(arbitrationKey, adapter.value.engine);
+    }
   }
 
+  /**
+   * Retires a run that no longer has a live lease.
+   *
+   * A missing lease row is treated exactly like an expired one: retention may
+   * have removed it after the process died, and "no row" must not mean "still
+   * running forever". The write is fenced, so a newer generation that claimed
+   * the conversation after the read wins and this pass writes nothing.
+   */
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
     if (isTerminalState(task.state) || task.state === 'awaiting_approval') {
       return task;
     }
     const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
     if (lease && lease.live) return task;
-    if (lease && !lease.live && lease.token === task.runToken) {
-      const applied = await deps.tasks.updateFenced({
-        taskId: task.taskId,
-        token: task.runToken ?? '',
-        patch: {
-          state: 'interrupted',
-          updatedAt: deps.clock.iso(),
-          failure: {
-            code: 'server_unavailable',
-            detail: 'The run stopped heartbeating and was retired.',
-            retryable: true,
-          },
+
+    const applied = await deps.tasks.updateFenced({
+      taskId: task.taskId,
+      token: task.runToken ?? '',
+      patch: {
+        state: 'interrupted',
+        updatedAt: deps.clock.iso(),
+        failure: {
+          code: 'server_unavailable',
+          detail: 'The run stopped heartbeating and was retired.',
+          retryable: true,
         },
-      });
-      if (applied.applied) {
-        publish(applied.task, 'task.interrupted', {
-          detail: 'Execution ownership was lost; the task is safe to resume.',
-        });
-        await notifyTerminal(applied.task, 'interrupted');
-        deps.audit.record({
-          actor: task.ownerId,
-          action: 'work.interrupted',
-          taskId: task.taskId,
-          conversationId: task.conversationId,
-          outcome: 'failed',
-        });
-        return applied.task;
-      }
-    }
-    return task;
+      },
+    });
+    if (!applied.applied) return task;
+
+    await deps.events.hydrate(applied.task.taskId).catch(() => undefined);
+    publish(applied.task, 'task.interrupted', {
+      detail: 'Execution ownership was lost; the task is safe to resume.',
+    });
+    await deps.events.flush(applied.task.taskId).catch(() => undefined);
+    await notifyTerminal(applied.task, 'interrupted').catch(() => undefined);
+    deps.audit.record({
+      actor: task.ownerId,
+      action: 'work.interrupted',
+      taskId: task.taskId,
+      conversationId: task.conversationId,
+      outcome: 'failed',
+    });
+    return applied.task;
   }
 
   const service: ApplicationService = {
@@ -608,13 +855,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         agent: agentId,
         createdAt: now,
         updatedAt: now,
-      });
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId,
-        role: 'user',
-        text: request.objective,
-        createdAt: now,
       });
 
       const task: TaskRecord = {
@@ -680,6 +920,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             : 'That task identity is already in use.',
         );
       }
+
+      // The prompt is written after the lease and the task record exist. A
+      // submission refused as busy or duplicate therefore leaves no user turn in
+      // a conversation that has no task to answer it. The id is derived from the
+      // task, so a retried submit cannot duplicate the prompt either.
+      await deps.conversations.appendMessage({
+        messageId: `${created.task.taskId}:user`,
+        conversationId,
+        role: 'user',
+        text: request.objective,
+        createdAt: now,
+      });
 
       publish(created.task, 'task.queued');
       deps.audit.record({
@@ -815,8 +1067,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        // A resume continues the plan: completed steps are not repeated.
+        keepCompletedSteps: true,
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      await deps.events.hydrate(taskId).catch(() => undefined);
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -848,6 +1103,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'already_terminal',
         });
       }
+      // Retry replays the run, so it requires the adapter's explicit pre-dispatch
+      // proof: the failure is retryable and there is nothing to clean up. A
+      // `retryable` flag written by a provider after it accepted work is not
+      // proof, which is why the code set is checked as well.
+      if (
+        !isRetryableStartFailure({
+          code: task.failure?.code ?? '',
+          retryable: task.failure?.retryable === true,
+          hasCleanup: false,
+        })
+      ) {
+        return fail(
+          'conflict',
+          'That failure is not safe to retry: only a start the adapter marked retryable, with nothing to clean up, may be replayed.',
+        );
+      }
       const token = deps.ids.runToken();
       const now = deps.clock.now();
       const claimed = await deps.lease.claim({
@@ -864,8 +1135,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        // A retry replays the whole run, so no step is carried over as done.
+        keepCompletedSteps: false,
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
+      await deps.events.hydrate(taskId).catch(() => undefined);
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -992,9 +1266,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
+      // Replay and subscription are opened together: an event published between
+      // them is buffered and delivered first instead of being skipped.
+      const opened = await deps.events.open(
+        taskId,
+        after,
+        deps.config.execution.eventBufferSize,
+      );
       return ok({
-        replay: deps.events.replay(taskId, after),
-        subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
+        replay: opened.replay,
+        subscribe: (listener) =>
+          opened.subscribe(listener as (event: ExecutionEvent) => void),
         lastSeq: deps.events.lastSeq(taskId),
       });
     },
@@ -1027,13 +1309,68 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           interrupted += 1;
         }
       }
-      return { interrupted };
+
+      // Derived-record repair: a crash between the authoritative task write and
+      // the event, transcript or notification write is recoverable because the
+      // task record is checked directly instead of trusting the last process.
+      let repaired = 0;
+      for (const task of await deps.tasks.listSettled(REPAIR_WINDOW)) {
+        if (await repair(task)) repaired += 1;
+      }
+
+      // Retention. Both sweeps are bounded and never remove a lease that is
+      // still live or a task's newest event.
+      const before = new Date(deps.clock.now().getTime() - deps.config.execution.retentionMs);
+      await deps.lease.prune({ before, limit: PRUNE_BOUND }).catch(() => 0);
+      await deps.events.prune({ before: before.toISOString(), limit: PRUNE_BOUND }).catch(() => 0);
+      return { interrupted, repaired };
     },
 
     shutdown: async () => {
+      stopping = true;
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
+
+      // Wait for the aborted runs to observe the signal and settle, so a graceful
+      // stop releases its lease instead of leaving an adapter active behind a
+      // closed process. The bound matches the runner's own cancellation grace.
+      await Promise.race([
+        deps.scheduler.idle(),
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, deps.config.execution.cancelGraceMs + 1_000);
+          timer.unref();
+        }),
+      ]);
+
+      // Anything still non-terminal cannot be resumed here: retire it under its
+      // own fence and release the lease, so a restart sees `interrupted` rather
+      // than a task stuck in `running`. Approval-suspended work is intentionally
+      // left alone; it is waiting for the owner, not for this process.
+      for (const task of await deps.tasks.listUnsettled()) {
+        if (task.state === 'awaiting_approval') continue;
+        const applied = await deps.tasks.updateFenced({
+          taskId: task.taskId,
+          token: task.runToken ?? '',
+          patch: {
+            state: 'interrupted',
+            updatedAt: deps.clock.iso(),
+            failure: {
+              code: 'server_unavailable',
+              detail: 'The engine stopped while this run was active.',
+              retryable: true,
+            },
+          },
+        });
+        if (!applied.applied) continue;
+        publish(applied.task, 'task.interrupted', {
+          detail: 'The engine stopped while this run was active.',
+        });
+        await deps.events.flush(applied.task.taskId).catch(() => undefined);
+        await notifyTerminal(applied.task, 'interrupted').catch(() => undefined);
+        await releaseLease(applied.task, task.runToken ?? '');
+      }
+      await deps.events.close();
     },
   };
 

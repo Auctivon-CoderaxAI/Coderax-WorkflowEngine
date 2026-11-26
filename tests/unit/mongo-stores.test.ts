@@ -145,9 +145,16 @@ test('reissue claims a new generation and refuses a live task', async () => {
     token: 'run-2',
     now: NOW,
     leaseExpiresAt: NOW,
+    keepCompletedSteps: true,
   });
   assert.equal(issued.applied, true);
-  assert.deepEqual(issued.applied && issued.task.checkpoint, { text: '', completedSteps: ['first'] });
+  // The client-visible text is cleared, but the completed steps and their output
+  // survive so a resume continues the plan instead of repeating it.
+  assert.deepEqual(issued.applied && issued.task.checkpoint, {
+    text: '',
+    completedSteps: ['first'],
+    resumeText: 'previous',
+  });
   assert.equal(issued.applied && issued.task.generation, 2);
   assert.equal(issued.applied && issued.task.state, 'queued');
   assert.equal(issued.applied && issued.task.runToken, 'run-2');
@@ -156,6 +163,31 @@ test('reissue claims a new generation and refuses a live task', async () => {
     await tasks.reissue({ taskId: 'task_1', token: 'run-3', now: NOW, leaseExpiresAt: NOW }),
     { applied: false, reason: 'superseded' },
   );
+});
+
+test('a retry clears the checkpoint while a resume keeps completed steps', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(
+    taskRecord({
+      taskId: 'task_1',
+      runToken: 'run-1',
+      state: 'failed',
+      checkpoint: { text: 'previous', completedSteps: ['first'] },
+    }),
+  );
+
+  const retried = await tasks.reissue({
+    taskId: 'task_1',
+    token: 'run-2',
+    now: NOW,
+    leaseExpiresAt: NOW,
+    keepCompletedSteps: false,
+  });
+  assert.equal(retried.applied, true);
+  assert.deepEqual(retried.applied && retried.task.checkpoint, {
+    text: '',
+    completedSteps: [],
+  });
 });
 
 test('tasks are listed by conversation, owner and settlement', async () => {

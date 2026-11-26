@@ -13,6 +13,7 @@ import type { PermissionStore } from '../permissions/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
+import type { EngineRunArbiter } from '../execution/arbiter.js';
 import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
@@ -44,6 +45,7 @@ export type InfrastructureDependencies = {
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
+  arbiter: EngineRunArbiter;
   health: HealthService;
 };
 
@@ -65,6 +67,7 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'events',
   'runner',
   'scheduler',
+  'arbiter',
   'health',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
