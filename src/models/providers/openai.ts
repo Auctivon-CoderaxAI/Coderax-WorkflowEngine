@@ -341,11 +341,13 @@ export async function* parseStream(
       if (finished) break;
       buffer += decoder.decode(value, { stream: true });
       for (;;) {
-        const boundary = buffer.indexOf('\n\n');
-        if (boundary < 0) break;
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        for (const line of frame.split('\n')) {
+        // CRLF is common in compatible servers; accept both and do not split a
+        // delimiter that arrives across two reads.
+        const delimiter = buffer.match(/\r?\n\r?\n/);
+        if (!delimiter || delimiter.index === undefined) break;
+        const frame = buffer.slice(0, delimiter.index);
+        buffer = buffer.slice(delimiter.index + delimiter[0].length);
+        for (const line of frame.split(/\r?\n/)) {
           if (!line.startsWith('data:')) continue;
           const payload = line.slice(5).trim();
           if (payload === '[DONE]') continue;
@@ -356,9 +358,17 @@ export async function* parseStream(
             continue;
           }
           for (const event of normalizeChunk(parsed, calls)) {
-            if (event.type === 'usage') usage = event.usage;
-            if (event.type === 'done') finishReason = event.finishReason;
-            else yield event;
+            // Some servers send usage twice (a chunk and a final total); retain
+            // only the last total and emit it once at the end.
+            if (event.type === 'usage') {
+              usage = event.usage;
+              continue;
+            }
+            if (event.type === 'done') {
+              finishReason = event.finishReason;
+              continue;
+            }
+            yield event;
           }
         }
       }

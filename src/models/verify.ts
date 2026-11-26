@@ -127,10 +127,10 @@ function verifyPricing(pricing: Record<string, unknown>): { zero: boolean; detai
         detail: `The provider price field ${key} is not numeric.`,
       };
     }
-    if (value > 0) {
+    if (value !== 0) {
       return {
         zero: false,
-        detail: `The provider price field ${key} is above zero.`,
+        detail: `The provider price field ${key} is not exactly zero.`,
       };
     }
   }

@@ -121,14 +121,16 @@ const request = (modelId: string, prompt = 'hello', providerId = 'p') => ({
 test('only a zero price list or a live attestation establishes free cost', async () => {
   const free = freeModel('free');
   const paid = freeModel('paid', { ref: { providerId: 'p', modelId: 'paid' }, pricing: { prompt: '0.000001', completion: '0.000002' } });
+  const negative = freeModel('negative', { ref: { providerId: 'p', modelId: 'negative' }, pricing: { prompt: '-1', completion: '0' } });
   const unknown = freeModel('unknown', { ref: { providerId: 'p', modelId: 'unknown' }, pricing: null });
   const engine = router({
-    adapters: [adapter({ models: [free, paid, unknown] })],
+    adapters: [adapter({ models: [free, paid, negative, unknown] })],
     preferredRoute: [paid.ref],
   });
   await engine.refresh();
   assert.deepEqual(engine.route(), [free.ref]);
   assert.equal(engine.resolve(paid.ref, 'cloud').ok, false);
+  assert.equal(engine.resolve(negative.ref, 'cloud').ok, false);
   assert.equal(engine.resolve(unknown.ref, 'cloud').ok, false);
 });
 

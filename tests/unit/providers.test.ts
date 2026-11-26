@@ -104,7 +104,31 @@ test('OpenAI-compatible streaming reassembles fragmented tool arguments', async 
   assert.deepEqual(tool?.type === 'tool' && tool.call.arguments, { path: 'README.md' });
   const usage = events.find((event) => event.type === 'usage');
   assert.deepEqual(usage?.type === 'usage' && usage.usage, { inputTokens: 10, outputTokens: 3 });
+  assert.equal(events.filter((event) => event.type === 'usage').length, 1);
   assert.equal(events.at(-1)?.type, 'done');
+});
+
+test('OpenAI-compatible SSE accepts CRLF frames and emits usage once', async () => {
+  const provider = createOpenAiProvider({
+    id: 'openrouter',
+    baseURL: 'https://openrouter.example/api/v1',
+    apiKey: 'key',
+    fetchImpl: (async () =>
+      sse([
+        'data: {"choices":[{"delta":{"content":"Hi"}}]}\r\n\r\n',
+        'data: {"usage":{"prompt_tokens":4,"completion_tokens":2}}\r\n\r\n',
+        'data: [DONE]\r\n\r\n',
+      ])) as typeof fetch,
+  });
+  const events = [];
+  for await (const event of provider.stream?.(openAiRequest) ?? []) events.push(event);
+  assert.equal(
+    events.filter((event) => event.type === 'text').map((event) => (event.type === 'text' ? event.text : '')).join(''),
+    'Hi',
+  );
+  assert.equal(events.filter((event) => event.type === 'usage').length, 1);
+  const usage = events.find((event) => event.type === 'usage');
+  assert.deepEqual(usage?.type === 'usage' && usage.usage, { inputTokens: 4, outputTokens: 2 });
 });
 
 test('a fragmented or invalid tool payload is preserved, not silently dropped', () => {
@@ -234,6 +258,27 @@ test('Gemini normalizes text and functionCall parts', async () => {
   assert.equal(completion.toolCalls[0]?.name, 'read_file');
   assert.deepEqual(completion.toolCalls[0]?.arguments, { path: 'README.md' });
   assert.deepEqual(completion.usage, { inputTokens: 5, outputTokens: 3 });
+});
+
+test('Gemini SSE accepts CRLF frames and emits normalized usage', async () => {
+  const provider = createGeminiProvider({
+    id: 'gemini',
+    baseURL: 'https://generativelanguage.example/v1beta',
+    apiKey: 'key',
+    fetchImpl: (async () =>
+      sse([
+        'data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}\r\n\r\n',
+        'data: {"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}\r\n\r\n',
+      ])) as typeof fetch,
+  });
+  const events = [];
+  for await (const event of provider.stream?.({
+    ...openAiRequest,
+    model: { providerId: 'gemini', modelId: 'gemini-2.5-flash' },
+  }) ?? []) events.push(event);
+  assert.equal(events.filter((event) => event.type === 'text').length, 1);
+  assert.equal(events.filter((event) => event.type === 'usage').length, 1);
+  assert.equal(events.at(-1)?.type, 'done');
 });
 
 test('provider reset headers are parsed, including composite Groq windows', () => {

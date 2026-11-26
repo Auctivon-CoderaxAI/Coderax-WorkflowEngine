@@ -311,11 +311,11 @@ export async function* parseStream(
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       for (;;) {
-        const boundary = buffer.indexOf('\n\n');
-        if (boundary < 0) break;
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        for (const line of frame.split('\n')) {
+        const delimiter = buffer.match(/\r?\n\r?\n/);
+        if (!delimiter || delimiter.index === undefined) break;
+        const frame = buffer.slice(0, delimiter.index);
+        buffer = buffer.slice(delimiter.index + delimiter[0].length);
+        for (const line of frame.split(/\r?\n/)) {
           if (!line.startsWith('data:')) continue;
           const payload = line.slice(5).trim();
           if (payload.length === 0 || payload === '[DONE]') continue;
