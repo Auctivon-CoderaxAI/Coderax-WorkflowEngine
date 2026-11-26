@@ -23,10 +23,10 @@ test('Work runs to completion, persists its transcript and notifies once', async
 
     assert.equal(completed.steps.length, 3);
     assert.ok(completed.steps.every((step) => step.state === 'completed'));
-    // Native runs three planned steps; each step returns the gateway's text.
+    // Native runs one planning call and three planned steps; each returns text.
     assert.ok(completed.result?.summary?.startsWith('A verified result.'));
-    // Usage accumulates across the three planned steps (11/13 each).
-    assert.deepEqual(completed.usage, { inputTokens: 33, outputTokens: 39 });
+    // Usage accumulates across all four real model calls (11/13 each).
+    assert.deepEqual(completed.usage, { inputTokens: 44, outputTokens: 52 });
 
     const conversation = await started.app.service.conversation(
       principal,

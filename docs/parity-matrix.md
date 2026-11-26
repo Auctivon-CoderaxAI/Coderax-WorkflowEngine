@@ -40,27 +40,27 @@ Status vocabulary:
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
-| 27 | OpenCode transport (SDK, Basic auth, session, prompt, abort) | `opencode/adapter.ts`, `sdk.ts`, `auth.ts` | injected transport only | Missing (review F3) |
-| 28 | OpenCode protocol mapping | `opencode/protocol.ts` | none | Missing |
-| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/router.ts` (discovery, pricing/attestation verification, capability classification, Fast/Auto/Complex ranking) | Preserved and strengthened — paid or unknown cost is refused, not inferred |
+| 27 | OpenCode transport (Basic auth, session, prompt, abort) | `opencode/adapter.ts` (SDK) | `src/agents/adapters/opencode.ts` (HTTP/SSE, session, abort, cleanup) | Preserved — transport differs; scripted-server verified, not live |
+| 28 | OpenCode protocol mapping | `opencode/protocol.ts` | text parts + SSE deltas | Simplified |
+| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/router.ts` (discovery, pricing/attestation verification, per-operation provider policy, capability classification, Fast/Auto/Complex ranking) | Preserved and strengthened — paid or unknown cost is refused, not inferred |
 | 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | `src/models/router.ts` (bounded candidates, circuits, quota cooldown) | Preserved — bounded and free-only; no fallback after streamed output |
 | 31 | FreeBuff SDK loading, loopback restriction, context floor | `freebuff/adapter.ts` | injected transport only | Missing (review F3) |
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
-| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | new deterministic planner + gateway (`src/agents/native`) | Changed — not the same agent; see #34 |
-| 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | absent; `tools: false` | Missing |
+| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | model-assisted plan → act → observe → reflect loop (`src/agents/native`) | Changed — not the same implementation |
+| 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | tools, MCP and RAG implemented; skills, subagents and code execution absent | Simplified |
 | 35 | Secret redaction of provider text | `cloud/redact.ts` | `src/observability/redact.ts` | Preserved |
 | 36 | Private/cloud mode denial for providers | `cloud/mode.ts` | workspace + memory partitioning only | Simplified |
 | 37 | Durable cancellation | lease flag | lease flag + service cancel | Preserved |
 | 38 | Resume / retry of an interrupted task | partial (retry of start failures) | `resume` and `retry` on the service, with checkpoints | Strengthened |
 | 39 | Checkpoints | none | `checkpoint.completedSteps` + accumulated text | Strengthened |
-| 40 | Approval records bound to an exact resource | approvals store | permission store; adapter does not create the record | Simplified (review F5) |
+| 40 | Approval records bound to an exact resource | approvals store | permission store + durable `awaiting_approval` suspend/resume | Strengthened |
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
 | 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
-| 45 | Cloud browser orchestration | none | none | Not started (both) |
+| 45 | Cloud browser orchestration | none | attachable through a configured browser/computer-use MCP server with `browser.use`; no live server verified | Simplified |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
-| 47 | Tool/plugin execution | Coderax tools | none | Missing |
+| 47 | Tool/plugin execution | Coderax tools | built-in and MCP tools implemented; plugin manifest loader absent | Simplified |
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
 | 49 | Shared typed SDK for both clients | none (hand-written helpers) | `packages/sdk` | Strengthened |
 | 50 | Startup dependency validation | none (config read at request time) | `src/bootstrap/compose.ts` refuses to start | Strengthened |
@@ -70,11 +70,11 @@ Status vocabulary:
 | Status | Count |
 | --- | --- |
 | Preserved | 23 |
-| Strengthened | 10 |
-| Simplified | 6 |
-| Missing | 8 |
+| Strengthened | 13 |
+| Simplified | 5 |
+| Missing | 7 |
 | Changed (deliberate) | 2 |
-| Not started (both) | 1 |
+| Not started (both) | 0 |
 
 ## What this means
 

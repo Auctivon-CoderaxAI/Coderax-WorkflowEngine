@@ -7,11 +7,15 @@ import type {
   EngineCapabilities,
   EngineFailureCode,
   EngineId,
+  KnowledgeSearchResult,
   ModelRef,
   Usage,
 } from '@coderax/contracts';
 import type { ProcessingOperation } from '../models/policy.js';
 import type { RoutingMode } from '../models/types.js';
+import type { PendingAction, StepOutput } from '../domain.js';
+import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
+import type { ToolExecutionGuard } from '../execution/guard.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -28,6 +32,28 @@ import type { RoutingMode } from '../models/types.js';
 export type AgentHistoryTurn = {
   role: 'user' | 'assistant';
   text: string;
+};
+
+/**
+ * Capabilities the engine lends to an agent for one turn. They are supplied per
+ * run, never held by the adapter: an external agent receives no context at all,
+ * and Native receives only what this owner's task is allowed to use.
+ */
+export type AgentContext = {
+  taskId?: string | null;
+  tools?: { runtime: ToolRuntime; gate: ApprovalGate; guard?: ToolExecutionGuard };
+  memory?: { list: () => Promise<string[]> };
+  knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
+  /** Persisted plan and finished steps, so a resume does not re-plan or re-run. */
+  pendingAction?: PendingAction | null;
+  savePendingAction?: (action: PendingAction | null) => Promise<boolean>;
+  savePlan?: (steps: Array<{ id: string; title: string }>) => Promise<boolean>;
+  plannedSteps?: Array<{ id: string; title: string }>;
+  completedSteps?: string[];
+  priorText?: string;
+  priorOutputs?: StepOutput[];
+  /** Owner approval policy for tool actions that need a decision. */
+  requireApproval?: boolean;
 };
 
 export type AgentRunRequest = {
@@ -53,11 +79,12 @@ export type AgentRunRequest = {
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
+  context?: AgentContext;
 };
 
 export type AgentReportEvent =
   | { type: 'step.started'; stepId: string; title: string }
-  | { type: 'step.completed'; stepId: string; title: string }
+  | { type: 'step.completed'; stepId: string; title: string; output?: string }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
@@ -77,9 +104,17 @@ export type AgentRunOutcome =
   | { ok: true; summary: string; usage?: Usage; model?: ModelRef }
   | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
 
+export type AgentWorkload = 'in-process' | 'external';
+
 export type AgentAdapter = {
   agent: AgentId;
   engine: EngineId;
+  /**
+   * Where the workload executes. The supervisor uses this to decide whether it
+   * can verify termination locally; an external workload always needs a
+   * workload-isolation provider, because its process tree is not ours.
+   */
+  workload?: AgentWorkload;
   capabilities: EngineCapabilities;
   isolation: AgentIsolation;
   availability: () => Availability;

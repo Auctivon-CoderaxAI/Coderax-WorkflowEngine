@@ -4,6 +4,14 @@ import { Problem } from './errors.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
 import {
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
+  RoutingReport,
+  ToolList,
+} from './intelligence.js';
+import {
   NotificationList,
   NotificationReadRequest,
   PermissionDecisionRequest,
@@ -94,6 +102,63 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['discovery'],
     auth: 'owner',
     response: { status: 200, description: 'Model list', schema: ModelList },
+  },
+  {
+    operationId: 'listTools',
+    method: 'GET',
+    path: '/v1/tools',
+    summary: 'Tools Coderax Native may call, with their scopes and approval policy.',
+    tags: ['discovery'],
+    auth: 'owner',
+    response: { status: 200, description: 'Tool list', schema: ToolList },
+  },
+  {
+    operationId: 'getRouting',
+    method: 'GET',
+    path: '/v1/routing',
+    summary: 'Provider quotas, verified cost evidence and the ranked zero-cost route.',
+    tags: ['discovery'],
+    auth: 'owner',
+    query: zod
+      .object({ mode: zod.enum(['auto', 'fast', 'complex']).optional() })
+      .strict(),
+    response: { status: 200, description: 'Routing report', schema: RoutingReport },
+  },
+  {
+    operationId: 'ingestKnowledge',
+    method: 'POST',
+    path: '/v1/knowledge',
+    summary: 'Store one document for retrieval in a data mode.',
+    tags: ['knowledge'],
+    auth: 'owner',
+    body: KnowledgeIngestRequest,
+    response: { status: 202, description: 'Stored document', schema: KnowledgeIngestResult },
+  },
+  {
+    operationId: 'listKnowledge',
+    method: 'GET',
+    path: '/v1/knowledge',
+    summary: 'Documents stored for owner-scoped retrieval.',
+    tags: ['knowledge'],
+    auth: 'owner',
+    query: zod.object({ mode: zod.enum(['private', 'cloud']).optional() }).strict(),
+    response: { status: 200, description: 'Knowledge list', schema: KnowledgeList },
+  },
+  {
+    operationId: 'searchKnowledge',
+    method: 'GET',
+    path: '/v1/knowledge/search',
+    summary: 'Retrieve the most relevant stored passages for a query.',
+    tags: ['knowledge'],
+    auth: 'owner',
+    query: zod
+      .object({
+        q: zod.string().min(1).max(2000),
+        k: zod.coerce.number().int().min(1).max(20).optional(),
+        mode: zod.enum(['private', 'cloud']).optional(),
+      })
+      .strict(),
+    response: { status: 200, description: 'Knowledge hits', schema: KnowledgeSearchResult },
   },
   {
     operationId: 'submitChat',

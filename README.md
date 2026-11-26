@@ -36,8 +36,14 @@ are clients of the same versioned API.
 | Reproducible quality benchmark harness | Implemented; live run requires provider credentials | `benchmarks/`, `scripts/benchmark.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
-| Coderax Native agent | Implemented | `src/agents/native` |
-| External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
+| Coderax Native agent: plan, tool actions, reflection, recovery | Implemented | `src/agents/native` |
+| Provider-independent zero-cost router with ranked modes + bounded fallback | Implemented | `src/models/router.ts`, `src/models/routed.ts` |
+| Built-in tools behind exact-resource permission gates | Implemented | `src/tools`, `tests/unit/tools.test.ts` |
+| Durable approval suspension and resume | Implemented | `src/agents/native/agent.ts`, `src/execution/runner.ts`, `tests/integration/intelligence.test.ts` |
+| MCP tools over HTTP and stdio | Implemented; scripted-server verified | `src/mcp/client.ts` |
+| Retrieval with semantic embeddings or honest lexical fallback | Implemented | `src/knowledge/store.ts` |
+| OpenCode HTTP/SSE transport | Implemented; not live-verified | `src/agents/adapters/opencode.ts` |
+| FreeBuff transport | Injection only — no authorized endpoint | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |

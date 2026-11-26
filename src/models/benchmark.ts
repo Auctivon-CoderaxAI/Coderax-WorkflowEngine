@@ -23,7 +23,7 @@ export const BenchmarkTask = z
     expectedTool: z
       .object({
         name: z.string().min(1).max(80),
-        arguments: z.record(z.unknown()).optional(),
+        arguments: z.record(z.string(), z.unknown()).optional(),
       })
       .strict()
       .optional(),

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Coderax WorkflowEngine API",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Authoritative HTTP surface for Coderax Native intelligence, agent orchestration and durable Work execution. Every operation is generated from the versioned route catalogue."
   },
   "servers": [
@@ -109,7 +109,7 @@
                       ]
                     },
                     "contractVersion": {
-                      "const": "1.0.0"
+                      "const": "1.1.0"
                     },
                     "startedAt": {
                       "type": "string",
@@ -727,6 +727,785 @@
             }
           }
         }
+      }
+    },
+    "/v1/tools": {
+      "get": {
+        "operationId": "listTools",
+        "summary": "Tools Coderax Native may call, with their scopes and approval policy.",
+        "tags": [
+          "discovery"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tool list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tools": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "builtin",
+                              "mcp",
+                              "plugin",
+                              "browser"
+                            ]
+                          },
+                          "scopes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "workspace.read",
+                                "workspace.write",
+                                "command.execute",
+                                "network.access",
+                                "memory.read",
+                                "memory.write",
+                                "knowledge.read",
+                                "knowledge.write",
+                                "conversation.read",
+                                "credential.use",
+                                "browser.use"
+                              ]
+                            }
+                          },
+                          "approval": {
+                            "type": "string",
+                            "enum": [
+                              "never",
+                              "once",
+                              "always"
+                            ]
+                          },
+                          "parameters": {
+                            "type": "object",
+                            "additionalProperties": true
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "description",
+                          "source",
+                          "scopes",
+                          "approval",
+                          "parameters"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "tools"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/routing": {
+      "get": {
+        "operationId": "getRouting",
+        "summary": "Provider quotas, verified cost evidence and the ranked zero-cost route.",
+        "tags": [
+          "discovery"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Routing report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "auto",
+                        "fast",
+                        "complex"
+                      ]
+                    },
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "costEvidence": {
+                            "type": "string",
+                            "enum": [
+                              "verified-free",
+                              "unverified"
+                            ]
+                          },
+                          "quota": {
+                            "type": "object",
+                            "properties": {
+                              "requestsPerMinute": {
+                                "type": "integer",
+                                "exclusiveMinimum": 0
+                              },
+                              "requestsPerDay": {
+                                "type": "integer",
+                                "exclusiveMinimum": 0
+                              },
+                              "tokensPerDay": {
+                                "type": "integer",
+                                "exclusiveMinimum": 0
+                              }
+                            },
+                            "required": [
+                              "requestsPerMinute",
+                              "requestsPerDay",
+                              "tokensPerDay"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "used": {
+                            "type": "object",
+                            "properties": {
+                              "requestsThisMinute": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "requestsToday": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "tokensToday": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "requestsThisMinute",
+                              "requestsToday",
+                              "tokensToday"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "models": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "ref": {
+                                  "type": "object",
+                                  "properties": {
+                                    "providerId": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 64
+                                    },
+                                    "modelId": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 160
+                                    }
+                                  },
+                                  "required": [
+                                    "providerId",
+                                    "modelId"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 160
+                                },
+                                "providerId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 64
+                                },
+                                "costClass": {
+                                  "type": "string",
+                                  "enum": [
+                                    "free",
+                                    "paid"
+                                  ]
+                                },
+                                "capabilities": {
+                                  "type": "object",
+                                  "properties": {
+                                    "coding": {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1
+                                    },
+                                    "reasoning": {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1
+                                    },
+                                    "speed": {
+                                      "type": "number",
+                                      "minimum": 0,
+                                      "maximum": 1
+                                    },
+                                    "toolCalling": {
+                                      "type": "boolean"
+                                    },
+                                    "multimodal": {
+                                      "type": "boolean"
+                                    },
+                                    "contextTokens": {
+                                      "type": "integer",
+                                      "exclusiveMinimum": 0,
+                                      "maximum": 10000000
+                                    }
+                                  },
+                                  "required": [
+                                    "coding",
+                                    "reasoning",
+                                    "speed",
+                                    "toolCalling",
+                                    "multimodal",
+                                    "contextTokens"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "availability": {
+                                  "type": "object",
+                                  "properties": {
+                                    "available": {
+                                      "type": "boolean"
+                                    },
+                                    "reason": {
+                                      "type": "string",
+                                      "enum": [
+                                        "ready",
+                                        "disabled",
+                                        "not_configured",
+                                        "sdk_unavailable",
+                                        "server_unavailable",
+                                        "model_missing",
+                                        "forbidden",
+                                        "not_ready"
+                                      ]
+                                    },
+                                    "detail": {
+                                      "type": "string",
+                                      "maxLength": 500
+                                    }
+                                  },
+                                  "required": [
+                                    "available",
+                                    "reason",
+                                    "detail"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "requestsRemaining": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "tokensRemaining": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "ref",
+                                "label",
+                                "providerId",
+                                "costClass",
+                                "capabilities",
+                                "availability",
+                                "requestsRemaining",
+                                "tokensRemaining"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "costEvidence",
+                          "quota",
+                          "used",
+                          "models"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "route": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "providerId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "modelId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 160
+                          }
+                        },
+                        "required": [
+                          "providerId",
+                          "modelId"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "allowPaid": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "providers",
+                    "route",
+                    "allowPaid"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "fast",
+                "complex"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/v1/knowledge": {
+      "post": {
+        "operationId": "ingestKnowledge",
+        "summary": "Store one document for retrieval in a data mode.",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Stored document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "documentId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "chunks": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    "embedding": {
+                      "type": "string",
+                      "enum": [
+                        "semantic",
+                        "lexical"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "documentId",
+                    "title",
+                    "chunks",
+                    "embedding",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000000
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ]
+                  }
+                },
+                "required": [
+                  "title",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listKnowledge",
+        "summary": "Documents stored for owner-scoped retrieval.",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "documents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "documentId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "title": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          },
+                          "chunks": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "cloud"
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "documentId",
+                          "title",
+                          "chunks",
+                          "mode",
+                          "createdAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "documents"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/v1/knowledge/search": {
+      "get": {
+        "operationId": "searchKnowledge",
+        "summary": "Retrieve the most relevant stored passages for a query.",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge hits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hits": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "documentId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "title": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          },
+                          "text": {
+                            "type": "string",
+                            "maxLength": 4000
+                          },
+                          "score": {
+                            "type": "number",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "documentId",
+                          "title",
+                          "text",
+                          "score"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "embedding": {
+                      "type": "string",
+                      "enum": [
+                        "semantic",
+                        "lexical"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "hits",
+                    "embedding"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          {
+            "name": "k",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          }
+        ]
       }
     },
     "/v1/chat": {
@@ -2103,8 +2882,12 @@
                               "command.execute",
                               "network.access",
                               "memory.read",
+                              "memory.write",
+                              "knowledge.read",
+                              "knowledge.write",
                               "conversation.read",
-                              "credential.use"
+                              "credential.use",
+                              "browser.use"
                             ]
                           },
                           "description": {
@@ -2245,8 +3028,12 @@
                               "command.execute",
                               "network.access",
                               "memory.read",
+                              "memory.write",
+                              "knowledge.read",
+                              "knowledge.write",
                               "conversation.read",
-                              "credential.use"
+                              "credential.use",
+                              "browser.use"
                             ]
                           },
                           "description": {

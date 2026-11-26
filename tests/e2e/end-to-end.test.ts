@@ -90,7 +90,9 @@ test('a cancelled task settles as cancelled and is not left running', async () =
 });
 
 test('a failed task can be retried on the same agent with a new generation', async () => {
-  const started = await startTestApp({ provider: failingProvider(1) });
+  // The first call is the model-assisted plan; the run's first action is the
+  // second call, which is the one that must fail here.
+  const started = await startTestApp({ provider: failingProvider(2) });
   const api = client(started.url);
   try {
     const accepted = await api.submitWork({

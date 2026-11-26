@@ -11,6 +11,12 @@ import type { MongoCollectionLike } from '../persistence/mongo.js';
 import { createMongoConnector, MongoUnavailableError } from '../persistence/mongo-connect.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createTaskRepository } from '../persistence/tasks.js';
+import type { ExecutionRepository } from '../persistence/executions.js';
+import { createExecutionRepository } from '../persistence/executions.js';
+import {
+  createMongoExecutionRepository,
+  ensureExecutionIndexes,
+} from '../persistence/mongo-executions.js';
 import { createConversationRepository } from '../persistence/conversations.js';
 import { createNotificationStore } from '../persistence/notifications.js';
 import { createMemoryStore } from '../memory/store.js';
@@ -31,8 +37,10 @@ import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
+  permissionCollection?: MongoCollectionLike;
   lease: LeaseStore;
   tasks: TaskRepository;
+  executions: ExecutionRepository;
   conversations: ConversationRepository;
   memory: MemoryStore;
   notifications: NotificationStore;
@@ -101,6 +109,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       driver: 'memory',
       lease: createLeaseStore(createInMemoryWorkRunTable()),
       tasks: createTaskRepository(),
+      executions: createExecutionRepository(),
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       notifications: createNotificationStore(),
@@ -112,6 +121,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const database = await openDatabase(input);
   const workRuns: MongoCollectionLike = database.collection(collectionName(config, 'work_runs'));
   const tasks = database.collection(collectionName(config, 'tasks'));
+  const executions = database.collection(collectionName(config, 'executions'));
   const conversations = database.collection(collectionName(config, 'conversations'));
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
@@ -119,9 +129,13 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const events = database.collection(collectionName(config, 'events'));
   const eventHeads = database.collection(collectionName(config, 'event_heads'));
 
+  const permissionCollection = database.collection(collectionName(config, 'permissions'));
   try {
+    await permissionCollection.createIndex({ requestId: 1 }, { unique: true, name: 'permission_request' });
+    await permissionCollection.createIndex({ ownerId: 1, taskId: 1 }, { name: 'permission_task' });
     await ensureWorkRunIndexes(workRuns);
     await ensureTaskIndexes(tasks);
+    await ensureExecutionIndexes(executions);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
@@ -135,8 +149,10 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   return {
     driver: 'mongo',
+    permissionCollection,
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
+    executions: createMongoExecutionRepository(executions),
     conversations: createMongoConversationRepository({ conversations, messages }),
     memory: createMongoMemoryStore({
       collection: memory,

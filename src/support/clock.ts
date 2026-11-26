@@ -19,6 +19,8 @@ export type IdGenerator = {
   eventId: () => string;
   /** A unique fencing token per claim; never a counter that can be reused. */
   runToken: () => string;
+  /** Names one supervised attempt, distinct from the task it executes. */
+  executionId: () => string;
   requestId: () => string;
   receipt: () => string;
 };
@@ -30,6 +32,7 @@ export function createIdGenerator(): IdGenerator {
     messageId: () => `msg_${randomUUID()}`,
     eventId: () => `evt_${randomUUID()}`,
     runToken: () => `run_${randomUUID()}`,
+    executionId: () => `exec_${randomUUID()}`,
     requestId: () => `req_${randomUUID()}`,
     receipt: () => `rcpt_${randomUUID()}`,
   };

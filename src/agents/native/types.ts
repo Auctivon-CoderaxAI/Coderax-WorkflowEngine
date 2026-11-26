@@ -21,5 +21,13 @@ export type PlanStep = {
  * persists completed step ids, which is what makes resume skip finished work.
  */
 export type Planner = {
-  plan: (input: { objective: string; maxSteps: number }) => PlanStep[];
+  plan: (input: {
+    objective: string;
+    maxSteps: number;
+    /** Earlier turns, so a model plan sees the same context the run does. */
+    history?: import('../types.js').AgentHistoryTurn[];
+    /** Present when a model-assisted plan is possible; its absence is not an error. */
+    complete?: (prompt: string, signal: AbortSignal) => Promise<string>;
+    signal?: AbortSignal;
+  }) => Promise<PlanStep[]> | PlanStep[];
 };

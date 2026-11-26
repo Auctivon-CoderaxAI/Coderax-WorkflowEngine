@@ -227,6 +227,9 @@ export type ProviderSettings = {
   maxConcurrency: number;
   requestTimeoutMs: number;
   discoveryIntervalMs: number;
+  /** Recorded free-tier daily ceilings; omission uses a conservative default. */
+  requestsPerDay?: number;
+  tokensPerDay?: number;
 };
 
 export type RegisteredProvider = {
@@ -303,6 +306,10 @@ export type ProviderHealth = {
   verifiedFreeModels: number;
   quotaUntil: string | null;
   circuit: CircuitState;
+  /** Observed usage since UTC midnight, for the published routing report. */
+  usedRequests: number;
+  usedTokens: number;
+  requestsThisMinute: number;
 };
 
 export type RouterHealth = {

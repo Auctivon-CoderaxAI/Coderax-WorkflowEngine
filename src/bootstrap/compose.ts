@@ -3,6 +3,8 @@ import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
 import { createNativeAgent } from '../agents/native/agent.js';
+import { createNativePlanner } from '../agents/native/planner.js';
+import { createOpenCodeHttpTransport } from '../agents/adapters/opencode.js';
 import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
@@ -17,16 +19,24 @@ import { createProviderPolicyRegistry, type ProviderPolicy } from '../models/pol
 import type {
   BenchmarkScore,
   FreeTierAttestation,
+  ModelGateway,
   ProviderAdapter,
   ProviderSettings,
   RegisteredProvider,
 } from '../models/types.js';
+import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
+import { createBuiltinTools } from '../tools/builtin.js';
+import { createToolRuntime } from '../tools/runtime.js';
+import { attachMcpServers } from '../mcp/client.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionStore } from '../permissions/store.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { createExecutionSupervisor } from '../execution/supervisor.js';
+import { createCapabilityBroker } from '../execution/capabilities.js';
+import { createUnavailableIsolationProvider } from '../execution/termination.js';
 import { createQuarantineRegistry } from '../execution/quarantine.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
@@ -53,7 +63,7 @@ export type Application = {
   service: ApplicationService;
   router: Router;
   server: HttpServer;
-  /** The single router, exposed for the benchmark harness and health tests. */
+  /** The single model router, exposed for the benchmark harness and health tests. */
   modelRouter: ModelRouter;
   /** Which lease table the validated persistence setting selected. */
   persistence: { driver: 'memory' | 'mongo' };
@@ -73,6 +83,12 @@ export type ComposeInput = {
   env?: NodeJS.ProcessEnv;
   /** Provider adapters for fixtures and future adapters; never a routing shortcut. */
   providers?: InjectedProvider[];
+  /**
+   * A gateway fixture for tests that exercise the agent loop without a provider
+   * transport. It is an injection point, not an authority: production always
+   * builds the router below, and a deployment never sets this.
+   */
+  gateway?: ModelGateway | null;
   /** Benchmark scores for tests; production loads them from the configured file. */
   benchmarks?: BenchmarkScore[];
   /** Provider policy records for fixtures; production reads `models.policy`. */
@@ -112,6 +128,8 @@ const PROVIDER_DEFAULTS: ProviderSettings = {
   maxConcurrency: 2,
   requestTimeoutMs: 60_000,
   discoveryIntervalMs: 600_000,
+  requestsPerDay: 500,
+  tokensPerDay: 500_000,
 };
 
 /**
@@ -180,6 +198,9 @@ function buildProviders(input: {
       provider.kind === 'gemini'
         ? createGeminiProvider(common)
         : createOpenAiProvider(common);
+    const recorded = input.config.models.catalog.find(
+      (entry) => entry.providerId === provider.id,
+    );
     registrations.push({
       adapter,
       settings: {
@@ -188,6 +209,12 @@ function buildProviders(input: {
         maxConcurrency: provider.maxConcurrency,
         requestTimeoutMs: provider.requestTimeoutMs,
         discoveryIntervalMs,
+        ...(recorded
+          ? {
+              requestsPerDay: recorded.requestsPerDay,
+              tokensPerDay: recorded.tokensPerDay,
+            }
+          : {}),
       },
     });
   }
@@ -281,7 +308,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ? {
         registrations: input.providers.map((entry) => ({
           adapter: entry.adapter,
-          settings: { ...PROVIDER_DEFAULTS, ...entry.settings, discoveryIntervalMs: entry.settings?.discoveryIntervalMs ?? config.models.routing.discoveryIntervalMs },
+          settings: {
+            ...PROVIDER_DEFAULTS,
+            ...entry.settings,
+            discoveryIntervalMs:
+              entry.settings?.discoveryIntervalMs ?? config.models.routing.discoveryIntervalMs,
+          },
         })),
         issues: [] as string[],
       }
@@ -335,9 +367,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
   await models.refresh();
 
+  // Production reaches inference only through the router above. A gateway
+  // fixture is a test seam and never becomes a second production authority.
+  const gateway: ModelGateway | null =
+    input.gateway !== undefined
+      ? input.gateway
+      : providerBuild.registrations.length > 0
+        ? models
+        : null;
+
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
-    gateway: providerBuild.registrations.length > 0 ? models : null,
+    gateway,
+    planner: createNativePlanner(),
     modelsAvailable: () => models.hasVerifiedFreeRoute(),
     unavailableDetail:
       providerBuild.registrations.length === 0
@@ -345,14 +387,34 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         : 'No verified zero-cost model is currently routable.',
   });
 
+  const opencodePassword = config.engines.opencode.passwordEnv
+    ? env[config.engines.opencode.passwordEnv]
+    : undefined;
+  const opencodeModel = config.engines.opencode.model?.includes('/')
+    ? {
+        providerId: config.engines.opencode.model.split('/')[0] ?? '',
+        modelId: config.engines.opencode.model.split('/').slice(1).join('/'),
+      }
+    : undefined;
+  const opencodeTransport =
+    input.externals?.opencode ??
+    (config.engines.opencode.baseURL
+      ? createOpenCodeHttpTransport({
+          baseURL: config.engines.opencode.baseURL,
+          ...(opencodePassword ? { password: opencodePassword } : {}),
+          ...(opencodeModel ? { model: opencodeModel } : {}),
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        })
+      : null);
+
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
     engine: 'opencode',
     label: 'OpenCode Agent',
     enabled: config.engines.opencode.enabled,
-    transport: input.externals?.opencode ?? null,
+    transport: opencodeTransport,
     missingDetail:
-      'The OpenCode adapter needs an injected transport; the engine does not spawn or bundle an OpenCode server.',
+      'The OpenCode adapter needs an injected transport or engines.opencode.baseURL; the engine does not spawn or bundle an OpenCode server.',
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
@@ -388,8 +450,48 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = createPermissionStore({
+    clock,
+    ids,
+    ...(persistence.permissionCollection
+      ? { collection: persistence.permissionCollection }
+      : {}),
+  });
   const notifications = persistence.notifications;
+
+  const mcp = await attachMcpServers(config.mcp.servers);
+  const embeddingBase = env.CODERAX_INFERENCE_BASE_URL;
+  const embeddingKey = env.CODERAX_INFERENCE_KEY;
+  const embeddings =
+    config.knowledge.embeddingModel && embeddingBase && embeddingKey
+      ? createOpenAiEmbeddingProvider({
+          baseURL: embeddingBase,
+          apiKey: embeddingKey,
+          model: config.knowledge.embeddingModel,
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        })
+      : null;
+  const knowledge = createKnowledgeStore({
+    clock,
+    ids,
+    embeddings,
+    maxDocuments: config.knowledge.maxDocuments,
+  });
+  const builtinTools = config.tools.enabled
+    ? createBuiltinTools({
+        shellEnabled: config.tools.shellEnabled,
+        allowedCommands: config.tools.allowedCommands,
+        networkEnabled: config.tools.networkEnabled,
+        allowedHosts: config.tools.allowedHosts,
+        maxOutputBytes: config.tools.maxOutputBytes,
+        commandTimeoutMs: config.tools.commandTimeoutMs,
+        maxSearchFiles: config.tools.maxSearchFiles,
+        memory,
+        knowledge: config.knowledge.enabled ? knowledge : null,
+      })
+    : [];
+  const tools = createToolRuntime({ tools: [...builtinTools, ...mcp.tools] });
+
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
@@ -421,6 +523,23 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     },
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
+  // There is no workload-isolation integration in this deployment. The provider
+  // says so instead of pretending an adapter promise proves a workload stopped;
+  // the supervisor then records such executions as unverified and holds their
+  // workspace rather than claiming containment.
+  const isolation = createUnavailableIsolationProvider(
+    'No deployment workload-isolation provider is configured, so a running workload cannot be verified as terminated.',
+  );
+  const supervisor = createExecutionSupervisor({
+    clock,
+    ids,
+    executions: persistence.executions,
+    capabilities: createCapabilityBroker(),
+    isolation,
+    containmentHoldMs: config.execution.containmentHoldMs,
+    shutdownGraceMs: config.execution.cancelGraceMs,
+    heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
+  });
 
   const health = createHealthService({
     clock,
@@ -523,6 +642,24 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
               };
         },
       },
+      {
+        name: 'isolation',
+        required: false,
+        check: async () => {
+          const report = supervisor.isolation();
+          return { status: report.status, detail: report.detail };
+        },
+      },
+      {
+        name: 'intelligence',
+        required: false,
+        check: async () => ({
+          status: 'ok' as const,
+          detail: `${tools.list().length} tool(s); ${models.health().route.length} routed model(s); ${
+            mcp.names.length
+          } MCP server(s)${mcp.failures.length > 0 ? `; ${mcp.failures.length} unavailable` : ''}.`,
+        }),
+      },
     ],
   });
 
@@ -543,9 +680,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     audit,
     events,
     runner,
+    supervisor,
     scheduler,
     health,
     quarantine,
+    tools,
+    knowledge,
+    modelRouter: models,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -619,6 +760,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     stop: async () => {
       models.stop();
       await service.shutdown();
+      await mcp.close();
       await server.close();
       await persistence.close();
     },

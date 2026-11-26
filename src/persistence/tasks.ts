@@ -33,6 +33,7 @@ export type TaskRepository = {
   reissue: (input: {
     taskId: string;
     token: string;
+    expected?: Pick<TaskRecord, 'state' | 'generation'>;
     now: string;
     leaseExpiresAt: string;
   }) => Promise<FencedWriteResult>;
@@ -99,17 +100,19 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(next.state)) settle(next);
       return true;
     },
-    reissue: async ({ taskId, token, now, leaseExpiresAt }) => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, expected }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if ((expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
+          (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
       const next: TaskRecord = {
         ...task,
         state: 'queued',
         generation: task.generation + 1,
-        checkpoint: { ...task.checkpoint, text: '' },
+        checkpoint: expected?.state === 'awaiting_approval'
+              ? task.checkpoint : { ...task.checkpoint, text: '' },
         runToken: token,
         updatedAt: now,
         leaseExpiresAt,

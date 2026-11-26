@@ -16,23 +16,37 @@ import type {
   TaskControlResult,
   TaskStatus,
   WorkSubmitRequest,
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
+  RoutingMode,
+  RoutingReport,
+  ToolList,
+  PermissionScope,
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskRecord } from '../domain.js';
+import type { TaskPatch, TaskRecord } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
+import type { ExecutionIdentity } from '../execution/identity.js';
+import type { ToolExecutionGuard } from '../execution/guard.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type {
   AgentAdapter,
+  AgentContext,
   AgentHistoryTurn,
   AgentReportEvent,
-  AgentRunOutcome,
 } from '../agents/types.js';
+import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import type { ModelRouter } from '../models/router.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import { inferRoutingMode } from '../models/router.js';
@@ -69,9 +83,13 @@ export type ApplicationServiceDeps = {
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
+  supervisor: ExecutionSupervisor;
   scheduler: TaskScheduler;
   health: HealthService;
   quarantine: QuarantineRegistry;
+  tools: ToolRuntime;
+  knowledge: KnowledgeStore;
+  modelRouter: ModelRouter;
 };
 
 export type EventStream = {
@@ -112,6 +130,19 @@ export type ApplicationService = {
     conversationId: string,
   ) => Promise<ServiceResult<Conversation>>;
   memory: (principal: Principal, mode: DataMode) => Promise<MemoryList>;
+  tools: () => ToolList;
+  routing: (mode: RoutingMode) => RoutingReport;
+  ingestKnowledge: (
+    principal: Principal,
+    body: KnowledgeIngestRequest,
+  ) => Promise<ServiceResult<KnowledgeIngestResult>>;
+  knowledge: (principal: Principal, mode: DataMode) => Promise<KnowledgeList>;
+  searchKnowledge: (
+    principal: Principal,
+    query: string,
+    k: number,
+    mode: DataMode,
+  ) => Promise<KnowledgeSearchResult>;
   permissions: (principal: Principal, taskId: string) => Promise<ServiceResult<PermissionList>>;
   decidePermission: (
     principal: Principal,
@@ -142,8 +173,35 @@ function scopeOf(task: TaskRecord): RunScope {
   };
 }
 
+/**
+ * Scopes a Chat turn may use. A Chat turn has no task, so a tool that needs a
+ * durable owner approval is still refused; these are the read-only capabilities
+ * that previously ran with no execution identity at all.
+ */
+const CHAT_SCOPES: readonly PermissionScope[] = [
+  'workspace.read',
+  'memory.read',
+  'knowledge.read',
+];
+
+/** Everything a Work run's configured tool runtime can expose. */
+const WORK_SCOPES: readonly PermissionScope[] = [
+  'workspace.read',
+  'workspace.write',
+  'command.execute',
+  'network.access',
+  'memory.read',
+  'memory.write',
+  'knowledge.read',
+  'knowledge.write',
+  'conversation.read',
+  'credential.use',
+  'browser.use',
+];
+
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
-  const controllers = new Map<string, AbortController>();
+  /** Which attempt currently represents each task, for a same-replica cancel. */
+  const executionsByTask = new Map<string, string>();
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -162,6 +220,87 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     } catch {
       return [];
     }
+  }
+
+  /**
+   * The approval gate for one run. A read-only tool never reaches it. A tool
+   * with a scope needs either a live grant for the exact resource or a new
+   * durable request; a chat turn has no task to attach a request to, so it is
+   * refused instead of running the action unapproved.
+   */
+  function approvalGate(input: {
+    ownerId: string;
+    taskId: string | null;
+    requireApproval: boolean;
+    guard?: ToolExecutionGuard;
+  }): ApprovalGate {
+    return {
+      ensure: async ({ scope, resource, description, tool, binding, consume }) => {
+        if (input.guard && !input.guard.live()) return { decision: 'denied' as const };
+        if (input.taskId === null) return { decision: 'denied' as const };
+        if (!input.requireApproval) return { decision: 'denied' };
+        const prior = await deps.permissions.lookup({
+          ownerId: input.ownerId, taskId: input.taskId, scope, resource, binding, consume,
+        });
+        if (prior) return prior;
+        const created = await deps.permissions.request({
+          ownerId: input.ownerId,
+          taskId: input.taskId,
+          agent: 'coderax',
+          binding,
+          scope,
+          resource,
+          description: `${tool}: ${description}`.slice(0, 2000),
+        });
+        return { decision: 'pending' as const, requestId: created.requestId };
+      },
+    };
+  }
+
+  /**
+   * Context is lent, not stored on the adapter. Only Coderax Native receives it;
+   * an external agent's isolation says `memory: none` and it is never given these
+   * ports. Memory and retrieval are scoped to the run's data mode, so a cloud run
+   * cannot read private entries.
+   */
+  async function nativeContext(input: {
+    ownerId: string;
+    mode: DataMode;
+    task?: TaskRecord;
+    guard?: ToolExecutionGuard;
+  }): Promise<AgentContext> {
+    return {
+      taskId: input.task?.taskId ?? null,
+      tools: {
+        runtime: deps.tools,
+        gate: approvalGate({
+          ownerId: input.ownerId,
+          taskId: input.task?.taskId ?? null,
+          requireApproval: input.task?.requireApproval ?? false,
+          ...(input.guard ? { guard: input.guard } : {}),
+        }),
+        ...(input.guard ? { guard: input.guard } : {}),
+      },
+      memory: {
+        list: async () =>
+          (await deps.memory.list({ ownerId: input.ownerId, mode: input.mode })).entries.map(
+            (entry) => `${entry.key}: ${entry.value}`,
+          ),
+      },
+      knowledge: {
+        search: (query, k) =>
+          deps.knowledge.search({ ownerId: input.ownerId, mode: input.mode, query, k }),
+      },
+      ...(input.task
+        ? {
+            plannedSteps: input.task.steps.map((step) => ({ id: step.id, title: step.title })),
+            completedSteps: [...input.task.checkpoint.completedSteps],
+            ...(input.task.checkpoint.outputs ? { priorOutputs: input.task.checkpoint.outputs } : {}),
+            priorText: input.task.checkpoint.text,
+            requireApproval: input.task.requireApproval,
+          }
+        : {}),
+    };
   }
 
   function publish(
@@ -281,6 +420,37 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // stream is missing the events that led to it.
     await deps.events.flush(task.taskId).catch(() => undefined);
     const now = deps.clock.iso();
+    if (outcome.kind === 'suspended') {
+      // A suspension keeps the task alive: the owner decides, and resume claims a
+      // new generation. The checkpoint is written under the same fence, and the
+      // lease is released so the conversation is not held by a run that stopped.
+      const applied = await deps.tasks.updateFenced({
+        taskId: task.taskId,
+        token,
+        patch: {
+          state: 'awaiting_approval',
+          updatedAt: now,
+          failure: {
+            code: 'approval_required',
+            detail: outcome.detail,
+            retryable: true,
+          },
+          ...(checkpoint ? { checkpoint } : {}),
+        },
+      });
+      if (applied.applied) {
+        deps.audit.record({
+          actor: task.ownerId,
+          action: 'work.awaiting_approval',
+          taskId: task.taskId,
+          conversationId: task.conversationId,
+          outcome: 'accepted',
+          detail: 'approval_required',
+        });
+      }
+      await releaseLease(task, token);
+      return;
+    }
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -458,11 +628,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     await deps.events.hydrate(taskId).catch(() => 0);
     publish(started.task, 'task.started');
 
-    const controller = new AbortController();
-    controllers.set(taskId, controller);
-
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
+    const outputs = [...(started.task.checkpoint.outputs ?? (started.task.checkpoint.text
+      ? [{ stepId: completed.join(', '), text: started.task.checkpoint.text }] : []))];
+    let reports = Promise.resolve();
+    const saveReport = (patch: TaskPatch): void => {
+      reports = reports.then(async () => {
+        await deps.tasks.updateFenced({ taskId, token, patch });
+      }).catch(() => { /* The settlement checkpoint includes all completed steps. */ });
+    };
     let text = '';
     let visible = text;
     const emitText = (next: string, replace = false): void => {
@@ -471,18 +646,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       visible = next;
     };
 
+    // The supervisor drops events once the execution loses authority, so this
+    // sink no longer needs its own controller check.
     const report = (event: AgentReportEvent): void => {
-      if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
       if (event.type === 'step.started') {
         const existing = steps.find((step) => step.id === event.stepId);
         if (existing) existing.state = 'running';
         else steps.push({ id: event.stepId, title: event.title, state: 'running' });
         publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
-        });
+        saveReport({ steps: structuredClone(steps), updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'step.completed') {
@@ -490,14 +662,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'completed';
         completed.push(event.stepId);
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            checkpoint: { completedSteps: [...completed], text: visible },
-            updatedAt: deps.clock.iso(),
-          },
+        if (event.output !== undefined) outputs.push({ stepId: event.stepId, text: redactContent(event.output) });
+        saveReport({
+          steps: structuredClone(steps),
+          checkpoint: { completedSteps: [...completed], text: visible, outputs: [...outputs] },
+          updatedAt: deps.clock.iso(),
         });
         return;
       }
@@ -546,8 +715,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     };
 
-    const history = await historyFor(task.conversationId, task.objective);
-    // External engines bypass the router, so their request slot is reserved here.
+    const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
+    const identity: ExecutionIdentity = {
+      executionId: deps.ids.executionId(),
+      kind: 'work',
+      taskId,
+      conversationId: task.conversationId,
+      ownerId: task.ownerId,
+      tenantId: task.tenantId,
+      agent: started.task.agent,
+      mode: task.mode,
+      generation: started.task.generation,
+      token,
+    };
+    executionsByTask.set(taskId, identity.executionId);
+
+    // External engines bypass the router, so their request slot is reserved
+    // here. Native is charged by the router's own reservation.
     const externalReservation =
       started.task.engine === 'native'
         ? null
@@ -558,6 +742,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             outputTokens: task.budget?.maxOutputTokens ?? 1_024,
           });
     if (externalReservation !== null && !externalReservation.allowed) {
+      if (executionsByTask.get(taskId) === identity.executionId) {
+        executionsByTask.delete(taskId);
+      }
       await settle(task, token, {
         kind: 'failed',
         code: 'budget_exhausted',
@@ -567,55 +754,119 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const held = externalReservation?.allowed ? externalReservation.reservation : null;
-    const result = await deps.runner.run({
-      scope: scopeOf(started.task),
-      token,
-      adapter: adapter.value as AgentAdapter,
-      request: {
-        ownerId: task.ownerId,
-        tenantId: task.tenantId,
-        conversationId: task.conversationId,
-        objective: task.objective,
-        history,
-        model: model.value.ref,
-        routing,
-        allowFallback: !pinned,
-        mode: task.mode,
-        operation: 'work',
-        workspaceRoot: workspace.value.root,
-        maxSteps: deps.config.engines.native.maxSteps,
-        budget: task.budget,
-        signal: controller.signal,
-      },
-      report,
-      generation: started.task.generation,
+
+    // Work and Chat now share one execution path. The runner keeps its lease
+    // heartbeat and bounded cancellation; the supervisor owns the identity, the
+    // capability grant, revocation and the termination record around it.
+    const supervised = await deps.supervisor.run({
+      identity,
+      adapter: adapter.value,
       workspaceRoot: workspace.value.root,
+      scopes: WORK_SCOPES,
+      report,
+      launch: async (execution) => {
+        const result = await deps.runner.run({
+          scope: scopeOf(started.task),
+          token,
+          adapter: adapter.value as AgentAdapter,
+          request: {
+            ownerId: task.ownerId,
+            tenantId: task.tenantId,
+            conversationId: task.conversationId,
+            objective: task.objective,
+            history,
+            model: model.value.ref,
+            routing,
+            allowFallback: !pinned,
+            mode: task.mode,
+            operation: 'work',
+            workspaceRoot: execution.workspaceRoot,
+            maxSteps: deps.config.engines.native.maxSteps,
+            budget: task.budget,
+            signal: execution.signal,
+            ...(started.task.agent === 'coderax'
+              ? {
+                  context: {
+                    ...await nativeContext({
+                      ownerId: task.ownerId,
+                      mode: task.mode,
+                      task: started.task,
+                      guard: execution.guard,
+                    }),
+                    pendingAction: started.task.pendingAction ?? null,
+                    savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
+                      taskId,
+                      token,
+                      patch: {
+                        pendingAction: pendingAction?.observations
+                          ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) }
+                          : pendingAction,
+                      },
+                    })).applied,
+                    savePlan: async (plan) => {
+                      const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
+                      const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
+                      if (saved.applied) steps.splice(0, steps.length, ...planned);
+                      return saved.applied;
+                    },
+                  },
+                }
+              : {}),
+          },
+          report: execution.report,
+        });
+        return {
+          outcome: result.outcome,
+          ownershipLost: result.ownershipLost,
+          abandoned: result.outcome.kind === 'cancelled' && result.outcome.abandoned === true,
+        };
+      },
     });
+    // Only the attempt that still owns this mapping may remove it: a superseded
+    // run can finish after its replacement has already registered itself.
+    if (executionsByTask.get(taskId) === identity.executionId) {
+      executionsByTask.delete(taskId);
+    }
     // Budget ownership is independent of task-ownership fences; release the
     // reservation before any guard that can return early.
     if (held) {
-      if (result.outcome.kind === 'completed') {
-        deps.budget.settle(held.id, result.outcome.usage ?? {});
+      if (supervised.admitted && supervised.outcome.kind === 'completed') {
+        deps.budget.settle(held.id, supervised.outcome.usage ?? {});
       } else {
         // The external engine may have dispatched before failing; retain the
         // request charge while returning its unused token allowance.
         deps.budget.release(held.id, { dispatched: true });
       }
     }
-    if (controllers.get(taskId) !== controller) return;
-    controllers.delete(taskId);
 
-    if (result.ownershipLost) {
+    if (!supervised.admitted) {
+      await settle(started.task, token, {
+        kind: 'failed',
+        code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
+        detail: supervised.detail,
+        retryable: supervised.code !== 'workspace_denied',
+      });
+      return;
+    }
+    if (supervised.ownershipLost || supervised.cause === 'interrupted') {
       // Deliberately no terminal write and no notification: this run no longer
       // owns the task, and the new owner is the only writer of its state.
       return;
     }
+    if (supervised.cause === 'shutdown') {
+      // The process is stopping; the task is left for startup reconciliation and
+      // this generation does not settle it.
+      return;
+    }
     const safeText = redactContent(text);
     emitText(safeText);
-    const outcome = result.outcome.kind === 'completed'
-      ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
-      : result.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    const outcome = supervised.outcome.kind === 'completed'
+      ? { ...supervised.outcome, summary: redactContent(supervised.outcome.summary) }
+      : supervised.outcome;
+    // The run's own durable reports must land before settlement, and the final
+    // checkpoint carries the step outputs the newer resume path depends on.
+    await reports;
+    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText, outputs });
   }
 
   const TERMINAL_EVENT = new Set([
@@ -702,6 +953,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
+    tools: () => ({ tools: deps.tools.list() }),
+    routing: (mode) => deps.modelRouter.report(mode),
+    ingestKnowledge: (principal, body) =>
+      deps.knowledge.ingest({
+        ownerId: principal.ownerId,
+        mode: body.mode,
+        title: body.title,
+        text: body.text,
+      }),
+    knowledge: (principal, mode) => deps.knowledge.list({ ownerId: principal.ownerId, mode }),
+    searchKnowledge: (principal, query, k, mode) =>
+      deps.knowledge.search({ ownerId: principal.ownerId, mode, query, k }),
 
     submitWork: async (principal, request) => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
@@ -856,6 +1119,24 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
+      if (task.state === 'awaiting_approval') {
+        const token = deps.ids.runToken();
+        const now = deps.clock.now();
+        const expiresAt = new Date(now.getTime() + deps.config.execution.leaseTtlMs);
+        if (!await deps.lease.claim({ key: workRunKey(scopeOf(task)), owner: task.ownerId, token, now, expiresAt })) {
+          return fail('busy', 'Another run holds this conversation.');
+        }
+        const claimed = await deps.tasks.reissue({
+          taskId, token, expected: { state: task.state, generation: task.generation },
+          now: now.toISOString(), leaseExpiresAt: expiresAt.toISOString(),
+        });
+        if (!claimed.applied) {
+          await releaseLease(task, token);
+          return fail('conflict', 'The suspended task changed before cancellation.');
+        }
+        await settle(claimed.task, token, { kind: 'cancelled' });
+        return ok({ taskId, state: 'cancelled', generation: claimed.task.generation, outcome: 'accepted' });
+      }
       const outcome = await deps.lease.cancel({
         key: workRunKey(scopeOf(task)),
         now: deps.clock.now(),
@@ -870,7 +1151,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           token: task.runToken ?? '',
           patch: { cancelRequested: true, updatedAt: deps.clock.iso() },
         });
-        controllers.get(task.taskId)?.abort();
+        const executionId = executionsByTask.get(task.taskId);
+        if (executionId) deps.supervisor.cancel(executionId, reason);
         return ok({
           taskId: task.taskId,
           state: task.state,
@@ -946,12 +1228,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
       const applied = await deps.tasks.reissue({
+        expected: { state: task.state, generation },
         taskId,
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be resumed.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -995,12 +1281,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
       const applied = await deps.tasks.reissue({
+        expected: { state: task.state, generation },
         taskId,
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be retried.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -1059,8 +1349,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
-      const history = await historyFor(conversationId, request.message);
-      const controller = new AbortController();
+      const history = request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
+      const identity: ExecutionIdentity = {
+        executionId: deps.ids.executionId(),
+        kind: 'chat',
+        taskId: null,
+        conversationId,
+        ownerId: principal.ownerId,
+        tenantId: conversation.tenantId,
+        agent: request.agent,
+        mode: request.mode,
+        generation: 0,
+        token: null,
+      };
+
       // The router reserves internally. An external engine does not pass through
       // it, so hold one request/token slot before dispatch and settle afterward.
       const reservation =
@@ -1076,41 +1378,82 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
       const held = reservation?.allowed ? reservation.reservation : null;
-      let outcome: AgentRunOutcome;
-      try {
-        outcome = await adapter.value.run(
-          {
-            ownerId: principal.ownerId,
-            tenantId: conversation.tenantId,
-            conversationId,
-            objective: request.message,
-            history,
-            model: model.value.ref,
-            routing,
-            allowFallback: request.model === undefined,
-            mode: request.mode,
-            operation: 'chat',
-            workspaceRoot: workspace.value.root,
-            maxSteps: 1,
-            budget: null,
-            signal: controller.signal,
-          },
-          () => undefined,
-        );
-      } catch (error) {
-        if (held) deps.budget.release(held.id, { dispatched: true });
-        throw error;
+
+      // A Chat turn is supervised for the same reasons a Work run is: it can call
+      // tools, it needs a revocable identity, and it must not keep acting after
+      // it has lost authority. It is not a task, so there is no lease and no
+      // terminal write.
+      const supervised = await deps.supervisor.run({
+        identity,
+        adapter: adapter.value,
+        workspaceRoot: workspace.value.root,
+        scopes: CHAT_SCOPES,
+        launch: async (execution) => {
+          const outcome = await adapter.value.run(
+            {
+              ownerId: principal.ownerId,
+              tenantId: conversation.tenantId,
+              conversationId,
+              objective: request.message,
+              history,
+              model: model.value.ref,
+              routing,
+              allowFallback: request.model === undefined,
+              mode: request.mode,
+              operation: 'chat',
+              workspaceRoot: execution.workspaceRoot,
+              maxSteps: 1,
+              budget: null,
+              signal: execution.signal,
+              ...(request.agent === 'coderax'
+                ? {
+                    context: await nativeContext({
+                      ownerId: principal.ownerId,
+                      mode: request.mode,
+                      guard: execution.guard,
+                    }),
+                  }
+                : {}),
+            },
+            execution.report,
+          );
+          return {
+            outcome: outcome.ok
+              ? {
+                  kind: 'completed' as const,
+                  summary: outcome.summary,
+                  ...(outcome.usage ? { usage: outcome.usage } : {}),
+                }
+              : outcome.code === 'cancelled'
+                ? { kind: 'cancelled' as const }
+                : outcome.code === 'approval_required'
+                  ? { kind: 'suspended' as const, detail: outcome.detail }
+                  : {
+                      kind: 'failed' as const,
+                      code: outcome.code,
+                      detail: outcome.detail,
+                      retryable: outcome.retryable,
+                    },
+          };
+        },
+      });
+      if (!supervised.admitted) {
+        if (held) deps.budget.release(held.id, { dispatched: false });
+        return fail('engine_unavailable', supervised.detail, supervised.code !== 'workspace_denied');
       }
-      if (!outcome.ok) {
+      const outcome = supervised.outcome;
+      if (outcome.kind !== 'completed') {
         if (held) deps.budget.release(held.id, { dispatched: true });
         return fail(
-          outcome.code === 'cancelled'
-            ? 'cancelled'
-            : outcome.code === 'budget_exhausted'
-              ? 'budget_exhausted'
-              : 'engine_unavailable',
-          outcome.detail,
-          outcome.retryable,
+          outcome.kind === 'cancelled' ? 'cancelled' : 'engine_unavailable',
+          outcome.kind === 'cancelled'
+            ? 'The chat turn was cancelled.'
+            : outcome.kind === 'failed'
+              ? outcome.detail
+              : outcome.kind === 'suspended'
+                ? outcome.detail
+                : 'The chat turn lost execution authority.',
+          outcome.kind === 'failed' ? outcome.retryable : false,
         );
       }
       const usedModel = outcome.model ?? model.value.ref;
@@ -1204,6 +1547,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     recoverInterrupted: async () => {
+      // Retire attempts whose owning process stopped heartbeating before the
+      // task sweep, so an old execution record cannot look live.
+      await deps.supervisor.retireStale(deps.config.execution.leaseTtlMs);
       const unsettled = await deps.tasks.listUnsettled();
       let interrupted = 0;
       for (const task of unsettled) {
@@ -1217,9 +1563,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     shutdown: async () => {
+      // Stop admitting, abort every supervised attempt with the `shutdown` cause
+      // (not `cancelled`), and give them a bounded window to unwind before the
+      // scheduler is stopped. Unsettled tasks are reconciled on next startup.
+      await deps.supervisor.shutdown();
       deps.scheduler.stop();
-      for (const controller of controllers.values()) controller.abort();
-      controllers.clear();
+      executionsByTask.clear();
       // Flush before the process releases the database, so a shutdown does not
       // lose the tail of a run that already reported it.
       await deps.events.close().catch(() => undefined);

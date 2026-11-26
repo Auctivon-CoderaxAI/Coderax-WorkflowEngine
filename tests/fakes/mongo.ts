@@ -17,6 +17,7 @@ function matches(document: Document, filter: MongoFilter): boolean {
         if (typeof value === 'number' && typeof bound === 'number') return value - bound;
         return Number.NaN;
       };
+      if ('$ne' in operators && value === operators.$ne) return false;
       if ('$lte' in operators) {
         const delta = compare(operators.$lte);
         if (Number.isNaN(delta) || delta > 0) return false;

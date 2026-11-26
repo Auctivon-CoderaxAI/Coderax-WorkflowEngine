@@ -14,10 +14,14 @@ import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { QuarantineRegistry } from '../execution/quarantine.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { Router } from '../api/router.js';
+import type { ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import type { ModelRouter } from '../models/router.js';
 
 /**
  * Dependencies are named, not positional.
@@ -44,9 +48,13 @@ export type InfrastructureDependencies = {
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
+  supervisor: ExecutionSupervisor;
   scheduler: TaskScheduler;
   health: HealthService;
   quarantine: QuarantineRegistry;
+  tools: ToolRuntime;
+  knowledge: KnowledgeStore;
+  modelRouter: ModelRouter;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -66,9 +74,13 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'audit',
   'events',
   'runner',
+  'supervisor',
   'scheduler',
   'health',
   'quarantine',
+  'tools',
+  'knowledge',
+  'modelRouter',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

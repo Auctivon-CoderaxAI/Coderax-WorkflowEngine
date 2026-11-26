@@ -280,3 +280,26 @@ test('the Mongo connector requires TLS for remote or discoverable connections', 
   await (await connect(target)).close();
   assert.deepEqual(seen, [false, true]);
 });
+
+test('a second replica can decide a stored approval and exactly one replica consumes it', async () => {
+  const workspace = createWorkspaces();
+  const database = createFakeDatabase();
+  const options = { config: mongoConfig(workspace), gateway: fakeGateway(), env: ENV, persistence: { database } };
+  const first = await composeApplication(options);
+  const second = await composeApplication(options);
+  try {
+    const args = { ownerId: 'owner', taskId: 'task', scope: 'browser.use' as const,
+      resource: 'browser', binding: 'action-A', consume: true };
+    const store = first.dependencies.permissions;
+    const other = second.dependencies.permissions;
+    const request = await store.request({ ...args, agent: 'coderax', description: 'One action' });
+    assert.ok((await other.decide({ ...args, requestId: request.requestId, decision: 'approved' })).ok);
+    assert.equal(await store.lookup({ ...args, binding: 'action-B' }), null);
+    const results = await Promise.all([store.lookup(args), other.lookup(args)]);
+    assert.equal(results.filter(result => result?.decision === 'granted').length, 1);
+  } finally {
+    await first.stop();
+    await second.stop();
+    workspace.cleanup();
+  }
+});
