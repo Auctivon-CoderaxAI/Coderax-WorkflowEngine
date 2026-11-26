@@ -6,9 +6,9 @@ import {
   CONTRACT_VERSION,
   EVENT_SCHEMA_VERSION,
   IsoDateTime,
-  isContractVersionSupported,
   parseSemanticVersion,
   SUPPORTED_CONTRACT_VERSIONS,
+  type SemanticVersion,
 } from './primitives.js';
 
 /**
@@ -175,10 +175,32 @@ export function negotiateContract(requested: string | undefined): ContractNegoti
     return { compatible: true, negotiatedContractVersion: CONTRACT_VERSION, negotiation: 'exact' };
   }
   return {
-    compatible: isContractVersionSupported(requested),
-    negotiatedContractVersion: isContractVersionSupported(requested)
-      ? requested
-      : CONTRACT_VERSION,
+    compatible: true,
+    negotiatedContractVersion: highestAdvertisedAtOrBelow(parsed),
     negotiation: 'client_supported',
   };
+}
+
+function compareVersions(left: SemanticVersion, right: SemanticVersion): number {
+  return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
+}
+
+/**
+ * The handshake may only name a version this build advertises. A client is free
+ * to ask for `1.0.7`; the server serves `1.0.0` and says so, rather than echoing
+ * a version it does not have.
+ */
+function highestAdvertisedAtOrBelow(requested: SemanticVersion): string {
+  const advertised: Array<{ version: string; parsed: SemanticVersion | null }> =
+    SUPPORTED_CONTRACT_VERSIONS.map((version) => ({
+      version,
+      parsed: parseSemanticVersion(version),
+    }));
+  const candidates = advertised
+    .filter(
+      (entry): entry is { version: string; parsed: SemanticVersion } => entry.parsed !== null,
+    )
+    .filter((entry) => compareVersions(entry.parsed, requested) <= 0)
+    .sort((left, right) => compareVersions(right.parsed, left.parsed));
+  return candidates[0]?.version ?? CONTRACT_VERSION;
 }

@@ -10,6 +10,7 @@ import type { ConversationRepository } from './conversations.js';
 import type { NotificationStore } from './notifications.js';
 import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
 import type { MemoryStore } from '../memory/store.js';
+import { MemoryValueTooLargeError } from '../memory/errors.js';
 import type { Clock } from '../support/clock.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
 import { isDuplicateKey } from './mongo.js';
@@ -359,7 +360,7 @@ export function createMongoMemoryStore(input: {
   return {
     put: async ({ ownerId, tenantId, mode, key, value }) => {
       if (value.length > input.maxValueLength) {
-        throw new Error('memory value exceeds the configured bound');
+        throw new MemoryValueTooLargeError(input.maxValueLength);
       }
       await input.collection.updateOne(
         { ownerId, mode, key },

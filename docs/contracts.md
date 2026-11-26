@@ -122,6 +122,10 @@ reserved before a lease is claimed or a budget slot is spent, so two concurrent
 retries cannot both create a run and a network retry cannot exhaust the daily
 budget. A repeat returns the original `TaskAccepted` with `replayed: true`.
 
+The guarantee is process-local: keys are held in memory, so they do not survive a
+restart and do not apply across replicas. A retry after a restart is handled as a
+new submission.
+
 ## Schedules, artifacts and memory retrieval
 
 - A schedule holds no lease and owns no run. A firing submits ordinary Work under

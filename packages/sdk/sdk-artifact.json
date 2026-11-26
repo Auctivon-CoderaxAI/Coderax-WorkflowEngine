@@ -6,8 +6,8 @@
   "eventSchemaVersion": 1,
   "chatStreamVersion": 1,
   "path": "artifacts/coderax-sdk-1.1.0.tgz",
-  "sha256": "ac52a490b212394cebcc2d782a89c7897b3902daf13e3e064a1690733f119a86",
-  "bytes": 32329,
+  "sha256": "520a0cf89532a71dec40b571615d7a08ac6d7f1f4427732f1b95854d4bc573db",
+  "bytes": 32581,
   "reproducible": true,
   "files": [
     {
@@ -87,8 +87,8 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/handshake.js",
-      "sha256": "ece374e562a2ad10118fcfa9835eb929a002b02e1632a1a08a8a6691d7a1eb07",
-      "bytes": 5470
+      "sha256": "3b1c745d7c6bc01e668b003172e1c5bcbd568dd7f0832ddbd07d8e2de067801e",
+      "bytes": 6172
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/health.d.ts",

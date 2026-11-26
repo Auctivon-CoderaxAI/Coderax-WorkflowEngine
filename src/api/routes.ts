@@ -72,10 +72,18 @@ function eventId(value: unknown): string {
 
 function acceptsEventStream(accept: string | undefined): boolean {
   if (!accept) return false;
-  return accept
-    .split(',')
-    .map((entry) => entry.trim().toLowerCase())
-    .some((entry) => entry === 'text/event-stream' || entry.startsWith('text/event-stream;'));
+  return accept.split(',').some((entry) => {
+    const [mediaType, ...params] = entry
+      .trim()
+      .toLowerCase()
+      .split(';')
+      .map((part) => part.trim());
+    if (mediaType !== 'text/event-stream') return false;
+    // `q=0` means the client explicitly refuses this media type (RFC 9110), so
+    // `application/json, text/event-stream;q=0` must still get JSON.
+    const quality = params.find((param) => param.startsWith('q='));
+    return quality === undefined || Number(quality.slice(2)) > 0;
+  });
 }
 
 /**

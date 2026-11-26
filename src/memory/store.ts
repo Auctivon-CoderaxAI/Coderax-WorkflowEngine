@@ -5,6 +5,7 @@ import type {
   MemorySearchResult,
 } from '@coderax/contracts';
 import type { MemoryRecord } from '../domain.js';
+import { MemoryValueTooLargeError } from './errors.js';
 import type { Clock } from '../support/clock.js';
 
 /**
@@ -61,7 +62,7 @@ export function createMemoryStore(input: { clock: Clock; maxValueLength: number 
   return {
     put: async ({ ownerId, tenantId, mode, key, value }) => {
       if (value.length > input.maxValueLength) {
-        throw new Error('memory value exceeds the configured bound');
+        throw new MemoryValueTooLargeError(input.maxValueLength);
       }
       entries.set(partition(ownerId, mode, key), {
         ownerId,

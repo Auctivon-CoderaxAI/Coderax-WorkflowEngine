@@ -45,6 +45,7 @@ import {
 import type { EngineFailureCode, ModelDescriptor, ProblemCode } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import type { ScheduleRecord, TaskRecord } from '../domain.js';
+import { MemoryValueTooLargeError } from '../memory/errors.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -1395,8 +1396,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           key: body.key,
           value: body.value,
         });
-      } catch {
-        return fail('validation_failed', 'That memory value exceeds the configured bound.');
+      } catch (error) {
+        // Only the bound guard is a validation failure. A storage outage must not
+        // tell the owner that a valid value is too large.
+        if (!(error instanceof MemoryValueTooLargeError)) throw error;
+        return fail(
+          'validation_failed',
+          `That memory value exceeds the configured bound of ${error.maxValueLength} characters.`,
+        );
       }
       return ok(await deps.memory.list({ ownerId: principal.ownerId, mode: body.mode }));
     },
@@ -1561,6 +1568,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       let started = 0;
       let skipped = 0;
       for (const schedule of due) {
+        // `due()` hands back copies, and an owner can pause or delete a schedule
+        // while an earlier submission in this same tick is awaiting. Re-read the
+        // record so a stale slot is never fired.
+        const current = deps.schedules.get(schedule.ownerId, schedule.scheduleId);
+        if (!current || !current.enabled || current.nextRunAt !== schedule.nextRunAt) {
+          skipped += 1;
+          continue;
+        }
         const principal: Principal = { ownerId: schedule.ownerId, isOwner: true };
         // The firing time is part of the idempotency key, so a tick that overlaps
         // another tick cannot submit the same slot twice.
