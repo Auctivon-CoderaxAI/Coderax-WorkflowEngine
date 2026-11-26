@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';
-import { OWNER_TOKEN, startTestApp } from '../helpers.js';
+import { fakeProvider, OWNER_TOKEN, startTestApp } from '../helpers.js';
 
 /** A real 1x1 transparent PNG; the intake parses its IHDR dimensions. */
 const PNG_1X1 =
@@ -82,6 +82,45 @@ test('a validated image becomes part of a chat turn and its stored metadata', as
     assert.equal(userTurn.media?.[0]?.alt, 'one pixel');
     // The transcript carries metadata, never the encoded bytes.
     assert.equal(JSON.stringify(conversation).includes(PNG_1X1), false);
+  } finally {
+    await started.close();
+  }
+});
+
+test('an image turn fails closed when no vision-capable route exists', async () => {
+  const provider = fakeProvider({ vision: false });
+  const started = await startTestApp({ provider });
+  const api = client(started.url);
+  try {
+    // Control: the same single route serves a text turn, so the refusal below is
+    // about image capability, not a missing model route.
+    const text = await api.chat({ message: 'Text only.', agent: 'coderax', mode: 'cloud' });
+    assert.equal(text.text.length > 0, true);
+    assert.equal(provider.calls, 1);
+
+    const conversationId = 'conv_no_vision_probe';
+    await assert.rejects(
+      api.chat({
+        message: 'What is in this image?',
+        conversationId,
+        agent: 'coderax',
+        mode: 'cloud',
+        attachments: [{ kind: 'image', mediaType: 'image/png', dataBase64: PNG_1X1 }],
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CoderaxApiError);
+        assert.equal(error.code, 'model_missing');
+        assert.equal(error.status, 503);
+        return true;
+      },
+    );
+
+    // Neither the provider nor the transcript saw the refused turn.
+    assert.equal(provider.calls, 1);
+    await assert.rejects(
+      api.conversation(conversationId),
+      (error: unknown) => error instanceof CoderaxApiError && error.code === 'not_found',
+    );
   } finally {
     await started.close();
   }

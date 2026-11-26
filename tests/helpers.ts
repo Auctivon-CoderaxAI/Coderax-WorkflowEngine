@@ -91,6 +91,8 @@ export function fakeProvider(input: {
   text?: string;
   beforeReturn?: () => Promise<void>;
   modelId?: string;
+  /** Advertise image input support; false proves an image turn fails closed. */
+  vision?: boolean;
 } = {}): ProviderAdapter & { calls: number } {
   const provider = {
     id: 'free',
@@ -102,7 +104,12 @@ export function fakeProvider(input: {
         label: 'Free test model',
         contextTokens: 32_768,
         maxOutputTokens: 4_096,
-        capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
+        capabilities: {
+          vision: input.vision ?? true,
+          toolCalling: true,
+          reasoning: true,
+          streaming: true,
+        },
         pricing: { prompt: '0', completion: '0', request: '0' },
       },
     ],

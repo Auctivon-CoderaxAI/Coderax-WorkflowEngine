@@ -17,6 +17,14 @@ const externalPolicy = testProviderPolicy('opencode', {
   credentials: 'owner-managed',
   grants: [{ operation: 'external_agent', mode: 'private', location: 'owner-region' }],
 });
+const freebuffPolicy = testProviderPolicy('freebuff', {
+  credentials: 'owner-managed',
+  grants: [{ operation: 'external_agent', mode: 'private', location: 'owner-region' }],
+});
+
+/** A real 1x1 transparent PNG, accepted by the media intake. */
+const PNG_1X1 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 async function fixture(input: {
   transport: ExternalAgentTransport;
@@ -105,6 +113,66 @@ test('external Chat and Work retain a token and request charge only after transp
         await close();
       }
     }
+  }
+});
+
+test('both external agents refuse image attachments instead of dropping them', async () => {
+  const workspace = createWorkspaces();
+  let dispatched = 0;
+  const transport: ExternalAgentTransport = {
+    probe: async () => {},
+    run: async () => {
+      dispatched += 1;
+      assert.fail('external image content was dispatched');
+    },
+  };
+  try {
+    const app = await composeApplication({
+      config: baseConfig(workspace, {
+        engines: {
+          default: 'native',
+          native: { enabled: true },
+          opencode: {
+            enabled: true,
+            baseURL: 'https://agent.example',
+            model: 'fixture',
+            passwordEnv: 'TEST_PASSWORD',
+          },
+          freebuff: {
+            enabled: true,
+            baseURL: 'https://agent.example',
+            sdkPath: '/fixture/sdk',
+            model: 'fixture',
+          },
+        },
+      }),
+      env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, TEST_PASSWORD: 'fixture' },
+      providers: [{ adapter: fakeProvider() }],
+      policies: [routedPolicy, externalPolicy, freebuffPolicy],
+      externals: { opencode: transport, freebuff: transport },
+    });
+    try {
+      for (const agent of ['opencode', 'freebuff'] as const) {
+        const result = await app.service.chat(principal, {
+          agent,
+          mode: 'private',
+          conversationId: `conv_${agent}_media_probe`,
+          message: 'What is in this image?',
+          attachments: [{ kind: 'image', mediaType: 'image/png', dataBase64: PNG_1X1 }],
+        });
+        assert.equal(result.ok, false);
+        if (!result.ok) {
+          assert.equal(result.code, 'unsupported_media_type');
+          assert.match(result.detail, /Coderax Native/);
+        }
+      }
+      assert.equal(dispatched, 0);
+      assert.deepEqual(await app.service.conversations(principal), { conversations: [] });
+    } finally {
+      await app.stop();
+    }
+  } finally {
+    workspace.cleanup();
   }
 });
 
