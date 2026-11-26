@@ -102,6 +102,49 @@ test('duplicate zero-cost candidates are refused', () => {
   }
 });
 
+test('the persistence driver can be selected from the environment', () => {
+  const ws = workspace();
+  try {
+    const config = loadConfig({
+      env: { CODERAX_PERSISTENCE_DRIVER: 'mongo' },
+      overrides: {
+        auth: { ownerId: 'owner' },
+        workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+        models: { route: [{ providerId: 'free', modelId: 'm' }] },
+      },
+    });
+    assert.equal(config.persistence.driver, 'mongo');
+    // The connection string is named, never inlined in configuration.
+    assert.equal(config.persistence.uriEnv, 'CODERAX_MONGODB_URI');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('an unknown persistence driver in the environment names the field', () => {
+  const ws = workspace();
+  try {
+    assert.throws(
+      () =>
+        loadConfig({
+          env: { CODERAX_PERSISTENCE_DRIVER: 'postgres' },
+          overrides: {
+            auth: { ownerId: 'owner' },
+            workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+            models: { route: [{ providerId: 'free', modelId: 'm' }] },
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ConfigurationError);
+        assert.ok(error.issues.some((issue) => issue.startsWith('persistence.driver')));
+        return true;
+      },
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('a short owner token is refused instead of accepted as authentication', () => {
   const ws = workspace();
   try {
