@@ -77,6 +77,7 @@ export type ApplicationServiceDeps = {
 };
 
 export type EventStream = {
+  generation: number;
   replay: Replay;
   subscribe: (listener: (event: unknown) => void) => Unsubscribe;
   close: () => void;
@@ -285,6 +286,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   ): Promise<void> {
     await deps.notifications.record({
       taskId: task.taskId,
+      generation: task.generation,
       ownerId: task.ownerId,
       conversationId: task.conversationId,
       agent: task.agent,
@@ -386,31 +388,32 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     // Only answer text belongs in the transcript. A failure detail is diagnostic
     // state, not an assistant answer, and the summary is already on the result.
-    const text = (checkpoint.resumeText || checkpoint.text || '').slice(0, 20_000);
+    const answer = checkpoint.resumeText || checkpoint.text || '';
+    const text = answer.slice(0, 20_000);
     if (text.length > 0) {
       try {
-        const appended = await deps.conversations.appendMessage({
-          messageId: `${task.taskId}:g${task.generation}:assistant`,
-          conversationId: task.conversationId,
-          role: 'assistant',
-          text,
-          createdAt: task.updatedAt,
-          agent: task.agent,
-        });
-        repaired = appended || repaired;
+        const messageId = `${task.taskId}:g${task.generation}:assistant`;
+        const messages = await deps.conversations.messages(task.conversationId);
+        // Legacy settlement used a random id but wrote the same timestamp as
+        // the terminal task update. Text alone can recur in unrelated turns.
+        const exists = messages.some(message => message.messageId === messageId || (
+          message.role === 'assistant' && message.agent === task.agent &&
+          message.createdAt === task.updatedAt && message.text === answer
+        ));
+        if (!exists) {
+          const appended = await deps.conversations.appendMessage({
+            messageId, conversationId: task.conversationId, role: 'assistant',
+            text, createdAt: task.updatedAt, agent: task.agent,
+          });
+          repaired = appended || repaired;
+        }
       } catch {
         // A transcript write is retried, never allowed to fail a settled run.
       }
     }
 
     try {
-      const listed = await deps.notifications.list(task.ownerId);
-      // A row with the wrong terminal state is stale: a task interrupted after a
-      // crash and later completed must not keep an `interrupted` blue dot.
-      const existingNotification = listed.notifications.find(
-        (entry) => entry.taskId === task.taskId,
-      );
-      if (!existingNotification || existingNotification.state !== terminal) {
+      if (!await deps.notifications.matches(task.ownerId, task.taskId, task.generation, terminal)) {
         await notifyTerminal(
           task,
           terminal,
@@ -633,6 +636,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...(started.task.checkpoint?.completedSteps ?? [])];
+    const priorText = started.task.checkpoint?.resumeText ?? '';
     let text = '';
     let visible = text;
     // Checkpoint writes are serialized: a later `step.started` cannot land before
@@ -671,7 +675,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         // A step boundary is a complete unit of text, so the whole redacted
         // output is safe to persist; the streaming path holds the trailing token
         // back only because a later delta could still complete a credential.
-        const stepText = redactContent(text);
+        const stepText = redactContent(priorText + text);
         persistCheckpoint({
           steps,
           checkpoint: {
@@ -808,7 +812,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outcome = result.outcome.kind === 'completed'
       ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
       : result.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    await settle(started.task, token, outcome, { completedSteps: completed, text: redactContent(priorText + text) });
     } finally {
       deps.arbiter.release(arbitrationKey, adapter.value.engine);
     }
@@ -860,13 +864,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return applied.task;
   }
 
+  const admissions = new Set<Promise<unknown>>();
+  function admit<T>(work: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
+    if (stopping) return Promise.resolve(fail('not_ready', 'The engine is stopping.', true));
+    const pending = work();
+    admissions.add(pending);
+    return pending.finally(() => admissions.delete(pending));
+  }
+
   const service: ApplicationService = {
     health: () => deps.health.report(),
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
-    submitWork: async (principal, request) => {
+    submitWork: async (principal, request) => admit<TaskAccepted>(async () => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
@@ -995,7 +1007,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: 1,
         eventsPath: `/v1/work/${task.taskId}/events`,
       });
-    },
+    }),
 
     task: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
@@ -1074,7 +1086,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    resumeTask: async (principal, taskId, generation) => {
+    resumeTask: async (principal, taskId, generation) => admit<TaskControlResult>(async () => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = await reconcile(found.value);
@@ -1125,9 +1137,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: applied.task.generation,
         outcome: 'accepted',
       });
-    },
+    }),
 
-    retryTask: async (principal, taskId, generation) => {
+    retryTask: async (principal, taskId, generation) => admit<TaskControlResult>(async () => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = found.value;
@@ -1195,7 +1207,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: applied.task.generation,
         outcome: 'accepted',
       });
-    },
+    }),
 
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
@@ -1320,6 +1332,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         deps.config.execution.eventBufferSize,
       );
       return ok({
+        generation: found.value.generation,
         replay: opened.replay,
         subscribe: (listener) =>
           opened.subscribe(listener as (event: ExecutionEvent) => void),
@@ -1376,6 +1389,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     shutdown: async () => {
       stopping = true;
       deps.scheduler.stop();
+      await Promise.allSettled(admissions);
       // Snapshot the runs this process owns before aborting them. A graceful stop
       // settles its own work; it must never enumerate the shared database and
       // interrupt a run another replica is executing.

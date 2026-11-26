@@ -418,6 +418,8 @@ export function createMongoMemoryStore(input: {
 
 export function createMongoNotificationStore(collection: MongoCollectionLike): NotificationStore {
   return {
+    matches: async (ownerId, taskId, generation, state) =>
+      Boolean(await collection.findOne({ ownerId, taskId, generation, state })),
     record: async (notification) => {
       await collection.updateOne(
         { taskId: notification.taskId },

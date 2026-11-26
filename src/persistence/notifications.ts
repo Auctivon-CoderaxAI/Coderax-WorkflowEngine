@@ -8,6 +8,7 @@ import type { NotificationRecord } from '../domain.js';
  * client's guess.
  */
 export type NotificationStore = {
+  matches: (ownerId: string, taskId: string, generation: number, state: NotificationRecord['state']) => Promise<boolean>;
   record: (notification: NotificationRecord) => Promise<void>;
   list: (ownerId: string) => Promise<NotificationList>;
   markRead: (ownerId: string, taskId: string) => Promise<void>;
@@ -17,6 +18,10 @@ export function createNotificationStore(): NotificationStore {
   const notifications = new Map<string, NotificationRecord>();
 
   return {
+    matches: async (ownerId, taskId, generation, state) => {
+      const row = notifications.get(taskId);
+      return row?.ownerId === ownerId && row.generation === generation && row.state === state;
+    },
     record: async (notification) => {
       notifications.set(notification.taskId, { ...notification });
     },

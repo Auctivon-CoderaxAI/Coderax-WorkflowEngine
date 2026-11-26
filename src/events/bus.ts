@@ -112,6 +112,8 @@ export function createEventBus(input: {
 }): EventBus {
   const streams = new Map<string, Stream>();
 
+  const tails = new Set<() => void>();
+
   function stream(taskId: string): Stream {
     const existing = streams.get(taskId);
     if (existing) return existing;
@@ -341,6 +343,14 @@ export function createEventBus(input: {
       // subscription must not deliver any of it a second time.
       const lastReplayed = replay.events[replay.events.length - 1]?.seq ?? 0;
       if (lastReplayed > subscriber.cursor) subscriber.cursor = lastReplayed;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let closed = false;
+      const close = (): void => {
+        closed = true;
+        clearTimeout(timer);
+        tails.delete(close);
+        state.listeners.delete(subscriber);
+      };
       return {
         replay,
         subscribe: (listener) => {
@@ -348,19 +358,39 @@ export function createEventBus(input: {
           // going live cannot interleave with a publish. A buffered event a
           // later page already replayed is skipped, so a sequence is delivered
           // exactly once.
-          for (const event of subscriber.backlog) {
-            if (event.seq <= lastReplayed) continue;
+          let delivered = Math.max(after, lastReplayed);
+          const durable = Boolean(input.log && !input.processLocal);
+          const forward = (event: ExecutionEvent): void => {
+            if (closed || event.seq <= delivered) return;
+            delivered = event.seq;
             listener(event);
-          }
-          subscriber.backlog.length = 0;
-          subscriber.listener = listener;
-          return () => {
-            state.listeners.delete(subscriber);
           };
+          // A local append can follow an unseen remote append. Only fast-path
+          // contiguous events; the ordered durable tail supplies any gap.
+          const local = (event: ExecutionEvent): void => {
+            if (!durable || event.seq === delivered + 1) forward(event);
+          };
+          for (const event of subscriber.backlog) local(event);
+          subscriber.backlog.length = 0;
+          subscriber.listener = local;
+          if (durable) {
+            const poll = async (): Promise<void> => {
+              let more = false;
+              try {
+                const page = await readDurable(taskId, delivered, limit);
+                for (const event of page.events) forward(event);
+                more = Boolean(page.hasMore);
+              } catch {
+                // A temporary storage failure leaves the delivered cursor intact.
+              }
+              if (!closed) timer = setTimeout(poll, more ? 0 : 250).unref();
+            };
+            tails.add(close);
+            void poll();
+          }
+          return close;
         },
-        close: () => {
-          state.listeners.delete(subscriber);
-        },
+        close,
       };
     },
 
@@ -401,6 +431,7 @@ export function createEventBus(input: {
     },
 
     close: async () => {
+      for (const close of tails) close();
       await Promise.allSettled([...streams.values()].map((state) => state.appends));
       await input.log?.close();
     },

@@ -405,7 +405,7 @@ test('a watermark recovers a row inserted before a crash reached the head', asyn
 
   // The head was never advanced, but the row is committed: the sequence must
   // continue after it, not reuse 7.
-  assert.equal((await store.log.watermark('t_wm')).seq, 7);
+  assert.deepEqual(await store.log.watermark('t_wm'), { seq: 7, generation: 1 });
   const next = await store.log.append({
     v: 1,
     taskId: 't_wm',
@@ -442,4 +442,57 @@ test('durable subscribers and local replay expose only committed appends', async
   await assert.rejects(bus.flush('t'), /append failed/);
   assert.deepEqual(live, [1, 2]);
   assert.deepEqual(bus.replay('t', 0).events.map(event => event.seq), [1, 2]);
+});
+
+test('a failed stale-row cleanup cannot expose the row or displace protected history', async () => {
+  const store = mongoLog();
+  await ensureEventIndexes({ events: store.collection, heads: store.heads });
+  const base = { v: 1, taskId: 'a', seq: 1, generation: 1, type: 'task.started',
+    agent: 'coderax', at: iso(), eventId: 'one' } as const;
+  assert.deepEqual(await store.log.append(base), { appended: true });
+  const insert = store.collection.insertOne;
+  store.collection.insertOne = async doc => {
+    const result = await insert(doc);
+    if (doc.eventId === 'loser') {
+      await store.heads.updateOne({ taskId: 'a' }, { $set: { generation: 2 } }, { upsert: false });
+    }
+    return result;
+  };
+  const remove = store.collection.deleteOne;
+  store.collection.deleteOne = async () => { throw new Error('cleanup unavailable'); };
+  assert.deepEqual(await store.log.append({ ...base, eventId: 'loser', seq: 2 }),
+    { appended: false, reason: 'stale_generation' });
+  store.collection.deleteOne = remove;
+  assert.deepEqual((await store.log.read({ taskId: 'a', after: 0, limit: 10 })).events, [base]);
+  assert.deepEqual(await store.log.latest('a', 10), [base]);
+  await store.log.append({ ...base, taskId: 'aa' });
+  await store.log.append({ ...base, taskId: 'b' });
+  await store.log.append({ ...base, taskId: 'b', seq: 2, eventId: 'two' });
+  const range = { before: '9999', limit: 1 };
+  assert.equal(await store.log.prune(range), 0);
+  const restarted = createMongoEventLog({ events: store.collection, heads: store.heads });
+  assert.equal(await restarted.prune(range), 1);
+  assert.deepEqual(await restarted.latest('a', 10), [base]);
+});
+
+test('an open durable stream tails another replica after replay', async () => {
+  const store = mongoLog(2);
+  const reader = store.bus();
+  const writer = store.bus();
+  const opened = await reader.open('remote', 0);
+  const delivered: number[] = [];
+  opened.subscribe(event => delivered.push(event.seq));
+  try {
+    for (const type of ['task.queued', 'task.started', 'task.completed'] as const) {
+      writer.publish({ taskId: 'remote', generation: 1, agent: 'coderax', type });
+    }
+    await writer.flush('remote');
+    const deadline = Date.now() + 3000;
+    while (delivered.length < 3 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(delivered, [1, 2, 3]);
+  } finally {
+    opened.close();
+  }
 });
