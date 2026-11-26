@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
-import { startTestApp, waitFor } from '../helpers.js';
+import { slowProvider, startTestApp, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -80,15 +80,7 @@ test('a submitted task completes without any client connection', async () => {
 });
 
 test('a second task in the same conversation is refused while one is live', async () => {
-  const started = await startTestApp({
-    gateway: {
-      id: 'slow',
-      complete: ({ signal }) =>
-        new Promise((_resolve, reject) => {
-          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-        }),
-    },
-  });
+  const started = await startTestApp({ provider: slowProvider(60_000) });
   try {
     const first = await started.app.service.submitWork(principal, {
       objective: 'First task',

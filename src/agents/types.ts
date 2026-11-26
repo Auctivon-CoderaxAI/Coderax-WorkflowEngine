@@ -9,8 +9,10 @@ import type {
   EngineId,
   KnowledgeSearchResult,
   ModelRef,
+  RoutingMode,
   Usage,
 } from '@coderax/contracts';
+import type { ProcessingOperation } from '../models/policy.js';
 import type { PendingAction, StepOutput } from '../domain.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 
@@ -65,7 +67,13 @@ export type AgentRunRequest = {
   history?: AgentHistoryTurn[];
   /** Already resolved by the model catalogue; never a raw provider override. */
   model: ModelRef;
+  /** Automatic, Fast or Complex ranking, chosen by the engine from the task. */
+  routing: RoutingMode;
+  /** False pins the owner's explicit model; a route-chosen model may fall back. */
+  allowFallback: boolean;
   mode: DataMode;
+  /** The exact processing operation this run performs through the gateway. */
+  operation: ProcessingOperation;
   workspaceRoot: string;
   maxSteps: number;
   budget: Budget | null;
@@ -92,7 +100,13 @@ export type AgentReportEvent =
 export type AgentReport = (event: AgentReportEvent) => void;
 
 export type AgentRunOutcome =
-  | { ok: true; summary: string; usage?: Usage }
+  | {
+      ok: true;
+      summary: string;
+      usage?: Usage;
+      /** The model that actually served the run, when routing replaced one. */
+      model?: ModelRef;
+    }
   | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
 
 export type AgentAdapter = {

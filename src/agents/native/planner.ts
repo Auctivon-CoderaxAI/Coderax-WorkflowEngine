@@ -71,7 +71,7 @@ export function createNativePlanner(input?: { complete?: boolean }): Planner {
       if (input?.complete !== false && complete && maxSteps > 1) {
         try {
           const text = await complete(
-            buildPlanPrompt({ objective, maxSteps, ...(history ? { history } : {}) }),
+            buildPlanPrompt({ objective, maxSteps, ...(history ? { history: [...history] } : {}) }),
             signal ?? new AbortController().signal,
           );
           const parsed = parsePlan(text, maxSteps);

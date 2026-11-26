@@ -2,51 +2,58 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { ModelCompletionRequest } from '../../src/agents/native/types.js';
-import { startTestApp, waitFor } from '../helpers.js';
+import type { ProviderCompletionRequest } from '../../src/models/types.js';
+import { fakeProvider, startTestApp, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
 /**
- * A scripted zero-cost model. It answers the plan prompt, acts with the real
+ * A scripted zero-cost provider. It answers the plan prompt, acts with the real
  * fs.write tool, then finishes. It is a test double for the provider wire, not a
- * mock of the engine: the tool, permission store, fence and task record all run.
+ * mock of the engine: cost verification, the tool runtime, the permission store,
+ * the fence and the task record all run for real.
  */
-function scriptedGateway() {
+function scriptedProvider() {
   const calls: string[] = [];
+  const base = fakeProvider();
+  const answer = (prompt: string): string => {
+    if (prompt.includes('Return ONLY a JSON array')) {
+      return '["Write the report", "Confirm completion"]';
+    }
+    if (prompt.includes('Current step (step-1):') && !prompt.includes('Tool fs.read')) {
+      return JSON.stringify({ tool: 'fs.read', input: { path: 'baseline.txt' } });
+    }
+    if (prompt.includes('Current step (step-2):') && prompt.includes('Tool fs.write succeeded')) {
+      return '{"final":"Confirmed."}';
+    }
+    if (!prompt.includes('Tool fs.write succeeded')) {
+      return JSON.stringify({
+        thought: 'Write the requested report into the workspace.',
+        tool: 'fs.write',
+        input: { path: 'report.txt', content: 'verified by the engine' },
+      });
+    }
+    return JSON.stringify({ thought: 'The report exists.', final: 'Wrote report.txt.' });
+  };
   return {
-    id: 'scripted-gateway',
+    id: 'free',
+    kind: 'openai' as const,
     calls,
-    complete: async (request: ModelCompletionRequest) => {
+    discover: base.discover,
+    complete: async (request: ProviderCompletionRequest) => {
       calls.push(request.prompt);
-      if (request.prompt.includes('Return ONLY a JSON array')) {
-        return { text: '["Write the report", "Confirm completion"]', usage: { inputTokens: 5, outputTokens: 5 } };
-      }
-      if (request.prompt.includes('Current step (step-1):') && !request.prompt.includes('Tool fs.read')) {
-        return { text: JSON.stringify({ tool: 'fs.read', input: { path: 'baseline.txt' } }) };
-      }
-      if (request.prompt.includes('Current step (step-2):') && request.prompt.includes('Tool fs.write succeeded')) return { text: '{"final":"Confirmed."}' };
-      if (!request.prompt.includes('Tool fs.write succeeded')) {
-        return {
-          text: JSON.stringify({
-            thought: 'Write the requested report into the workspace.',
-            tool: 'fs.write',
-            input: { path: 'report.txt', content: 'verified by the engine' },
-          }),
-          usage: { inputTokens: 7, outputTokens: 9 },
-        };
-      }
       return {
-        text: JSON.stringify({ thought: 'The report exists.', final: 'Wrote report.txt.' }),
-        usage: { inputTokens: 3, outputTokens: 4 },
+        text: answer(request.prompt),
+        toolCalls: [],
+        usage: { inputTokens: 7, outputTokens: 9 },
       };
     },
   };
 }
 
 test('a tool action suspends for approval, resumes and writes a real file', async () => {
-  const gateway = scriptedGateway();
-  const started = await startTestApp({ gateway });
+  const provider = scriptedProvider();
+  const started = await startTestApp({ provider });
   try {
     const baseline = path.join(started.workspace.cloudRoot, 'baseline.txt');
     await writeFile(baseline, 'original baseline');
@@ -122,10 +129,10 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
     assert.deepEqual(completed.steps.map(step => step.state), ['completed', 'completed']);
 
     assert.deepEqual(writes.slice(0, 3), ['suspend', 'report', 'suspend']);
-    const afterReplay = gateway.calls.filter(prompt => prompt.includes('Tool fs.write succeeded'));
+    const afterReplay = provider.calls.filter(prompt => prompt.includes('Tool fs.write succeeded'));
     assert.ok(afterReplay.some(prompt => prompt.includes('original baseline')));
-    assert.ok(!gateway.calls.some(prompt => prompt.includes('changed baseline')));
-    const secondStep = gateway.calls.filter(prompt => prompt.includes('Current step (step-2):'));
+    assert.ok(!provider.calls.some(prompt => prompt.includes('changed baseline')));
+    const secondStep = provider.calls.filter(prompt => prompt.includes('Current step (step-2):'));
     assert.equal(secondStep.length, 2);
     assert.ok(secondStep.every(prompt => prompt.includes('Completed step results:') &&
       prompt.includes('Wrote report.txt.')));
@@ -159,7 +166,7 @@ test('tools, routing and retrieval are substantive and zero-cost', async () => {
     assert.equal(names.includes('shell.run'), false);
     assert.equal(names.includes('http.fetch'), false);
 
-    const routing = started.app.service.routing('complex');
+    const routing = await started.app.service.routing('complex');
     assert.equal(routing.allowPaid, false);
     assert.ok(routing.route.length > 0);
     assert.ok(routing.providers.every((provider) => provider.costEvidence === 'verified-free'));
@@ -191,11 +198,16 @@ test('tools, routing and retrieval are substantive and zero-cost', async () => {
 });
 
 for (const partial of ['', 'First step complete.']) test(`suspended cancellation preserves history (partial: ${Boolean(partial)})`, async () => {
-  const gateway = scriptedGateway();
-  const complete = gateway.complete;
-  gateway.complete = request => partial && request.prompt.includes('Current step (step-1):')
-    ? Promise.resolve({ text: JSON.stringify({ final: partial }) }) : complete(request);
-  const started = await startTestApp({ gateway });
+  const provider = scriptedProvider();
+  const complete = provider.complete;
+  provider.complete = request => partial && request.prompt.includes('Current step (step-1):')
+    ? Promise.resolve({
+        text: JSON.stringify({ final: partial }),
+        toolCalls: [],
+        usage: { inputTokens: 2, outputTokens: 2 },
+      })
+    : complete(request);
+  const started = await startTestApp({ provider });
   try {
     const submitted = await started.app.service.submitWork(principal, {
       objective: 'Write the report', mode: 'cloud', requireApproval: true,
@@ -218,7 +230,7 @@ for (const partial of ['', 'First step complete.']) test(`suspended cancellation
 });
 
 test('failed suspension persistence leaves the running task recoverable on lease expiry', async () => {
-  const started = await startTestApp({ gateway: scriptedGateway() });
+  const started = await startTestApp({ provider: scriptedProvider() });
   try {
     const { tasks, scheduler, clock } = started.app.dependencies;
     const update = tasks.updateFenced;
@@ -242,7 +254,7 @@ test('failed suspension persistence leaves the running task recoverable on lease
 });
 
 test('cancellation after the runner returns wins over suspension while reports drain', async () => {
-  const started = await startTestApp({ gateway: scriptedGateway() });
+  const started = await startTestApp({ provider: scriptedProvider() });
   let releaseReports = (): void => {};
   const reports = new Promise<void>(resolve => { releaseReports = resolve; });
   let settlementStarted = false;

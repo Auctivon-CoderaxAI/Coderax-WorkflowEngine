@@ -1,16 +1,16 @@
-import type { Availability, EngineCapabilities, Usage } from '@coderax/contracts';
+import type { Availability, EngineCapabilities, ModelRef, Usage } from '@coderax/contracts';
 import type {
   AgentAdapter,
   AgentReport,
   AgentRunOutcome,
   AgentRunRequest,
 } from '../types.js';
-import type { ModelGateway, Planner } from './types.js';
+import type { GatewayCompletion, ModelGateway, Planner } from './types.js';
 import { createNativePlanner } from './planner.js';
 import { buildActionPrompt, NATIVE_ACTION_SYSTEM } from './prompt.js';
 import { parseAction } from './action.js';
 import type { ToolContext } from '../../tools/types.js';
-import { isBudgetExhausted, isRouterExhausted } from '../../models/routed.js';
+import { routingFailure } from '../../models/types.js';
 
 /**
  * Coderax Native is the default and the only engine with no external dependency.
@@ -21,6 +21,11 @@ import { isBudgetExhausted, isRouterExhausted } from '../../models/routed.js';
  * claiming a result it never produced. An action that needs the owner suspends
  * the task with a durable permission request; it does not silently proceed and
  * does not fail permanently.
+ *
+ * Every model call goes through the gateway port owned by the single model
+ * router. Native never names a provider endpoint, never selects a second model
+ * and never falls back to a paid route: an exhausted verified-free route is
+ * reported as `model_missing`.
  */
 
 const MAX_TOOL_CALLS_PER_STEP = 4;
@@ -50,6 +55,8 @@ export function createNativeAgent(input: {
   enabled: boolean;
   gateway: ModelGateway | null;
   planner?: Planner;
+  /** Router-owned readiness: a gateway can exist while nothing is routable. */
+  modelsAvailable?: () => boolean;
   unavailableDetail?: string;
 }): AgentAdapter {
   const planner = input.planner ?? createNativePlanner();
@@ -74,6 +81,15 @@ export function createNativeAgent(input: {
         detail:
           input.unavailableDetail ??
           'No zero-cost inference endpoint is configured for Coderax Native.',
+      };
+    }
+    if (input.modelsAvailable && !input.modelsAvailable()) {
+      return {
+        available: false,
+        reason: 'not_ready',
+        detail:
+          input.unavailableDetail ??
+          'No verified zero-cost model is currently routable for Coderax Native.',
       };
     }
     return { available: true, reason: 'ready', detail: 'Coderax Native is ready.' };
@@ -124,6 +140,7 @@ export function createNativeAgent(input: {
         output: undefined,
       };
       let calls = 0;
+      let actualModel: ModelRef | undefined;
       /**
        * A per-task execution budget is a ceiling on this run, checked before each
        * call and after each reported usage. It is independent of the owner's
@@ -151,6 +168,30 @@ export function createNativeAgent(input: {
         retryable: false,
       });
 
+      /** Every gateway call carries the same authorization envelope. */
+      const call = (fields: {
+        system: string;
+        prompt: string;
+        signal?: AbortSignal;
+        routing?: 'auto' | 'fast' | 'complex';
+        maxOutputTokens?: number;
+      }): Promise<GatewayCompletion> =>
+        gateway.complete({
+          ownerId: request.ownerId,
+          model: request.model,
+          mode: request.mode,
+          operation: request.operation,
+          routing: fields.routing ?? request.routing,
+          allowFallback: request.allowFallback,
+          system: fields.system,
+          prompt: fields.prompt,
+          signal: fields.signal ?? request.signal,
+          ...(fields.maxOutputTokens === undefined ? {} : { maxOutputTokens: fields.maxOutputTokens }),
+          ...(context.taskId === undefined || context.taskId === null
+            ? {}
+            : { taskId: context.taskId }),
+        });
+
       if (request.signal.aborted) return cancelled();
 
       let steps = context.plannedSteps ?? [];
@@ -168,16 +209,15 @@ export function createNativeAgent(input: {
                       complete: async (prompt: string, signalAbort: AbortSignal) => {
                         if (budgetSpent()) throw new Error('budget_exhausted');
                         calls += 1;
-                        const completion = await gateway.complete({
-                          model: request.model,
-                          ownerId: request.ownerId,
+                        const completion = await call({
                           system:
                             'You are Coderax Native. Plan the work. Return only a JSON array of step titles.',
                           prompt,
                           signal: signalAbort,
-                          routingMode: 'complex',
+                          routing: 'complex',
                         });
                         accumulate(totals, completion.usage);
+                        actualModel = completion.model;
                         return completion.text;
                       },
                     }
@@ -237,41 +277,55 @@ export function createNativeAgent(input: {
           const replay = pending?.stepId === step.id ? pending : null;
           if (!replay && budgetSpent()) return budgetFailure();
           if (!replay) calls += 1;
-          let completion;
+          let completion: GatewayCompletion;
           try {
-            completion = replay ? { text: replay.json, usage: undefined } : await gateway.complete({
-              model: request.model,
-              system: NATIVE_ACTION_SYSTEM,
-              prompt: buildActionPrompt({
-                objective: request.objective,
-                steps,
-                step,
-                completed: [...completed],
-                outputs,
-                history,
-                observations,
-                memory: memoryLines,
-                knowledge: knowledgeLines,
-                catalogue: toolCatalogue,
-              }),
-              signal: request.signal,
-              ownerId: request.ownerId,
-              toolSchemaText: toolCatalogue,
-              routingMode: tools ? 'complex' : 'fast',
-              ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
-            });
+            completion = replay
+              ? {
+                  text: replay.json,
+                  usage: undefined,
+                  toolCalls: [],
+                  model: request.model,
+                  attempts: [request.model],
+                  latencyMs: 0,
+                }
+              : await call({
+                  system: NATIVE_ACTION_SYSTEM,
+                  prompt: buildActionPrompt({
+                    objective: request.objective,
+                    steps,
+                    step,
+                    completed: [...completed],
+                    outputs,
+                    history,
+                    observations,
+                    memory: memoryLines,
+                    knowledge: knowledgeLines,
+                    catalogue: toolCatalogue,
+                  }),
+                  routing: tools ? 'complex' : 'fast',
+                  ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
+                });
           } catch (error) {
             if (request.signal.aborted) return cancelled();
-            if (isRouterExhausted(error)) {
+            const failure = routingFailure(error);
+            if (failure) {
               return {
                 ok: false,
-                code: 'model_missing',
-                detail: 'No verified zero-cost model is available; the run stopped instead of routing to a paid path.',
-                retryable: true,
+                code:
+                  failure.code === 'budget_exhausted'
+                    ? 'budget_exhausted'
+                    : failure.code === 'paid_model_refused'
+                      ? 'paid_model_refused'
+                      : failure.code === 'cancelled'
+                        ? 'cancelled'
+                        : failure.code === 'model_missing'
+                          ? 'model_missing'
+                          : // Candidates existed but every one of them failed; that
+                            // is a provider failure, not a missing route.
+                            'provider_error',
+                detail: failure.detail,
+                retryable: false,
               };
-            }
-            if (isBudgetExhausted(error) || (error instanceof Error && error.message === 'budget_exhausted')) {
-              return budgetFailure();
             }
             return {
               ok: false,
@@ -282,6 +336,7 @@ export function createNativeAgent(input: {
               retryable: false,
             };
           }
+          actualModel = completion.model;
           accumulate(totals, completion.usage);
           if (budgetSpent()) {
             // The call already happened; report what it cost and stop cleanly
@@ -421,6 +476,7 @@ export function createNativeAgent(input: {
         ok: true,
         summary: summary.length > 0 ? summary : 'The objective produced no content.',
         ...(usage ? { usage } : {}),
+        ...(actualModel ? { model: actualModel } : {}),
       };
     },
   };

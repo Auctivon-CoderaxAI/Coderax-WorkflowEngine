@@ -1,7 +1,15 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ModelGateway } from '../src/agents/native/types.js';
+import type {
+  FreeTierAttestation,
+  ProviderAdapter,
+  ProviderCompletionRequest,
+} from '../src/models/types.js';
+import { createBudgetLedger, createMemoryBudgetStore, type BudgetLedger } from '../src/models/budget.js';
+import { ProviderError } from '../src/models/types.js';
+import type { ProviderPolicy } from '../src/models/policy.js';
+import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -31,22 +39,70 @@ export function createWorkspaces(): TestWorkspace {
 }
 
 /**
- * Published zero-cost terms for the test model. Tests use a real record shape so
- * the eligibility gate is exercised rather than bypassed: the date window is
- * relative to now, and every billed unit is zero.
+ * A policy that authorizes the fixture provider for every operation in cloud
+ * mode only. Private mode stays denied unless a test grants it explicitly, so a
+ * missing operation classification cannot pass by accident.
  */
-export function verifiedTerms(overrides?: Record<string, unknown>): Record<string, unknown> {
-  const now = Date.now();
+export function testProviderPolicy(
+  providerId = 'free',
+  overrides: Partial<ProviderPolicy> = {},
+): ProviderPolicy {
   return {
-    source: 'https://provider.example/pricing',
-    observedAt: new Date(now - 3_600_000).toISOString(),
-    expiresAt: new Date(now + 30 * 86_400_000).toISOString(),
-    currency: 'USD',
-    inputPerMillionTokens: 0,
-    outputPerMillionTokens: 0,
-    requestPerCall: 0,
-    ...(overrides ?? {}),
+    providerId,
+    retention: 'transient',
+    training: 'prohibited',
+    location: 'owner-region',
+    credentials: 'deployment-managed',
+    modes: ['cloud', 'private'],
+    grants: PROCESSING_OPERATIONS.map((operation) => ({
+      operation,
+      mode: 'cloud' as const,
+      location: 'owner-region' as const,
+    })),
+    evidenceUrl: 'https://provider.example/terms',
+    verifiedAt: '2026-01-01T00:00:00.000Z',
+    expiresAt: null,
+    ...overrides,
   };
+}
+
+/**
+ * A complete zero-cost attestation for fixtures. It carries every field the
+ * verifier requires: a 30-day window, USD, an account reference, a billing
+ * boundary that cannot produce a charge, a zero cap and a published allowance.
+ */
+export function testAttestation(
+  overrides: Partial<FreeTierAttestation> = {},
+): FreeTierAttestation {
+  return {
+    providerId: 'free',
+    modelId: 'coderax-small',
+    evidenceUrl: 'https://provider.example/free-tier',
+    verifiedAt: '2026-11-20T00:00:00.000Z',
+    expiresAt: '2026-12-20T00:00:00.000Z',
+    currency: 'USD',
+    accountRef: 'acct-free-tier',
+    billing: 'no-payment-method',
+    spendCapUsd: 0,
+    quota: { requestsPerDay: 1_000, tokensPerDay: 1_000_000 },
+    ...overrides,
+  };
+}
+
+/** The ledger the engine uses, over the process-local store. */
+export function testBudget(input: {
+  maxRequestsPerDay?: number;
+  maxTokensPerDay?: number;
+  taskMaxRequests?: number;
+  taskMaxTokens?: number;
+} = {}): BudgetLedger {
+  return createBudgetLedger({
+    store: createMemoryBudgetStore(),
+    maxRequestsPerDay: input.maxRequestsPerDay ?? 100,
+    maxTokensPerDay: input.maxTokensPerDay ?? 1_000_000,
+    taskMaxRequests: input.taskMaxRequests ?? 100,
+    taskMaxTokens: input.taskMaxTokens ?? 1_000_000,
+  });
 }
 
 export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, unknown>): EngineConfig {
@@ -56,15 +112,7 @@ export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, 
     workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
     models: {
       route: [{ providerId: 'free', modelId: 'coderax-small' }],
-      evidence: [
-        {
-          providerId: 'free',
-          modelId: 'coderax-small',
-          toolCalling: true,
-          contextTokens: 32_000,
-          terms: verifiedTerms(),
-        },
-      ],
+      policy: [testProviderPolicy()],
     },
     execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
     ...(overrides ?? {}),
@@ -72,66 +120,92 @@ export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, 
 }
 
 /**
- * A deterministic gateway for tests. It is a test double, not a provider: the
- * production path is `createOpenAiCompatibleGateway`, exercised separately.
+ * A deterministic provider fixture. It reports a zero price list, so the real
+ * router verifies it like any other provider; the fixture never bypasses cost,
+ * context, budget or fallback logic.
  */
-export function fakeGateway(input: {
+export function fakeProvider(input: {
   text?: string;
   beforeReturn?: () => Promise<void>;
-} = {}): ModelGateway & { calls: number } {
-  const gateway = {
-    id: 'test-gateway',
+  modelId?: string;
+} = {}): ProviderAdapter & { calls: number } {
+  const provider = {
+    id: 'free',
+    kind: 'openai' as const,
     calls: 0,
-    complete: async ({ signal }: { signal: AbortSignal }) => {
-      gateway.calls += 1;
+    discover: async () => [
+      {
+        ref: { providerId: 'free', modelId: input.modelId ?? 'coderax-small' },
+        label: 'Free test model',
+        contextTokens: 32_768,
+        maxOutputTokens: 4_096,
+        capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
+        pricing: { prompt: '0', completion: '0', request: '0' },
+      },
+    ],
+    complete: async ({ signal }: ProviderCompletionRequest) => {
+      provider.calls += 1;
       if (input.beforeReturn) await input.beforeReturn();
-      if (signal.aborted) throw new Error('aborted');
+      if (signal.aborted) throw new ProviderError('cancelled', 'aborted', { retryable: false });
       return {
         text: input.text ?? 'A verified result.',
+        toolCalls: [],
         usage: { inputTokens: 11, outputTokens: 13 },
       };
     },
   };
-  return gateway;
+  return provider;
 }
 
-export function failingGateway(failures: number): ModelGateway & { calls: number } {
-  const gateway = {
-    id: 'failing-gateway',
-    calls: 0,
+export function failingProvider(failures: number): ProviderAdapter & { calls: number } {
+  const base = fakeProvider();
+  const provider = {
+    ...base,
     complete: async () => {
-      gateway.calls += 1;
-      if (gateway.calls <= failures) throw new Error('provider unavailable');
-      return { text: 'Recovered result.', usage: { inputTokens: 3, outputTokens: 4 } };
+      provider.calls += 1;
+      if (provider.calls <= failures) {
+        throw new ProviderError('server', 'provider unavailable', { retryable: true });
+      }
+      return { text: 'Recovered result.', toolCalls: [], usage: { inputTokens: 3, outputTokens: 4 } };
     },
   };
-  return gateway;
+  return provider;
 }
 
-export function slowGateway(delayMs: number): ModelGateway & { calls: number } {
-  const gateway = {
-    id: 'slow-gateway',
+export function slowProvider(delayMs: number): ProviderAdapter & { calls: number } {
+  const provider = {
+    ...fakeProvider(),
     calls: 0,
-    complete: ({ signal }: { signal: AbortSignal }) =>
-      new Promise<{ text: string }>((resolve, reject) => {
-        gateway.calls += 1;
-        const timer = setTimeout(() => resolve({ text: 'Slow result.' }), delayMs);
-        timer.unref();
-        signal.addEventListener(
-          'abort',
-          () => {
-            clearTimeout(timer);
-            reject(new Error('aborted'));
-          },
-          { once: true },
-        );
-      }),
+    complete: ({ signal }: ProviderCompletionRequest) =>
+      new Promise<{ text: string; toolCalls: never[]; usage: { inputTokens: number; outputTokens: number } }>(
+        (resolve, reject) => {
+          provider.calls += 1;
+          const timer = setTimeout(
+            () =>
+              resolve({
+                text: 'Slow result.',
+                toolCalls: [],
+                usage: { inputTokens: 2, outputTokens: 2 },
+              }),
+            delayMs,
+          );
+          timer.unref();
+          signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(new ProviderError('cancelled', 'aborted', { retryable: false }));
+            },
+            { once: true },
+          );
+        },
+      ),
   };
-  return gateway;
+  return provider;
 }
 
 export async function startTestApp(options: {
-  gateway?: ModelGateway;
+  provider?: ProviderAdapter;
   config?: Record<string, unknown>;
 } = {}): Promise<{
   app: Application;
@@ -144,7 +218,7 @@ export async function startTestApp(options: {
   const app = await composeApplication({
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    gateway: options.gateway ?? fakeGateway(),
+    providers: [{ adapter: options.provider ?? fakeProvider() }],
   });
   const { url } = await app.start();
   return {
@@ -185,6 +259,7 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     mode: 'cloud',
     objective: 'Do the thing',
     model: { providerId: 'free', modelId: 'coderax-small' },
+    modelPinned: false,
     state: 'queued',
     generation: 1,
     runToken: null,

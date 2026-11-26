@@ -19,7 +19,7 @@ import type { ApplicationService } from '../orchestration/service.js';
 import type { Router } from '../api/router.js';
 import type { ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
-import type { Router as ModelRouter } from '../models/router.js';
+import type { ModelRouter } from '../models/router.js';
 
 /**
  * Dependencies are named, not positional.

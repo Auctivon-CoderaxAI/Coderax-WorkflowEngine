@@ -40,10 +40,10 @@ Status vocabulary:
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
-| 27 | OpenCode transport (Basic auth, session, prompt, abort) | `opencode/adapter.ts` (SDK) | `src/agents/adapters/opencode.ts` (HTTP/SSE, session, abort, cleanup) | Preserved — transport differs; scripted-server verified, not live |
-| 28 | OpenCode protocol mapping | `opencode/protocol.ts` | text parts + SSE deltas | Simplified |
-| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/router.ts` (evidence, quotas, ranked modes) | Strengthened |
-| 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | `src/models/routed.ts` (bounded, free-only, retryable errors only) | Strengthened |
+| 27 | OpenCode transport (SDK, Basic auth, session, prompt, abort) | `opencode/adapter.ts`, `sdk.ts`, `auth.ts` | injected transport only | Missing (review F3) |
+| 28 | OpenCode protocol mapping | `opencode/protocol.ts` | none | Missing |
+| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/router.ts` (discovery, pricing/attestation verification, capability classification, Fast/Auto/Complex ranking) | Preserved and strengthened — paid or unknown cost is refused, not inferred |
+| 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | `src/models/router.ts` (bounded candidates, circuits, quota cooldown) | Preserved — bounded and free-only; no fallback after streamed output |
 | 31 | FreeBuff SDK loading, loopback restriction, context floor | `freebuff/adapter.ts` | injected transport only | Missing (review F3) |
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
 | 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | model-assisted plan → act → observe → reflect loop (`src/agents/native`) | Changed — not the same implementation |
@@ -83,15 +83,16 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
-are closed, migrating a client would remove functionality, which the brief
+capability Coderax has today. Until rows 18, 22, 27, 28, 31, 34, 36, 40, 44, 46 and
+47 are closed, migrating a client would remove functionality, which the brief
 forbids.
 
 Dependency order for closing them:
 
 1. Persistent execution events and replay across restart (row 22), then fenced
    conversation writes (row 18).
-2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
+2. Real OpenCode transport and protocol (rows 27–28), then FreeBuff (31). The
+   provider-independent model router (rows 29–30) is implemented in `src/models`.
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
    and the one that decides whether Coderax Native can replace the LibreChat
    agent stack.

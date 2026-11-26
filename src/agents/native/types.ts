@@ -1,33 +1,16 @@
-import type { ModelRef, RoutingMode, Usage } from '@coderax/contracts';
-import type { AgentHistoryTurn } from '../types.js';
+/**
+ * The gateway port is owned by the model router: an agent names a resolved model
+ * and never reaches a provider URL or key. Re-exported here so the native agent
+ * does not import routing internals.
+ */
+export type {
+  GatewayCompletion,
+  GatewayRequest,
+  GatewayStreamEvent,
+  ModelGateway,
+} from '../../models/types.js';
 
-export type ModelCompletionRequest = {
-  model: ModelRef;
-  system: string;
-  prompt: string;
-  signal: AbortSignal;
-  maxOutputTokens?: number;
-  /** Set by the agent so routing ranks models for the work being done. */
-  routingMode?: RoutingMode;
-  /** Only a tool-capable model may serve an action turn. */
-  requiresTools?: boolean;
-  requiresVision?: boolean;
-  /** The owner whose daily zero-cost budget this call is charged to. */
-  ownerId?: string;
-  /**
-   * The exact tool catalogue text embedded in the prompt. It is counted as
-   * input separately so token accounting cannot omit the largest fixed part of
-   * a Native prompt.
-   */
-  toolSchemaText?: string;
-  /** Ask the provider to stream; usage is folded from the streamed frames. */
-  stream?: boolean;
-};
-
-export type ModelGateway = {
-  id: string;
-  complete: (request: ModelCompletionRequest) => Promise<{ text: string; usage?: Usage }>;
-};
+export type { AgentHistoryTurn } from '../types.js';
 
 export type PlanStep = {
   id: string;
@@ -35,18 +18,18 @@ export type PlanStep = {
 };
 
 /**
- * Planning is a port so Native can use a deterministic planner today and a model
- * planner later without changing the run contract. A plan is data: the engine
- * persists completed step ids, which is what makes resume skip finished work.
+ * Planning is a port so Native can plan deterministically and, when a verified
+ * free model is routable, ask it for a plan with the deterministic result as a
+ * floor. A plan is data: the engine persists completed step ids, which is what
+ * makes resume skip finished work.
  */
 export type Planner = {
   plan: (input: {
     objective: string;
     maxSteps: number;
-    /** Earlier turns, so a model plan sees the same context the run does. */
-    history?: AgentHistoryTurn[];
-    /** Present when a model-assisted plan is possible; its absence is not an error. */
-    complete?: (prompt: string, signal: AbortSignal) => Promise<string>;
+    history?: ReadonlyArray<{ role: 'user' | 'assistant'; text: string }>;
     signal?: AbortSignal;
-  }) => Promise<PlanStep[]> | PlanStep[];
+    /** Supplied only when the caller can afford a model-assisted plan. */
+    complete?: (prompt: string, signal: AbortSignal) => Promise<string>;
+  }) => PlanStep[] | Promise<PlanStep[]>;
 };

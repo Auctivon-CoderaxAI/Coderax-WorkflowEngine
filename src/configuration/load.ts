@@ -120,6 +120,31 @@ export function validateInvariants(config: EngineConfig): string[] {
   if (models.allowPaid !== false) {
     issues.push('models.allowPaid must remain false: Coderax does not use paid models');
   }
+
+  const providerIds = new Set<string>();
+  for (const provider of models.providers) {
+    if (providerIds.has(provider.id)) {
+      issues.push(`models.providers lists ${provider.id} more than once`);
+    }
+    providerIds.add(provider.id);
+  }
+  for (const attestation of models.attestations) {
+    const verifiedAt = Date.parse(attestation.verifiedAt);
+    const expiresAt = Date.parse(attestation.expiresAt);
+    const label = `${attestation.providerId}/${attestation.modelId}`;
+    if (!Number.isFinite(verifiedAt) || !Number.isFinite(expiresAt) || expiresAt <= verifiedAt) {
+      issues.push(`models.attestations for ${label} must expire after they were verified`);
+      continue;
+    }
+    // Provider terms go stale. A record that claims a longer validity than the
+    // verifier's maximum window would be refused at routing time anyway, so it
+    // is a configuration error rather than a silent downgrade.
+    if (expiresAt - verifiedAt > 90 * 24 * 60 * 60 * 1_000) {
+      issues.push(
+        `models.attestations for ${label} must not claim more than 90 days of validity`,
+      );
+    }
+  }
   return issues;
 }
 

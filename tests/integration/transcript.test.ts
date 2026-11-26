@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ModelCompletionRequest } from '../../src/agents/native/types.js';
+import type { ProviderAdapter, ProviderCompletionRequest } from '../../src/models/types.js';
 import { workRunKey } from '../../src/execution/lease.js';
 import { startTestApp, waitFor } from '../helpers.js';
 
@@ -10,17 +10,28 @@ const principal = { ownerId: 'owner-test', isOwner: true as const };
  * A gateway that keeps every prompt it was given, so the test can read what the
  * model actually saw rather than trusting that history was passed along.
  */
-function recordingGateway(): {
-  id: string;
-  prompts: string[];
-  complete: (request: ModelCompletionRequest) => Promise<{ text: string }>;
-} {
+function recordingGateway(): ProviderAdapter & { prompts: string[] } {
   const gateway = {
-    id: 'recording-gateway',
+    id: 'free',
+    kind: 'openai' as const,
     prompts: [] as string[],
-    complete: async (request: ModelCompletionRequest) => {
+    discover: async () => [
+      {
+        ref: { providerId: 'free', modelId: 'recording' },
+        label: 'Recording model',
+        contextTokens: 32_768,
+        maxOutputTokens: 4_096,
+        capabilities: { vision: false, toolCalling: false, reasoning: true, streaming: true },
+        pricing: { prompt: '0', completion: '0' },
+      },
+    ],
+    complete: async (request: ProviderCompletionRequest) => {
       gateway.prompts.push(request.prompt);
-      return { text: `answer-${gateway.prompts.length}` };
+      return {
+        text: `answer-${gateway.prompts.length}`,
+        toolCalls: [],
+        usage: { inputTokens: 5, outputTokens: 5 },
+      };
     },
   };
   return gateway;
@@ -28,7 +39,7 @@ function recordingGateway(): {
 
 test('a follow-up turn is prompted with the earlier exchange', async () => {
   const gateway = recordingGateway();
-  const started = await startTestApp({ gateway });
+  const started = await startTestApp({ provider: gateway });
   try {
     const first = await started.app.service.submitWork(principal, {
       objective: 'First objective',
@@ -102,7 +113,7 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
 
 test('a chat follow-up is prompted with the earlier exchange', async () => {
   const gateway = recordingGateway();
-  const started = await startTestApp({ gateway });
+  const started = await startTestApp({ provider: gateway });
   try {
     const first = await started.app.service.chat(principal, {
       message: 'First question',

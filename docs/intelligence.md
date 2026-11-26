@@ -6,61 +6,80 @@ port, fails closed when its prerequisite is absent, and is covered by a test.
 
 ## Model routing
 
-`src/models/router.ts` is the only module that decides which model serves a
-request, and `src/models/eligibility.ts` is the only module that decides whether
-a model is free. A model is admitted only when:
+`src/models/router.ts` is the one authoritative router, `src/models/verify.ts` the
+one cost verifier and `src/models/budget.ts` the one ledger.
+`src/models/catalog.ts` is a thin projection over the router for `/v1/routing`; it
+holds no ranking or eligibility logic of its own. Provider adapters report facts
+and execute requests; they never decide anything.
 
-- its own record proves zero cost: an HTTPS `terms.source`, an `observedAt` that
-  is not in the future, an `expiresAt` that has not passed within a 90-day
-  window, currency `USD`, and every billed unit (input, output and per call) at
-  exactly `0`;
+A model is admitted only when:
+
+- its own record proves zero cost: a published price list with every billed unit
+  at exactly `0`, **or** an attestation for that exact model that names the
+  account (`accountRef`), the billing boundary, `currency: "USD"`,
+  `spendCapUsd: 0`, a published daily allowance, an HTTPS `evidenceUrl`, and a
+  validity window that is current and no longer than 90 days;
 - the router-derived `costClass` is `free` **and** the verdict is verified — a
   descriptor that says `free` without evidence is refused;
-- the model reports itself available;
-- no provider retry-after cooldown and no open circuit blocks it; and
-- its local request and token quota has not been exhausted.
+- it supports the requested operation (chat, work, native reasoning, multi-agent,
+  memory, RAG, document, multimodal, MCP, external agent) under the provider
+  policy, in the requested data mode;
+- the model reports itself available, no retry-after cooldown or open circuit
+  blocks it, and its local quota has not been exhausted; and
+- the request fits inside the context window with the output ceiling attached.
 
-Unknown pricing is `paid`, not free. A configured route, a working API key or a
-reachable endpoint proves authentication only. When Native is enabled and no
-routed model has verified terms, composition throws a `StartupError` naming each
-refused model and the reason, so the engine cannot start on an unproven route.
+Unknown pricing is `paid`, not free. A configured route, an administrator's pricing
+evidence and a working API key each prove something narrower than free-tier
+eligibility: a route is a preference, evidence is an observation, and a key is
+authentication. A free allowance that sits behind a billing account which can
+charge overage is not free, which is why the spend cap must be exactly zero. When
+Native is enabled and no routed model is verified free, composition throws a
+`StartupError` naming each refused model and the reason, so the engine cannot start
+on an unproven route.
 
 `allowPaid` remains a literal `false`; there is no configuration field that can
 enable it. A requested paid or unpriced model is refused with
-`paid_model_refused`, and an unknown or exhausted model with `model_missing`.
-When nothing eligible remains, routing fails closed with
-`No verified zero-cost model is available…` rather than trying a wider provider.
+`paid_model_refused`; an empty verified-free set is `model_missing`; an exhausted
+day is `budget_exhausted`. When nothing eligible remains, routing fails closed
+rather than trying a wider provider.
 
-Routing modes rank the eligible set:
+Routing modes rank the eligible set (`fast`, `auto`, `complex`), with capability,
+context and preference tie-breaks. A model the owner names is pinned; an
+automatically chosen model may fall back inside the verified-free set, bounded by
+`models.maxFallbacks`, and the task record stores the model that actually served
+it so the fallback is auditable rather than invisible.
 
-| Mode | Weights (coding / reasoning / speed) |
-| --- | --- |
-| `auto` | 0.35 / 0.35 / 0.30 |
-| `fast` | 0.20 / 0.10 / 0.70 |
-| `complex` | 0.40 / 0.45 / 0.15 |
+### Durable budget accounting
 
-A tool-capable model receives a 0.02 tie-break bonus, then context length, then
-the model key break ties deterministically. `GET /v1/routing` reports the ranked
-route and each provider's recorded evidence, quota and local usage.
+The ledger reserves one request slot and the estimated input plus output-ceiling
+tokens before dispatch, in a per-owner UTC-day window and a per-task window. The
+durable store (`src/persistence/budgets.ts`) admits a request only when a single
+conditional `findOneAndUpdate` succeeds, so concurrent replicas cannot both take
+the last slot; the updated document is the proof of admission, not a read-then-write
+check.
 
-Budget reservations are durable. `src/models/budget.ts` reserves one request and
-the estimated input tokens before a call is dispatched, and
-`src/persistence/budgets.ts` implements the window atomically — a conditional
-`findOneAndUpdate` with `$inc`, so two replicas racing for the last slot cannot
-both win. A settlement replaces the reservation with the usage the provider
-reported; a failed call releases it instead of charging it. Input accounting
-includes the system prompt, the user prompt and the serialized tool catalogue
-(`src/models/tokens.ts`); a provider that reports no usage is still charged the
-estimate, and streamed completions fold their usage frame before settlement.
+Settlement policy is asymmetric on purpose:
 
-`src/models/circuit.ts` opens a per-model and per-provider circuit after a
-bounded number of consecutive failures and keeps it open for the provider's own
-`retry-after` window, clamped locally. `src/models/routed.ts` implements the
-gateway over the router. A retryable
-provider failure (HTTP 408/425/429/5xx, timeout, connection reset) falls back to
-the next approved free model, bounded by `models.maxFallbacks`. Authentication,
-validation, 404/422 and abort failures never fall back, because retrying them
-elsewhere would hide the real fault.
+- a call that **may have reached the provider** is charged the reserved amount
+  (`release(id, { dispatched: true })`), because a timeout, a broken stream or a
+  missing usage report never proves the provider did no work;
+- a call that never dispatched is refunded in full;
+- settlement and release are idempotent per reservation, so a duplicate report
+  cannot double-charge;
+- an abandoned reservation expires and is swept by the next admission on that
+  window, refunding exactly once;
+- actual usage above the estimate is charged as reported, and the window refuses
+  further requests once it is over its ceiling.
+
+`src/models/circuit.ts` opens a per-model and per-provider circuit after a bounded
+number of consecutive failures and keeps it open for the provider's own
+`retry-after` window, clamped locally. A retryable provider failure (HTTP
+408/425/429/5xx, timeout, connection reset) falls back to the next approved free
+model; authentication, validation, 404/422 and abort failures never fall back,
+because retrying them elsewhere would hide the real fault.
+
+Full detail: [`docs/model-routing.md`](model-routing.md). The distributed
+guarantees are exercised against a driver fake, not a live replica set.
 
 ## Native loop
 

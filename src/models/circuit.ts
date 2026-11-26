@@ -1,110 +1,95 @@
+import type { CircuitState } from './types.js';
+
 /**
- * A circuit breaker is what stops a failing free provider from being retried
- * forever. It is intentionally per key (provider, or provider plus model) so one
- * broken model does not remove a provider's other verified-free models.
+ * A circuit per model and per provider. Three consecutive failures open it; one
+ * probe is admitted after the cooldown. A half-open probe that fails reopens the
+ * circuit instead of letting every request through.
  *
- * `closed` admits traffic. `open` refuses it until a cooldown ends. `half_open`
- * admits exactly one probe: a success closes the circuit, a failure re-opens it
- * for another cooldown. The state is derived from the clock, so no timer is
- * needed and a process restart simply starts closed again.
+ * An admission token scopes cleanup and outcomes to the attempt that obtained
+ * them. A request admitted while the circuit was closed cannot close, reopen or
+ * release a probe that a later admission owns.
  */
-
-export type BreakerState = 'closed' | 'open' | 'half_open';
-
-type Breaker = {
-  failures: number;
-  openedAt: number | null;
-  openedUntil: number | null;
-  probing: boolean;
+export type CircuitAdmission = {
+  /** True only for the single half-open probe. */
+  readonly probe: boolean;
+  readonly epoch: number;
 };
 
-export type CircuitBreakers = {
-  allow: (key: string, at: Date) => boolean;
-  success: (key: string) => void;
-  failure: (key: string, at: Date, retryAfterMs?: number) => void;
-  state: (key: string, at: Date) => BreakerState;
-  snapshot: (at: Date) => Array<{ key: string; state: BreakerState; failures: number }>;
+export type Circuit = {
+  allow: (now: Date) => CircuitAdmission | null;
+  success: (admission?: CircuitAdmission) => void;
+  failure: (now: Date, admission?: CircuitAdmission) => void;
+  /** Release a half-open probe that never produced an outcome. */
+  abandon: (admission?: CircuitAdmission) => void;
+  state: (now: Date) => CircuitState;
+  retryAfterMs: (now: Date) => number;
 };
 
-export function createCircuitBreakers(input?: {
-  failureThreshold?: number;
-  cooldownMs?: number;
-  maxCooldownMs?: number;
-}): CircuitBreakers {
-  const threshold = Math.max(1, input?.failureThreshold ?? 3);
-  const cooldownMs = Math.max(1, input?.cooldownMs ?? 60_000);
-  const maxCooldownMs = Math.max(cooldownMs, input?.maxCooldownMs ?? 10 * 60_000);
-  const breakers = new Map<string, Breaker>();
+export function createCircuit(input: {
+  failureThreshold: number;
+  cooldownMs: number;
+}): Circuit {
+  let failures = 0;
+  let openedAt: number | null = null;
+  let probeEpoch: number | null = null;
+  let epoch = 0;
 
-  function breaker(key: string): Breaker {
-    const existing = breakers.get(key);
-    if (existing) return existing;
-    const created: Breaker = { failures: 0, openedAt: null, openedUntil: null, probing: false };
-    breakers.set(key, created);
-    return created;
+  function state(now: Date): CircuitState {
+    if (openedAt === null) return 'closed';
+    if (now.getTime() - openedAt >= input.cooldownMs) return 'half_open';
+    return 'open';
   }
 
-  function state(key: string, at: Date): BreakerState {
-    const entry = breaker(key);
-    if (entry.openedUntil === null) return 'closed';
-    if (at.getTime() < entry.openedUntil) return 'open';
-    return 'half_open';
+  function ownsProbe(admission?: CircuitAdmission): boolean {
+    return (
+      admission?.probe === true &&
+      probeEpoch !== null &&
+      admission.epoch === probeEpoch
+    );
   }
 
   return {
-    allow: (key, at) => {
-      const current = state(key, at);
-      if (current === 'closed') return true;
-      if (current === 'open') return false;
-      const entry = breaker(key);
-      // One probe at a time: a second caller waits for the first result.
-      if (entry.probing) return false;
-      entry.probing = true;
-      return true;
+    allow: (now) => {
+      const current = state(now);
+      if (current === 'closed') return { probe: false, epoch: ++epoch };
+      if (current === 'open') return null;
+      if (probeEpoch !== null) return null;
+      const admitted = ++epoch;
+      probeEpoch = admitted;
+      return { probe: true, epoch: admitted };
     },
-    success: (key) => {
-      breakers.set(key, { failures: 0, openedAt: null, openedUntil: null, probing: false });
+    success: (admission) => {
+      if (openedAt === null) {
+        failures = 0;
+        return;
+      }
+      // Only the current half-open probe can recover an open circuit.
+      if (!ownsProbe(admission) && admission !== undefined) return;
+      failures = 0;
+      openedAt = null;
+      probeEpoch = null;
     },
-    failure: (key, at, retryAfterMs) => {
-      const entry = breaker(key);
-      entry.probing = false;
-      entry.failures += 1;
-      const wasOpen = state(key, at) === 'half_open';
-      if (!wasOpen && entry.failures < threshold) return;
-      // A provider that states when to retry decides the cooldown, bounded by
-      // the local maximum so a hostile header cannot park a provider forever.
-      const requested =
-        typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
-          ? retryAfterMs
-          : cooldownMs;
-      const duration = Math.min(Math.max(requested, cooldownMs), maxCooldownMs);
-      entry.openedAt = at.getTime();
-      entry.openedUntil = at.getTime() + duration;
+    failure: (now, admission) => {
+      // A closed-state attempt that returns after the circuit opened is stale;
+      // its failure must not reopen or extend the newer circuit. A probe from an
+      // older cooldown is stale for the same reason.
+      if (admission?.probe === false && openedAt !== null) return;
+      if (admission?.probe === true && !ownsProbe(admission)) return;
+      if (ownsProbe(admission) || admission === undefined) probeEpoch = null;
+      failures += 1;
+      if (failures >= input.failureThreshold) {
+        openedAt = now.getTime();
+      }
+    },
+    abandon: (admission) => {
+      // A closed-state admission must never release someone else's probe.
+      if (admission !== undefined && !ownsProbe(admission)) return;
+      probeEpoch = null;
     },
     state,
-    snapshot: (at) =>
-      [...breakers.entries()].map(([key]) => ({
-        key,
-        state: state(key, at),
-        failures: breaker(key).failures,
-      })),
+    retryAfterMs: (now) => {
+      if (openedAt === null) return 0;
+      return Math.max(0, openedAt + input.cooldownMs - now.getTime());
+    },
   };
-}
-
-/**
- * A provider may state its own retry window. Prefer the standards-shaped
- * `retry-after` in seconds, then the millisecond form some gateways use, then
- * the reset epoch in `x-ratelimit-reset-requests`. Anything unparseable is
- * ignored rather than guessed.
- */
-export function retryAfterMs(headers: { get: (name: string) => string | null }): number | undefined {
-  const seconds = Number(headers.get('retry-after'));
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
-  const milliseconds = Number(headers.get('retry-after-ms'));
-  if (Number.isFinite(milliseconds) && milliseconds >= 0) return Math.round(milliseconds);
-  const reset = headers.get('x-ratelimit-reset-requests');
-  if (reset && /^\d+(?:\.\d+)?s$/.test(reset)) {
-    return Math.round(Number(reset.slice(0, -1)) * 1000);
-  }
-  return undefined;
 }

@@ -42,7 +42,7 @@ import type {
 } from '../agents/types.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
-import type { Router as ModelRouter } from '../models/router.js';
+import type { ModelRouter } from '../models/router.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
@@ -58,6 +58,8 @@ import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
+import { estimateTokens } from '../models/verify.js';
+import { inferRoutingMode } from '../models/router.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -122,7 +124,7 @@ export type ApplicationService = {
   ) => Promise<ServiceResult<Conversation>>;
   memory: (principal: Principal, mode: DataMode) => Promise<MemoryList>;
   tools: () => ToolList;
-  routing: (mode: RoutingMode) => RoutingReport;
+  routing: (mode: RoutingMode) => Promise<RoutingReport>;
   ingestKnowledge: (
     principal: Principal,
     body: KnowledgeIngestRequest,
@@ -415,6 +417,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               summary: outcome.summary.slice(0, 20_000),
               artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
             },
+            // Record what served, not what the plan preferred: a fallback within
+            // the verified-free route is durable evidence the owner can audit.
+            ...(outcome.model ? { model: outcome.model } : {}),
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           }
         : outcome.kind === 'cancelled'
@@ -455,7 +460,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (outcome.kind === 'completed') {
         publish(settled, 'task.completed', {
           summary: outcome.summary.slice(0, 20_000),
-          ...(settled.model ? { model: settled.model } : {}),
+          ...((outcome.model ?? settled.model) ? { model: outcome.model ?? settled.model } : {}),
           ...(outcome.usage ? { usage: outcome.usage } : {}),
         });
       } else if (outcome.kind === 'cancelled') {
@@ -524,8 +529,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
 
     const model = task.model
-      ? deps.models.resolve(task.model, task.mode)
-      : deps.models.resolve(null, task.mode);
+      ? deps.models.resolve(task.model, task.mode, 'work')
+      : deps.models.resolve(null, task.mode, 'work');
     if (!model.ok) {
       await settle(task, token, {
         kind: 'failed',
@@ -666,7 +671,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           objective: task.objective,
           history,
           model: model.value.ref,
+          routing: inferRoutingMode({
+            objective: task.objective,
+            ...(task.agent === 'coderax' ? { toolCount: 1 } : {}),
+          }),
+          allowFallback: task.modelPinned !== true,
           mode: task.mode,
+          operation: 'work',
           workspaceRoot: workspace.value.root,
           maxSteps: deps.config.engines.native.maxSteps,
           budget: task.budget,
@@ -698,6 +709,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           emitText(safeText);
           await reports;
           const { ownershipLost, outcome } = current();
+          await chargeExternal(started.task, outcome);
           if (controllers.get(taskId) !== controller || ownershipLost) return;
           await settle(started.task, token,
             outcome.kind === 'completed' ? { ...outcome, summary: redactContent(outcome.summary) }
@@ -749,13 +761,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
+  /**
+   * Charge an external engine. Native passes through the router, which reserves
+   * and settles atomically; an external engine bypasses it, so the service
+   * charges the owner day here. A failed dispatch is still charged one request
+   * and its prompt estimate because the engine may already have consumed it.
+   */
+  const chargeExternal = async (
+    task: TaskRecord,
+    outcome: RunOutcome,
+  ): Promise<void> => {
+    if (task.engine === 'native') return;
+    const usage =
+      outcome.kind === 'completed' && outcome.usage
+        ? outcome.usage
+        : { inputTokens: estimateTokens([task.objective]) };
+    await deps.budget.charge(task.ownerId, usage, deps.clock.now());
+  };
+
   const service: ApplicationService = {
     health: () => deps.health.report(),
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
     tools: () => ({ tools: deps.tools.list() }),
-    routing: (mode) => deps.modelRouter.report(mode),
+    routing: (mode) => deps.models.report(mode),
     ingestKnowledge: (principal, body) =>
       deps.knowledge.ingest({
         ownerId: principal.ownerId,
@@ -772,11 +802,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
 
-      const model = deps.models.resolve(request.model, request.mode);
+      const model = deps.models.resolve(request.model, request.mode, 'work');
       if (!model.ok) return model;
 
-      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
-      if (!reservation.allowed) {
+      // Admission only: the router reserves the real request and token
+      // allowance atomically at dispatch, so a queued task cannot hold quota it
+      // may never use.
+      if (!(await deps.budget.available(principal.ownerId, deps.clock.now()))) {
         return fail(
           'budget_exhausted',
           'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -814,6 +846,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         mode: request.mode,
         objective: request.objective,
         model: model.value.ref,
+        // The resolved model is recorded either way, but only an owner-named
+        // model is pinned. An automatic route may use the router's bounded
+        // verified-free fallback, which is what makes a provider outage
+        // survivable without ever widening to a paid route.
+        modelPinned: request.model !== undefined,
         state: 'queued',
         generation: 1,
         runToken: null,
@@ -1108,11 +1145,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model, request.mode);
+      const model = deps.models.resolve(request.model, request.mode, 'chat');
       if (!model.ok) return model;
 
-      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
-      if (!reservation.allowed) {
+      if (!(await deps.budget.available(principal.ownerId, deps.clock.now()))) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
       const workspace = await resolveEngineWorkspace({
@@ -1151,7 +1187,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           objective: request.message,
           history,
           model: model.value.ref,
+          routing: inferRoutingMode({ objective: request.message }),
+          allowFallback: request.model === undefined,
           mode: request.mode,
+          operation: 'chat',
           workspaceRoot: workspace.value.root,
           maxSteps: 1,
           budget: null,
@@ -1169,7 +1208,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome.retryable,
         );
       }
-      await deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+      // Native was already reserved and settled by the router; an external
+      // engine bypasses it, so its usage is charged here against the owner day.
+      if (adapter.value.engine !== 'native') {
+        await deps.budget.charge(
+          principal.ownerId,
+          (outcome.ok ? outcome.usage : undefined) ?? {
+            inputTokens: estimateTokens([request.message]),
+          },
+          deps.clock.now(),
+        );
+      }
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ChatFrame } from '@coderax/contracts';
 import { CoderaxClient } from '@coderax/sdk';
-import { OWNER_TOKEN, baseConfig, createWorkspaces, fakeGateway } from '../helpers.js';
+import { OWNER_TOKEN, baseConfig, createWorkspaces, fakeProvider } from '../helpers.js';
 import { composeApplication } from '../../src/bootstrap/compose.js';
 
 /**
@@ -20,7 +20,7 @@ async function startChatApp(): Promise<{
   const app = await composeApplication({
     config: baseConfig(workspace),
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    gateway: fakeGateway({ text: 'Streamed answer.' }),
+    providers: [{ adapter: fakeProvider({ text: 'Streamed answer.' }) }],
   });
   const { url } = await app.start();
   return {

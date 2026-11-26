@@ -30,9 +30,11 @@ The engine refuses to start until all of these pass, and reports each failure:
    `CODERAX_OWNER_TOKEN_ENV`.
 2. Two absolute, existing, non-overlapping workspace directories
    (`workspaces.privateRoot`, `workspaces.cloudRoot`).
-3. A verified zero-cost model route (`models.route`), and either a configured
-   inference endpoint or an injected external transport. With neither, readiness is
-   false and startup is blocked — intentionally.
+3. A verified zero-cost model route. `models.route` is only a preference order:
+   the router must discover at least one currently free model from provider pricing
+   or an unexpired exact-model attestation. With no such model, readiness is false
+   and startup is blocked — intentionally. A provider credential alone proves
+   authentication, never price.
 4. At least one registered handler per documented operation (automatic).
 5. A heartbeat interval at most one third of the lease TTL (validated).
 
@@ -40,9 +42,11 @@ The engine refuses to start until all of these pass, and reports each failure:
 
 1. Build on the host: `npm ci && npm run verify`.
 2. Place a JSON configuration file containing no secrets (owner id, workspace
-   roots, model route, engine defaults).
-3. Provide `CODERAX_OWNER_TOKEN` and `CODERAX_INFERENCE_KEY` through the host's
-   secret mechanism, never the repository.
+   roots, model route, providers by variable name, attestations, engine defaults).
+3. Provide `CODERAX_OWNER_TOKEN` and the provider key variables
+   (`OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY` or a
+   configured `apiKeyEnv`) through the host's secret mechanism, never the
+   repository.
 4. Bind loopback and expose the port only to the existing reverse proxy; the engine
    is never public-facing.
 5. Point the Worker's `/v1` (or a dedicated engine host) at the engine, keeping the
