@@ -767,6 +767,18 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const current = await deps.artifacts.get(key);
           if (!current) return fail('not_found', 'That artifact does not exist for this owner.');
+          // Optimistic concurrency: a caller that read version N may append only
+          // while the artifact is still at N, so a concurrent edit is refused
+          // instead of being silently replaced.
+          if (
+            request.expectedVersion !== undefined &&
+            current.version !== request.expectedVersion
+          ) {
+            return fail(
+              'conflict',
+              'That artifact changed after it was read; fetch the current version and retry.',
+            );
+          }
 
           const prepared = await prepare({
             filename: request.filename,
