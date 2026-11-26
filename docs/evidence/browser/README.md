@@ -49,6 +49,12 @@ for this capture are time-limited, so the report was assembled from a desktop
 phase, a mobile phase and a timer phase; `capture.phases` records that. A local
 run does all three in one process.
 
+The exact HUD wrap, and therefore the canvas height, depends on the installed
+monospace font metrics. The recorded numbers come from the cloud Chromium that
+produced this report; a local Chromium with different fonts can be a few pixels
+taller or shorter. What the fix guarantees is `bitmap = round(CSS box × device
+scale)`, and the script asserts that on every run.
+
 ## Owner-only access
 
 | Request | Result |
