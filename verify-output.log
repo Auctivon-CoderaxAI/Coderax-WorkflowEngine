@@ -1,0 +1,9 @@
+
+> coderax-workflow-engine@0.1.0 verify
+> npm run build && node --test "dist/tests/**/*.test.js" && node dist/scripts/check-openapi.js
+
+
+> coderax-workflow-engine@0.1.0 build
+> tsc -b
+
+src/artifacts/types.ts(1,1): error TS6133: 'createHash' is declared but its value is never read.

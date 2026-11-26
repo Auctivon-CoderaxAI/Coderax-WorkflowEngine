@@ -5634,8 +5634,7 @@
                         "format": {
                           "type": "string",
                           "enum": [
-                            "document.json",
-                            "project.json"
+                            "document.json"
                           ]
                         }
                       },
@@ -5643,6 +5642,143 @@
                         "artifactId",
                         "version",
                         "format"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "project": {
+                      "type": "object",
+                      "properties": {
+                        "projectId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "manifest": {
+                          "type": "object",
+                          "properties": {
+                            "projectId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "mode": {
+                              "type": "string",
+                              "enum": [
+                                "private",
+                                "cloud"
+                              ]
+                            },
+                            "files": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "relativePath": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 1024
+                                  },
+                                  "artifactId": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128
+                                  },
+                                  "version": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0
+                                  },
+                                  "sha256": {
+                                    "type": "string"
+                                  },
+                                  "bytes": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "mediaType": {
+                                    "type": "string",
+                                    "enum": [
+                                      "text/plain",
+                                      "text/markdown",
+                                      "text/csv",
+                                      "text/tab-separated-values",
+                                      "application/json",
+                                      "application/pdf",
+                                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                      "application/vnd.oasis.opendocument.text",
+                                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                      "application/vnd.oasis.opendocument.spreadsheet",
+                                      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                      "application/vnd.oasis.opendocument.presentation",
+                                      "image/png",
+                                      "image/jpeg",
+                                      "image/gif",
+                                      "image/webp",
+                                      "audio/mpeg",
+                                      "audio/wav",
+                                      "audio/ogg",
+                                      "audio/flac",
+                                      "audio/mp4",
+                                      "video/mp4",
+                                      "video/webm",
+                                      "video/ogg",
+                                      "video/quicktime"
+                                    ]
+                                  },
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "document",
+                                      "pdf",
+                                      "spreadsheet",
+                                      "presentation",
+                                      "image",
+                                      "audio",
+                                      "video",
+                                      "source",
+                                      "project",
+                                      "game",
+                                      "visualization",
+                                      "execution",
+                                      "data",
+                                      "software",
+                                      "dataset",
+                                      "other"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "relativePath",
+                                  "artifactId",
+                                  "version",
+                                  "sha256",
+                                  "bytes",
+                                  "mediaType",
+                                  "kind"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "digest": {
+                              "type": "string"
+                            },
+                            "generatedAt": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "projectId",
+                            "mode",
+                            "files",
+                            "digest",
+                            "generatedAt"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "projectId",
+                        "manifest"
                       ],
                       "additionalProperties": false
                     },
@@ -7398,6 +7534,11 @@
                       "entry": {
                         "type": "string",
                         "maxLength": 300
+                      },
+                      "projectId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
                       }
                     },
                     "required": [

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import type {
   ArtifactKind,
   ArtifactMediaType,
@@ -143,17 +142,3 @@ export function slugOf(value: string, fallback = 'deliverable'): string {
   return slug.length > 0 ? slug : fallback;
 }
 
-/**
- * Flattens a project-relative path into an artifact file name and keeps it
- * inside the store's 200-character limit without losing uniqueness.
- */
-export function flatFilename(input: { base: string; path?: string; extension: string }): string {
-  const suffix = input.path ? input.path.split('/').filter(Boolean).join('_') : '';
-  const stem = suffix.length > 0 ? `${input.base}__${suffix}` : input.base;
-  const safe = stem.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^[^A-Za-z0-9]+/, '');
-  const extension = input.extension.replace(/^\./, '');
-  const candidate = `${safe}.${extension}`;
-  if (candidate.length <= 200) return candidate;
-  const tail = createHash('sha256').update(safe).digest('hex').slice(0, 10);
-  return `${safe.slice(0, 200 - extension.length - 12)}_${tail}.${extension}`;
-}

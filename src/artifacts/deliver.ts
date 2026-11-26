@@ -194,6 +194,15 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
         return produced;
       }
 
+      // A generated project needs a project to belong to: the one the request
+      // names, the one the caller associated, or a new one for this deliverable.
+      const projectId =
+        normalised.kind === 'software'
+          ? (normalised.projectId ??
+            options.projectId ??
+            `proj_${deps.ids.receipt().replace(/^rcpt_/, '')}`)
+          : options.projectId;
+
       const persisted = await persistProduced({
         artifacts: deps.artifacts,
         principal,
@@ -202,7 +211,7 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
         note: `deliverable:${normalised.kind}`,
         ...(options.conversationId ? { conversationId: options.conversationId } : {}),
         ...(options.taskId ? { taskId: options.taskId } : {}),
-        ...(options.projectId ? { projectId: options.projectId } : {}),
+        ...(projectId ? { projectId } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
       });
       if (!persisted.ok) return persisted;
@@ -226,6 +235,7 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
         verification: { ok: true, checks: produced.value.checks },
         receipt: { receiptId: receipt.receipt, at: receipt.at },
         ...(persisted.value.source ? { source: persisted.value.source } : {}),
+        ...(persisted.value.project ? { project: persisted.value.project } : {}),
         ...(produced.value.analysis ? { analysis: produced.value.analysis } : {}),
       });
     } catch (error) {

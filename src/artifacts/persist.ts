@@ -1,12 +1,11 @@
 import {
   DocumentSourceArtifact,
-  ProjectManifest,
   MAX_ARTIFACT_BYTES,
   type ArtifactDescriptor,
   type DataMode,
+  type DeliverableProject,
   type DeliverableSource,
   type DocumentFormat,
-  type ProjectManifestEntry,
 } from '@coderax/contracts';
 import { readFile } from 'node:fs/promises';
 import type { ArtifactService } from './service.js';
@@ -15,6 +14,7 @@ import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import type { ProducedDeliverable, StagedArtifact } from './types.js';
 import { digestOf } from './file.js';
+import { createArtifactTreeWriter } from './tree.js';
 
 /**
  * The single bridge between generation and the durable artifact service.
@@ -42,6 +42,7 @@ export type PersistInput = {
 export type PersistedDeliverable = {
   descriptors: ArtifactDescriptor[];
   source?: DeliverableSource;
+  project?: DeliverableProject;
 };
 
 type Stored = {
@@ -155,72 +156,76 @@ export async function persistProduced(
     await rollback();
     return outputResult;
   }
-  const partResult = await storeAll(parts);
-  if (!partResult.ok) {
-    await rollback();
-    return partResult;
+  if (!input.produced.project) {
+    const partResult = await storeAll(parts);
+    if (!partResult.ok) {
+      await rollback();
+      return partResult;
+    }
   }
 
   let source: DeliverableSource | undefined;
 
+  let project: DeliverableProject | undefined;
+  const treeDescriptors: ArtifactDescriptor[] = [];
+
   if (input.produced.project) {
-    const project = input.produced.project;
-    const entries: ProjectManifestEntry[] = [];
-    for (const entry of input.produced.files) {
-      if (!entry.projectPath) continue;
-      const match = stored.find((candidate) => candidate.staged.filename === entry.filename);
-      if (!match) continue;
-      entries.push({
-        path: entry.projectPath,
-        sha256: match.descriptor.sha256,
-        artifactId: match.descriptor.artifactId,
-        version: match.descriptor.version,
-        bytes: match.descriptor.bytes,
-        mediaType: match.descriptor.mediaType,
+    if (!input.projectId) {
+      await rollback();
+      return fail(
+        'validation_failed',
+        'A generated project must name the projectId its files belong to.',
+      );
+    }
+    const files = [];
+    for (const file of parts) {
+      let content: Buffer;
+      try {
+        content = await readFile(file.absolute);
+      } catch {
+        await rollback();
+        return fail('storage_unavailable', 'A staged file disappeared before it could be stored.');
+      }
+      if (content.length !== file.bytes || digestOf(content) !== file.sha256) {
+        await rollback();
+        return fail(
+          'internal_error',
+          'A staged file did not match the digest recorded when it was verified.',
+        );
+      }
+      files.push({
+        relativePath: file.projectPath ?? file.filename,
+        mediaType: file.mediaType,
+        kind: file.kind,
+        content,
+        note: input.note.slice(0, 500),
       });
     }
-    const manifest = ProjectManifest.safeParse({
-      version: 1,
-      name: project.name,
-      entry: project.entry,
-      files: entries,
-    });
-    if (!manifest.success || entries.length === 0) {
+    // The store owns tree identity: it validates the whole batch, reuses the
+    // artifact that already holds a path, and derives the manifest from rows.
+    const written = await createArtifactTreeWriter({ artifacts: input.artifacts }).persist(
+      input.principal,
+      {
+        projectId: input.projectId,
+        mode: input.mode,
+        files,
+        ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+      },
+    );
+    if (!written.ok) {
       await rollback();
-      return fail('internal_error', 'The generated project manifest is not valid.');
+      return written;
     }
-    const manifestFile: StagedArtifact = {
-      filename: `${project.name}.project.json`,
-      absolute: '',
-      bytes: Buffer.byteLength(JSON.stringify(manifest.data), 'utf8'),
-      sha256: digestOf(JSON.stringify(manifest.data)),
-      kind: 'source',
-      mediaType: 'application/json',
-      title: `${project.name} project manifest`,
-      role: 'source',
-    };
-    // Written through the same store path, from memory rather than staging.
-    const uploaded = await input.artifacts.upload(input.principal, {
-      filename: manifestFile.filename,
-      mediaType: 'application/json',
-      contentBase64: Buffer.from(JSON.stringify(manifest.data), 'utf8').toString('base64'),
-      sha256: manifestFile.sha256,
-      kind: 'source',
-      mode: input.mode,
-      note: input.note.slice(0, 500),
-      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
-      ...(input.taskId ? { taskId: input.taskId } : {}),
-    });
-    if (!uploaded.ok) {
-      await rollback();
-      return uploaded;
+    for (const entry of written.value.manifest.files) {
+      const descriptor = await input.artifacts.get(input.principal, entry.artifactId, input.mode);
+      if (!descriptor.ok) {
+        await rollback();
+        return descriptor;
+      }
+      treeDescriptors.push(descriptor.value);
     }
-    stored.push({ staged: manifestFile, descriptor: uploaded.value.artifact, created: true });
-    source = {
-      artifactId: uploaded.value.artifact.artifactId,
-      version: uploaded.value.artifact.version,
-      format: 'project.json',
-    };
+    project = { projectId: written.value.projectId, manifest: written.value.manifest };
   }
 
   if (input.produced.document) {
@@ -329,7 +334,8 @@ export async function persistProduced(
   }
 
   return ok({
-    descriptors: stored.map((entry) => entry.descriptor),
+    descriptors: [...stored.map((entry) => entry.descriptor), ...treeDescriptors],
     ...(source ? { source } : {}),
+    ...(project ? { project } : {}),
   });
 }

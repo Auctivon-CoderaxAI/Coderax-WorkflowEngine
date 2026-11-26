@@ -321,7 +321,7 @@ test('a TSV dataset is ingested with tab delimiters', async () => {
   assert.equal(result.value.produced.analysis?.profile.columns, 2);
 });
 
-test('a software tree is flattened into unique artifact names and parsed, never executed', async () => {
+test('a software tree keeps its relative paths and is parsed, never executed', async () => {
   const result = await produce({
     kind: 'software',
     name: 'demo',
@@ -334,13 +334,15 @@ test('a software tree is flattened into unique artifact names and parsed, never 
   const { produced, bytes } = result.value;
   assert.ok(produced.project);
   assert.equal(produced.project?.verification.executed, false);
-  const names = produced.files.map((file) => file.filename);
-  assert.equal(new Set(names.map((name) => name.toLowerCase())).size, names.length);
-  for (const name of names) {
-    assert.ok(!name.includes('/'), `${name} must be flat`);
-    assert.ok(name.length <= 200);
+  for (const file of produced.files) {
+    assert.ok(!file.filename.includes('/'), `${file.filename} must be a leaf name`);
+    assert.equal(
+      file.projectPath?.split('/').at(-1),
+      file.filename,
+      'the store requires the tree path basename to equal the file name',
+    );
+    assert.ok(!file.projectPath?.split('/').includes('..'));
   }
-  assert.ok(produced.files.every((file) => file.projectPath), 'each file keeps its project path');
   assert.ok([...bytes.values()].some((body) => body.toString().includes('export function')));
   assert.ok(produced.checks.some((check) => check.name === 'entry' && check.ok));
 });

@@ -24,7 +24,7 @@ metadata of its own and no capability list.
 | Ref | Commit |
 | --- | --- |
 | `main` (base) | `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd` |
-| `feat/durable-artifacts` (branch base) | `bf2e9b292257cae1247bd1df8f26630c2691205a` |
+| `feat/durable-artifacts` (branch base) | `8eceaad36c0eb433aafd919e38ac893a2f331e76` |
 | `feat/artifact-intelligence` (recovery baseline) | `c9bac16b0bd78252d39282853bd9ef842b8f228c` |
 | `feat/multimodal-creative-intelligence` (not merged) | `c0cfa993ef2d890b7abf4e2d33506c9f34214c85` |
 | `feat/native-reasoning-planner` (PR #3) | `90b87db7832cd948e801e01c3cf9ce97409bb068` |
@@ -32,11 +32,11 @@ metadata of its own and no capability list.
 | `feat/zero-cost-model-router` (PR #4) | `b6e002bc11c4a402c04d652681f75744cf428d65` |
 | `feat/execution-supervisor` (PR #5) | `13d4b4f7796f819e4e58bd18006efc4970929e6e` |
 
-The integration branch is stacked on `feat/durable-artifacts` at `bf2e9b2`,
-because that branch owns persistence. It was first built on `fd5edef` and
-rebased after the durable owner added validated tree paths and the `software`,
-`dataset` and `other` kinds; those primitives are now used directly instead of
-the manifest-only workaround described below. It does not merge PRs #2–#5: each of those
+The integration branch is stacked on `feat/durable-artifacts` at `8eceaad`,
+because that branch owns persistence. It was first built on `fd5edef`, rebased
+once for validated tree paths and the `software`/`dataset` kinds, and rebased
+again for the durable project manifest, restore operation and generator tree
+adapter; all three are now the only implementation used here. It does not merge PRs #2–#5: each of those
 changes the planner, router, permissions or supervisor this branch consumes
 through an existing port rather than duplicating. Merging them is an owner
 decision and is listed as outstanding.
@@ -53,16 +53,17 @@ decision and is listed as outstanding.
    through `ArtifactService`, and a deliverable is reported as created only
    after the service returned descriptors. Staging is removed in a `finally`,
    and a startup sweep removes directories a crashed process left behind.
-3. **Software source trees.** The durable store models the tree itself:
-   `ArtifactDescriptor.relativePath` is a validated, metadata-only path whose
-   basename must equal `filename`, and nothing is ever opened from it. Each
-   generated source file is stored with `kind: 'software'` and its real path, so
-   a project keeps its structure without an archive and without weakening the
-   flat-name protections. A `<name>.project.json` artifact (`ProjectManifest`,
-   version 1) remains as the index a client reads for the entry point and the
-   per-file digests. Duplicate normalized tree paths are refused before a single
-   upload happens; identical basenames in different directories are legitimate
-   because the path, not the name, identifies the file.
+3. **Software source trees.** Generation writes files into staging, then hands
+   the whole batch to the durable adapter, `createArtifactTreeWriter`
+   (`src/artifacts/tree.ts`). The adapter validates every relative path and
+   media type before writing, refuses duplicate, case-folded and
+   file-versus-directory path conflicts, maps a path that already exists in the
+   project to a new version of the same artifact, and uploads new paths with
+   the project, conversation and task associations. There is **no manifest
+   artifact**: the store derives `ArtifactProjectManifest` from the rows that
+   carry the `projectId`, so the tree has one authority and a client reads it
+   with `GET /v1/artifacts/manifest`. A software request may name an existing
+   `projectId` to extend that tree; otherwise the deliverable opens one.
 4. **Cross-device editing.** `DocumentRequest.base` is
    `{ artifactId, mode, expectedVersion? }`. The engine downloads that version
    from the durable service into staging, parses it as a
@@ -115,7 +116,7 @@ artifact that can be revised by id (`document.json` or `project.json`);
 At the branch head, `npm run verify`:
 
 - `tsc -b` across contracts, SDK and engine;
-- `node --test "dist/tests/**/*.test.js"` — 175 tests, 175 pass, 0 fail,
+- `node --test "dist/tests/**/*.test.js"` — 185 tests, 185 pass, 0 fail,
   **0 skipped**, against a real `mongod` (7.0.14). `mongodb-memory-server` is now
   a dev dependency, so the real-Mongo durability lanes start their own server
   instead of skipping; `.github/workflows/verify.yml` additionally pins
@@ -142,6 +143,12 @@ racing writer that won the version), the request fails, the source stays on its
 old version, and the orphaned output version is never named by the stored model
 — nothing half-updated becomes visible. The test for this injects exactly one
 refused `addVersion` on the source and asserts the state that remains.
+
+Two edits that both read version 1 are resolved by the same rule: exactly one
+appends the source and wins, the other is refused with `conflict`. Both may have
+appended their outputs first, so the loser's output version exists but is never
+named by the stored source; the test asserts the three-version history and that
+the winner's version is the one the source points at.
 
 A retry must still be possible after such a failure. Pinning each output append
 to the version the *source* records made the next edit conflict forever, because

@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { ArtifactDescriptor, ArtifactMediaType } from './artifacts.js';
-import { ArtifactId, DataMode, IsoDateTime, Sha256 } from './primitives.js';
+import { ArtifactDescriptor, ArtifactProjectManifest } from './artifacts.js';
+import { ArtifactId, DataMode, IsoDateTime, ProjectId } from './primitives.js';
 
 /**
  * Deliverable generation.
@@ -21,7 +21,7 @@ import { ArtifactId, DataMode, IsoDateTime, Sha256 } from './primitives.js';
  */
 
 /** The editable-source artifact this deliverable can be revised from. */
-export const DeliverableSourceFormat = z.enum(['document.json', 'project.json']);
+export const DeliverableSourceFormat = z.enum(['document.json']);
 export type DeliverableSourceFormat = z.infer<typeof DeliverableSourceFormat>;
 
 export const DeliverableSource = z
@@ -399,6 +399,12 @@ export const SoftwareRequest = z
     language: z.enum(['javascript', 'typescript']).default('javascript'),
     files: z.array(SourceFile).max(100).default([]),
     entry: z.string().max(300).optional(),
+    /**
+     * An existing project whose tree this generation extends. Each path is
+     * matched by relative path and gains a version instead of a second file;
+     * omitted, the deliverable opens a project of its own.
+     */
+    projectId: ProjectId.optional(),
   })
   .strict();
 export type SoftwareRequest = z.infer<typeof SoftwareRequest>;
@@ -480,6 +486,21 @@ export const DatasetAnalysis = z
 export type DatasetAnalysis = z.infer<typeof DatasetAnalysis>;
 
 /**
+ * A generated project, as the durable store owns it.
+ *
+ * The manifest is not a stored copy: the store derives it from the rows that
+ * carry the same `projectId`, so the tree has one authority. `manifest.files`
+ * names each relative path, its artifact id, its current version and its digest.
+ */
+export const DeliverableProject = z
+  .object({
+    projectId: ProjectId,
+    manifest: ArtifactProjectManifest,
+  })
+  .strict();
+export type DeliverableProject = z.infer<typeof DeliverableProject>;
+
+/**
  * Every file in `artifacts` is a stored, integrity-verified artifact descriptor
  * returned by the durable service. `source` points at the artifact that can be
  * revised by id; `receipt` is the audit receipt recorded after persistence
@@ -499,38 +520,12 @@ export const Deliverable = z
       })
       .strict(),
     source: DeliverableSource.optional(),
+    /** The stored tree of a generated software project, as the store lists it. */
+    project: DeliverableProject.optional(),
     analysis: DatasetAnalysis.optional(),
   })
   .strict();
 export type Deliverable = z.infer<typeof Deliverable>;
-
-/**
- * The stored manifest of a generated software project. The durable store refuses
- * archives, so a multi-file project is one JSON manifest whose entries name a
- * validated relative path, the digest of that file and the artifact that holds
- * its exact bytes. No path in it is ever resolved against a host filesystem.
- */
-export const ProjectManifestEntry = z
-  .object({
-    path: SourcePath,
-    sha256: Sha256,
-    artifactId: ArtifactId,
-    version: z.number().int().positive(),
-    bytes: z.number().int().positive(),
-    mediaType: ArtifactMediaType,
-  })
-  .strict();
-export type ProjectManifestEntry = z.infer<typeof ProjectManifestEntry>;
-
-export const ProjectManifest = z
-  .object({
-    version: z.literal(1),
-    name: FileName,
-    entry: SourcePath,
-    files: z.array(ProjectManifestEntry).min(1).max(100),
-  })
-  .strict();
-export type ProjectManifest = z.infer<typeof ProjectManifest>;
 
 /** One produced format and the stored artifact that holds its current bytes. */
 export const DocumentSourceOutput = z

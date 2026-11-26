@@ -176,35 +176,70 @@ test('a dataset and a software project are stored as descriptors, not paths', as
       language: 'javascript',
       files: [],
     });
-    assert.ok(software.source, 'a project manifest artifact is reported');
-    assert.equal(software.source?.format, 'project.json');
-    const treeFiles = software.artifacts.filter(
-      (artifact) => artifact.relativePath !== undefined,
+    // The tree is reported by the store's own manifest, not by a second copy.
+    const project = software.project;
+    assert.ok(project, 'a generated project reports its stored tree');
+    assert.ok(project.projectId.startsWith('proj_'));
+    assert.equal(project.manifest.projectId, project.projectId);
+    assert.equal(project.manifest.mode, 'cloud');
+    assert.match(project.manifest.digest, /^[a-f0-9]{64}$/);
+    assert.ok(project.manifest.files.length > 0);
+    assert.equal(
+      software.artifacts.length,
+      project.manifest.files.length,
+      'every stored file is described once, by the store',
     );
-    assert.ok(treeFiles.length > 0, 'each source file carries its validated tree path');
-    for (const file of treeFiles) {
-      assert.equal(
-        file.relativePath?.split('/').pop(),
-        file.filename,
-        'the store requires the basename to equal the file name',
-      );
-      assert.ok(!file.relativePath?.startsWith('/'));
-      assert.ok(!file.relativePath?.split('/').includes('..'));
-    }
-    const manifest = await api.downloadArtifact(software.source!.artifactId, { mode: 'cloud' });
-    const parsed = JSON.parse(Buffer.from(manifest.contentBase64, 'base64').toString()) as {
-      version: number;
-      entry: string;
-      files: Array<{ path: string; artifactId: string; sha256: string }>;
-    };
-    assert.equal(parsed.version, 1);
-    assert.ok(parsed.files.length > 0);
-    for (const file of parsed.files) {
+    assert.equal(
+      software.artifacts.some((artifact) => artifact.filename.endsWith('.project.json')),
+      false,
+      'no manifest artifact is stored; the store derives it',
+    );
+    for (const file of project.manifest.files) {
       assert.ok(file.artifactId.startsWith('art_'));
       assert.match(file.sha256, /^[a-f0-9]{64}$/);
-      assert.ok(!file.path.startsWith('/'));
-      assert.ok(!file.path.split('/').includes('..'));
+      assert.equal(file.relativePath.split('/').pop(), file.relativePath.split('/').at(-1));
+      assert.ok(!file.relativePath.startsWith('/'));
+      assert.ok(!file.relativePath.split('/').includes('..'));
+      assert.equal(file.kind, 'software');
     }
+    // The manifest is a query over the same rows, so both agree exactly.
+    const listed = await api.artifactManifest(project.projectId, 'cloud');
+    assert.deepEqual(
+      listed.files.map((file) => [file.relativePath, file.artifactId, file.version]),
+      project.manifest.files.map((file) => [file.relativePath, file.artifactId, file.version]),
+    );
+    assert.equal(listed.digest, project.manifest.digest);
+
+    // A later generation can extend the same project; a path gains a version
+    // instead of a second artifact.
+    const extended = await api.deliver({
+      kind: 'software',
+      mode: 'cloud',
+      name: 'toolkit-demo',
+      description: 'The same project with a README.',
+      template: 'module',
+      language: 'javascript',
+      files: [{ path: 'README.md', content: '# toolkit-demo\n' }],
+      projectId: project.projectId,
+    });
+    assert.equal(extended.project?.projectId, project.projectId);
+    const readme = project.manifest.files.find((file) => file.relativePath === 'README.md');
+    const readmeAfter = extended.project?.manifest.files.find(
+      (file) => file.relativePath === 'README.md',
+    );
+    assert.ok(readme && readmeAfter, 'the generated README is in both manifests');
+    assert.equal(readmeAfter.artifactId, readme.artifactId, 'a path keeps its artifact identity');
+    assert.equal(readmeAfter.version, readme.version + 1, 'changed bytes gain a version');
+    assert.notEqual(readmeAfter.sha256, readme.sha256);
+
+    // Regenerating an identical file is idempotent: the version does not move.
+    const identical = project.manifest.files.find((file) => file.relativePath === 'src/index.js');
+    const identicalAfter = extended.project?.manifest.files.find(
+      (file) => file.relativePath === 'src/index.js',
+    );
+    assert.ok(identical && identicalAfter);
+    assert.equal(identicalAfter.version, identical.version);
+    assert.equal(identicalAfter.sha256, identical.sha256);
   } finally {
     await first.close();
   }
@@ -437,6 +472,80 @@ test('an edit that fails after the output appends leaves the stored source on it
       ).toString('utf8'),
     ) as { outputs: Array<{ format: string; version: number }> };
     assert.ok(retriedSource.outputs.every((output) => output.version === 3));
+  } finally {
+    await first.close();
+  }
+});
+
+test('two concurrent edits at the same expected version have one winner and one conflict', async () => {
+  const first = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database: createFakeDatabase() },
+  });
+  try {
+    const api = client(first.url);
+    const created = await api.deliver({
+      kind: 'document',
+      mode: 'cloud',
+      filename: 'race',
+      title: 'Race',
+      blocks: BLOCKS,
+      formats: ['docx', 'markdown'],
+    });
+    const sourceId = created.source!.artifactId;
+    const docxId = created.artifacts.find((artifact) => artifact.filename === 'race.docx')!.artifactId;
+
+    const edit = (text: string) =>
+      api.deliver({
+        kind: 'document',
+        mode: 'cloud',
+        filename: 'race',
+        title: `Race (${text})`,
+        edits: [{ op: 'append', blocks: [{ type: 'paragraph', text }] }],
+        formats: ['docx', 'markdown'],
+        base: { artifactId: sourceId, mode: 'cloud', expectedVersion: 1 },
+      });
+
+    // Both readers saw version 1, so exactly one may append it.
+    const settled = await Promise.allSettled([edit('Written by A.'), edit('Written by B.')]);
+    const fulfilled = settled.filter(
+      (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof edit>>> =>
+        result.status === 'fulfilled',
+    );
+    const rejected = settled.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    assert.equal(fulfilled.length, 1, 'exactly one edit wins');
+    assert.equal(rejected.length, 1, 'exactly one edit is refused');
+
+    const failure = rejected[0]!.reason;
+    assert.ok(failure instanceof CoderaxApiError, 'the loser gets a typed refusal');
+    assert.equal(failure.code, 'conflict');
+
+    const winner = fulfilled[0]!.value;
+    assert.equal(winner.source!.version, 2, 'the winner advanced the one source artifact');
+    const storedSource = JSON.parse(
+      Buffer.from(
+        (await api.downloadArtifact(sourceId, { mode: 'cloud' })).contentBase64,
+        'base64',
+      ).toString('utf8'),
+    ) as { outputs: Array<{ format: string; version: number }> };
+    assert.ok(
+      storedSource.outputs.every((output) => output.version === 2),
+      'the stored source names the winner’s output versions',
+    );
+
+    // Both requests appended their outputs before either wrote the source; the
+    // loser's version exists but is never named by the source, so no reader
+    // resolves a half-applied edit.
+    const history = await api.artifactVersions(docxId, 'cloud');
+    assert.deepEqual(
+      history.versions.map((version) => version.version),
+      [1, 2, 3],
+    );
+    const winnerDocx = winner.artifacts.find((artifact) => artifact.filename === 'race.docx')!;
+    assert.equal(winnerDocx.version, 2);
+    assert.equal(history.versions[1]!.sha256, winnerDocx.sha256);
   } finally {
     await first.close();
   }
