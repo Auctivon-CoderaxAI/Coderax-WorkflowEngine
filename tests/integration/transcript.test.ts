@@ -55,7 +55,8 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
     });
 
     const firstTurnPrompts = gateway.prompts.length;
-    assert.equal(firstTurnPrompts, 3);
+    // One model-assisted plan and three planned steps.
+    assert.equal(firstTurnPrompts, 4);
     // The first turn has nothing to remember.
     assert.ok(gateway.prompts.every((prompt) => !prompt.includes('Earlier in this conversation:')));
 
@@ -74,12 +75,14 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
     });
 
     const followUpPrompts = gateway.prompts.slice(firstTurnPrompts);
-    assert.equal(followUpPrompts.length, 3);
+    // One plan (with history) and three planned steps (with history).
+    assert.equal(followUpPrompts.length, 4);
     for (const prompt of followUpPrompts) {
       assert.ok(prompt.includes('Earlier in this conversation:'));
       // The stored user turn and the stored assistant answer, in order.
       assert.ok(prompt.includes('Owner: First objective'));
-      assert.ok(prompt.includes('Assistant: answer-1'));
+      // The plan consumed answer-1; the stored answer begins at the first step.
+      assert.ok(prompt.includes('Assistant: answer-2'));
       // The current objective is the objective, not a repeated history turn.
       assert.equal(prompt.split('Follow-up objective').length - 1, 1);
     }

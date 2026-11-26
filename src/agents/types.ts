@@ -7,9 +7,11 @@ import type {
   EngineCapabilities,
   EngineFailureCode,
   EngineId,
+  KnowledgeSearchResult,
   ModelRef,
   Usage,
 } from '@coderax/contracts';
+import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -26,6 +28,24 @@ import type {
 export type AgentHistoryTurn = {
   role: 'user' | 'assistant';
   text: string;
+};
+
+/**
+ * Capabilities the engine lends to an agent for one turn. They are supplied per
+ * run, never held by the adapter: an external agent receives no context at all,
+ * and Native receives only what this owner's task is allowed to use.
+ */
+export type AgentContext = {
+  taskId?: string | null;
+  tools?: { runtime: ToolRuntime; gate: ApprovalGate };
+  memory?: { list: () => Promise<string[]> };
+  knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
+  /** Persisted plan and finished steps, so a resume does not re-plan or re-run. */
+  plannedSteps?: Array<{ id: string; title: string }>;
+  completedSteps?: string[];
+  priorText?: string;
+  /** Owner approval policy for tool actions that need a decision. */
+  requireApproval?: boolean;
 };
 
 export type AgentRunRequest = {
@@ -45,6 +65,7 @@ export type AgentRunRequest = {
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
+  context?: AgentContext;
 };
 
 export type AgentReportEvent =

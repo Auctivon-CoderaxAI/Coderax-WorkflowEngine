@@ -9,7 +9,9 @@ export type RunOutcome =
   | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
-  | { kind: 'interrupted'; detail: string };
+  | { kind: 'interrupted'; detail: string }
+  /** The run needs an owner decision; its checkpoint is durable and resumable. */
+  | { kind: 'suspended'; detail: string };
 
 export type RunResult = {
   outcome: RunOutcome;
@@ -184,6 +186,12 @@ export function createTaskRunner(input: {
               summary: outcome.summary,
               ...(outcome.usage ? { usage: outcome.usage } : {}),
             },
+            ownershipLost: false,
+          };
+        }
+        if (outcome.code === 'approval_required') {
+          return {
+            outcome: { kind: 'suspended', detail: outcome.detail },
             ownershipLost: false,
           };
         }

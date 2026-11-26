@@ -16,6 +16,13 @@ import type {
   TaskControlResult,
   TaskStatus,
   WorkSubmitRequest,
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
+  RoutingMode,
+  RoutingReport,
+  ToolList,
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
@@ -27,7 +34,15 @@ import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
 import type { AgentRegistry } from '../agents/registry.js';
-import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
+import type {
+  AgentAdapter,
+  AgentContext,
+  AgentHistoryTurn,
+  AgentReportEvent,
+} from '../agents/types.js';
+import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import type { Router as ModelRouter } from '../models/router.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
@@ -63,6 +78,9 @@ export type ApplicationServiceDeps = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  tools: ToolRuntime;
+  knowledge: KnowledgeStore;
+  modelRouter: ModelRouter;
 };
 
 export type EventStream = {
@@ -103,6 +121,19 @@ export type ApplicationService = {
     conversationId: string,
   ) => Promise<ServiceResult<Conversation>>;
   memory: (principal: Principal, mode: DataMode) => Promise<MemoryList>;
+  tools: () => ToolList;
+  routing: (mode: RoutingMode) => RoutingReport;
+  ingestKnowledge: (
+    principal: Principal,
+    body: KnowledgeIngestRequest,
+  ) => Promise<ServiceResult<KnowledgeIngestResult>>;
+  knowledge: (principal: Principal, mode: DataMode) => Promise<KnowledgeList>;
+  searchKnowledge: (
+    principal: Principal,
+    query: string,
+    k: number,
+    mode: DataMode,
+  ) => Promise<KnowledgeSearchResult>;
   permissions: (principal: Principal, taskId: string) => Promise<ServiceResult<PermissionList>>;
   decidePermission: (
     principal: Principal,
@@ -149,6 +180,89 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     } catch {
       return [];
     }
+  }
+
+  /**
+   * The approval gate for one run. A read-only tool never reaches it. A tool
+   * with a scope needs either a live grant for the exact resource or a new
+   * durable request; a chat turn has no task to attach a request to, so it is
+   * refused instead of running the action unapproved.
+   */
+  function approvalGate(input: {
+    ownerId: string;
+    taskId: string | null;
+    requireApproval: boolean;
+  }): ApprovalGate {
+    return {
+      ensure: async ({ scope, resource, description, tool }) => {
+        if (input.taskId === null) return { decision: 'denied' as const };
+        if (await deps.permissions.isApproved(input.taskId, scope, resource)) {
+          return { decision: 'granted' as const };
+        }
+        if (!input.requireApproval) return { decision: 'denied' as const };
+        const existing = await deps.permissions.list(input.ownerId, input.taskId);
+        const pending = existing.requests.find(
+          (request) =>
+            request.decision === 'pending' &&
+            request.scope === scope &&
+            request.resource === resource,
+        );
+        if (pending) {
+          return { decision: 'pending' as const, requestId: pending.requestId };
+        }
+        const created = await deps.permissions.request({
+          ownerId: input.ownerId,
+          taskId: input.taskId,
+          agent: 'coderax',
+          scope,
+          resource,
+          description: `${tool}: ${description}`.slice(0, 2000),
+        });
+        return { decision: 'pending' as const, requestId: created.requestId };
+      },
+    };
+  }
+
+  /**
+   * Context is lent, not stored on the adapter. Only Coderax Native receives it;
+   * an external agent's isolation says `memory: none` and it is never given these
+   * ports. Memory and retrieval are scoped to the run's data mode, so a cloud run
+   * cannot read private entries.
+   */
+  async function nativeContext(input: {
+    ownerId: string;
+    mode: DataMode;
+    task?: TaskRecord;
+  }): Promise<AgentContext> {
+    return {
+      taskId: input.task?.taskId ?? null,
+      tools: {
+        runtime: deps.tools,
+        gate: approvalGate({
+          ownerId: input.ownerId,
+          taskId: input.task?.taskId ?? null,
+          requireApproval: input.task?.requireApproval ?? false,
+        }),
+      },
+      memory: {
+        list: async () =>
+          (await deps.memory.list({ ownerId: input.ownerId, mode: input.mode })).entries.map(
+            (entry) => `${entry.key}: ${entry.value}`,
+          ),
+      },
+      knowledge: {
+        search: (query, k) =>
+          deps.knowledge.search({ ownerId: input.ownerId, mode: input.mode, query, k }),
+      },
+      ...(input.task
+        ? {
+            plannedSteps: input.task.steps.map((step) => ({ id: step.id, title: step.title })),
+            completedSteps: [...input.task.checkpoint.completedSteps],
+            priorText: input.task.checkpoint.text,
+            requireApproval: input.task.requireApproval,
+          }
+        : {}),
+    };
   }
 
   function publish(
@@ -264,6 +378,40 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const now = deps.clock.iso();
+    if (outcome.kind === 'suspended') {
+      // A suspension keeps the task alive: the owner decides, and resume claims a
+      // new generation. The checkpoint is written under the same fence, and the
+      // lease is released so the conversation is not held by a run that stopped.
+      try {
+        const applied = await deps.tasks.updateFenced({
+          taskId: task.taskId,
+          token,
+          patch: {
+            state: 'awaiting_approval',
+            updatedAt: now,
+            failure: {
+              code: 'approval_required',
+              detail: outcome.detail,
+              retryable: true,
+            },
+            ...(checkpoint ? { checkpoint } : {}),
+          },
+        });
+        if (applied.applied) {
+          deps.audit.record({
+            actor: task.ownerId,
+            action: 'work.awaiting_approval',
+            taskId: task.taskId,
+            conversationId: task.conversationId,
+            outcome: 'accepted',
+            detail: 'approval_required',
+          });
+        }
+      } finally {
+        await releaseLease(task, token);
+      }
+      return;
+    }
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -517,6 +665,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         maxSteps: deps.config.engines.native.maxSteps,
         budget: task.budget,
         signal: controller.signal,
+        ...(started.task.agent === 'coderax'
+          ? {
+              context: await nativeContext({
+                ownerId: task.ownerId,
+                mode: task.mode,
+                task: started.task,
+              }),
+            }
+          : {}),
       },
       report,
     });
@@ -579,6 +736,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
+    tools: () => ({ tools: deps.tools.list() }),
+    routing: (mode) => deps.modelRouter.report(mode),
+    ingestKnowledge: (principal, body) =>
+      deps.knowledge.ingest({
+        ownerId: principal.ownerId,
+        mode: body.mode,
+        title: body.title,
+        text: body.text,
+      }),
+    knowledge: (principal, mode) => deps.knowledge.list({ ownerId: principal.ownerId, mode }),
+    searchKnowledge: (principal, query, k, mode) =>
+      deps.knowledge.search({ ownerId: principal.ownerId, mode, query, k }),
 
     submitWork: async (principal, request) => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
@@ -928,6 +1097,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           maxSteps: 1,
           budget: null,
           signal: controller.signal,
+          ...(request.agent === 'coderax'
+            ? { context: await nativeContext({ ownerId: principal.ownerId, mode: request.mode }) }
+            : {}),
         },
         () => undefined,
       );

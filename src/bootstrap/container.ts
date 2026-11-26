@@ -17,6 +17,9 @@ import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { Router } from '../api/router.js';
+import type { ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import type { Router as ModelRouter } from '../models/router.js';
 
 /**
  * Dependencies are named, not positional.
@@ -45,6 +48,9 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  tools: ToolRuntime;
+  knowledge: KnowledgeStore;
+  modelRouter: ModelRouter;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -66,6 +72,9 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'scheduler',
   'health',
+  'tools',
+  'knowledge',
+  'modelRouter',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

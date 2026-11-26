@@ -3,8 +3,10 @@ import type {
   ModelList,
   ModelRef,
   DataMode,
+  RoutingMode,
 } from '@coderax/contracts';
 import { modelKey } from '@coderax/contracts';
+import type { Router } from './router.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 
@@ -29,6 +31,39 @@ function usable(descriptor: ModelDescriptor, mode: DataMode): boolean {
   // Private mode is BYOK/local only; a hosted model is not a private resource.
   if (mode === 'private' && descriptor.costClass !== 'free') return false;
   return true;
+}
+
+/**
+ * The catalogue a caller resolves against, implemented on the single router so
+ * model discovery and model selection cannot disagree.
+ */
+export function createRouterCatalog(router: Router): ModelCatalog {
+  return {
+    list: () => router.list(),
+    route: (_mode: DataMode) => router.report('auto').route,
+    resolve: (requested, _mode) => {
+      const selected = router.select({
+        mode: 'auto' as RoutingMode,
+        ...(requested ? { requested } : {}),
+      });
+      if (!selected.ok) {
+        return fail(
+          selected.code === 'paid_model_refused' ? 'paid_model_refused' : 'model_missing',
+          selected.detail,
+        );
+      }
+      const model = selected.value;
+      return ok({
+        ref: model.ref,
+        label: model.label,
+        costClass: model.costClass,
+        contextTokens: model.profile.contextTokens,
+        toolCalling: model.profile.toolCalling,
+        streaming: true,
+        availability: model.availability,
+      });
+    },
+  };
 }
 
 export function createModelCatalog(input: {

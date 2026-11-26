@@ -1,17 +1,25 @@
-import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
+import type { AgentIsolation, EngineCapabilities } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
 import { createNativeAgent } from '../agents/native/agent.js';
+import { createNativePlanner } from '../agents/native/planner.js';
 import { createOpenAiCompatibleGateway } from '../agents/native/gateway.js';
 import type { ModelGateway } from '../agents/native/types.js';
+import { createOpenCodeHttpTransport } from '../agents/adapters/opencode.js';
 import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
 import { probeAgents } from '../agents/probe.js';
-import { createModelCatalog } from '../models/catalog.js';
+import { createRouterCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
+import { createRouter as createModelRouter, type ProviderDescriptor } from '../models/router.js';
+import { createRoutedGateway } from '../models/routed.js';
+import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
+import { createBuiltinTools } from '../tools/builtin.js';
+import { createToolRuntime } from '../tools/runtime.js';
+import { attachMcpServers } from '../mcp/client.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionStore } from '../permissions/store.js';
 import { createAuditLog } from '../observability/audit.js';
@@ -27,6 +35,7 @@ import { registerRoutes } from '../api/routes.js';
 import { createHttpServer } from '../api/server.js';
 import type { HttpServer } from '../api/server.js';
 import { validateWorkspaceRoots, workspaceRoots } from '../execution/workspace.js';
+import { modelKey } from '@coderax/contracts';
 import {
   createApplicationContainer,
   createDependencyContainer,
@@ -97,24 +106,62 @@ function buildGateway(input: ComposeInput): ModelGateway | null {
   });
 }
 
-function modelDescriptors(input: {
+/**
+ * Providers are derived from the configured route. Every entry is free by
+ * construction — there is no configuration field that can mark one paid — and
+ * capability/quota evidence comes from `models.catalog` when the owner recorded
+ * it. The router, not this function, decides which model serves a request.
+ */
+function modelProviders(input: {
   config: EngineConfig;
   gateway: ModelGateway | null;
-}): ModelDescriptor[] {
-  return input.config.models.route.map((ref) => ({
-    ref,
-    label: `${ref.providerId} ${ref.modelId}`,
-    costClass: 'free' as const,
-    toolCalling: false,
-    streaming: false,
-    availability: input.gateway
-      ? { available: true, reason: 'ready' as const, detail: 'Verified zero-cost endpoint.' }
-      : {
-          available: false,
-          reason: 'not_configured' as const,
-          detail: 'No zero-cost inference endpoint is configured.',
-        },
-  }));
+}): ProviderDescriptor[] {
+  const evidence = new Map(
+    input.config.models.catalog.map((entry) => [
+      `${entry.providerId}/${entry.modelId}`,
+      entry,
+    ]),
+  );
+  const providerIds = [...new Set(input.config.models.route.map((ref) => ref.providerId))];
+
+  return providerIds.map((providerId) => {
+    const models = input.config.models.route
+      .filter((ref) => ref.providerId === providerId)
+      .map((ref) => {
+        const entry = evidence.get(modelKey(ref));
+        return {
+          ref,
+          label: entry?.label ?? `${ref.providerId} ${ref.modelId}`,
+          costClass: 'free' as const,
+          profile: {
+            coding: entry?.coding ?? 0.5,
+            reasoning: entry?.reasoning ?? 0.5,
+            speed: entry?.speed ?? 0.5,
+            toolCalling: entry?.toolCalling ?? false,
+            multimodal: entry?.multimodal ?? false,
+            contextTokens: entry?.contextTokens ?? 8192,
+          },
+          availability: input.gateway
+            ? { available: true, reason: 'ready' as const, detail: 'Verified zero-cost endpoint.' }
+            : {
+                available: false,
+                reason: 'not_configured' as const,
+                detail: 'No zero-cost inference endpoint is configured.',
+              },
+        };
+      });
+    const first = evidence.get(modelKey(models[0]?.ref ?? input.config.models.route[0]!));
+    return {
+      id: providerId,
+      costEvidence: 'verified-free' as const,
+      quota: {
+        requestsPerMinute: first?.requestsPerMinute ?? 20,
+        requestsPerDay: first?.requestsPerDay ?? 500,
+        tokensPerDay: first?.tokensPerDay ?? 500_000,
+      },
+      models,
+    };
+  });
 }
 
 /**
@@ -143,16 +190,54 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
 
   const gateway = buildGateway(input);
-  const native = createNativeAgent({ enabled: config.engines.native.enabled, gateway });
+  const providers = modelProviders({ config, gateway });
+  const modelRouter = createModelRouter({ providers });
+  const gateways = new Map<string, ModelGateway>();
+  if (gateway) {
+    for (const provider of providers) gateways.set(provider.id, gateway);
+  }
+  const routedGateway =
+    gateways.size > 0
+      ? createRoutedGateway({
+          router: modelRouter,
+          gateways,
+          maxFallbacks: config.models.maxFallbacks,
+        })
+      : null;
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway: routedGateway,
+    planner: createNativePlanner(),
+  });
+
+  const opencodePassword = config.engines.opencode.passwordEnv
+    ? env[config.engines.opencode.passwordEnv]
+    : undefined;
+  const opencodeModel = config.engines.opencode.model?.includes('/')
+    ? {
+        providerId: config.engines.opencode.model.split('/')[0] ?? '',
+        modelId: config.engines.opencode.model.split('/').slice(1).join('/'),
+      }
+    : undefined;
+  const opencodeTransport =
+    input.externals?.opencode ??
+    (config.engines.opencode.baseURL
+      ? createOpenCodeHttpTransport({
+          baseURL: config.engines.opencode.baseURL,
+          ...(opencodePassword ? { password: opencodePassword } : {}),
+          ...(opencodeModel ? { model: opencodeModel } : {}),
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        })
+      : null);
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
     engine: 'opencode',
     label: 'OpenCode Agent',
     enabled: config.engines.opencode.enabled,
-    transport: input.externals?.opencode ?? null,
+    transport: opencodeTransport,
     missingDetail:
-      'The OpenCode adapter needs an injected transport; the engine does not spawn or bundle an OpenCode server.',
+      'The OpenCode adapter needs an injected transport or engines.opencode.baseURL; the engine does not spawn or bundle an OpenCode server.',
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
@@ -177,11 +262,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         : 'coderax',
   });
 
-  const models = createModelCatalog({
-    descriptors: modelDescriptors({ config, gateway }),
-    route: config.models.route,
-    allowPaid: false,
-  });
+  const models = createRouterCatalog(modelRouter);
 
   const budget = createBudgetLedger({
     maxRequestsPerDay: config.models.dailyRequestBudget,
@@ -200,6 +281,40 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const memory = persistence.memory;
   const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
+
+  const mcp = await attachMcpServers(config.mcp.servers);
+  const embeddingBase = env.CODERAX_INFERENCE_BASE_URL;
+  const embeddingKey = env.CODERAX_INFERENCE_KEY;
+  const embeddings =
+    config.knowledge.embeddingModel && embeddingBase && embeddingKey
+      ? createOpenAiEmbeddingProvider({
+          baseURL: embeddingBase,
+          apiKey: embeddingKey,
+          model: config.knowledge.embeddingModel,
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        })
+      : null;
+  const knowledge = createKnowledgeStore({
+    clock,
+    ids,
+    embeddings,
+    maxDocuments: config.knowledge.maxDocuments,
+  });
+  const builtinTools = config.tools.enabled
+    ? createBuiltinTools({
+        shellEnabled: config.tools.shellEnabled,
+        allowedCommands: config.tools.allowedCommands,
+        networkEnabled: config.tools.networkEnabled,
+        allowedHosts: config.tools.allowedHosts,
+        maxOutputBytes: config.tools.maxOutputBytes,
+        commandTimeoutMs: config.tools.commandTimeoutMs,
+        maxSearchFiles: config.tools.maxSearchFiles,
+        memory,
+        knowledge: config.knowledge.enabled ? knowledge : null,
+      })
+    : [];
+  const tools = createToolRuntime({ tools: [...builtinTools, ...mcp.tools] });
+
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
@@ -284,6 +399,16 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
+      {
+        name: 'intelligence',
+        required: false,
+        check: async () => ({
+          status: 'ok' as const,
+          detail: `${tools.list().length} tool(s); ${modelRouter.report(config.routing.defaultMode).route.length} routed model(s); ${
+            mcp.names.length
+          } MCP server(s)${mcp.failures.length > 0 ? `; ${mcp.failures.length} unavailable` : ''}.`,
+        }),
+      },
     ],
   });
 
@@ -306,6 +431,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     scheduler,
     health,
+    tools,
+    knowledge,
+    modelRouter,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -376,6 +504,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     },
     stop: async () => {
       await service.shutdown();
+      await mcp.close();
       await server.close();
       await persistence.close();
     },

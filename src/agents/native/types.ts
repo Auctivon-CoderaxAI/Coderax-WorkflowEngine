@@ -1,4 +1,5 @@
-import type { ModelRef, Usage } from '@coderax/contracts';
+import type { ModelRef, RoutingMode, Usage } from '@coderax/contracts';
+import type { AgentHistoryTurn } from '../types.js';
 
 export type ModelCompletionRequest = {
   model: ModelRef;
@@ -6,6 +7,11 @@ export type ModelCompletionRequest = {
   prompt: string;
   signal: AbortSignal;
   maxOutputTokens?: number;
+  /** Set by the agent so routing ranks models for the work being done. */
+  routingMode?: RoutingMode;
+  /** Only a tool-capable model may serve an action turn. */
+  requiresTools?: boolean;
+  requiresVision?: boolean;
 };
 
 export type ModelGateway = {
@@ -24,5 +30,13 @@ export type PlanStep = {
  * persists completed step ids, which is what makes resume skip finished work.
  */
 export type Planner = {
-  plan: (input: { objective: string; maxSteps: number }) => PlanStep[];
+  plan: (input: {
+    objective: string;
+    maxSteps: number;
+    /** Earlier turns, so a model plan sees the same context the run does. */
+    history?: AgentHistoryTurn[];
+    /** Present when a model-assisted plan is possible; its absence is not an error. */
+    complete?: (prompt: string, signal: AbortSignal) => Promise<string>;
+    signal?: AbortSignal;
+  }) => Promise<PlanStep[]> | PlanStep[];
 };
