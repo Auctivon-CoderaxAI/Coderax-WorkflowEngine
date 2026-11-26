@@ -13,8 +13,8 @@ before the remaining branches can be closed or retargeted.
 | `feat/multimodal-creative-intelligence` | this branch | Consolidated media, creative and router integration. |
 | `feat/multimodal-intelligence-core` | `5dd5e66` | The other multimodal implementation. Its APNG and truncation checks were adopted; its router is not adopted. |
 | `feat/zero-cost-model-router` (PR #4) | `b6e002b` | Merged into this branch. It remains the only model router. |
-| `contract/authoritative-v1.1` | `ea66028` | Not merged. Conflicts with the router budget and defines a different artifact schema. |
-| `feat/durable-artifacts` | `fd5edef` | Not merged. Defines a second, richer artifact schema and a Mongo blob store. |
+| `contract/authoritative-v1.1` | `ea66028` | Merged. Its catalogue, SDK and handshake are canonical v1.1 on this branch. |
+| `feat/durable-artifacts` | `fd0a4c1` | Merged through `fd5edef`: the versioned artifact descriptor, content-addressed blobs, reference counting, atomic quota admission and the real-Mongo lane. Its five later commits add leases, project trees/manifests and generators; those are not merged. |
 | `feat/artifact-intelligence` | `c9bac16` | Not merged. Generators depend on the durable-artifacts schema. |
 | `ci/permanent-quality-gate` | `21015a7` | Not merged. Its suites assume the pre-merge contract and router. |
 
@@ -59,51 +59,54 @@ Its deterministic media id, in-memory base64 carriage and Markdown creative
 format were not adopted: media ids are owner-scoped in the durable store here,
 and Markdown is plain text rather than an HTML/SVG rendering boundary.
 
-## What is blocked, and why
+## Consolidation decisions, and what remains
 
-### The two v1.1 artifact contracts are incompatible
+### One v1.1 artifact contract is canonical
 
-`contract/authoritative-v1.1` publishes a task-scoped artifact record:
-
-```text
-ArtifactRecord { artifactId, taskId, path, mediaType, bytes, digest, createdAt }
-```
-
-and stores bytes under `<workspace-root>/.coderax-artifacts`.
-
-`feat/durable-artifacts` publishes a versioned, quota-accounted artifact:
+The durable versioned descriptor from `feat/durable-artifacts` is the artifact
+record:
 
 ```text
 ArtifactDescriptor { artifactId, kind, filename, mediaType, bytes, sha256,
                      mode, version, versions, projectId, conversationId,
-                     taskId, expiresAt, inferenceExposure }
+                     taskId, createdAt, updatedAt, expiresAt, inferenceExposure }
 ```
 
-with content-addressed blobs, reference counting, atomic quota admission,
-retention, deletion and a real-Mongo concurrency lane.
+It is published once, at v1.1.0, with content-addressed blobs, reference
+counting, atomic quota admission, retention and deletion. The task-scoped
+`ArtifactRecord` from `contract/authoritative-v1.1` is not adopted: the
+authoritative contract's catalogue, SDK and handshake are canonical, and its
+artifact operations map onto the descriptor above. There is no second artifact
+schema and no v1.2.
 
-Both call themselves `1.1.0`. Merging them requires an owner decision about
-which record is canonical and how the other operations map onto it. Publishing
-both would be exactly the incompatible duplicate v1.1 contract the task
-prohibits.
+`feat/durable-artifacts` has since advanced from `fd5edef` to `fd0a4c1` with
+expiring read leases, project trees and manifests, restore, and the generation
+API, adding `docx`, `exceljs`, `pdf-lib` and `pptxgenjs`. Its artifact changes
+are additive over this branch's contract, so the branches are compatible, but
+generation is `feat/artifact-intelligence` work and is not merged here.
 
-### The contract branch predates the router budget
+### The router budget is preserved
 
-`acceptedFor`, `submitWork` and the schedule ticker on
-`contract/authoritative-v1.1` use the pre-router budget API
-(`reserve(ownerId, at)`, `release(ownerId, at)`, `consume`). The router uses
-reservation ids, held token estimates and dispatch-aware settlement. Taking the
-contract branch's service or budget would regress quota accounting. A probe
-merge produced 10 conflicts across the service, routes, SDK, persistence,
-composition and budget; resolving them is a service rewrite, not a merge.
+The contract branch predated the router's reservation-id budget API. The merge
+kept the router's reservation ids, held estimates and dispatch-aware settlement
+and mapped the authoritative contract's operations onto them. Quota accounting
+is unchanged.
 
-### Media is not yet backed by the artifact authority
+### Media is a view over the artifact authority
 
-Media currently uses the owner- and mode-scoped `media` collection. That is
-durable under MongoDB and is tested through the repository port, but it is a
-second blob path alongside the artifact store. It must be folded into whichever
-artifact service the owner selects before the storage sections of the task can
-be claimed complete.
+`/v1/media` owns no storage. `POST /v1/media` performs the media-specific
+validation (magic bytes, canonical base64, pixel and attachment bounds, mode and
+owner scoping) and then writes an immutable artifact version through
+`ArtifactService`; the media id is the artifact id. Reads go back through the
+artifact service, so the artifact descriptor is the only record of the bytes,
+their retention and their quota.
+
+`tests/integration/media-authority.test.ts` proves this on a real MongoDB: the
+artifact descriptor and version list match the media, a version written through
+`/v1/artifacts` is what `/v1/media` serves, a non-image artifact is not exposed
+as media, deletion through the artifact API removes the media and its blobs, a
+second engine reads the media from the server, and a media upload is refused
+with `quota_exceeded` when the single artifact slot is already used.
 
 ## Capability matrix
 
@@ -123,8 +126,8 @@ not mean hosted inference was exercised.
 | Document understanding (PDF/DOCX/XLSX/PPTX) | Unavailable on this branch | `feat/artifact-intelligence` owns generators; no parser or inference path is integrated here. |
 | Multimodal conversation | Implemented for cloud and explicit private | Chat and Work carry attachments; external agents are refused. |
 | Creative SVG/HTML validation | Implemented, tested | Allowlist scan; unsafe bodies withheld; safe bodies still require `sandbox: 'required'`. Not a sanitizer. |
-| Persistent media references | Implemented, tested through the store port | Mongo and in-memory repositories; real `mongod` is not installed in this environment, so distributed durability is not claimed. |
-| Durable artifact versions / quota / refcount | Not integrated | Depends on the artifact-contract decision above. |
+| Persistent media references | Implemented, tested on a real server | Media is stored as an artifact version; `media-authority` covers the real-Mongo path and the `mongodb` CI job requires a real server. |
+| Durable artifact versions / quota / refcount | Integrated, tested on a real server | Versioned descriptor, reference counting and atomic quota admission from `feat/durable-artifacts`; real-Mongo durability, concurrency and media-quota tests run in the `mongodb` job. |
 
 ## Security evidence
 
@@ -150,10 +153,11 @@ not mean hosted inference was exercised.
 
 ## Verification
 
-- Local: `npm run verify` — 209 tests, 209 pass, OpenAPI drift clean.
-- Hosted: exact-HEAD GitHub Actions on this branch. Historical evidence:
-  run `45877952215` at `c0cfa99`; run `45877479332` at `a22c496`. The run for the
-  current head is linked from the pull request.
+- Local: `npm run verify` with `CODERAX_REQUIRE_MONGODB=1` against a real
+  MongoDB 8.0 — 273 tests, 273 pass, 0 skipped, OpenAPI drift clean.
+- Hosted: the `verify` workflow, whose `mongodb` job runs the whole suite
+  against a pinned `mongo:8.0` service with `CODERAX_REQUIRE_MONGODB=1`, so the
+  real-database tests fail rather than skip there.
 - No live provider inference, pricing check, eligibility check or privacy-terms
   fetch was performed: no provider credential exists in this environment. The
   router's discovery and policy fixtures are not a substitute for that evidence.
@@ -163,24 +167,24 @@ not mean hosted inference was exercised.
   bodies are bounded by `server.maxBodyBytes`, and collection schemas carry
   explicit maxima, but the advisory remains until the contract packages move to
   zod 4.
-- Real MongoDB: `mongod` is not installed in this environment, so only the
-  repository port and the in-memory fake were exercised. Distributed durability,
-  replica behavior and real concurrent quota admission are not claimed.
+- Real MongoDB: the durability, concurrency and media-authority suites ran
+  against a real MongoDB 8.0 server, and the `mongodb` CI job repeats that on
+  every push. Replica-set behavior and failover are still not claimed: the server
+  is a single node.
 
-## Decisions requested from the owners
+## Decisions recorded
 
-1. **Artifact contract:** adopt the authoritative task-scoped record or the
-   durable versioned descriptor as canonical v1.1, and state how the other
-   branch maps onto it.
-2. **Media home:** keep `/v1/media` as a thin media view over the artifact
-   service, or express media as artifact kinds with media metadata. This decides
-   whether a version bump is required.
+1. **Artifact contract:** the durable versioned descriptor is canonical v1.1; the
+   task-scoped record is not published. Recorded above.
+2. **Media home:** `/v1/media` stays a thin, owner- and mode-scoped view over the
+   artifact service, and media is expressed as the `image` artifact kind with
+   media metadata. No version bump was required.
 3. **Merge order:** router (#4) → authoritative contract (#7) → durable artifacts
    → artifact intelligence → this media layer. Retarget to `main` after #4, then
    remove the stack-scoped CI triggers.
 
-Until those decisions are recorded, `feat/multimodal-intelligence-core` should
-not be closed: its APNG and truncation checks are incorporated here, but its
-owner may still want the remaining stack. `feat/durable-artifacts` and
-`feat/artifact-intelligence` should not be closed either; they own functionality
-this branch does not duplicate.
+`feat/multimodal-intelligence-core` should not be closed: its APNG and
+truncation checks are incorporated here, but its owner may still want the
+remaining stack. `feat/durable-artifacts` and `feat/artifact-intelligence` should
+not be closed either; they own generators and generation this branch does not
+duplicate.
