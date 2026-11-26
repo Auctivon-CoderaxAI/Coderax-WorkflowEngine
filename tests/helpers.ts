@@ -158,6 +158,7 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     state: 'queued',
     generation: 1,
     runToken: null,
+    eventSeq: 0,
     steps: [],
     checkpoint: { completedSteps: [], text: '' },
     createdAt: now,

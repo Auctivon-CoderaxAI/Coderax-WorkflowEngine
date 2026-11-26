@@ -35,7 +35,7 @@ Status vocabulary:
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/store.ts` (one row per event, unique `(taskId, seq)` and `eventId`, TTL retention) with the sequence allocated on the fenced task row and an SSE metadata frame | Preserved (fake-verified; no live DB, TTL expiry not exercised) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
@@ -69,10 +69,10 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 22 |
+| Preserved | 23 |
 | Strengthened | 10 |
 | Simplified | 5 |
-| Missing | 10 |
+| Missing | 9 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 1 |
 
@@ -83,14 +83,13 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
-are closed, migrating a client would remove functionality, which the brief
-forbids.
+capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 44, 46 and 47 are
+closed, migrating a client would remove functionality, which the brief forbids.
 
 Dependency order for closing them:
 
-1. Persistent execution events and replay across restart (row 22), then fenced
-   conversation writes (row 18).
+1. Fenced conversation writes (row 18). Persistent events and replay across
+   restart (row 22) are durable as of this branch.
 2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
    and the one that decides whether Coderax Native can replace the LibreChat
@@ -102,7 +101,10 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head: 129/129 tests, OpenAPI drift clean.
+- Durable execution events are covered by store-contract, fenced-allocation,
+  replay-across-restart and SSE-metadata tests. TTL expiry, a concurrent append
+  race on two replicas and a live MongoDB are not exercised.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a

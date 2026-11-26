@@ -4,21 +4,24 @@ import type {
   ExecutionEventType,
 } from '@coderax/contracts';
 import { EVENT_SCHEMA_VERSION } from '@coderax/contracts';
+import type { EventStore, Replay } from './store.js';
+
+export type { Replay } from './store.js';
 
 export type EventDraft = {
   taskId: string;
+  /**
+   * The generation that asserts it may write this task. The sequence allocator
+   * checks it against the fenced task row, so a superseded run publishes nothing
+   * instead of appending to a log a newer generation now owns.
+   */
+  runToken: string;
   agent: AgentId;
   generation: number;
   type: ExecutionEventType;
   payload?: unknown;
   /** Defaults to the bus clock; a recovery replay supplies the original time. */
   at?: string;
-};
-
-export type Replay = {
-  events: ExecutionEvent[];
-  /** True when the requested cursor is older than the retained window. */
-  truncated: boolean;
 };
 
 export type AcceptResult =
@@ -28,111 +31,122 @@ export type AcceptResult =
 export type Unsubscribe = () => void;
 
 /**
- * One bus per process, one ordered log per task.
- *
- * `seq` is assigned here and never by a caller, so two producers cannot create a
- * tie. A replayed event is accepted only when its id is new and its sequence is
- * beyond what has been seen; anything else is reported rather than applied. A
- * subscriber that disconnects does not stop the run: publishing is independent
- * of any listener.
+ * The fenced sequence authority the bus needs. `TaskRepository` satisfies it, and
+ * a test can supply a smaller object without a database.
  */
-export type EventBus = {
-  publish: (draft: EventDraft) => ExecutionEvent;
-  /** Applies an externally produced event (replay or recovery) exactly once. */
-  accept: (event: ExecutionEvent) => AcceptResult;
-  replay: (taskId: string, after: number) => Replay;
-  subscribe: (taskId: string, after: number, listener: (event: ExecutionEvent) => void) => Unsubscribe;
-  lastSeq: (taskId: string) => number;
+export type SeqAuthority = {
+  allocateSeq: (input: { taskId: string; token: string }) => Promise<number | null>;
+  adoptSeq: (input: { taskId: string; seq: number }) => Promise<void>;
 };
 
-type Stream = {
-  events: ExecutionEvent[];
-  seq: number;
-  seen: Set<string>;
-  listeners: Set<{ cursor: number; listener: (event: ExecutionEvent) => void }>;
+/**
+ * One durable log per task, shared by every process that can reach the store.
+ *
+ * `seq` is allocated by the fenced task row and never by a caller, so two
+ * producers on two replicas cannot create a tie and a stale generation cannot
+ * create anything at all. A subscriber polls the log from its cursor instead of
+ * listening to process memory, which is what makes a replay after a restart and a
+ * tail from another replica the same mechanism. A subscriber that disconnects
+ * does not stop the run: appending is independent of any listener.
+ */
+export type EventBus = {
+  /** Returns `null` when the writer no longer holds the task's fencing token. */
+  publish: (draft: EventDraft) => Promise<ExecutionEvent | null>;
+  /** Applies an externally produced event (replay or recovery) exactly once. */
+  accept: (event: ExecutionEvent) => Promise<AcceptResult>;
+  replay: (taskId: string, after: number) => Promise<Replay>;
+  subscribe: (taskId: string, after: number, listener: (event: ExecutionEvent) => void) => Unsubscribe;
+  lastSeq: (taskId: string) => Promise<number>;
 };
 
 export function createEventBus(input: {
-  bufferSize: number;
+  store: EventStore;
+  seq: SeqAuthority;
+  /** How often a tail re-reads the log; there is no in-process push path. */
+  pollMs: number;
   eventId: () => string;
   iso: () => string;
 }): EventBus {
-  const streams = new Map<string, Stream>();
-
-  function stream(taskId: string): Stream {
-    const existing = streams.get(taskId);
-    if (existing) return existing;
-    const created: Stream = { events: [], seq: 0, seen: new Set(), listeners: new Set() };
-    streams.set(taskId, created);
-    return created;
-  }
-
-  function append(state: Stream, event: ExecutionEvent): void {
-    state.events.push(event);
-    state.seen.add(event.eventId);
-    if (state.events.length > input.bufferSize) {
-      state.events.splice(0, state.events.length - input.bufferSize);
-    }
-    for (const subscriber of state.listeners) {
-      if (event.seq > subscriber.cursor) {
-        subscriber.cursor = event.seq;
-        subscriber.listener(event);
-      }
-    }
-  }
-
   return {
-    publish: (draft) => {
-      const state = stream(draft.taskId);
-      state.seq += 1;
+    publish: async (draft) => {
+      const seq = await input.seq.allocateSeq({
+        taskId: draft.taskId,
+        token: draft.runToken,
+      });
+      if (seq === null) return null;
       const event = {
         v: EVENT_SCHEMA_VERSION,
         eventId: input.eventId(),
         taskId: draft.taskId,
-        seq: state.seq,
+        seq,
         at: draft.at || input.iso(),
         agent: draft.agent,
         generation: draft.generation,
         type: draft.type,
         ...(draft.payload === undefined ? {} : { payload: draft.payload }),
       } as ExecutionEvent;
-      append(state, event);
-      return event;
+      // A duplicate here means the allocated sequence was already stored, which
+      // only happens if the head lagged the log. Reporting it as unpublished is
+      // honest: the caller must not treat this event as delivered.
+      return (await input.store.append(event)) === 'stored' ? event : null;
     },
-    accept: (event) => {
-      const state = stream(event.taskId);
-      if (state.seen.has(event.eventId)) {
+
+    accept: async (event) => {
+      if (await input.store.has(event.eventId)) {
         return { accepted: false, reason: 'duplicate' };
       }
-      if (event.seq <= state.seq) {
+      if (event.seq <= (await input.store.lastSeq(event.taskId))) {
         return { accepted: false, reason: 'out_of_order' };
       }
-      state.seq = event.seq;
-      append(state, event);
+      if ((await input.store.append(event)) === 'duplicate') {
+        return { accepted: false, reason: 'duplicate' };
+      }
+      // Adoption raises the head so the next allocation continues above it; a
+      // head that stayed behind would hand out a sequence the log already holds.
+      await input.seq.adoptSeq({ taskId: event.taskId, seq: event.seq });
       return { accepted: true, event };
     },
-    replay: (taskId, after) => {
-      const state = streams.get(taskId);
-      if (!state) return { events: [], truncated: false };
-      const oldest = state.events[0]?.seq ?? 0;
-      // The consumer's next needed sequence is `after + 1`; if that predates the
-      // retained window, some events are gone and the caller must be told.
-      if (oldest > 1 && after + 1 < oldest) {
-        return { events: state.events, truncated: true };
-      }
-      return {
-        events: state.events.filter((event) => event.seq > after),
-        truncated: false,
-      };
-    },
+
+    replay: (taskId, after) => input.store.replay(taskId, after),
+
     subscribe: (taskId, after, listener) => {
-      const state = stream(taskId);
-      const entry = { cursor: after, listener };
-      state.listeners.add(entry);
+      let cursor = after;
+      let closed = false;
+      let timer: NodeJS.Timeout | null = null;
+
+      const poll = async (): Promise<void> => {
+        try {
+          const replay = await input.store.replay(taskId, cursor);
+          for (const event of replay.events) {
+            if (closed) return;
+            if (event.seq <= cursor) continue;
+            cursor = event.seq;
+            listener(event);
+          }
+        } catch {
+          // The next poll re-reads from the same cursor, so a transient store
+          // failure heals itself; a persistent one leaves the client to its own
+          // timeout instead of ending a run that is still making progress.
+        }
+        schedule();
+      };
+
+      const schedule = (): void => {
+        if (closed) return;
+        timer = setTimeout(() => {
+          void poll();
+        }, input.pollMs);
+        timer.unref();
+      };
+
+      schedule();
       return () => {
-        state.listeners.delete(entry);
+        closed = true;
+        if (timer) clearTimeout(timer);
+        timer = null;
       };
     },
-    lastSeq: (taskId) => streams.get(taskId)?.seq ?? 0,
+
+    lastSeq: (taskId) => input.store.lastSeq(taskId),
   };
 }

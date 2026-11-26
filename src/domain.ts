@@ -52,6 +52,12 @@ export type TaskRecord = {
   state: TaskState;
   generation: number;
   runToken: string | null;
+  /**
+   * The highest event sequence the durable log holds for this task, absent rows
+   * read as 0. It lives on the fenced row so allocating a sequence and proving
+   * ownership are one atomic operation.
+   */
+  eventSeq: number;
   steps: TaskStep[];
   checkpoint: TaskCheckpoint;
   createdAt: IsoDateTime;

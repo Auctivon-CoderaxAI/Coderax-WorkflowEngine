@@ -1,37 +1,74 @@
-import type { MongoCollectionLike, MongoCursor, MongoFilter } from '../../src/persistence/mongo.js';
+import type {
+  MongoCollectionLike,
+  MongoCursor,
+  MongoFilter,
+  MongoUpdate,
+} from '../../src/persistence/mongo.js';
 import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 
 type Document = Record<string, unknown>;
 type Index = {
   keys: Record<string, 1 | -1>;
-  options?: { unique?: boolean; name?: string };
+  options?: { unique?: boolean; name?: string; expireAfterSeconds?: number };
 };
+
+/**
+ * Ordering covers the three comparable shapes the stores use: dates for leases
+ * and retention, numbers for event sequences, and strings for identifiers. A
+ * numeric comparison that fell back to string order would put sequence 10 before
+ * 9, which is exactly the bug a durable log cannot afford.
+ */
+function compare(left: unknown, right: unknown): number | null {
+  if (left instanceof Date && right instanceof Date) {
+    return Math.sign(left.getTime() - right.getTime());
+  }
+  if (typeof left === 'number' && typeof right === 'number') {
+    return Math.sign(left - right);
+  }
+  if (typeof left === 'string' && typeof right === 'string') {
+    return Math.sign(left.localeCompare(right));
+  }
+  return null;
+}
 
 function matches(document: Document, filter: MongoFilter): boolean {
   return Object.entries(filter).every(([field, condition]) => {
     const value = document[field];
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
-      if ('$lte' in operators) {
-        const bound = operators.$lte as Date;
-        if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
-      }
-      if ('$gt' in operators) {
-        const bound = operators.$gt as Date;
-        if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
-      }
-      if ('$in' in operators) {
-        const list = operators.$in as unknown[];
-        if (!list.includes(value)) return false;
-      }
-      if ('$nin' in operators) {
-        const list = operators.$nin as unknown[];
-        if (list.includes(value)) return false;
+      for (const [operator, bound] of Object.entries(operators)) {
+        if (operator === '$lte' || operator === '$lt' || operator === '$gt' || operator === '$gte') {
+          const order = compare(value, bound);
+          if (order === null) return false;
+          if (operator === '$lte' && order > 0) return false;
+          if (operator === '$lt' && order >= 0) return false;
+          if (operator === '$gt' && order <= 0) return false;
+          if (operator === '$gte' && order < 0) return false;
+        } else if (operator === '$in') {
+          if (!(bound as unknown[]).includes(value)) return false;
+        } else if (operator === '$nin') {
+          if ((bound as unknown[]).includes(value)) return false;
+        }
       }
       return true;
     }
     return value === condition;
   });
+}
+
+function applyUpdate(document: Document, update: MongoUpdate): Document {
+  const next: Document = { ...document, ...(update.$set ?? {}) };
+  for (const [field, amount] of Object.entries(update.$inc ?? {})) {
+    const current = next[field];
+    next[field] = (typeof current === 'number' ? current : 0) + amount;
+  }
+  for (const [field, value] of Object.entries(update.$max ?? {})) {
+    const current = next[field];
+    if (current === undefined || (compare(current, value) ?? 1) < 0) {
+      next[field] = value;
+    }
+  }
+  return next;
 }
 
 function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
@@ -51,9 +88,10 @@ export type FakeCollection = MongoCollectionLike & {
 
 /**
  * A collection fake that enforces what the stores rely on: a cursor that sorts
- * and limits, atomic single-document updates, and the unique indexes the stores
- * declare (a duplicate insert raises 11000). It is a test double for the driver,
- * not for the repositories, so the same fake proves the wiring and the semantics.
+ * and limits, atomic single-document updates including `$inc` and `$max`, numeric
+ * comparisons, and the unique indexes the stores declare (a duplicate insert
+ * raises 11000). It is a test double for the driver, not for the repositories, so
+ * the same fake proves the wiring and the semantics.
  */
 export function createFakeCollection(): FakeCollection {
   const documents: Document[] = [];
@@ -81,11 +119,8 @@ export function createFakeCollection(): FakeCollection {
       sort: (spec) => {
         const [field, direction] = Object.entries(spec)[0] ?? ['key', 1];
         result = [...result].sort((left, right) => {
-          const a = left[field];
-          const b = right[field];
-          const leftValue = a instanceof Date ? a.getTime() : String(a);
-          const rightValue = b instanceof Date ? b.getTime() : String(b);
-          return leftValue < rightValue ? -direction : leftValue > rightValue ? direction : 0;
+          const order = compare(left[field], right[field]) ?? 0;
+          return order * direction;
         });
         return self;
       },
@@ -121,13 +156,15 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = { ...documents[index], ...update.$set };
-      return { ...documents[index] };
+      const next = applyUpdate(documents[index] as Document, update);
+      assertUnique(next, index);
+      documents[index] = next;
+      return { ...next };
     },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);
       if (index !== -1) {
-        const next = { ...documents[index], ...update.$set };
+        const next = applyUpdate(documents[index] as Document, update);
         assertUnique(next, index);
         documents[index] = next;
         return { matchedCount: 1, upsertedCount: 0 };
@@ -135,7 +172,11 @@ export function createFakeCollection(): FakeCollection {
       if (!options.upsert) {
         return { matchedCount: 0, upsertedCount: 0 };
       }
-      const candidate = { ...(update.$setOnInsert ?? {}), ...update.$set };
+      const candidate = applyUpdate({ ...(update.$setOnInsert ?? {}) }, {
+        ...(update.$set ? { $set: update.$set } : {}),
+        ...(update.$inc ? { $inc: update.$inc } : {}),
+        ...(update.$max ? { $max: update.$max } : {}),
+      });
       assertUnique(candidate, -1);
       documents.push(candidate);
       return { matchedCount: 0, upsertedCount: 1 };

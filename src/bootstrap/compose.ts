@@ -202,7 +202,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const notifications = persistence.notifications;
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
-    bufferSize: config.execution.eventBufferSize,
+    store: persistence.events,
+    // The task row is the fenced sequence authority; the bus never numbers an
+    // event on its own, so a superseded generation cannot append one.
+    seq: tasks,
+    pollMs: config.execution.eventPollMs,
     eventId: ids.eventId,
     iso: clock.iso,
   });

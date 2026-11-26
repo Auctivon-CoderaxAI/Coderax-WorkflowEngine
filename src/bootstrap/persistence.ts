@@ -2,6 +2,8 @@ import type { EngineConfig } from '../configuration/schema.js';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
+import type { EventStore } from '../events/store.js';
+import { createMemoryEventStore, createMongoEventStore, ensureEventIndexes } from '../events/store.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { MemoryStore } from '../memory/store.js';
@@ -30,6 +32,7 @@ export type PersistenceStores = {
   driver: 'memory' | 'mongo';
   lease: LeaseStore;
   tasks: TaskRepository;
+  events: EventStore;
   conversations: ConversationRepository;
   memory: MemoryStore;
   notifications: NotificationStore;
@@ -96,6 +99,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       driver: 'memory',
       lease: createLeaseStore(createInMemoryWorkRunTable()),
       tasks: createTaskRepository(),
+      events: createMemoryEventStore({ maxPerTask: config.execution.eventBufferSize }),
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       notifications: createNotificationStore(),
@@ -110,6 +114,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
   const notifications = database.collection(collectionName(config, 'notifications'));
+  const events = database.collection(collectionName(config, 'events'));
 
   try {
     await ensureWorkRunIndexes(workRuns);
@@ -117,6 +122,9 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
+    await ensureEventIndexes(events, {
+      retentionSeconds: Math.floor(config.execution.eventRetentionMs / 1000),
+    });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -128,6 +136,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     driver: 'mongo',
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
+    events: createMongoEventStore({
+      collection: events,
+      pageSize: config.execution.eventBufferSize,
+      now: () => clock.now(),
+    }),
     conversations: createMongoConversationRepository({ conversations, messages }),
     memory: createMongoMemoryStore({
       collection: memory,

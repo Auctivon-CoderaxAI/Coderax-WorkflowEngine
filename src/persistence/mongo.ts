@@ -26,22 +26,34 @@ export type MongoCursor = {
   toArray: () => Promise<Record<string, unknown>[]>;
 };
 
+/**
+ * The update operators these tables use. `$inc` is what makes the event sequence
+ * allocation atomic, and `$max` is what lets an adopted external sequence raise a
+ * head without ever lowering it.
+ */
+export type MongoUpdate = {
+  $set?: Record<string, unknown>;
+  $setOnInsert?: Record<string, unknown>;
+  $inc?: Record<string, number>;
+  $max?: Record<string, number>;
+};
+
 /** The subset of the MongoDB collection API these tables need. */
 export type MongoCollectionLike = {
   createIndex: (
     keys: Record<string, 1 | -1>,
-    options?: { unique?: boolean; name?: string },
+    options?: { unique?: boolean; name?: string; expireAfterSeconds?: number },
   ) => Promise<unknown>;
   insertOne: (document: Record<string, unknown>) => Promise<unknown>;
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;
   findOneAndUpdate: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown> },
+    update: MongoUpdate,
     options: { returnDocument: 'after'; includeResultMetadata: false },
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown>; $setOnInsert?: Record<string, unknown> },
+    update: MongoUpdate,
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;

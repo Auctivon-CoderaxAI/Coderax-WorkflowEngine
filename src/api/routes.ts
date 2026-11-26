@@ -1,6 +1,6 @@
 import type { DataMode } from '@coderax/contracts';
-import type { ApplicationService } from '../orchestration/service.js';
-import type { RouteRegistry } from './router.js';
+import type { ApplicationService, EventStream } from '../orchestration/service.js';
+import type { RouteRegistry, SseFrame } from './router.js';
 import { problemResult } from './router.js';
 import type { ServiceFailure } from '../support/result.js';
 
@@ -28,36 +28,32 @@ function isTerminalPayload(value: unknown): boolean {
   );
 }
 
-function eventId(value: unknown): string {
-  if (typeof value === 'object' && value !== null) {
-    const id = (value as { eventId?: unknown }).eventId;
-    if (typeof id === 'string') return id;
-  }
-  return '';
-}
-
 /**
- * Replays retained events, then tails the live ones. The stream closes on a
- * terminal event so a client never waits for a task that already finished; a
- * disconnected client stops consuming without stopping the run.
+ * Replays the durable log from the cursor, then tails it. The first frame is an
+ * SSE comment carrying the log's metadata: the SDK drops any line that is not
+ * `data:`, so a deployed client keeps working while a newer one can read
+ * `lastSeq` and `truncated` without a new frame type in the event contract. The
+ * stream closes on a terminal event so a client never waits for a task that
+ * already finished; a disconnected client stops consuming without stopping the
+ * run.
  */
-async function* toEventStream(stream: {
-  replay: { events: unknown[] };
-  subscribe: (listener: (event: unknown) => void) => () => void;
-}): AsyncIterable<unknown> {
-  const seen = new Set<string>();
+async function* toEventStream(stream: EventStream): AsyncIterable<SseFrame> {
+  yield {
+    kind: 'comment',
+    comment: `coderax-meta ${JSON.stringify({
+      lastSeq: stream.replay.lastSeq,
+      truncated: stream.replay.truncated,
+    })}`,
+  };
+
   for (const event of stream.replay.events) {
-    seen.add(eventId(event));
-    yield event;
+    yield { kind: 'event', event };
     if (isTerminalPayload(event)) return;
   }
 
   const pending: unknown[] = [];
   let wake: (() => void) | null = null;
   const unsubscribe = stream.subscribe((event) => {
-    const id = eventId(event);
-    if (id && seen.has(id)) return;
-    if (id) seen.add(id);
     pending.push(event);
     wake?.();
   });
@@ -66,7 +62,7 @@ async function* toEventStream(stream: {
     for (;;) {
       const next = pending.shift();
       if (next !== undefined) {
-        yield next;
+        yield { kind: 'event', event: next };
         if (isTerminalPayload(next)) return;
         continue;
       }

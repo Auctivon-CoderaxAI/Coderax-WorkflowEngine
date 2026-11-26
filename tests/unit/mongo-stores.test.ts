@@ -158,6 +158,49 @@ test('reissue claims a new generation and refuses a live task', async () => {
   );
 });
 
+test('the event head is allocated through the current fence only', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1' }));
+
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 1);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 2);
+  // A superseded or unknown writer gets no sequence at all.
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-0' }), null);
+  assert.equal(await tasks.allocateSeq({ taskId: 'missing', token: 'run-1' }), null);
+
+  // A terminal row keeps its token, so its owner can announce the settlement.
+  await tasks.updateFenced({ taskId: 'task_1', token: 'run-1', patch: { state: 'completed' } });
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 3);
+
+  // Adoption raises the head and never lowers it.
+  await tasks.adoptSeq({ taskId: 'task_1', seq: 7 });
+  assert.equal((await tasks.get('task_1'))?.eventSeq, 7);
+  await tasks.adoptSeq({ taskId: 'task_1', seq: 4 });
+  assert.equal((await tasks.get('task_1'))?.eventSeq, 7);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 8);
+});
+
+test('a reissued generation allocates above the log the previous one wrote', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1' }));
+  await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' });
+  await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' });
+  await tasks.updateFenced({ taskId: 'task_1', token: 'run-1', patch: { state: 'failed' } });
+
+  const issued = await tasks.reissue({
+    taskId: 'task_1',
+    token: 'run-2',
+    now: NOW,
+    leaseExpiresAt: NOW,
+  });
+  assert.equal(issued.applied, true);
+  // The head survives reissue, so a client cursor from generation 1 still means
+  // something in generation 2.
+  assert.equal(issued.applied && issued.task.eventSeq, 2);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-2' }), 3);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), null);
+});
+
 test('tasks are listed by conversation, owner and settlement', async () => {
   const tasks = createMongoTaskRepository(createFakeCollection());
   await tasks.create(taskRecord({ taskId: 'task_1', conversationId: 'conv_1', runToken: 'run-1' }));
