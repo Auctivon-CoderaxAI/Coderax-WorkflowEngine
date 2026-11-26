@@ -293,14 +293,26 @@ test('a committing action without a declared intent fails closed', async () => {
     assert.equal(unidentified.ok, false);
     assert.equal(unidentified.ok === false && unidentified.code, 'permission_required');
 
-    const declared = await must(
+    // form_input is safe for filling a field, not for clicking a button: a
+    // button click can submit a form or perform another committing action.
+    const declared = await act(started, session.sessionId, {
+      type: 'click',
+      target: { elementId: 'el-submit' },
+      intent: { category: 'form_input', description: 'Submit the search form' },
+    });
+    assert.equal(declared.ok, false);
+    assert.equal(declared.ok === false && declared.code, 'permission_required');
+
+    const approval = await approve(started, session.sessionId, 'irreversible');
+    const approved = await must(
       act(started, session.sessionId, {
         type: 'click',
         target: { elementId: 'el-submit' },
         intent: { category: 'form_input', description: 'Submit the search form' },
+        approvalId: approval,
       }),
     );
-    assert.equal(declared.state, 'ready');
+    assert.equal(approved.state, 'ready');
   } finally {
     await started.close();
   }
@@ -337,13 +349,28 @@ test('filling a password field requires an authentication approval', async () =>
     );
     assert.equal(approved.state, 'ready');
 
-    const enter = await act(started, session.sessionId, {
+    // Enter can submit the form, so it is a committing action even when the
+    // caller describes it as form input.
+    const enterRefused = await act(started, session.sessionId, {
       type: 'press',
       key: 'Enter',
       target: { elementId: 'el-password' },
       intent: { category: 'form_input', description: 'Submit the form' },
     });
-    assert.equal(enter.ok, true);
+    assert.equal(enterRefused.ok, false);
+    assert.equal(enterRefused.ok === false && enterRefused.code, 'permission_required');
+
+    const enterApproval = await approve(started, session.sessionId, 'irreversible');
+    const enter = await must(
+      act(started, session.sessionId, {
+        type: 'press',
+        key: 'Enter',
+        target: { elementId: 'el-password' },
+        intent: { category: 'form_input', description: 'Submit the form' },
+        approvalId: enterApproval,
+      }),
+    );
+    assert.equal(enter.state, 'ready');
   } finally {
     await started.close();
   }
@@ -384,6 +411,7 @@ test('accessible discovery, forms, keyboard, mouse and tabs are supported', asyn
       }),
     );
     await must(act(started, session.sessionId, { type: 'mouse', input: 'move', x: 10, y: 20 }));
+    const mouseApproval = await approve(started, session.sessionId, 'irreversible');
     await must(
       act(started, session.sessionId, {
         type: 'mouse',
@@ -392,6 +420,7 @@ test('accessible discovery, forms, keyboard, mouse and tabs are supported', asyn
         y: 20,
         button: 'left',
         intent: { category: 'form_input', description: 'Click the focused field' },
+        approvalId: mouseApproval,
       }),
     );
 
@@ -422,12 +451,14 @@ test('accessible discovery, forms, keyboard, mouse and tabs are supported', asyn
     );
     assert.equal(afterActivate.url, 'https://example.test/second');
 
+    const closeApproval = await approve(started, session.sessionId, 'irreversible');
     await must(
       act(started, session.sessionId, {
         type: 'tab',
         input: 'close',
         tabId: secondTab.tabId,
         intent: { category: 'read', description: 'Close the tab when done' },
+        approvalId: closeApproval,
       }),
     );
     const afterClose = await must(
@@ -791,6 +822,32 @@ test('a provider returning a page outside the allowlist fails the session', asyn
     assert.equal(fake.closed.length, 1);
     const receipt = (await receiptsOf(started, session.sessionId)).at(-1);
     assert.equal(receipt?.outcome, 'failed');
+  } finally {
+    await started.close();
+  }
+});
+
+test('a provider-returned tab outside the allowlist fails the session', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({
+    browser: fake,
+    config: { browsers: { enabled: true } },
+  });
+  try {
+    const session = await open(started);
+    fake.setNextTabs([
+      { tabId: 'tab-1', url: 'https://example.test/', title: 'Allowed', active: true },
+      { tabId: 'tab-2', url: 'https://evil.test/', title: 'Outside', active: false },
+    ]);
+    const result = await act(started, session.sessionId, { type: 'inspect' });
+    assert.equal(result.ok, false);
+    assert.equal(result.ok === false && result.code, 'protocol_error');
+
+    const failed = await must(
+      started.app.service.browserSession(principal, session.sessionId),
+    );
+    assert.equal(failed.state, 'failed');
+    assert.equal(fake.closed.length, 1);
   } finally {
     await started.close();
   }

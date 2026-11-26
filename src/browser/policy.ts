@@ -24,7 +24,20 @@ import type { ProviderElement } from './types.js';
 const UNSAFE_CHARACTERS =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
-const SAFE_INTENT_CATEGORIES = new Set(['read', 'navigate', 'form_input']);
+// Keys that only move focus or scroll the page. Any other key can commit a form
+// or trigger an application action, so it needs an approval.
+const SAFE_PRESS_KEYS = new Set([
+  'Tab',
+  'Escape',
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'PageUp',
+  'PageDown',
+  'Home',
+  'End',
+]);
 
 const SENSITIVE_CATEGORIES: readonly BrowserSensitiveCategory[] = [
   'file_transfer',
@@ -62,7 +75,7 @@ export function scopeFor(category: BrowserSensitiveCategory): PermissionScope {
 
 export function sensitivityFor(
   action: BrowserAction,
-  passwordTarget: boolean,
+  context: { passwordTarget: boolean; targetRole?: string },
 ): Sensitivity | null {
   const declared = 'intent' in action ? action.intent?.category : undefined;
   if (declared && SENSITIVE_CATEGORIES.includes(declared as BrowserSensitiveCategory)) {
@@ -72,24 +85,30 @@ export function sensitivityFor(
   if (action.type === 'upload' || action.type === 'download') {
     return sensitivity('file_transfer');
   }
-  if (action.type === 'fill' && passwordTarget && declared !== 'authentication') {
+  if (
+    action.type === 'fill' &&
+    context.passwordTarget &&
+    declared !== 'authentication'
+  ) {
     return sensitivity('authentication');
   }
+  // `form_input` is safe only for filling a field. A click, even one declared
+  // as form input, can submit a form; only an observed link with an explicit
+  // navigation intent avoids an approval.
   if (action.type === 'click') {
-    if (declared && SAFE_INTENT_CATEGORIES.has(declared)) return null;
+    const role = context.targetRole?.toLowerCase();
+    if (declared === 'navigate' && role === 'link') return null;
     return sensitivity('irreversible');
   }
   if (action.type === 'press') {
-    if (declared && SAFE_INTENT_CATEGORIES.has(declared)) return null;
+    if (SAFE_PRESS_KEYS.has(action.key)) return null;
     return sensitivity('irreversible');
   }
   if (action.type === 'mouse') {
-    if (action.input === 'move') return null;
-    if (declared && SAFE_INTENT_CATEGORIES.has(declared)) return null;
+    if (action.input === 'move' || action.input === 'wheel') return null;
     return sensitivity('irreversible');
   }
   if (action.type === 'tab' && action.input === 'close') {
-    if (declared && SAFE_INTENT_CATEGORIES.has(declared)) return null;
     return sensitivity('irreversible');
   }
   return null;
@@ -189,6 +208,13 @@ export function sanitizeElements(elements: readonly ProviderElement[]): BrowserE
     });
   }
   return out;
+}
+
+export function tabsWithinOrigins(
+  tabs: readonly BrowserTab[],
+  origins: readonly string[],
+): boolean {
+  return tabs.every((tab) => tab.url === 'about:blank' || originAllowed(tab.url, origins));
 }
 
 export function sanitizeTabs(tabs: readonly BrowserTab[]): BrowserTab[] | null {

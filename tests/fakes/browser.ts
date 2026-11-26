@@ -45,6 +45,7 @@ export type FakeBrowserProvider = BrowserProvider & {
   setCapabilities: (patch: Partial<BrowserCapabilities>) => void;
   setNextArtifacts: (artifacts: ProviderArtifact[] | null) => void;
   setNextUrl: (url: string | null) => void;
+  setNextTabs: (tabs: BrowserTab[] | null) => void;
   setScreenshot: (data: Buffer, contentType?: string) => void;
   setDownload: (data: Buffer, contentType?: string) => void;
   failNextAct: () => void;
@@ -103,6 +104,7 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
   };
   let nextArtifacts: ProviderArtifact[] | null = null;
   let nextUrl: string | null = null;
+  let nextTabs: BrowserTab[] | null = null;
   let failNext = false;
   let failNextClose = false;
   let tabCounter = 1;
@@ -138,6 +140,9 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
     },
     setNextUrl: (url) => {
       nextUrl = url;
+    },
+    setNextTabs: (tabs) => {
+      nextTabs = tabs;
     },
     setScreenshot: (data, contentType = 'image/png') => {
       screenshot = { data, contentType };
@@ -243,13 +248,15 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
       }
 
       const url = nextUrl ?? session.url;
+      const tabs = nextTabs ?? session.tabs;
       nextUrl = null;
+      nextTabs = null;
       return {
         ok: true,
         value: {
           url,
           title: session.title,
-          tabs: session.tabs,
+          tabs,
           ...(observation ? { observation } : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         },

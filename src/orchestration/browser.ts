@@ -53,6 +53,7 @@ import {
   sanitizeUntrusted,
   sensitivityFor,
   scopeFor,
+  tabsWithinOrigins,
 } from '../browser/policy.js';
 
 /**
@@ -244,8 +245,8 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       const result = await deps.provider.close(record.providerSessionId);
       return result.ok;
     } catch {
-      // A provider that cannot be reached is already gone as far as the owner is
-      // concerned; the session is expired rather than kept usable.
+      // An unreachable provider cannot confirm termination. The caller records
+      // the session as quarantined rather than inventing a clean close.
       return false;
     }
   }
@@ -492,7 +493,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
 
       const url = sanitizePageUrl(created.value.url);
       const tabs = sanitizeTabs(created.value.tabs);
-      if (!url || !tabs) {
+      if (!url || !tabs || !tabsWithinOrigins(tabs, origins)) {
         try {
           await deps.provider.close(created.value.providerSessionId);
         } catch {
@@ -660,16 +661,18 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           started,
         );
       }
+      const targetElement =
+        targetElementId === undefined
+          ? undefined
+          : record.lastElements.find((element) => element.elementId === targetElementId);
       const passwordTarget =
         action.type === 'fill' &&
-        targetElementId !== undefined &&
-        record.lastElements.some(
-          (element) =>
-            element.elementId === targetElementId &&
-            element.inputType?.toLowerCase() === 'password',
-        );
+        targetElement?.inputType?.toLowerCase() === 'password';
 
-      const sensitivity = sensitivityFor(normalizedAction, passwordTarget);
+      const sensitivity = sensitivityFor(normalizedAction, {
+        passwordTarget,
+        ...(targetElement ? { targetRole: targetElement.role } : {}),
+      });
       let approvalId: string | undefined;
       if (sensitivity) {
         const approval = await checkApproval({
@@ -712,11 +715,11 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         );
       }
       const tabs = sanitizeTabs(outcome.value.tabs ?? record.session.tabs);
-      if (!tabs) {
+      if (!tabs || !tabsWithinOrigins(tabs, record.session.allowedOrigins)) {
         return protocolViolation(
           record,
           actionName,
-          'The browser provider returned an unusable tab list.',
+          'The browser provider returned an unusable or out-of-allowlist tab list.',
           started,
         );
       }

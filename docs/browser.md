@@ -128,12 +128,21 @@ provider failure cannot replay it; a retry needs a new approval.
 
 Fail-closed defaults:
 
-- A committing `click`, `press`, non-move `mouse` input, `tab.close`, `upload` or
-  `download` without a declared intent is treated as sensitive and refused until
-  approved. Declaring a non-sensitive category (`read`, `navigate`,
-  `form_input`) is required to perform it without an approval.
-- Filling an element the provider identified as a password field is upgraded to
+- A `click` requires an approval unless it targets an observed `link` and the
+  caller declares `navigate`. `form_input` is **not** a safe intent for a click:
+  a button click can submit a form, delete data or perform another committing
+  action.
+- A `press` requires an approval unless the key only moves focus or scrolls
+  (`Tab`, `Escape`, arrow keys, `PageUp`, `PageDown`, `Home`, `End`). `Enter`,
+  `Space` and every other key can commit a form and need approval.
+- Mouse `move` and `wheel` are non-committing. Mouse `down` and `up` need an
+  approval. `tab.close` needs an approval. `upload` and `download` need a
+  `file_transfer` approval.
+- Filling a non-password field with `form_input` is non-committing. Filling an
+  element the provider identified as a password field is upgraded to
   `authentication`, even if the caller declared `form_input`.
+- CAPTCHAs, access controls and provider restrictions are never bypassed. A
+  session that encounters one must pause and escalate to the owner.
 - The owner sees the declared category and description on the receipt; an agent
   cannot use page text to relabel an action.
 
@@ -267,6 +276,11 @@ content.
 - Provider-side redirect enforcement is required by the protocol but cannot be
   proven until a real provider is verified; the engine detects the final URL and
   fails the session.
+- DNS-rebinding and private-network blocking, egress restriction, browser-origin
+  credential isolation and download isolation are provider obligations. No real
+  provider exists, so those protections are not verified here. The engine does
+  refuse active download types and verifies every returned main-frame and tab
+  URL against the exact-origin allowlist.
 - Durable browser sessions are **not implemented**. Control-plane records,
   approvals and artifact bytes are process-local. A restart cannot recover a
   session, and the provider TTL is the only remote backstop. The required
