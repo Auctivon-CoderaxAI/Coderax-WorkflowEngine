@@ -13,12 +13,49 @@ function matches(document: Document, filter: MongoFilter): boolean {
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
       if ('$lte' in operators) {
-        const bound = operators.$lte as Date;
-        if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
+        const bound = operators.$lte;
+        if (bound instanceof Date) {
+          if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
+        } else if (typeof bound === 'number') {
+          if (typeof value !== 'number' || value > bound) return false;
+        } else {
+          return false;
+        }
       }
       if ('$gt' in operators) {
-        const bound = operators.$gt as Date;
-        if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
+        const bound = operators.$gt;
+        if (bound instanceof Date) {
+          if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
+        } else if (typeof bound === 'number') {
+          if (typeof value !== 'number' || value <= bound) return false;
+        } else {
+          return false;
+        }
+      }
+      if ('$gte' in operators) {
+        const bound = operators.$gte;
+        if (bound instanceof Date) {
+          if (!(value instanceof Date) || value.getTime() < bound.getTime()) return false;
+        } else if (typeof bound === 'number') {
+          if (typeof value !== 'number' || value < bound) return false;
+        } else {
+          return false;
+        }
+      }
+      if ('$lt' in operators) {
+        const bound = operators.$lt;
+        if (bound instanceof Date) {
+          if (!(value instanceof Date) || value.getTime() >= bound.getTime()) return false;
+        } else if (typeof bound === 'number') {
+          if (typeof value !== 'number' || value >= bound) return false;
+        } else if (typeof bound === 'string') {
+          if (typeof value !== 'string' || value >= bound) return false;
+        } else {
+          return false;
+        }
+      }
+      if ('$ne' in operators) {
+        if (value === operators.$ne) return false;
       }
       if ('$in' in operators) {
         const list = operators.$in as unknown[];
@@ -36,6 +73,15 @@ function matches(document: Document, filter: MongoFilter): boolean {
 
 function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
   return JSON.stringify(Object.keys(keys).map((field) => document[field] ?? null));
+}
+
+function applyUpdate(document: Document, update: { $set?: Document; $inc?: Record<string, number> }): Document {
+  const next = { ...document, ...(update.$set ?? {}) };
+  for (const [field, amount] of Object.entries(update.$inc ?? {})) {
+    const current = typeof next[field] === 'number' ? (next[field] as number) : 0;
+    next[field] = current + amount;
+  }
+  return next;
 }
 
 function duplicateKey(): Error {
@@ -121,13 +167,13 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = { ...documents[index], ...update.$set };
+      documents[index] = applyUpdate(documents[index], update);
       return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);
       if (index !== -1) {
-        const next = { ...documents[index], ...update.$set };
+        const next = applyUpdate(documents[index], update);
         assertUnique(next, index);
         documents[index] = next;
         return { matchedCount: 1, upsertedCount: 0 };
@@ -135,7 +181,7 @@ export function createFakeCollection(): FakeCollection {
       if (!options.upsert) {
         return { matchedCount: 0, upsertedCount: 0 };
       }
-      const candidate = { ...(update.$setOnInsert ?? {}), ...update.$set };
+      const candidate = applyUpdate({ ...(update.$setOnInsert ?? {}) }, update);
       assertUnique(candidate, -1);
       documents.push(candidate);
       return { matchedCount: 0, upsertedCount: 1 };

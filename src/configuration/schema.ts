@@ -235,6 +235,25 @@ export const ExecutionConfig = z
   })
   .strict();
 
+/**
+ * Durable artifact bounds. Every ceiling is a hard refusal, never a warning:
+ * an oversized upload is rejected before it is written and an owner over quota
+ * is refused rather than allowed to grow unbounded storage.
+ */
+export const ArtifactsConfig = z
+  .object({
+    maxBytesPerArtifact: z.number().int().min(1_024).max(10_485_760).default(8_388_608),
+    maxBytesPerOwner: z.number().int().min(1_024).max(1_073_741_824).default(268_435_456),
+    maxArtifactsPerOwner: z.number().int().min(1).max(10_000).default(1_000),
+    maxVersionsPerArtifact: z.number().int().min(1).max(100).default(20),
+    /** 0 keeps an artifact until it is deleted or a version is pruned. */
+    defaultRetentionDays: z.number().int().min(0).max(3_650).default(0),
+    maxRetentionDays: z.number().int().min(1).max(3_650).default(365),
+    /** MongoDB document limit is 16 MiB; a chunk stays comfortably below it. */
+    chunkBytes: z.number().int().min(65_536).max(4_194_304).default(1_048_576),
+  })
+  .strict();
+
 export const PersistenceConfig = z
   .object({
     /**
@@ -267,6 +286,7 @@ export const EngineConfigSchema = z
     engines: EnginesConfig.default({}),
     models: ModelsConfig,
     execution: ExecutionConfig.default({}),
+    artifacts: ArtifactsConfig.default({}),
     persistence: PersistenceConfig.default({}),
   })
   .strict();
@@ -275,3 +295,4 @@ export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
 export type PersistenceSettings = z.infer<typeof PersistenceConfig>;
+export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;

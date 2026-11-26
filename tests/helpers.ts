@@ -1,10 +1,17 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ProviderAdapter, ProviderCompletionRequest } from '../src/models/types.js';
+import type {
+  GatewayCompletion,
+  GatewayRequest,
+  ModelGateway,
+  ProviderAdapter,
+  ProviderCompletionRequest,
+} from '../src/models/types.js';
 import { ProviderError } from '../src/models/types.js';
 import type { ProviderPolicy } from '../src/models/policy.js';
 import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
+import type { MongoConnector, MongoDatabase } from '../src/persistence/mongo-connect.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -113,6 +120,60 @@ export function fakeProvider(input: {
   return provider;
 }
 
+/**
+ * A deterministic gateway for the artifact tests. The gateway is the router in
+ * production; this double only replaces the inference result, so it is adapted
+ * to a provider below rather than bypassing routing, cost or policy.
+ */
+export function fakeGateway(input: {
+  text?: string;
+  beforeReturn?: () => Promise<void>;
+} = {}): ModelGateway & { calls: number } {
+  const gateway = {
+    id: 'test-gateway',
+    calls: 0,
+    complete: async ({ signal, model }: GatewayRequest): Promise<GatewayCompletion> => {
+      gateway.calls += 1;
+      if (input.beforeReturn) await input.beforeReturn();
+      if (signal.aborted) throw new ProviderError('cancelled', 'aborted', { retryable: false });
+      return {
+        text: input.text ?? 'A verified result.',
+        toolCalls: [],
+        usage: { inputTokens: 11, outputTokens: 13 },
+        model,
+        attempts: [model],
+        latencyMs: 0,
+      };
+    },
+  };
+  return gateway;
+}
+
+/** Runs a gateway double through the real router as a discovered provider. */
+function gatewayProvider(gateway: ModelGateway): ProviderAdapter & { calls: number } {
+  const provider = {
+    ...fakeProvider(),
+    complete: async (request: ProviderCompletionRequest) => {
+      const completion = await gateway.complete({
+        ownerId: OWNER_ID,
+        model: request.model,
+        mode: 'cloud',
+        operation: 'work',
+        system: request.system,
+        prompt: request.prompt,
+        ...(request.messages === undefined ? {} : { messages: request.messages }),
+        signal: request.signal,
+      });
+      return {
+        text: completion.text,
+        toolCalls: completion.toolCalls,
+        ...(completion.usage === undefined ? {} : { usage: completion.usage }),
+      };
+    },
+  };
+  return provider;
+}
+
 export function failingProvider(failures: number): ProviderAdapter & { calls: number } {
   const base = fakeProvider();
   const provider = {
@@ -162,7 +223,11 @@ export function slowProvider(delayMs: number): ProviderAdapter & { calls: number
 
 export async function startTestApp(options: {
   provider?: ProviderAdapter;
+  /** A gateway double, executed through the router as a provider fixture. */
+  gateway?: ModelGateway;
   config?: Record<string, unknown>;
+  /** A shared database, so two app instances can prove they read the same rows. */
+  persistence?: { database?: MongoDatabase; connect?: MongoConnector };
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -174,7 +239,14 @@ export async function startTestApp(options: {
   const app = await composeApplication({
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    providers: [{ adapter: options.provider ?? fakeProvider() }],
+    providers: [
+      {
+        adapter: options.gateway
+          ? gatewayProvider(options.gateway)
+          : (options.provider ?? fakeProvider()),
+      },
+    ],
+    ...(options.persistence ? { persistence: options.persistence } : {}),
   });
   const { url } = await app.start();
   return {

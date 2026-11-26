@@ -1,5 +1,7 @@
 import type {
   AgentId,
+  ArtifactKind,
+  ArtifactMediaType,
   Budget,
   DataMode,
   EngineId,
@@ -128,6 +130,48 @@ export type NotificationRecord = {
   summary?: string;
   createdAt: IsoDateTime;
   read: boolean;
+};
+
+/**
+ * Durable artifact metadata. The bytes live in a content-addressed blob and are
+ * named only by `sha256`; the file name here is metadata and never a path.
+ */
+export type ArtifactRecord = {
+  artifactId: string;
+  ownerId: string;
+  tenantId: string | null;
+  mode: DataMode;
+  kind: ArtifactKind;
+  filename: string;
+  mediaType: ArtifactMediaType;
+  bytes: number;
+  sha256: string;
+  /** Current version number. Immutable version rows live alongside. */
+  version: number;
+  /** Retained version count, including the current one. */
+  versions: number;
+  projectId: string | null;
+  conversationId: string | null;
+  taskId: string | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  expiresAt: IsoDateTime | null;
+};
+
+export type ArtifactVersionRecord = {
+  ownerId: string;
+  mode: DataMode;
+  artifactId: string;
+  version: number;
+  filename: string;
+  mediaType: ArtifactMediaType;
+  /** Immutable per version, so a rollback restores the kind that version had. */
+  kind: ArtifactKind;
+  /** Size and digest of this exact version, so history is independently auditable. */
+  bytes: number;
+  sha256: string;
+  note?: string;
+  createdAt: IsoDateTime;
 };
 
 export type AuditRecord = {

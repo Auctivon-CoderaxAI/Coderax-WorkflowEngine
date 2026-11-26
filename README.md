@@ -39,6 +39,7 @@ are clients of the same versioned API.
 | Coderax Native agent | Implemented | `src/agents/native` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
+| Durable artifacts (metadata, versions, content) | Implemented; MongoDB-backed, verified across a real engine restart and two-replica concurrency | `docs/artifacts.md`, `tests/integration/artifacts-durable.test.ts`, `tests/integration/artifacts-concurrency.test.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |
@@ -48,7 +49,8 @@ been migrated, that the engine is deployed, or that the external agents work.
 
 `docs/parity-matrix.md` is the authoritative comparison against the engine
 Coderax runs today, and `docs/pr-1-review.md` records what is preserved, what is
-simplified and what is still missing.
+simplified and what is still missing. `docs/artifacts.md` describes durable
+artifact storage, its security boundaries and how durability is verified.
 
 ## Quick start
 

@@ -19,6 +19,15 @@ import type { WorkRunRow, WorkRunTable } from './work-runs.js';
 
 export type MongoFilter = Record<string, unknown>;
 
+/** The update operators these tables rely on. `$inc` is how a capacity counter
+ * is admitted atomically: the filter and the increment are one server-side
+ * operation, so two replicas cannot both spend the last byte. */
+export type MongoUpdate = {
+  $set?: Record<string, unknown>;
+  $setOnInsert?: Record<string, unknown>;
+  $inc?: Record<string, number>;
+};
+
 /** A lazily executed query; the subset of the driver cursor these stores use. */
 export type MongoCursor = {
   sort: (spec: Record<string, 1 | -1>) => MongoCursor;
@@ -36,12 +45,12 @@ export type MongoCollectionLike = {
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;
   findOneAndUpdate: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown> },
+    update: MongoUpdate,
     options: { returnDocument: 'after'; includeResultMetadata: false },
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown>; $setOnInsert?: Record<string, unknown> },
+    update: MongoUpdate,
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
