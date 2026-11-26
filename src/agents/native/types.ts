@@ -1,17 +1,14 @@
-import type { ModelRef, Usage } from '@coderax/contracts';
-
-export type ModelCompletionRequest = {
-  model: ModelRef;
-  system: string;
-  prompt: string;
-  signal: AbortSignal;
-  maxOutputTokens?: number;
-};
-
-export type ModelGateway = {
-  id: string;
-  complete: (request: ModelCompletionRequest) => Promise<{ text: string; usage?: Usage }>;
-};
+/**
+ * The gateway port is owned by the model router: an agent names a resolved model
+ * and never reaches a provider URL or key. Re-exported here so the native agent
+ * does not import routing internals.
+ */
+export type {
+  GatewayCompletion,
+  GatewayRequest,
+  GatewayStreamEvent,
+  ModelGateway,
+} from '../../models/types.js';
 
 export type PlanStep = {
   id: string;

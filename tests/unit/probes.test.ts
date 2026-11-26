@@ -16,7 +16,16 @@ const capabilities = {
 } as const;
 
 function gateway(): ModelGateway {
-  return { id: 'test', complete: async () => ({ text: 'ok' }) };
+  return {
+    id: 'test',
+    complete: async () => ({
+      text: 'ok',
+      toolCalls: [],
+      model: { providerId: 'free', modelId: 'test' },
+      attempts: [{ providerId: 'free', modelId: 'test' }],
+      latencyMs: 1,
+    }),
+  };
 }
 
 function transport(probe: () => Promise<void>): ExternalAgentTransport {

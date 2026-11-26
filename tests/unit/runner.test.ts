@@ -26,6 +26,8 @@ function request(signal: AbortSignal): AgentRunRequest {
     conversationId: 'conv',
     objective: 'Do the work',
     model: { providerId: 'free', modelId: 'coderax-small' },
+    routing: 'auto',
+    allowFallback: true,
     mode: 'cloud',
     workspaceRoot: '/tmp',
     maxSteps: 1,

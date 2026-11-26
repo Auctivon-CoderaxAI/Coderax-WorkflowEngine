@@ -32,7 +32,8 @@ are clients of the same versioned API.
 | Cancellation, resume, bounded same-engine retry | Implemented | `src/orchestration/service.ts`, e2e tests |
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
-| Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
+| Zero-cost model router (discovery, verification, modes, limits, fallback, health) | Implemented | `src/models/router.ts`, `src/models/providers`, tests |
+| Reproducible quality benchmark harness | Implemented; live run requires provider credentials | `benchmarks/`, `scripts/benchmark.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
@@ -54,7 +55,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 48 tests: unit, contract, integration, security, e2e
+npm test                          # unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -63,8 +64,9 @@ Run the engine (it refuses to start until every startup check passes):
 ```bash
 export CODERAX_OWNER_ID=owner
 export CODERAX_OWNER_TOKEN="$(openssl rand -hex 32)"
-export CODERAX_INFERENCE_BASE_URL=https://your-zero-cost-endpoint/v1
-export CODERAX_INFERENCE_KEY=...
+# One or more provider keys. A key authenticates; it does not make a model free.
+export OPENROUTER_API_KEY=...
+export GEMINI_API_KEY=...
 # workspace roots must exist, be absolute and must not overlap
 node -e "require('fs').mkdirSync('/srv/coderax/private',{recursive:true});require('fs').mkdirSync('/srv/coderax/cloud',{recursive:true})"
 CODERAX_ENGINE_CONFIG=./engine.json npm start
@@ -76,10 +78,21 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
 {
   "auth": { "ownerId": "owner" },
   "workspaces": { "privateRoot": "/srv/coderax/private", "cloudRoot": "/srv/coderax/cloud" },
-  "models": { "route": [{ "providerId": "openrouter", "modelId": "coderax:free" }] },
+  "models": {
+    "route": [{ "providerId": "openrouter", "modelId": "inclusionai/ling-3.2-flash:free" }],
+    "attestations": []
+  },
   "engines": { "default": "native" }
 }
 ```
+
+`models.route` is a preference order, not a free claim. The router discovers
+models, verifies zero cost from the provider price list or a time-bounded
+attestation, and refuses to start Native when no verified-free model is routable.
+Gemini, Groq and Cerebras publish no machine-readable price and therefore need an
+attestation per exact model. See [`docs/model-routing.md`](docs/model-routing.md)
+for the verification rules, routing modes, budgets, rate limits, circuits,
+fallback, streaming normalization and benchmarks.
 
 The engine binds `127.0.0.1` by default and is never public-facing.
 
@@ -95,7 +108,7 @@ src/orchestration    Work lifecycle: submit, execute, cancel, resume, retry, rec
 src/execution        leases, arbitration, heartbeat runner, retry, workspace confinement
 src/persistence      task repository (fenced writes), lease tables, conversations
 src/agents           registry, Coderax Native, isolated external adapters
-src/models           verified catalogue, zero-cost route, daily budget ledger
+src/models           discovery, zero-cost verification, routing, limits, health, benchmarks
 src/events           ordered event log with dedupe and replay
 src/permissions      scoped, single-use approval requests
 src/memory           owner- and mode-partitioned memory
@@ -109,8 +122,9 @@ its own collaborators.
 
 ## Non-negotiables enforced in code
 
-- **$0**: no paid model is representable (`allowPaid` is a literal `false`), and a
-  daily request/token budget refuses rather than overruns.
+- **$0**: no paid model is representable (`allowPaid` is a literal `false`); free
+  cost is proven from provider pricing or an unexpired exact-model attestation;
+  unknown cost is refused; and a reserved request/token budget fails closed.
 - **Cloud-only execution**: the engine runs on its host; clients execute nothing.
 - **Owner-only**: one principal, constant-time token comparison, no memberships.
 - **No silent substitution**: an unavailable agent is refused, never swapped.

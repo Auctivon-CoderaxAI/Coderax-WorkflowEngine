@@ -42,8 +42,8 @@ Status vocabulary:
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
 | 27 | OpenCode transport (SDK, Basic auth, session, prompt, abort) | `opencode/adapter.ts`, `sdk.ts`, `auth.ts` | injected transport only | Missing (review F3) |
 | 28 | OpenCode protocol mapping | `opencode/protocol.ts` | none | Missing |
-| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/catalog.ts` + `routing` | Simplified — no multi-candidate auto fallback |
-| 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | none | Missing |
+| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/router.ts` (discovery, pricing/attestation verification, capability classification, Fast/Auto/Complex ranking) | Preserved and strengthened — paid or unknown cost is refused, not inferred |
+| 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | `src/models/router.ts` (bounded candidates, circuits, quota cooldown) | Preserved — bounded and free-only; no fallback after streamed output |
 | 31 | FreeBuff SDK loading, loopback restriction, context floor | `freebuff/adapter.ts` | injected transport only | Missing (review F3) |
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
 | 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | new deterministic planner + gateway (`src/agents/native`) | Changed — not the same agent; see #34 |
@@ -83,8 +83,8 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 27–31, 34, 36, 44, 46 and 47 are closed,
-and rows 18 and 40 are strengthened, migrating a client would remove
+capability Coderax has today. Until rows 27–28, 31, 34, 36, 44, 46 and 47 are
+closed, and rows 18 and 40 are strengthened, migrating a client would remove
 functionality, which the brief forbids.
 
 Dependency order for closing them:
@@ -92,7 +92,8 @@ Dependency order for closing them:
 1. ~~Persistent execution events and replay across restart (row 22)~~ — closed
    by `docs/durable-events.md`; the remaining part of row 18 is an atomic fenced
    conversation write.
-2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
+2. Real OpenCode transport and protocol (rows 27–28), then FreeBuff (31). The
+   provider-independent model router (rows 29–30) is implemented in `src/models`.
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
    and the one that decides whether Coderax Native can replace the LibreChat
    agent stack.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxClient } from '@coderax/sdk';
-import { failingGateway, OWNER_TOKEN, slowGateway, startTestApp, waitFor } from '../helpers.js';
+import { failingProvider, OWNER_TOKEN, slowProvider, startTestApp, waitFor } from '../helpers.js';
 
 function client(url: string): CoderaxClient {
   return new CoderaxClient({ baseUrl: url, token: OWNER_TOKEN });
@@ -60,7 +60,7 @@ test('submit, stream, status, notifications and history complete end to end', as
 });
 
 test('a cancelled task settles as cancelled and is not left running', async () => {
-  const started = await startTestApp({ gateway: slowGateway(60_000) });
+  const started = await startTestApp({ provider: slowProvider(60_000) });
   const api = client(started.url);
   try {
     const accepted = await api.submitWork({
@@ -90,7 +90,7 @@ test('a cancelled task settles as cancelled and is not left running', async () =
 });
 
 test('a failed task can be retried on the same agent with a new generation', async () => {
-  const started = await startTestApp({ gateway: failingGateway(1) });
+  const started = await startTestApp({ provider: failingProvider(1) });
   const api = client(started.url);
   try {
     const accepted = await api.submitWork({

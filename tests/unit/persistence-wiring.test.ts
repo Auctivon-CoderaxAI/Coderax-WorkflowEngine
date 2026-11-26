@@ -7,7 +7,7 @@ import { createFakeCollection, createFakeDatabase } from '../fakes/mongo.js';
 import {
   baseConfig,
   createWorkspaces,
-  fakeGateway,
+  fakeProvider,
   OWNER_TOKEN,
   waitFor,
   type TestWorkspace,
@@ -36,7 +36,7 @@ test('the default persistence driver is memory', async () => {
     const app = await composeApplication({
       config: baseConfig(workspace),
       env: ENV,
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
     });
     assert.deepEqual(app.persistence, { driver: 'memory' });
     await app.stop();
@@ -52,7 +52,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
     const first = await composeApplication({
       config: mongoConfig(workspace),
       env: ENV,
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
       persistence: { database },
     });
     assert.deepEqual(first.persistence, { driver: 'mongo' });
@@ -92,7 +92,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
     const second = await composeApplication({
       config: mongoConfig(workspace),
       env: ENV,
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
       persistence: { database },
     });
     try {
@@ -136,7 +136,7 @@ test('mongo without a connection string fails startup and names the variable', a
         composeApplication({
           config: mongoConfig(workspace),
           env: ENV,
-          gateway: fakeGateway(),
+          providers: [{ adapter: fakeProvider() }],
         }),
       (error: unknown) => {
         assert.match(startupIssue(error), /CODERAX_MONGODB_URI is not set/);
@@ -160,7 +160,7 @@ test('the connection string is read from the configured variable name', async ()
         collectionPrefix: 'test_',
       }),
       env: { ...ENV, CODERAX_TEST_MONGO: 'mongodb://127.0.0.1:27017' },
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
       persistence: {
         connect: async (input) => {
           seen.push(input);
@@ -186,7 +186,7 @@ test('an unreachable deployment fails startup instead of downgrading', async () 
         composeApplication({
           config: mongoConfig(workspace),
           env: { ...ENV, CODERAX_MONGODB_URI: 'mongodb://127.0.0.1:1/coderax' },
-          gateway: fakeGateway(),
+          providers: [{ adapter: fakeProvider() }],
           persistence: {
             connect: async () => {
               throw new MongoUnavailableError(
@@ -220,7 +220,7 @@ test('a collection that cannot be indexed fails startup', async () => {
         composeApplication({
           config: mongoConfig(workspace),
           env: ENV,
-          gateway: fakeGateway(),
+          providers: [{ adapter: fakeProvider() }],
           persistence: { database },
         }),
       (error: unknown) => {
