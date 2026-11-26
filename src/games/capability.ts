@@ -75,7 +75,7 @@ export function createGameCapabilityReport(input: GameCapabilityInput): GameCapa
       'Two reference builds passed desktop and 390px mobile Chromium acceptance: rendering, keyboard, mouse, touch, jump, collision, scoring, switch/goal completion, level advancement, restart, timer failure, audio synthesis and owner-only access. Other genres and Safari/Firefox are covered by the DOM boot and deterministic verifier, not by a real browser.',
     evidence: [
       'docs/evidence/browser/report.json — measured browser state and performance',
-      'docs/evidence/browser/platformer-desktop.png, platformer-mobile.png, puzzle-desktop.png, puzzle-mobile.png',
+      'docs/evidence/browser/platformer-desktop.png, platformer-mobile.png, platformer-level2.png, puzzle-desktop.png, puzzle-mobile.png',
       'docs/evidence/browser/README.md — method, anonymous 403 / authenticated 200, limitations',
     ],
     environments: ['cloud-browser-chromium'],

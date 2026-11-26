@@ -44,7 +44,7 @@
       "gapJumps": 3,
       "deaths": 0
     },
-    "progression": { "levelIndexBefore": 0, "levelIndexAfter": 1, "levelIdAfter": "level-2", "statusAfter": "playing" },
+    "progression": { "levelIndexBefore": 0, "levelIndexAfter": 1, "levelIdAfter": "level-2", "statusAfter": "playing", "screenshot": "docs/evidence/browser/platformer-level2.png" },
     "failure": { "condition": "level timer expired", "status": "lost", "observedTick": 7201 },
     "audio": { "audioContextState": "running", "oscillatorsOnJump": 1, "muteToggle": [false, true] },
     "performance": {

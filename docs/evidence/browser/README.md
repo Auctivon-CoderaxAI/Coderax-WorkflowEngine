@@ -48,6 +48,7 @@ exported HTML has zero external script references.
 
 The platformer run took 6.3 s with 5 jumps; the puzzle took 12.0 s with 12
 replans. Screenshots are `platformer-desktop.png`, `platformer-mobile.png`,
+`platformer-level2.png` (captured immediately after completing level 1),
 `puzzle-desktop.png` and `puzzle-mobile.png` in this directory. Exact numbers
 are in `report.json`.
 

@@ -162,8 +162,8 @@ owner-authenticated preview origin and exercised in cloud Chromium on
 - **Cost:** 3 s of platformer play used 0.307 s task time, 0.039 s script time
   and 5.2 MB JS heap on the cloud VM.
 
-The measured report and four screenshots (desktop and 390×844 for both builds)
-are in `docs/evidence/browser/`. This is Chromium-only evidence for the two
+The measured report and five screenshots (desktop and 390×844 for both builds,
+plus platformer level 2 after the level-1 win) are in `docs/evidence/browser/`. This is Chromium-only evidence for the two
 reference builds; there is no zero-cost browser CI or Safari/Firefox device
 matrix.
 
