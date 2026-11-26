@@ -55,7 +55,7 @@ run. `clean` means no architecture/capability finding, not that CI passed.
 | `security/remediation-808dfd3` | `74b1264c1b20df24f80e20cc6c0c7d08db02a7c5` | disconnected | Security baseline; rebase the superseded helpers and preserve its runnable CVE proof. |
 | `security/remediation` | `4b2ea758d9fab4d04bff380651ed8a6b38708912` | disconnected | Documentation/evidence branch based on an older integration; rebase the superseded helpers and use the current contract evidence, not its older route/report counts. |
 | `contract/authoritative-v1.1` | `ea660285b3c0a950067aa3b57f1764ccb509af8a` | disconnected | Contract proposal; it must import the authoritative route catalogue rather than define a second one, and be rebased for the superseded helpers. |
-| `ci/permanent-quality-gate` | `21015a7f7484dda8a6b9951e52782a8bd8921d01` | clean | Parallel one-commit gate branch; reviewed as an artifact, not overwritten. |
+| `ci/permanent-quality-gate` | `21015a7f7484dda8a6b9951e52782a8bd8921d01` | clean | Competing one-commit gate. Inspected and retained as historical evidence; its unique pinned-action, lockfile-integrity and release-range checks were integrated into the surviving `ci/permanent-quality-gates` gate. Not overwritten. |
 
 `arbiter.ts`/`retry.ts` are superseded on every branch that has not rebased on
 this branch's removal. They are reported as dead modules, not wired in merely to

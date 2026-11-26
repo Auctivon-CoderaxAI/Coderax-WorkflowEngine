@@ -36,6 +36,23 @@ test('a heartbeat that cannot sustain the lease is refused at startup', () => {
   }
 });
 
+test('shutdown has a bounded default and rejects an unusably short deadline', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    assert.equal(config.execution.shutdownGraceMs, 10_000);
+    assert.equal(
+      EngineConfigSchema.safeParse({
+        ...config,
+        execution: { ...config.execution, shutdownGraceMs: 1 },
+      }).success,
+      false,
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('paid routing cannot be configured at all', () => {
   const ws = workspace();
   try {

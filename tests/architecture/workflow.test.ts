@@ -28,6 +28,14 @@ test('the verification workflow cannot swallow a required failure', () => {
   }
 });
 
+test('actions are pinned and install scripts cannot run in the required job', () => {
+  const text = readFileSync(path.join(workflows, 'verify.yml'), 'utf8');
+  assert.match(text, /actions\/checkout@[0-9a-f]{40}/);
+  assert.match(text, /actions\/setup-node@[0-9a-f]{40}/);
+  assert.match(text, /persist-credentials:\s*false/);
+  assert.match(text, /npm ci --ignore-scripts/);
+});
+
 test('the live lane uses a pinned MongoDB service and fails without it', () => {
   const text = readFileSync(path.join(workflows, 'verify.yml'), 'utf8');
   assert.match(text, /image:\s*mongo:7\.0\.14/);

@@ -20,11 +20,11 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | TypeScript compilation | `npm run build` (`tsc -b`, project references) | compiler exit status |
 | Unit tests | `unit` | `tests/unit/**` |
 | Integration tests | `integration` | `tests/integration/**` (collection fake) |
-| Real database integration | `mongo-live` (also inside the required `verify` CI job) | `tests/live/mongo.test.ts` against a pinned `mongo:7.0.14` service |
+| Real database integration | `mongo-live` (also inside the required `verify` CI job) | `tests/live/mongo.test.ts` and `tests/live/shutdown.test.ts` against a pinned `mongo:7.0.14` service |
 | Security regression tests | `security` | `tests/security/**` |
 | Adversarial execution tests | `adversarial` | `tests/adversarial/**` |
 | OpenAPI drift | `openapi` | `dist/scripts/check-openapi.js` |
-| SDK compatibility | `contract`, `artifacts` | `tests/contract/routes.test.ts`, `tests/artifacts/artifacts.test.ts` |
+| SDK compatibility | `contract`, `artifacts` | `tests/contract/routes.test.ts`, `tests/artifacts/artifacts.test.ts`, `tests/artifacts/dependencies.test.ts` |
 | Route registration completeness | `contract` | `tests/contract/routes.test.ts` |
 | Dependency wiring | `architecture` | `tests/architecture/wiring.test.ts`, `dist/scripts/check-architecture.js` |
 | Unused/disconnected capabilities | `architecture` | reachability and factory-consumer checks in the same pair |
@@ -41,14 +41,18 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | Event replay | `adversarial`, `unit` | `tests/adversarial/replay.test.ts`, `tests/unit/events.test.ts` |
 | Approval enforcement | `adversarial`, `security` | `tests/adversarial/approval.test.ts`, `[SEC-F5]` |
 | Package artifact integrity | `artifacts` | `npm pack --dry-run`, entrypoints, reproducibility, no source/secrets |
+| Dependency and lockfile integrity | `artifacts` | `tests/artifacts/dependencies.test.ts` (reviewed direct deps, private workspaces, https + integrity hashes, script-free lockfile) |
+| Provider network safety | `security` | `tests/security/network.test.ts` (https-only, no URL credentials/private targets, redirects refused) |
 | API-to-engine end to end | `e2e` | `tests/e2e/end-to-end.test.ts` |
 
 The `mongo-live` gate is deliberately not folded into `integration`. A passing
 collection fake proves repository semantics; it does not prove the official
 driver, server indexes, two-connection arbitration, generation fencing, crash
-recovery or notification durability. The live suite now covers those six paths
-and the gate forces `CODERAX_REQUIRE_MONGO=1`, so a missing service fails instead
-of silently skipping. The image is pinned to `mongo:7.0.14`; the service is
+recovery, notification durability or shutdown draining. The live suite now
+covers those eight paths and the gate forces `CODERAX_REQUIRE_MONGO=1`, so a
+missing service fails instead of silently skipping. The shutdown test is a real
+database fault injection: a checkpoint `updateOne` is delayed across `stop()`,
+and the test fails if persistence closes before every injected write settles. The image is pinned to `mongo:7.0.14`; the service is
 ephemeral and receives no production credentials. Quota, durable events,
 approvals and artifacts cannot be claimed against a database until their owning
 branches land; the gate will require their live tests then rather than treating
@@ -169,9 +173,12 @@ The files most likely to need a rebase are
 sources.
 
 There is also a separate remote `ci/permanent-quality-gate` branch with an
-earlier one-commit gate implementation. It is a parallel artifact, not a source
-of truth for this branch; it must not be overwritten. Reconcile its useful
-checks through review rather than merging two competing gate implementations.
+earlier one-commit gate implementation at `21015a7`. It was inspected at that
+head and remains unmodified. Its pinned action SHAs, disabled install lifecycle
+scripts, dependency/lockfile integrity check and release-range check were
+integrated here; its sibling database job was not copied because it would not be
+visible to the protected `verify` context. One surviving implementation remains,
+not two or three.
 Cross-repository release certification stays outside this repository gate: the
 release owner consumes the evidence from the exact `verify` head, while this
 repository enforces only its own architecture and tests.
@@ -185,7 +192,11 @@ chosen one owner.
 
 The SDK compatibility gate is intentionally strict: the tools, routing and
 knowledge operations in PR #2/#5 must add matching `SDK_OPERATIONS` entries
-(and client methods) before the contract gate can pass. That is the
+(and client methods) before the contract gate can pass. The gate also rejects a
+contract package version that differs from `CONTRACT_VERSION`, so a fork cannot
+advertise a different catalogue under the same package version. PR #7 currently
+advertises 1.1.0; the requested API/SDK 1.2.0 is not present on any observed
+remote head, so it is a release blocker rather than a claim made here. That is the
 incompatibility the gate exists to catch; it is not a test to be relaxed. The
 zod upgrade changes no HTTP shape and should merge without requiring a change to
 the intelligence, approval or supervisor logic.
@@ -225,6 +236,16 @@ and delete/read race) passed 5/5 with zero skips against a disposable real
 server. Those tests are in its integration gate and use
 `CODERAX_TEST_MONGODB_URI`; they still need a standardized live file before they
 can satisfy this lane. The branch's claimed 147-test total was not re-run here.
+
+## Provider network regressions
+
+`tests/security/network.test.ts` proves that plaintext URLs, credentials in the
+URL, loopback addresses, private ranges and the metadata address are refused,
+and that the OpenAI-compatible gateway sets `redirect: 'error'`. DNS rebinding
+and an approved hostname resolving to a private address are not solved by this
+static check; they require a deployment egress allow-list or pinned-address
+dispatcher. The gate reports that as a boundary rather than claiming SSRF is
+fully eliminated.
 
 ## Hosted CI and protection state
 

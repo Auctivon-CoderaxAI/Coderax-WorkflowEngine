@@ -21,6 +21,18 @@ const root = path.resolve(import.meta.dirname, '..', '..', '..');
 const principalPath = (routePath: string): string =>
   routePath.replace('{taskId}', 'task_missing').replace('{conversationId}', 'conv_missing');
 
+test('operation identifiers, paths and the canonical index are unique', () => {
+  const ids = ROUTES.map((route) => route.operationId);
+  assert.equal(new Set(ids).size, ids.length, 'operationId values must be unique');
+  const methodsAndPaths = ROUTES.map((route) => `${route.method} ${route.path}`);
+  assert.equal(new Set(methodsAndPaths).size, methodsAndPaths.length, 'method/path pairs must be unique');
+  assert.equal(ROUTE_INDEX.size, ROUTES.length);
+  assert.deepEqual(
+    [...ROUTE_INDEX.values()].map((route) => route.operationId).sort(),
+    [...ids].sort(),
+  );
+});
+
 test('the SDK implements every catalogued operation and no phantom operation', () => {
   const catalogue = ROUTES.map((route) => route.operationId).sort();
   assert.deepEqual(Object.keys(SDK_OPERATIONS).sort(), catalogue);
@@ -36,8 +48,13 @@ test('the SDK implements every catalogued operation and no phantom operation', (
   const sdk = JSON.parse(
     readFileSync(path.join(root, 'packages', 'sdk', 'package.json'), 'utf8'),
   ) as { version: string; private: boolean };
+  const contracts = JSON.parse(
+    readFileSync(path.join(root, 'packages', 'contracts', 'package.json'), 'utf8'),
+  ) as { version: string; private: boolean };
   assert.equal(sdk.version, CONTRACT_VERSION, 'SDK and HTTP contract versions must match');
+  assert.equal(contracts.version, CONTRACT_VERSION, 'contract package and CONTRACT_VERSION must match');
   assert.equal(sdk.private, true, 'the SDK is not a public artifact');
+  assert.equal(contracts.private, true, 'the contracts package is not a public artifact');
 });
 
 test('every owner route is registered and answers 401 without a token', async () => {

@@ -106,6 +106,7 @@ export function createHttpServer(input: {
     })();
   });
 
+  let closePromise: Promise<void> | null = null;
   return {
     listen: () =>
       new Promise((resolve, reject) => {
@@ -116,9 +117,16 @@ export function createHttpServer(input: {
           resolve({ url: `http://${input.host}:${port}` });
         });
       }),
-    close: () =>
-      new Promise((resolve) => {
+    close: () => {
+      if (closePromise) return closePromise;
+      closePromise = new Promise((resolve) => {
+        if (!server.listening) {
+          resolve();
+          return;
+        }
         server.close(() => resolve());
-      }),
+      });
+      return closePromise;
+    },
   };
 }

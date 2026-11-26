@@ -96,6 +96,8 @@ export const ExecutionConfig = z
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */
     cancelGraceMs: z.number().int().min(100).max(30_000).default(5_000),
+    /** How long graceful shutdown may drain before it fails closed. */
+    shutdownGraceMs: z.number().int().min(100).max(300_000).default(10_000),
   })
   .strict();
 

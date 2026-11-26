@@ -118,6 +118,9 @@ export type ApplicationService = {
   budget: (principal: Principal) => BudgetState;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
+  /** Stop admitting new execution work before the listener is closed. */
+  beginShutdown: () => void;
+  /** Abort active work, drain the scheduler and settle its writes. */
   shutdown: () => Promise<void>;
 };
 
@@ -131,6 +134,12 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | null = null;
+
+  function unavailable(): ServiceResult<never> {
+    return fail('not_ready', 'The engine is shutting down.');
+  }
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -601,6 +610,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     models: () => deps.models.list(),
 
     submitWork: async (principal, request) => {
+      if (shuttingDown) return unavailable();
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
@@ -800,6 +810,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     resumeTask: async (principal, taskId, generation) => {
+      if (shuttingDown) return unavailable();
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = await reconcile(found.value);
@@ -849,6 +860,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     retryTask: async (principal, taskId, generation) => {
+      if (shuttingDown) return unavailable();
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = found.value;
@@ -898,6 +910,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     chat: async (principal, request) => {
+      if (shuttingDown) return unavailable();
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
       const model = deps.models.resolve(request.model, request.mode);
@@ -1050,10 +1063,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return { interrupted };
     },
 
-    shutdown: async () => {
+    beginShutdown: () => {
+      shuttingDown = true;
+      deps.scheduler.stop();
+    },
+
+    shutdown: () => {
+      if (shutdownPromise) return shutdownPromise;
+      shuttingDown = true;
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
+      shutdownPromise = deps.scheduler.idle();
+      return shutdownPromise;
     },
   };
 
