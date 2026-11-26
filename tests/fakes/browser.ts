@@ -54,6 +54,7 @@ export type FakeBrowserProvider = BrowserProvider & {
   failNextAct: () => void;
   failNextCreateUnknown: () => void;
   failNextClose: () => void;
+  failNextLifecycleUnknown: () => void;
 };
 
 function featuresAllTrue() {
@@ -115,6 +116,7 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
   let failNext = false;
   let failNextCreateUnknownFlag = false;
   let failNextClose = false;
+  let failNextLifecycleUnknownFlag = false;
   let tabCounter = 1;
 
   const sessions = new Map<
@@ -178,6 +180,9 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
     },
     failNextClose: () => {
       failNextClose = true;
+    },
+    failNextLifecycleUnknown: () => {
+      failNextLifecycleUnknownFlag = true;
     },
 
     create: async (input) => {
@@ -302,18 +307,53 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
         pauseGate = null;
         await gate;
       }
+      if (failNextLifecycleUnknownFlag) {
+        failNextLifecycleUnknownFlag = false;
+        return {
+          ok: false,
+          code: 'unavailable',
+          detail: 'The fake provider lost the pause response.',
+          outcomeUnknown: true,
+        };
+      }
       return { ok: true, value: undefined };
     },
     resume: async (providerSessionId) => {
       fake.resumed.push(providerSessionId);
+      if (failNextLifecycleUnknownFlag) {
+        failNextLifecycleUnknownFlag = false;
+        return {
+          ok: false,
+          code: 'unavailable',
+          detail: 'The fake provider lost the resume response.',
+          outcomeUnknown: true,
+        };
+      }
       return { ok: true, value: undefined };
     },
-    takeover: async () => ({
-      ok: true,
-      value: { interactiveUrl: fake.takeoverUrl },
-    }),
+    takeover: async () => {
+      if (failNextLifecycleUnknownFlag) {
+        failNextLifecycleUnknownFlag = false;
+        return {
+          ok: false,
+          code: 'unavailable',
+          detail: 'The fake provider lost the takeover response.',
+          outcomeUnknown: true,
+        };
+      }
+      return { ok: true, value: { interactiveUrl: fake.takeoverUrl } };
+    },
     release: async (providerSessionId) => {
       fake.released.push(providerSessionId);
+      if (failNextLifecycleUnknownFlag) {
+        failNextLifecycleUnknownFlag = false;
+        return {
+          ok: false,
+          code: 'unavailable',
+          detail: 'The fake provider lost the release response.',
+          outcomeUnknown: true,
+        };
+      }
       return { ok: true, value: undefined };
     },
     close: async (providerSessionId) => {

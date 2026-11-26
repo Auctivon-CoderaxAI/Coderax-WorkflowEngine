@@ -239,6 +239,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     approvalId?: string;
     artifactId?: string;
     detail?: string;
+    outcomeUnknown?: true;
   }): BrowserReceipt {
     const receipt: BrowserReceipt = {
       receiptId: deps.ids.receipt(),
@@ -251,6 +252,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       ...(input.approvalId ? { approvalId: input.approvalId } : {}),
       ...(input.artifactId ? { artifactId: input.artifactId } : {}),
       ...(input.detail ? { detail: redactText(input.detail, [], 500) } : {}),
+      ...(input.outcomeUnknown ? { outcomeUnknown: true } : {}),
     };
     store.addReceipt({ ownerId: input.record.ownerId, receipt });
     return receipt;
@@ -387,6 +389,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     detail: string,
     started: number,
     approvalId?: string,
+    outcomeUnknown?: true,
   ): Promise<ServiceFailure> {
     record.lastElements = [];
     const released = await closeProvider(record);
@@ -402,7 +405,15 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       },
     };
     store.updateSession(record);
-    addReceipt({ record, action, outcome: 'failed', started, detail, ...(approvalId ? { approvalId } : {}) });
+    addReceipt({
+      record,
+      action,
+      outcome: 'failed',
+      started,
+      detail,
+      ...(approvalId ? { approvalId } : {}),
+      ...(outcomeUnknown ? { outcomeUnknown: true } : {}),
+    });
     audit(record.ownerId, 'browser.action.failed', 'failed', `action=${action}`);
     return fail('protocol_error', detail);
   }
@@ -426,15 +437,16 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     }
     if (result.ok) return ok(result.value);
     if (result.outcomeUnknown) {
-      await protocolViolation(
+      return protocolViolation(
         record,
         action,
-        'The browser provider did not confirm the session transition.',
+        `The ${action} outcome is unknown; the provider did not confirm it.`,
         started,
+        undefined,
+        true,
       );
-    } else {
-      addReceipt({ record, action, outcome: 'failed', started, detail: result.detail });
     }
+    addReceipt({ record, action, outcome: 'failed', started, detail: result.detail });
     return providerFailure(result);
   }
 
@@ -881,6 +893,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
             'The browser action outcome is unknown; the provider did not confirm its result.',
             started,
             approvalId,
+            true,
           );
         }
         addReceipt({

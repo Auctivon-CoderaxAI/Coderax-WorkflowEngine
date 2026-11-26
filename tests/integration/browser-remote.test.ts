@@ -496,6 +496,7 @@ test('an unknown remote action outcome takes the session out of service', async 
         const receipts = await service.browserReceipts(principal, id);
         assert.ok(receipts.ok);
         assert.match(receipts.value.receipts.at(-1)?.detail ?? '', /outcome is unknown/);
+        assert.equal(receipts.value.receipts.at(-1)?.outcomeUnknown, true);
         assert.equal((await service.browserAction(principal, id, { type: 'inspect', maxTextChars: 100, includeElements: true })).ok, false);
         assert.equal(provider.requests.filter(({ url }) => url.endsWith('/actions')).length, 1);
       }

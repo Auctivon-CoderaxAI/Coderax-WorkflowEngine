@@ -701,22 +701,75 @@ test('unconfirmed lifecycle transitions retire the session while definite reject
         assert.equal((await must(service.browserSession(principal, id))).state, expectedState);
         assert.equal(fake.closed.length, 0);
 
-        fake[operation] = async () => ({
-          ok: false, code: 'timeout', outcomeUnknown: true, detail: 'Provider timed out.',
-        });
+        fake[operation] = async () => {
+          if (operation === 'takeover') throw new Error('Provider disconnected.');
+          return { ok: false, code: 'timeout', outcomeUnknown: true, detail: 'Provider timed out.' };
+        };
         const closeConfirmed = operation === 'pause' || operation === 'takeover';
         if (!closeConfirmed) fake.failNextClose();
         const uncertain = await dispatch();
-        assert.equal(uncertain.ok === false && uncertain.code, 'browser_unavailable');
+        assert.equal(uncertain.ok === false && uncertain.code, 'protocol_error');
         assert.equal((await must(service.browserSession(principal, id))).state, closeConfirmed ? 'failed' : 'quarantined');
         assert.equal(fake.closed.length, 1);
         const receipt = (await receiptsOf(started, id)).at(-1);
         assert.equal(receipt?.action, operation);
         assert.equal(receipt?.outcome, 'failed');
+        assert.equal(receipt?.outcomeUnknown, true);
       } finally {
         await started.close();
       }
     });
+  }
+});
+
+test('an unknown lifecycle outcome takes the session out of service and is flagged', async () => {
+  for (const operation of ['pause', 'resume', 'takeover', 'release'] as const) {
+    const fake = fakeBrowserProvider();
+    const started = await startTestApp({
+      browser: fake,
+      config: { browsers: { enabled: true } },
+    });
+    try {
+      const session = await open(started);
+      if (operation === 'resume') {
+        await must(started.app.service.pauseBrowserSession(principal, session.sessionId));
+      }
+      if (operation === 'release') {
+        await must(
+          started.app.service.takeoverBrowserSession(principal, session.sessionId, {
+            active: true,
+          }),
+        );
+      }
+
+      fake.failNextLifecycleUnknown();
+      const result = await (operation === 'pause'
+        ? started.app.service.pauseBrowserSession(principal, session.sessionId)
+        : operation === 'resume'
+          ? started.app.service.resumeBrowserSession(principal, session.sessionId)
+          : operation === 'takeover'
+            ? started.app.service.takeoverBrowserSession(principal, session.sessionId, {
+                active: true,
+              })
+            : started.app.service.takeoverBrowserSession(principal, session.sessionId, {
+                active: false,
+              }));
+      assert.equal(result.ok, false);
+      if (result.ok) continue;
+      assert.equal(result.code, 'protocol_error');
+
+      const current = await must(
+        started.app.service.browserSession(principal, session.sessionId),
+      );
+      assert.equal(current.state, 'failed');
+      assert.equal(fake.closed.length, 1);
+      const receipt = (await receiptsOf(started, session.sessionId)).at(-1);
+      assert.equal(receipt?.action, operation);
+      assert.equal(receipt?.outcome, 'failed');
+      assert.equal(receipt?.outcomeUnknown, true);
+    } finally {
+      await started.close();
+    }
   }
 });
 

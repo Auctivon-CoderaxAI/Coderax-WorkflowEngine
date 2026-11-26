@@ -195,6 +195,9 @@ Page text, titles, element labels and values are **untrusted data**:
 
 - A success receipt exists only after the provider returned the evidence the
   action required.
+- A receipt carries `outcomeUnknown: true` when the provider may have acted but
+  did not confirm the result. That action or lifecycle transition takes the
+  session out of service and attempts a confirmed close.
 - A screenshot must be exactly one PNG or JPEG whose magic bytes match the
   declared type and whose size is within `maxScreenshotBytes`. The engine
   computes the SHA-256 of the exact bytes it received and stores that digest on
