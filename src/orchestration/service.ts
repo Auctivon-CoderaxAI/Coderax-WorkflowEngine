@@ -831,7 +831,25 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
         { taskId, conversationId },
       );
-      if (accepted.ok) return { ok: true };
+      if (accepted.ok) {
+        // Cancellation may have committed while acceptTask was creating the
+        // task. Re-read after acceptance and stop the task we just created; the
+        // receipt is still `claimed`, so cancellation marks it terminal.
+        const after = await deps.schedules.get(schedule.scheduleId);
+        if (!after || after.state === 'cancelled') {
+          await service.cancelTask(
+            { ownerId: schedule.ownerId, isOwner: true },
+            accepted.value.taskId,
+            'The schedule was cancelled during dispatch.',
+          );
+          return {
+            ok: false,
+            reason: 'refused',
+            detail: 'That schedule was cancelled during dispatch.',
+          };
+        }
+        return { ok: true };
+      }
       if (accepted.code === 'busy') {
         return { ok: false, reason: 'busy', detail: accepted.detail };
       }
@@ -1447,6 +1465,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           updatedAt: now,
         },
       });
+      if (!applied.applied) {
+        // A concurrent tick changed the record. Never acknowledge a
+        // cancellation that did not commit: report the current state so the
+        // client can retry against the new version.
+        const latest = await deps.schedules.get(scheduleId);
+        if (!latest) return fail('not_found', 'That schedule no longer exists.');
+        if (latest.state === 'cancelled') return ok(control(latest, 'already_terminal'));
+        return fail('conflict', 'The schedule changed while it was being cancelled; retry.');
+      }
       const cancelled = applied.schedule ?? record;
 
       // A live run is stopped through the durable lease, not by writing its task
@@ -1458,6 +1485,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       for (const execution of executions) {
         if (isTerminalExecution(execution.state)) continue;
         if (execution.state === 'retry_wait' || execution.state === 'claimed') {
+          // A claimed receipt may already have a live task: dispatch writes the
+          // receipt first and the task second. Cancel the task through the
+          // durable lease before terminalizing the receipt, otherwise a run the
+          // owner cancelled keeps executing with no receipt to reconcile.
+          if (execution.taskId) {
+            await service.cancelTask(principal, execution.taskId, 'The schedule was cancelled.');
+          }
           await deps.schedules.updateExecution({
             executionId: execution.executionId,
             from: ['retry_wait', 'claimed'],
@@ -1584,7 +1618,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           condition: request.condition ?? record.condition,
           retry: request.retry ?? record.retry,
           priority: request.priority ?? record.priority,
-          limits: request.limits ?? record.limits,
+          limits: request.limits ? { ...record.limits, ...request.limits } : record.limits,
           missedRunPolicy: request.missedRunPolicy ?? record.missedRunPolicy,
           state: enabled ? 'active' : 'paused',
           nextRunAt,

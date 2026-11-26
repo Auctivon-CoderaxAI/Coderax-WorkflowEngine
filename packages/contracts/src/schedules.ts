@@ -253,7 +253,8 @@ export const ScheduleUpdateRequest = z
     condition: ScheduleCondition.optional(),
     retry: ScheduleRetry.optional(),
     priority: z.number().int().min(0).max(9).optional(),
-    limits: ScheduleLimits.optional(),
+    /** Partial: omitted fields keep their stored values, never creation defaults. */
+    limits: ScheduleLimits.partial().optional(),
     missedRunPolicy: MissedRunPolicy.optional(),
     enabled: z.boolean().optional(),
   })

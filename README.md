@@ -58,7 +58,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 142 tests: unit, contract, integration, security, e2e
+npm test                          # 144 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -124,6 +124,10 @@ its own collaborators.
 - **Fenced state**: an expired generation can never overwrite a newer one.
 
 ## Scheduling
+
+Schedules persist across a restart only when `persistence.driver` is `mongo`.
+With the default `memory` driver they are process-local, together with their
+receipts and notices; scheduling is intended for the durable driver.
 
 A schedule is a durable owner record, not a client timer. `POST /v1/schedules`
 accepts a one-time instant, an interval, an hourly rule, a daily or weekly

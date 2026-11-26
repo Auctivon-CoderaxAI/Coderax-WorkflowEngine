@@ -319,8 +319,10 @@ export function createScheduleEngine(input: {
       schedule.limits.maxRunsTotal !== undefined &&
       schedule.runsTotal >= schedule.limits.maxRunsTotal
     ) {
+      // Only an active schedule may exhaust. A concurrent cancellation is
+      // terminal and must never be overwritten by an in-flight admission.
       await patchSchedule(schedule.scheduleId, (current) =>
-        current.state === 'exhausted'
+        current.state !== 'active'
           ? null
           : { state: 'exhausted', nextRunAt: null, updatedAt: iso() },
       );
@@ -645,21 +647,36 @@ export function createScheduleEngine(input: {
         conversationId: execution.conversationId,
         attempt: execution.attempt,
       });
+      const account = async (): Promise<void> => {
+        // The original dispatch may have crashed after creating the task but
+        // before accounting. Recovery applies the same counter once, on the
+        // receipt transition that proves the task exists.
+        await patchSchedule(execution.scheduleId, (current) => ({
+          runsTotal: current.runsTotal + 1,
+          lastRunAt: iso(),
+          lastExecutionId: execution.executionId,
+          updatedAt: iso(),
+        }));
+      };
       if (outcome.ok) {
-        await store.updateExecution({
+        const moved = await store.updateExecution({
           executionId: execution.executionId,
           from: ['claimed'],
           patch: { state: 'dispatched', updatedAt: iso() },
         });
-        report.dispatched += 1;
+        if (moved) {
+          await account();
+          report.dispatched += 1;
+        }
       } else if (outcome.reason === 'duplicate') {
         const landed = await port.taskSnapshot(taskId);
         if (landed) {
-          await store.updateExecution({
+          const moved = await store.updateExecution({
             executionId: execution.executionId,
             from: ['claimed'],
             patch: { state: 'dispatched', updatedAt: iso() },
           });
+          if (moved) await account();
         }
       }
       return;

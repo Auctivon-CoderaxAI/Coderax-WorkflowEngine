@@ -791,6 +791,11 @@ test('a crash during dispatch leaves one receipt and recovers to one task', asyn
   const recovered = await store.listExecutions(schedule.scheduleId, 10);
   assert.equal(recovered.length, 1);
   assert.equal(recovered[0]?.state, 'dispatched');
+  assert.equal(
+    (await store.get(schedule.scheduleId))?.runsTotal,
+    1,
+    'recovery accounts the run once, so a total limit still bounds it',
+  );
 });
 
 test('a transient store failure is reported and the next tick still runs', async () => {

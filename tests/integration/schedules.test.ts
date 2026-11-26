@@ -389,3 +389,32 @@ test('editing a paused schedule preserves the pause and resume computes the next
     await started.close();
   }
 });
+
+test('a partial limits edit preserves the stored daily cap and run budget', async () => {
+  const started = await startTestApp({ config: { schedules: FAST_SCHEDULES } });
+  const api = client(started.url);
+  try {
+    const created = await api.createSchedule({
+      name: 'Bounded inspection',
+      objective: 'Inspect the deployment',
+      timing: { kind: 'interval', everySeconds: 3_600 },
+      limits: {
+        maxRunsPerDay: 3,
+        budget: { maxRequests: 4, maxInputTokens: 1_000, maxOutputTokens: 1_000 },
+      },
+    });
+
+    const edited = await api.updateSchedule(created.scheduleId, {
+      limits: { maxRunsTotal: 10 },
+    });
+    assert.equal(edited.limits.maxRunsPerDay, 3, 'the omitted daily cap is not reset to its default');
+    assert.deepEqual(edited.limits.budget, {
+      maxRequests: 4,
+      maxInputTokens: 1_000,
+      maxOutputTokens: 1_000,
+    });
+    assert.equal(edited.limits.maxRunsTotal, 10);
+  } finally {
+    await started.close();
+  }
+});
