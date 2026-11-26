@@ -148,17 +148,20 @@ owner-authenticated preview origin and exercised in cloud Chromium on
 - **Rendering:** platformer 1280×682 / 872,960 opaque pixels; puzzle 1280×682 /
   698,368 opaque pixels, with no page errors.
 - **Controls:** keyboard right moved +208 px and jump rose 115 px; the on-screen
-  mouse button moved +208 px; mobile touch moved +100 px and touch jump rose
-  105 px. The DOM boot harness now also presses the shipped on-screen buttons so
-  a broken touch mapping fails the default gate.
+  mouse button moved +208 px; at 390×844 mobile touch moved +112.7 px and touch
+  jump rose 116.7 px. The DOM boot harness now also presses the shipped on-screen
+  buttons so a broken touch mapping fails the default gate.
 - **Gameplay:** platformer won level 1 in 6.3 s (score 120, 2 pickups, health 2,
   5 jumps, 3 gap clears) and advanced to level 2; puzzle won in 12.0 s (score
   140, 4/4 pickups, switch on, goal unlocked, 0 collisions, 12 replans) and
   advanced to level 2. Timer expiry produced `lost`; `R` restarted at tick 21.
 - **Audio:** the AudioContext was running and a jump created one oscillator;
   mute toggled false/true. Audible output was not captured.
-- **Mobile:** 390×844 had no horizontal overflow and every on-screen button was
-  visible for both builds.
+- **Mobile:** at 390×844 the platformer canvas bitmap and CSS box were both
+  390×698 after the HUD wrapped to two lines; the puzzle bitmap was 390×652
+  against a 390×651.5 CSS box. Neither page had horizontal overflow and every
+  on-screen button was visible. These figures were re-captured at `585ae28` after
+  the HUD-wrap fix; the desktop figures are the earlier capture.
 - **Access:** a fresh anonymous browser context received **403**; the
   owner-authenticated browser received **200**. Authentication was not disabled.
 - **Cost:** 3 s of platformer play used 0.307 s task time, 0.039 s script time

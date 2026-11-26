@@ -1,9 +1,29 @@
 {
   "capturedAt": "2026-11-26T19:45:00.000Z",
-  "sourceHead": "working tree after ce271b9; browser-test fixes and this evidence are delivered together",
+  "sourceHead": "desktop sections: working tree after ce271b9; 390px mobile: 585ae28e36295edb2d69c044af045863f20179fe (HUD-wrap fix)",
   "documentDigests": {
     "platformer.html": "sha256:12035bbd67d17df7efe71ae95d4d4e98a7f1ddc0f53d0193b7e46f637aef0ef4",
     "puzzle.html": "sha256:e6a215cd0743fef95fc0d2a735ae03e3acb1bcc04abfca3c37115790bf8c9f9a"
+  },
+  "mobileRecapture": {
+    "capturedAt": "2026-11-26T21:57:35.000Z",
+    "sourceHead": "585ae28e36295edb2d69c044af045863f20179fe",
+    "previewUrl": "https://pv-4b463b58d51d-agent37-37fbb862-2d4b-44cb-9bca-1aa0d1c06097.freebuff.site/",
+    "viewport": "390x844",
+    "deviceScaleFactor": 1,
+    "ownerAuth": {
+      "anonymousStatus": 403,
+      "authenticatedStatus": 200
+    },
+    "documentDigests": {
+      "platformer.html": "sha256:5b4c5cfbef428f512f648d0d0621c24d51b3abbbad628dbd2d481fdea1d22f58",
+      "puzzle.html": "sha256:bb7ef97fa429efc7dfed170bacd64a0b8053b702289cedfe522d5cbe25a9bb16"
+    },
+    "method": "Playwright CDP Emulation.setDeviceMetricsOverride at 390x844 with deviceScaleFactor 1; the exact regenerated preview documents were loaded from the owner-authenticated preview origin; touchstart/touchend were dispatched on the shipped handlers; bitmap and CSS box were read from the live canvas after the HUD wrapped.",
+    "screenshots": [
+      "platformer-mobile.png",
+      "puzzle-mobile.png"
+    ]
   },
   "environment": {
     "browser": "Cloud Chromium via the Freebuff cloud browser panel",
@@ -72,22 +92,44 @@
     "progression": { "levelIndexBefore": 0, "levelIndexAfter": 1, "levelIdAfter": "level-2", "statusAfter": "playing" },
     "mobile": {
       "viewport": [390, 844],
+      "deviceScaleFactor": 1,
       "canvas": [390, 652],
+      "canvasCss": [390, 651.5],
+      "bitmapMatchesCss": true,
       "horizontalOverflow": false,
-      "buttons": 5,
-      "canvasOpaquePixels": 177840,
-      "touchRightDeltaPx": 100
+      "touchButtons": ["left", "right", "up", "down"],
+      "muteButton": true,
+      "hud": {
+        "lines": 1,
+        "height": 31,
+        "text": "Level 1/3  Score 0  Health 3  Collected 0"
+      },
+      "touchRightDeltaPx": 112.7,
+      "healthAfterTouch": 3,
+      "status": "playing",
+      "screenshot": "puzzle-mobile.png"
     }
   },
   "platformerMobile": {
     "viewport": [390, 844],
-        "canvas": [390, 713],
-    "canvasCssHeight": 698,
+    "deviceScaleFactor": 1,
+    "canvas": [390, 698],
+    "canvasCss": [390, 698],
+    "bitmapMatchesCss": true,
     "horizontalOverflow": false,
-    "buttons": 4,
-    "mouseRightDeltaPx": 208,
-    "touchRightDeltaPx": 100,
-      "touchJumpRisePx": 105
+    "touchButtons": ["left", "right", "jump"],
+    "muteButton": true,
+    "hud": {
+      "lines": 2,
+      "height": 46,
+      "text": "Level 1/3  Score 0  Health 3  Collected 0  Time 119"
+    },
+    "touchRightDeltaPx": 112.7,
+    "touchJumpRisePx": 116.7,
+    "healthAfterTouch": 3,
+    "deathsAfterTouch": 0,
+    "status": "playing",
+    "screenshot": "platformer-mobile.png"
   },
   "limitations": [
     "Chromium only; Safari, Firefox and real iOS/Android were not tested.",
@@ -95,6 +137,8 @@
     "Audio synthesis was verified by a running AudioContext and an oscillator created on jump; audible output was not captured.",
     "The browser controller is acceptance-test code, not the Native Gaming Agent runtime; it does not make the agent a cloud-browser player.",
     "Performance metrics come from Chrome DevTools Protocol on one desktop VM sample; they are not a cross-device benchmark.",
-    "No hosted browser CI exists at zero cost, so this evidence is for the two reference builds at the recorded head."
+    "No hosted browser CI exists at zero cost, so this evidence is for the two reference builds at the recorded heads.",
+    "The 390px mobile figures were re-captured at 585ae28e36295edb2d69c044af045863f20179fe after the HUD-wrap fix; the desktop sections remain the earlier ce271b9 capture and were not re-run.",
+    "The mobile re-capture ran at deviceScaleFactor 1. The 2x device-pixel path is covered by the DOM harness (browser.boot), not this browser run."
   ]
 }
