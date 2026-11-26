@@ -122,8 +122,18 @@ test('a competing workflow-engine declaration is rejected', () => {
   assert.ok(findings.some((finding) => finding.rule === 'duplicate_workflow_engine'));
 });
 
-test('a duplicated model router declaration is rejected', () => {
+test('a duplicated model catalogue declaration is rejected', () => {
   const files = [...baseRepository(), file('src/models/second.ts', 'export function createModelCatalog() {}\n')];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some((finding) => finding.rule === 'duplicate_model_catalog'));
+});
+
+test('two competing model router implementations are rejected', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/models/router.ts', 'export function createRouter() {}\n'),
+    file('src/models/router-v2.ts', 'export function createModelRouter() {}\n'),
+  ];
   const findings = checkArchitecture({ files, entry: 'src/main.ts' });
   assert.ok(findings.some((finding) => finding.rule === 'duplicate_model_router'));
 });

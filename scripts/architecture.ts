@@ -150,7 +150,7 @@ const CONSTRUCTIONS: ReadonlyArray<{
 const UNIQUE_DECLARATIONS: ReadonlyArray<{ rule: string; token: string }> = [
   { rule: 'duplicate_workflow_engine', token: 'export function createApplicationService(' },
   { rule: 'duplicate_task_runner', token: 'export function createTaskRunner(' },
-  { rule: 'duplicate_model_router', token: 'export function createModelCatalog(' },
+  { rule: 'duplicate_model_catalog', token: 'export function createModelCatalog(' },
   { rule: 'duplicate_event_bus', token: 'export function createEventBus(' },
   { rule: 'duplicate_route_catalogue', token: 'export const ROUTES' },
 ];
@@ -225,6 +225,24 @@ export function checkArchitecture(repository: Repository): Finding[] {
         detail: `expected exactly one "${declaration.token}", found ${count}`,
       });
     }
+  }
+
+  // The catalogue factory is not the only router shape: the intelligence work
+  // may add `createModelRouter` or a model-scoped `createRouter`. Count both so
+  // two competing router implementations cannot merge as "just another file".
+  const modelRouterDeclarations = files.reduce((total, file) => {
+    const modelScoped = file.path.startsWith('src/models/')
+      ? file.text.split('export function createRouter(').length - 1
+      : 0;
+    const explicit = file.text.split('export function createModelRouter(').length - 1;
+    return total + modelScoped + explicit;
+  }, 0);
+  if (modelRouterDeclarations > 1) {
+    findings.push({
+      rule: 'duplicate_model_router',
+      path: 'src/models',
+      detail: `expected at most one model router declaration, found ${modelRouterDeclarations}`,
+    });
   }
 
   for (const file of files) {
