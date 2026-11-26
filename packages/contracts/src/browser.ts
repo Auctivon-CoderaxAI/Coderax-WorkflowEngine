@@ -474,6 +474,8 @@ export const BrowserReceipt = z
     sessionId: BrowserSessionId,
     action: BrowserReceiptAction,
     outcome: z.enum(['succeeded', 'refused', 'failed']),
+    /** True when the provider may have acted but did not confirm the result. */
+    outcomeUnknown: z.boolean().optional(),
     provider: z.string().min(1).max(120),
     at: IsoDateTime,
     durationMs: z.number().int().nonnegative(),

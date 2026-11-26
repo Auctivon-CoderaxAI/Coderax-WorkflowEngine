@@ -5352,6 +5352,9 @@
                               "failed"
                             ]
                           },
+                          "outcomeUnknown": {
+                            "type": "boolean"
+                          },
                           "provider": {
                             "type": "string",
                             "minLength": 1,

@@ -678,6 +678,57 @@ test('pause, resume, owner takeover and release preserve the session safely', as
   }
 });
 
+test('an unknown lifecycle outcome takes the session out of service and is flagged', async () => {
+  for (const operation of ['pause', 'resume', 'takeover', 'release'] as const) {
+    const fake = fakeBrowserProvider();
+    const started = await startTestApp({
+      browser: fake,
+      config: { browsers: { enabled: true } },
+    });
+    try {
+      const session = await open(started);
+      if (operation === 'resume') {
+        await must(started.app.service.pauseBrowserSession(principal, session.sessionId));
+      }
+      if (operation === 'release') {
+        await must(
+          started.app.service.takeoverBrowserSession(principal, session.sessionId, {
+            active: true,
+          }),
+        );
+      }
+
+      fake.failNextLifecycleUnknown();
+      const result = await (operation === 'pause'
+        ? started.app.service.pauseBrowserSession(principal, session.sessionId)
+        : operation === 'resume'
+          ? started.app.service.resumeBrowserSession(principal, session.sessionId)
+          : operation === 'takeover'
+            ? started.app.service.takeoverBrowserSession(principal, session.sessionId, {
+                active: true,
+              })
+            : started.app.service.takeoverBrowserSession(principal, session.sessionId, {
+                active: false,
+              }));
+      assert.equal(result.ok, false);
+      if (result.ok) continue;
+      assert.equal(result.code, 'protocol_error');
+
+      const current = await must(
+        started.app.service.browserSession(principal, session.sessionId),
+      );
+      assert.equal(current.state, 'failed');
+      assert.equal(fake.closed.length, 1);
+      const receipt = (await receiptsOf(started, session.sessionId)).at(-1);
+      assert.equal(receipt?.action, operation);
+      assert.equal(receipt?.outcome, 'failed');
+      assert.equal(receipt?.outcomeUnknown, true);
+    } finally {
+      await started.close();
+    }
+  }
+});
+
 test('closing a session is terminal and idempotent', async () => {
   const fake = fakeBrowserProvider();
   const started = await startTestApp({
