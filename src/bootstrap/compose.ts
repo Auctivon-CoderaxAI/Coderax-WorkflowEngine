@@ -1,4 +1,4 @@
-import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
+import type { EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
@@ -75,13 +75,6 @@ const EXTERNAL_CAPABILITIES: EngineCapabilities = {
   resume: false,
   modelSelection: true,
   durable: true,
-};
-
-const EXTERNAL_ISOLATION: AgentIsolation = {
-  workspace: 'isolated',
-  memory: 'none',
-  credentials: 'none',
-  conversations: 'none',
 };
 
 function buildGateway(input: ComposeInput): ModelGateway | null {
@@ -382,4 +375,3 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   };
 }
 
-export { EXTERNAL_ISOLATION };

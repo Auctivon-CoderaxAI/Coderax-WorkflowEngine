@@ -7,16 +7,23 @@ function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let tooLarge = false;
+    // The remainder is drained rather than the socket destroyed: the caller gets
+    // the documented typed 413 instead of a reset connection, and a slow upload
+    // cannot keep the process buffering an unbounded body.
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        reject(new Error('request body is too large'));
-        request.destroy();
+        tooLarge = true;
+        chunks.length = 0;
         return;
       }
-      chunks.push(chunk);
+      if (!tooLarge) chunks.push(chunk);
     });
-    request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    request.on('end', () => {
+      if (tooLarge) reject(new Error('request body is too large'));
+      else resolve(Buffer.concat(chunks).toString('utf8'));
+    });
     request.on('error', reject);
   });
 }

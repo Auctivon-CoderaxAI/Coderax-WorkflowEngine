@@ -68,10 +68,3 @@ export function redactText(
   return text.length > bound ? `${text.slice(0, bound - 1)}…` : text;
 }
 
-/** Redacts an optional detail without inventing one. */
-export function redactDetail(
-  value: string | undefined,
-  secrets: readonly string[] = [],
-): string | undefined {
-  return value === undefined ? undefined : redactText(value, secrets);
-}

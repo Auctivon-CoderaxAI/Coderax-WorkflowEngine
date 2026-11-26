@@ -33,6 +33,7 @@ are clients of the same versioned API.
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
+| Automated quality gate (build, suites, contracts, architecture, supply chain) | Implemented | `.github/workflows/verify.yml`, `docs/quality-gate.md` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
@@ -47,15 +48,21 @@ been migrated, that the engine is deployed, or that the external agents work.
 
 `docs/parity-matrix.md` is the authoritative comparison against the engine
 Coderax runs today, and `docs/pr-1-review.md` records what is preserved, what is
-simplified and what is still missing.
+simplified and what is still missing. `docs/quality-gate.md` is the acceptance
+gate: what each check proves, the fake-versus-real MongoDB distinction, and the
+limits that are not claimed.
 
 ## Quick start
 
 ```bash
 npm install
 npm run build
-npm test                          # 48 tests: unit, contract, integration, security, e2e
-npm run openapi:check             # fails if the published contract drifted
+npm test                          # build plus every unit, contract, integration, security,
+                                  # adversarial, architecture and e2e suite
+npm run verify                    # the acceptance gate: build, every suite, every static gate
+npm run gate                      # static gates only: contracts, SDK, routes, structure,
+                                  # reachability, dependencies, artifacts
+npm run test:mongo:live           # REAL MongoDB; fails without CODERAX_TEST_MONGO_URI
 ```
 
 Run the engine (it refuses to start until every startup check passes):

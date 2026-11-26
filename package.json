@@ -20,9 +20,23 @@
     "test:contract": "npm run build && node --test \"dist/tests/contract/*.test.js\"",
     "test:integration": "npm run build && node --test \"dist/tests/integration/*.test.js\"",
     "test:security": "npm run build && node --test \"dist/tests/security/*.test.js\"",
+    "test:e2e": "npm run build && node --test \"dist/tests/e2e/*.test.js\"",
+    "test:adversarial": "npm run build && node --test \"dist/tests/adversarial/*.test.js\"",
+    "test:architecture": "npm run build && node --test \"dist/tests/architecture/*.test.js\"",
+    "test:mongo:fake": "npm run build && node --test \"dist/tests/unit/mongo-*.test.js\" \"dist/tests/unit/persistence-wiring.test.js\"",
+    "test:mongo:live": "npm run build && node --test \"dist/tests/integration/mongo-live.check.js\"",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
-    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
+    "gate:structure": "node dist/scripts/gate/run.js structure",
+    "gate:reachability": "node dist/scripts/gate/run.js reachability",
+    "gate:registration": "node dist/scripts/gate/run.js registration",
+    "gate:sdk": "node dist/scripts/gate/run.js sdk",
+    "gate:openapi": "node dist/scripts/gate/run.js openapi",
+    "gate:dependencies": "node dist/scripts/gate/run.js dependencies",
+    "gate:artifacts": "node dist/scripts/gate/run.js artifacts",
+    "gate:audit": "npm audit --audit-level=high",
+    "gate": "npm run gate:openapi && npm run gate:registration && npm run gate:sdk && npm run gate:structure && npm run gate:reachability && npm run gate:dependencies && npm run gate:artifacts",
+    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && npm run gate"
   },
   "dependencies": {
     "@coderax/contracts": "*",
@@ -30,6 +44,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "mongodb": "^6.22.0",
     "typescript": "^5.9.3"
   }
 }

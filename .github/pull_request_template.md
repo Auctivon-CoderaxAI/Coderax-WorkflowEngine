@@ -16,12 +16,17 @@ what triggers it, and how the system behaves after the change.
 Command run and its actual result, at the pushed head:
 
 ```bash
-npm ci && npm run verify
+npm ci --ignore-scripts && npm run verify
 ```
 
-- Build:
-- Tests (count and result):
-- `npm run openapi:check`:
+- Build (TypeScript project references):
+- Unit / contract / integration / e2e (count and result):
+- Security regression suite:
+- Adversarial execution suite:
+- Architecture regression suite (boundaries, routes, SDK, wiring, reachability):
+- Static gates (`npm run gate`):
+- Real MongoDB (`npm run test:mongo:live`): run, or plainly not run and why
+- Dependency audit (`npm run gate:audit`):
 - Manual observation (if any):
 
 A component passing its own unit tests is not evidence for the UI-to-API-to-engine

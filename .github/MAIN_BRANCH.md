@@ -16,7 +16,8 @@ Configure rulesets/branch protection for `main` with:
   push by someone other than its author and stale approvals dismissed when the
   pull request changes.
 - Required status checks for the `verify` workflow, evaluated at the exact head
-  SHA. A passing run at an earlier head is not a pass.
+  SHA. The required jobs are `quality gate`, `real MongoDB integration` and
+  `dependency vulnerability scan`. A passing run at an earlier head is not a pass.
 - Code-owner review for `.github/workflows/`, `.github/CODEOWNERS` and
   `packages/contracts/`.
 - All review threads resolved before merge.
@@ -54,6 +55,8 @@ npm ci
 npm run verify
 ```
 
-Hosted CI is subject to the owner's Actions minute allowance. When hosted jobs
-cannot start, run the same command locally, paste the result into the pull
-request, and say plainly that hosted CI did not run. Do not purchase minutes.
+Hosted CI is subject to the owner's Actions minute allowance. Every job uses a
+standard `ubuntu-latest` runner; no larger runner, paid action or purchased minute
+is used. When hosted jobs cannot start, run the same command locally, paste the
+result into the pull request, and say plainly that hosted CI did not run. Do not
+purchase minutes or weaken a gate to compensate.

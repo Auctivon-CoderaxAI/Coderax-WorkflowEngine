@@ -1,7 +1,13 @@
 name: verify
 
-# The acceptance gate. A passing run at an earlier head is not a pass, so the
-# workflow runs on every push to a pull request and on main after merge.
+# The acceptance gate. A passing run at an earlier head is not a pass, so this
+# runs on every push to a pull request and on main after merge.
+#
+# Every job uses a standard GitHub-hosted runner (ubuntu-latest). No larger
+# runner, paid action, matrix expansion or purchased minute is used. If the
+# account's hosted billing restriction persists, the jobs do not start; that is
+# reported in the pull request instead of being worked around (see
+# docs/governance.md and docs/quality-gate.md).
 
 on:
   pull_request:
@@ -17,9 +23,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  quality-gate:
+    name: quality gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -28,17 +35,60 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Install
-        run: npm ci
+      - name: Install (locked, lifecycle scripts disabled)
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Build (TypeScript project references)
+      # TypeScript compilation is the typecheck: tsc -b across contracts, SDK
+      # and engine project references.
+      - name: TypeScript compilation
         run: npm run build
 
-      - name: Tests (unit, contract, integration, security, e2e)
-        run: node --test "dist/tests/**/*.test.js"
+      - name: Unit tests
+        run: node --test "dist/tests/unit/*.test.js"
 
-      - name: Contract drift gate
-        run: npm run openapi:check
+      - name: Contract tests
+        run: node --test "dist/tests/contract/*.test.js"
+
+      - name: Integration tests (fencing, crash recovery, event replay)
+        run: node --test "dist/tests/integration/*.test.js"
+
+      - name: Security regression tests (isolation, cost policy, approvals)
+        run: node --test "dist/tests/security/*.test.js"
+
+      - name: Adversarial execution tests
+        run: node --test "dist/tests/adversarial/*.test.js"
+
+      - name: Architecture regression tests (contracts, routes, SDK, dependency wiring)
+        run: node --test "dist/tests/architecture/*.test.js"
+
+      - name: End-to-end tests
+        run: node --test "dist/tests/e2e/*.test.js"
+
+      - name: OpenAPI drift
+        run: npm run gate:openapi
+
+      - name: Route registration completeness
+        run: npm run gate:registration
+
+      - name: SDK compatibility
+        run: npm run gate:sdk
+
+      - name: Architecture boundaries and single ownership
+        run: npm run gate:structure
+
+      - name: Unused and disconnected capability detection
+        run: npm run gate:reachability
+
+      - name: Dependency manifests and lockfile integrity
+        run: npm run gate:dependencies
+
+      - name: Package artifact integrity
+        run: npm run gate:artifacts
+
+      - name: Package dry-run (metadata is packable)
+        run: |
+          npm pack --dry-run --workspace @coderax/contracts
+          npm pack --dry-run --workspace @coderax/sdk
 
       - name: Reject committed secrets and local paths
         run: |
@@ -48,3 +98,61 @@ jobs:
             exit 1
           fi
           echo "No committed secret values found."
+
+  database-regression:
+    name: real MongoDB integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CODERAX_TEST_MONGO_URI: mongodb://127.0.0.1:27017/coderax_gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install (locked, lifecycle scripts disabled)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      # The fake collection suite is named separately so a green run here can
+      # never be read as live database evidence.
+      - name: Fake-collection persistence suites (not a database)
+        run: npm run test:mongo:fake
+
+      - name: Real MongoDB integration
+        run: npm run test:mongo:live
+
+  vulnerabilities:
+    name: dependency vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install (locked, lifecycle scripts disabled)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      # High and critical advisories fail the gate. A documented exception is
+      # not used: an advisory is fixed by upgrading, not by ignoring it.
+      - name: Audit runtime dependencies
+        run: npm audit --audit-level=high --omit=dev
+
+      - name: Audit development dependencies
+        run: npm audit --audit-level=high

@@ -2,7 +2,12 @@ import type { EngineFailureCode, Usage } from '@coderax/contracts';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore, RunScope } from './lease.js';
 import { workRunKey } from './lease.js';
-import type { AgentAdapter, AgentReport, AgentRunRequest } from '../agents/types.js';
+import type {
+  AgentAdapter,
+  AgentReport,
+  AgentRunOutcome,
+  AgentRunRequest,
+} from '../agents/types.js';
 
 export type RunOutcome =
   | { kind: 'completed'; summary: string; usage?: Usage }
@@ -19,6 +24,18 @@ export type RunResult = {
    */
   ownershipLost: boolean;
 };
+
+function isAgentOutcome(value: unknown): value is AgentRunOutcome {
+  if (typeof value !== 'object' || value === null) return false;
+  const outcome = value as Record<string, unknown>;
+  if (outcome.ok === true) return typeof outcome.summary === 'string';
+  if (outcome.ok !== false) return false;
+  return (
+    typeof outcome.code === 'string' &&
+    typeof outcome.detail === 'string' &&
+    typeof outcome.retryable === 'boolean'
+  );
+}
 
 export type TaskRunner = {
   run: (input: {
@@ -174,7 +191,24 @@ export function createTaskRunner(input: {
             ownershipLost: true,
           };
         }
-        if (cancelRequested || (!outcome.ok && outcome.code === 'cancelled')) {
+        if (cancelRequested) {
+          return { outcome: { kind: 'cancelled' }, ownershipLost: false };
+        }
+        // An adapter is another process's code. A malformed outcome must become a
+        // typed failure that settles the task, never an exception that leaves it
+        // running until a restart reclassifies it.
+        if (!isAgentOutcome(outcome)) {
+          return {
+            outcome: {
+              kind: 'failed',
+              code: 'protocol_error',
+              detail: 'The agent returned an outcome the engine could not interpret.',
+              retryable: false,
+            },
+            ownershipLost: false,
+          };
+        }
+        if (!outcome.ok && outcome.code === 'cancelled') {
           return { outcome: { kind: 'cancelled' }, ownershipLost: false };
         }
         if (outcome.ok) {

@@ -24,7 +24,7 @@ Status vocabulary:
 | 8 | One settlement per run | `run.ts` | `src/execution/runner.ts` | Preserved |
 | 9 | Stream ending without a terminal event is a failure | `run.ts` (`protocol_error`) | `runner.ts` | Preserved |
 | 10 | Bounded cancellation cleanup (5 s) | `run.ts` | `src/execution/runner.ts` `cancelGraceMs` (5 s default) | Preserved |
-| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Preserved |
+| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` (policy exists; orchestration does not invoke it) | Simplified — the disconnected-capability gate reports the unwired module; runtime auto-retry is not claimed |
 | 12 | Workspace confinement, symlink-resolved, mode-partitioned, Windows-safe | `workspace.ts` | `src/execution/workspace.ts` | Preserved |
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |
@@ -69,9 +69,9 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 22 |
+| Preserved | 21 |
 | Strengthened | 10 |
-| Simplified | 5 |
+| Simplified | 6 |
 | Missing | 10 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 1 |
@@ -102,10 +102,15 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head: 168/168 tests, OpenAPI drift and all seven
+  static gates clean. This includes the security, adversarial, architecture,
+  recovery, fencing and replay suites.
 - Durable stores are verified against a semantics-faithful collection fake that
-  enforces unique indexes and cursor semantics. **No live MongoDB has been
-  contacted**; "durable" here means the adapter and wiring are proven, not that a
-  real server has stored a row.
+  enforces unique indexes and cursor semantics. A **real MongoDB** check now exists
+  (`npm run test:mongo:live`, run by the `real MongoDB integration` job against a
+  `mongo:7` service container) but it was not executed from this environment, which
+  has neither Docker nor `mongod`. No live row was stored here.
 - No hosted CI run exists: the GitHub Actions job is blocked by account billing.
   The local run above is the only executed evidence.
+- The dependency vulnerability scan reports one high advisory (`zod < 4.6.6`); it is
+  enforcing, not ignored. `docs/quality-gate.md` records the blocking follow-up.

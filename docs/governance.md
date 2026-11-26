@@ -73,6 +73,19 @@ Until an authorized remote runner passes the required check, hosted verification
 remains blocked. Prior workstation results are historical evidence; the charter
 requires cloud compute for future verification.
 
+### Configured gate (2026-11-26)
+
+`.github/workflows/verify.yml` now defines the permanent quality gate using only
+standard `ubuntu-latest` runners: one job for the build, every test suite and the
+seven static gates; one for real MongoDB against a free `mongo:7` service
+container; one for `npm audit` at high and critical. No larger runner, paid action
+or purchased minute is used.
+
+If the account's hosted billing restriction persists, these jobs do not start.
+That is a limitation of the platform, not permission to weaken a check: the pull
+request reports the local command and result, and the audit finding stays visible.
+See `docs/quality-gate.md`.
+
 ## Current state
 
 | Item | State |
@@ -80,5 +93,6 @@ requires cloud compute for future verification.
 | `main` protection | Not enforceable (Pro-only); equivalent policy documented above |
 | Reviewers installed | None |
 | Approvals on PR #1 | 0 |
-| Hosted CI | Never started (account billing restriction) |
-| Local verification at `1cbd9db` | build 0, 60/60 tests, contract gate clean |
+| Hosted CI | Workflow configured on standard hosted runners; no hosted run observed (account billing restriction) |
+| Local verification at this change | build 0, 168/168 tests, seven static gates clean; real MongoDB and hosted CI not run here |
+| Dependency audit | One high advisory (`zod < 4.6.6`); enforcing and reported, not ignored |

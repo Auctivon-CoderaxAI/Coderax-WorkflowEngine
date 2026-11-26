@@ -42,9 +42,15 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
 `npm run verify` is the acceptance gate. It runs:
 
 1. `npm run build` — TypeScript project references across contracts, SDK and engine.
-2. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security
-   and end-to-end suites.
-3. `npm run openapi:check` — fails if `openapi.json` differs from the contracts.
+2. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security,
+   adversarial, architecture and end-to-end suites.
+3. `npm run gate` — OpenAPI drift, route registration, SDK compatibility,
+   architecture boundaries and single ownership, unreachable modules, dependency
+   manifests and lockfile integrity, and package artifact integrity.
+
+The fake MongoDB collection suite is explicitly not live database evidence.
+`npm run test:mongo:live` requires `CODERAX_TEST_MONGO_URI` and fails without it.
+See `docs/quality-gate.md` for what each control proves and what it does not.
 
 Paste the command and its actual result into the pull request's Testing section. A
 component passing its own unit tests is not sufficient: the UI-to-API-to-engine
