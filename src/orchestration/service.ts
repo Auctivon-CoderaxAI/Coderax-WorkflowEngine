@@ -7,6 +7,8 @@ import type {
   Conversation,
   ConversationList,
   DataMode,
+  Deliverable,
+  DeliverableRequestInput,
   MemoryList,
   ModelList,
   NotificationList,
@@ -42,6 +44,7 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import type { ArtifactService } from '../artifacts/service.js';
+import type { DeliverableService } from '../artifacts/deliver.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
 
@@ -60,6 +63,7 @@ export type ApplicationServiceDeps = {
   permissions: PermissionStore;
   notifications: NotificationStore;
   artifactService: ArtifactService;
+  deliverables: DeliverableService;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -114,6 +118,15 @@ export type ApplicationService = {
   notifications: (principal: Principal) => Promise<NotificationList>;
   /** Durable artifact storage; the only path that returns artifact bytes. */
   artifacts: ArtifactService;
+  /**
+   * Generate, verify and durably persist a deliverable. The files it returns are
+   * artifact descriptors owned by `artifacts`, not paths in a workspace.
+   */
+  deliver: (
+    principal: Principal,
+    request: DeliverableRequestInput,
+    options?: { conversationId?: string; taskId?: string; signal?: AbortSignal },
+  ) => Promise<ServiceResult<Deliverable>>;
   events: (
     principal: Principal,
     taskId: string,
@@ -510,6 +523,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       token,
       adapter: adapter.value as AgentAdapter,
       request: {
+        taskId: task.taskId,
         ownerId: task.ownerId,
         tenantId: task.tenantId,
         conversationId: task.conversationId,
@@ -1014,6 +1028,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     notifications: (principal) => deps.notifications.list(principal.ownerId),
 
     artifacts: deps.artifactService,
+
+    deliver: (principal, request, options) => deps.deliverables.deliver(principal, request, options),
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
