@@ -6,11 +6,12 @@ either a compiled test or a command that exits non-zero on a real finding. CI
 runs on standard `ubuntu-latest` GitHub-hosted runners only; there is no paid
 runner, action, database or model in this path.
 
-`npm run verify` (build + all non-live gates + gate manifest coverage) is the
-local acceptance command. `node dist/scripts/run-gates.js list` is the
-authoritative gate list. `node dist/scripts/run-gates.js coverage` fails when a
-compiled test file is not assigned to exactly one gate, so a new suite cannot be
-added and silently left unrun.
+`npm run verify` (build + all gates, including the real-MongoDB gate + manifest
+coverage) is the acceptance command. It requires `CODERAX_TEST_MONGO_URI` to
+name a disposable MongoDB; there is no local-file or in-memory substitute. Use
+`npm run gate -- unit` (or another gate id) for a subset without a database.
+`node dist/scripts/run-gates.js list` is the authoritative gate list, and
+`coverage` fails when a compiled test file is not assigned to exactly one gate.
 
 ## Gate matrix
 
@@ -19,7 +20,7 @@ added and silently left unrun.
 | TypeScript compilation | `npm run build` (`tsc -b`, project references) | compiler exit status |
 | Unit tests | `unit` | `tests/unit/**` |
 | Integration tests | `integration` | `tests/integration/**` (collection fake) |
-| Real database integration | `mongo-live` (separate CI job) | `tests/live/mongo.test.ts` against a `mongo:7` service |
+| Real database integration | `mongo-live` (also part of `verify`; separate CI job) | `tests/live/mongo.test.ts` against a pinned `mongo:7.0.14` service |
 | Security regression tests | `security` | `tests/security/**` |
 | Adversarial execution tests | `adversarial` | `tests/adversarial/**` |
 | OpenAPI drift | `openapi` | `dist/scripts/check-openapi.js` |
@@ -27,6 +28,8 @@ added and silently left unrun.
 | Route registration completeness | `contract` | `tests/contract/routes.test.ts` |
 | Dependency wiring | `architecture` | `tests/architecture/wiring.test.ts`, `dist/scripts/check-architecture.js` |
 | Unused/disconnected capabilities | `architecture` | reachability and factory-consumer checks in the same pair |
+| Capability ownership (type-based) | `architecture` | `dist/scripts/capabilities.js`, `tests/architecture/capabilities.test.ts` |
+| Durable scheduling | `unit` (current in-process scheduler) | `tests/unit/scheduler.test.ts`; the durable scheduler owner must add a live test when it lands |
 | Dependency vulnerabilities | `audit` | `dist/scripts/check-audit.js` (high and critical fail) |
 | Model cost policy | `adversarial`, `unit` | `tests/adversarial/cost-policy.test.ts`, `tests/unit/models.test.ts` |
 | Private/cloud isolation | `security` | `tests/security/isolation.test.ts`, `tests/security/regressions.test.ts` |
@@ -39,20 +42,35 @@ added and silently left unrun.
 
 The `mongo-live` gate is deliberately not folded into `integration`. A passing
 collection fake proves repository semantics; it does not prove the official
-driver, server indexes, or two-connection arbitration. The fake is never
-presented as a database test, and the live job sets `CODERAX_REQUIRE_MONGO=1` so
-a missing service fails instead of skipping.
+driver, server indexes, two-connection arbitration, generation fencing, crash
+recovery or notification durability. The live suite now covers those six paths
+and the gate forces `CODERAX_REQUIRE_MONGO=1`, so a missing service fails instead
+of silently skipping. The image is pinned to `mongo:7.0.14`; the service is
+ephemeral and receives no production credentials. Quota, durable events,
+approvals and artifacts cannot be claimed against a database until their owning
+branches land; the gate will require their live tests then rather than treating
+the in-memory path as evidence.
 
 ## Architecture regression tests
 
-`dist/scripts/check-architecture.js` and `tests/architecture/graph.test.ts`
+`dist/scripts/check-architecture.js`, `dist/scripts/capabilities.js`,
+`tests/architecture/graph.test.ts` and `tests/architecture/capabilities.test.ts`
 enforce:
 
 - every `src/**/*.ts` module is reachable from `src/main.ts`;
 - exactly one construction site for the workflow service, task runner, model
   catalog, event bus, route registry, HTTP server, scheduler and route catalogue;
-- exactly one declaration of each capability owner (a second model router or
-  workflow engine fails, not just a second import);
+- exactly one **value whose type satisfies** each capability contract
+  (`ModelCatalog`/`ModelRouter`, `TaskRunner`, `TaskScheduler`,
+  `PermissionGate`, `BudgetLedger`, `EventBus`, `ApplicationService`, HTTP
+  `Router`, `RouteRegistry`, `Planner`, `ExecutionSupervisor`), regardless of
+  factory name. Memory/Mongo persistence drivers are not authorities; the
+  decision layer is;
+- a provider adapter returning `ProviderAdapter` is not a model router, and the
+  tool/MCP network seams are not classified as unauthorized inference; the
+  synthetic tests prove both distinctions;
+- the composed container has exactly the declared keys, so an indirectly
+  registered extra service is a finding;
 - only `src/orchestration/service.ts` starts a run, claims a lease or writes a
   terminal task;
 - agents cannot import orchestration, API or persistence; models cannot import
@@ -64,11 +82,16 @@ enforce:
 - the SDK operation map equals the route catalogue, so an API operation without
   a client fails the contract gate.
 
-Every rule has a negative control in `tests/architecture/graph.test.ts`: the test
-suite injects a duplicate runner, a second HTTP server, a competing workflow
-engine, a duplicate model router, an orphan module, an unconsumed factory, a
-boundary violation and a second route catalogue, and asserts the checker reports
-each one. A gate that cannot fail is not a gate.
+Every rule has a negative control. `graph.test.ts` injects a duplicate runner, a
+second HTTP server, a competing workflow engine, a duplicate model catalogue, an
+orphan module, an unconsumed factory, a boundary violation and a second route
+catalogue. `capabilities.test.ts` uses different factory names (`alpha`, `beta`,
+`renamedButAuthoritative`, `queue`) and an indirectly constructed value, proves
+the type checker rejects two owners, and proves a `ProviderAdapter` is not a
+model router. The real checked-in repository is required to report no finding;
+the PR #5 consolidated probe currently reports competing model-router
+implementations and two planners, which is the gate doing its job, not a green
+result.
 
 ## Previously reported independent findings
 
@@ -103,23 +126,39 @@ the ordered free route, discovery and the daily budget.
 `npm audit --json` is parsed by `dist/scripts/check-audit.js`; high and critical
 advisories fail. The repository previously carried
 [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)
-(CVE-2023-54404) through zod 3. This change upgrades zod to `^4.6.7` in the root,
-contracts and SDK manifests and adapts the hand-written JSON-Schema converter to
-zod 4 internals. `openapi.json` is byte-identical before and after the upgrade,
-so no API contract changed. There is no audit exception or lowered threshold.
+(CVE-2023-54404) through zod 3; the advisory range is `<4.6.6` and the fixed
+version is `4.6.7`. The root, contracts and SDK now resolve one deduplicated
+zod `4.6.7`, and the security-remediation branch independently uses the same
+version, so there is one migration line rather than competing majors. The
+hand-written JSON-Schema converter was adapted to zod 4 internals;
+`tests/unit/zod4.test.ts` covers runtime defaults, optional fields, strict
+objects, discriminated unions, refinements and the generated schema shape.
+`openapi.json` is byte-identical before and after the upgrade. There is no audit
+exception or lowered threshold.
 
 ## Coordination with active owners
 
 This work is additive on a short-lived branch. It does not modify any active
-implementation branch. At the time of writing the active heads are intelligence
-and tools (PR #2), native reasoning and approvals (PR #3), the standalone model
-router (PR #4) and the execution supervisor plus intelligence merge (PR #5).
-PR #5 contains a second copy of the same tools/knowledge routes as PR #2; only
-one owner implementation should land. The files most likely to need a rebase are
+implementation branch. The inspected heads are intelligence/tools (PR #2),
+native reasoning/approvals (PR #3), the standalone model router (PR #4) and the
+execution supervisor plus intelligence merge (PR #5), plus the dedicated
+durable-events, durable-artifacts, artifact-intelligence, multimodal and
+security-remediation branches. PR #5 contains the same tools/knowledge routes as
+PR #2, and its model catalogue has both `createModelCatalog` and
+`createRouterCatalog`; the capability gate correctly reports those as competing
+routers. The files most likely to need a rebase are
 `src/bootstrap/compose.ts`, `src/bootstrap/container.ts`,
 `src/configuration/schema.ts`, `src/orchestration/service.ts`,
 `src/permissions/store.ts`, `src/models/router.ts` and `packages/contracts/`
 sources.
+
+There is also a separate remote `ci/permanent-quality-gate` branch with an
+earlier one-commit gate implementation. It is a parallel artifact, not a source
+of truth for this branch; it must not be overwritten. Reconcile its useful
+checks through review rather than merging two competing gate implementations.
+Cross-repository release certification stays outside this repository gate: the
+release owner consumes the evidence from the exact `verify` head, while this
+repository enforces only its own architecture and tests.
 
 The SDK compatibility gate is intentionally strict: the tools, routing and
 knowledge operations in PR #2/#5 must add matching `SDK_OPERATIONS` entries
@@ -128,10 +167,32 @@ incompatibility the gate exists to catch; it is not a test to be relaxed. The
 zod upgrade changes no HTTP shape and should merge without requiring a change to
 the intelligence, approval or supervisor logic.
 
+## Execution helper resolution
+
+`src/execution/arbiter.ts` was superseded by the durable lease key and was
+removed. `src/execution/retry.ts` was also removed: the runner never called it,
+the service only exposes owner-triggered `retryTask`, and importing its
+constants into configuration only made the orphan look reachable. The gate now
+reports an unreachable or unconsumed helper rather than accepting that kind of
+wiring. No runtime behavior was replaced: the existing owner-triggered retry
+path remains, and a future automatic retry must arrive with its own execution
+tests and owner coordination.
+
+## Real-MongoDB coverage
+
+The live suite covers the paths that exist on this base: official-driver
+connection and index bootstrap, two-connection lease arbitration, completed-task
+restart, generation fencing across real task documents, expired-generation
+recovery plus resume, and notification unread/mark-read durability. Quota,
+durable events, approvals, artifacts and schedules are not claimed here because
+their implementation branches are not on this base; the capability and live
+gates are the place they must add evidence when they land.
+
 ## Zero-cost and hosted-CI state
 
 - Runner: `ubuntu-latest` standard image, included minutes only.
-- Database: `mongo:7` service container, no managed database.
+- Database: pinned `mongo:7.0.14` service container, no managed database and no
+  production URI. A missing service fails the required live gate.
 - No paid model is called by any gate; the test gateway is a deterministic fake,
   and the live database test executes Native against that fake.
 - No third-party action beyond `actions/checkout` and `actions/setup-node`.

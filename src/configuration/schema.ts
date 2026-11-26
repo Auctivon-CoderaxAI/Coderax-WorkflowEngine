@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
-import { MAX_ATTEMPTS, MAX_DELAY_MS } from '../execution/retry.js';
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -90,13 +89,6 @@ export const ExecutionConfig = z
     /** A run holds its lease only while it heartbeats inside this window. */
     leaseTtlMs: z.number().int().min(3_000).max(600_000).default(30_000),
     heartbeatIntervalMs: z.number().int().min(500).max(60_000).default(10_000),
-    /**
-     * Total attempts, including the first. 1 disables retry. The bounds come
-     * from the retry policy module so configuration cannot admit a value the
-     * executor would clamp or refuse.
-     */
-    maxAttempts: z.number().int().min(1).max(MAX_ATTEMPTS).default(1),
-    retryDelayMs: z.number().int().min(0).max(MAX_DELAY_MS).default(250),
     maxConcurrentTasks: z.number().int().min(1).max(64).default(4),
     /** Events retained per task for replay; older events require a new query. */
     eventBufferSize: z.number().int().min(16).max(100_000).default(2_000),

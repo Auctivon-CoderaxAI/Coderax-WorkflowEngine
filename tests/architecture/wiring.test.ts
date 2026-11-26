@@ -18,9 +18,11 @@ test('every named dependency is supplied by the composition root', async () => {
         `dependency ${name} was not wired`,
       );
     }
+    // An extra key is an indirectly registered service: the named container is
+    // the complete registration surface, not a bag that accepts a second owner.
     assert.deepEqual(
-      [...INFRASTRUCTURE_DEPENDENCIES].sort(),
-      INFRASTRUCTURE_DEPENDENCIES.slice().sort(),
+      Object.keys(dependencies).sort(),
+      [...APPLICATION_DEPENDENCIES].sort(),
     );
   } finally {
     await started.close();

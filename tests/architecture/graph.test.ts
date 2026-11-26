@@ -138,6 +138,34 @@ test('two competing model router implementations are rejected', () => {
   assert.ok(findings.some((finding) => finding.rule === 'duplicate_model_router'));
 });
 
+test('a provider call outside the gateway is rejected', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/agents/rogue.ts', "export async function call() { await fetch('https://example.test'); }\n"),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some((finding) => finding.rule === 'unauthorized_inference'));
+});
+
+test('a model provider adapter is allowed to reach its provider endpoint', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/models/providers/http.ts', "export async function call() { await fetch('https://provider.test'); }\n"),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(!findings.some((finding) => finding.rule === 'unauthorized_inference'));
+});
+
+test('explicit tool and MCP transports are allowed network seams', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/tools/builtin.ts', "export async function call() { await fetch('https://tool.test'); }\n"),
+    file('src/mcp/client.ts', "export async function call() { await fetch('https://mcp.test'); }\n"),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(!findings.some((finding) => finding.rule === 'unauthorized_inference'));
+});
+
 test('an orphaned capability module is rejected', () => {
   const files = [...baseRepository(), file('src/execution/dead.ts', 'export const dead = true;\n')];
   const findings = checkArchitecture({ files, entry: 'src/main.ts' });

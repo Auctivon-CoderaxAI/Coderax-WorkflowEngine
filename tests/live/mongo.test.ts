@@ -8,7 +8,8 @@ import { composeApplication } from '../../src/bootstrap/compose.js';
 import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../../src/persistence/mongo.js';
 import { createLeaseStore } from '../../src/persistence/work-runs.js';
-import { baseConfig, fakeGateway, OWNER_TOKEN, waitFor } from '../helpers.js';
+import { workRunKey } from '../../src/execution/lease.js';
+import { baseConfig, fakeGateway, OWNER_TOKEN, taskRecord, waitFor } from '../helpers.js';
 
 /**
  * Real MongoDB only.
@@ -223,6 +224,225 @@ test(
       await client.close().catch(() => undefined);
       rmSync(workspace, { recursive: true, force: true });
       if (!firstStopped) await first.stop().catch(() => undefined);
+    }
+  },
+);
+
+test(
+  'a real database enforces generation fencing across two stores',
+  { skip: uri ? false : required ? false : 'CODERAX_TEST_MONGO_URI is not set' },
+  async () => {
+    requiresDatabase();
+    const workspace = mkdtempSync(path.join(tmpdir(), 'coderax-live-fence-'));
+    const privateRoot = path.join(workspace, 'private');
+    const cloudRoot = path.join(workspace, 'cloud');
+    mkdirSync(privateRoot);
+    mkdirSync(cloudRoot);
+    const app = await composeApplication({
+      config: config(
+        { root: workspace, privateRoot, cloudRoot, cleanup: () => undefined },
+        {
+          persistence: {
+            driver: 'mongo',
+            uriEnv: 'CODERAX_TEST_MONGO_URI',
+            database: databaseName,
+            collectionPrefix: 'live_fence_',
+          },
+        },
+      ),
+      env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+      gateway: fakeGateway(),
+    });
+    try {
+      const taskId = 'task_fence_live';
+      const created = await app.dependencies.tasks.create(
+        taskRecord({
+          taskId,
+          conversationId: 'conv_fence_live',
+          ownerId: 'owner-test',
+          state: 'running',
+          runToken: 'token-old',
+          leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+        }),
+      );
+      assert.equal(created.ok, true);
+
+      const wrong = await app.dependencies.tasks.updateFenced({
+        taskId,
+        token: 'token-new',
+        patch: { state: 'completed' },
+      });
+      assert.deepEqual(wrong, { applied: false, reason: 'superseded' });
+
+      const right = await app.dependencies.tasks.updateFenced({
+        taskId,
+        token: 'token-old',
+        patch: { state: 'failed', failure: { code: 'provider_error', detail: 'fenced', retryable: false } },
+      });
+      assert.equal(right.applied, true);
+      assert.equal((await app.dependencies.tasks.get(taskId))?.state, 'failed');
+
+      const afterTerminal = await app.dependencies.tasks.updateFenced({
+        taskId,
+        token: 'token-old',
+        patch: { state: 'completed' },
+      });
+      assert.deepEqual(afterTerminal, { applied: false, reason: 'terminal' });
+    } finally {
+      await app.stop().catch(() => undefined);
+      const cleanup = new MongoClient(uri as string);
+      await cleanup.connect().catch(() => undefined);
+      await cleanup.db(databaseName).dropDatabase().catch(() => undefined);
+      await cleanup.close().catch(() => undefined);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'a real database recovers an expired generation as interrupted and resumes it',
+  { skip: uri ? false : required ? false : 'CODERAX_TEST_MONGO_URI is not set' },
+  async () => {
+    requiresDatabase();
+    const workspace = mkdtempSync(path.join(tmpdir(), 'coderax-live-recovery-'));
+    const privateRoot = path.join(workspace, 'private');
+    const cloudRoot = path.join(workspace, 'cloud');
+    mkdirSync(privateRoot);
+    mkdirSync(cloudRoot);
+    const app = await composeApplication({
+      config: config(
+        { root: workspace, privateRoot, cloudRoot, cleanup: () => undefined },
+        {
+          persistence: {
+            driver: 'mongo',
+            uriEnv: 'CODERAX_TEST_MONGO_URI',
+            database: databaseName,
+            collectionPrefix: 'live_recovery_',
+          },
+        },
+      ),
+      env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+      gateway: fakeGateway(),
+    });
+    const principal = { ownerId: 'owner-test', isOwner: true as const };
+    try {
+      const taskId = 'task_recovery_live';
+      const conversationId = 'conv_recovery_live';
+      const token = 'token-crashed';
+      const expired = new Date(Date.now() - 60_000);
+      const claimed = await app.dependencies.lease.claim({
+        key: workRunKey({ tenantId: null, ownerId: principal.ownerId, conversationId }),
+        owner: principal.ownerId,
+        token,
+        now: expired,
+        expiresAt: new Date(expired.getTime() + 1_000),
+      });
+      assert.equal(claimed, true);
+      assert.equal(
+        (
+          await app.dependencies.tasks.create(
+            taskRecord({
+              taskId,
+              conversationId,
+              ownerId: principal.ownerId,
+              state: 'running',
+              runToken: token,
+              leaseExpiresAt: new Date(expired.getTime() + 1_000).toISOString(),
+            }),
+          )
+        ).ok,
+        true,
+      );
+
+      const recovered = await app.service.recoverInterrupted();
+      assert.equal(recovered.interrupted, 1);
+      const interrupted = await app.service.task(principal, taskId);
+      assert.equal(interrupted.ok && interrupted.value.state, 'interrupted');
+
+      const generation = interrupted.ok ? interrupted.value.generation : 1;
+      const resumed = await app.service.resumeTask(principal, taskId, generation);
+      assert.equal(resumed.ok, true);
+      await app.dependencies.scheduler.idle();
+      const completed = await app.service.task(principal, taskId);
+      assert.equal(completed.ok && completed.value.state, 'completed');
+      const notifications = await app.dependencies.notifications.list(principal.ownerId);
+      assert.ok(notifications.notifications.some((entry) => entry.taskId === taskId));
+    } finally {
+      await app.stop().catch(() => undefined);
+      const cleanup = new MongoClient(uri as string);
+      await cleanup.connect().catch(() => undefined);
+      await cleanup.db(databaseName).dropDatabase().catch(() => undefined);
+      await cleanup.close().catch(() => undefined);
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'a real database keeps notifications unread across a restart and supports mark-read',
+  { skip: uri ? false : required ? false : 'CODERAX_TEST_MONGO_URI is not set' },
+  async () => {
+    requiresDatabase();
+    const workspace = mkdtempSync(path.join(tmpdir(), 'coderax-live-notify-'));
+    const privateRoot = path.join(workspace, 'private');
+    const cloudRoot = path.join(workspace, 'cloud');
+    mkdirSync(privateRoot);
+    mkdirSync(cloudRoot);
+    const appConfig = config(
+      { root: workspace, privateRoot, cloudRoot, cleanup: () => undefined },
+      {
+        persistence: {
+          driver: 'mongo',
+          uriEnv: 'CODERAX_TEST_MONGO_URI',
+          database: databaseName,
+          collectionPrefix: 'live_notify_',
+        },
+      },
+    );
+    const env = { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string };
+    const first = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+    const notification = {
+      taskId: 'task_notify_live',
+      ownerId: 'owner-test',
+      conversationId: 'conv_notify_live',
+      agent: 'coderax' as const,
+      mode: 'cloud' as const,
+      state: 'completed' as const,
+      summary: 'durable notification',
+      createdAt: new Date().toISOString(),
+      read: false,
+    };
+    let firstStopped = false;
+    try {
+      await first.dependencies.notifications.record(notification);
+      await first.stop();
+      firstStopped = true;
+
+      const second = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+      try {
+        const before = await second.dependencies.notifications.list(notification.ownerId);
+        assert.equal(before.unread, 1);
+        assert.equal(before.notifications[0]?.summary, 'durable notification');
+        await second.dependencies.notifications.markRead(notification.ownerId, notification.taskId);
+      } finally {
+        await second.stop();
+      }
+
+      const third = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+      try {
+        const after = await third.dependencies.notifications.list(notification.ownerId);
+        assert.equal(after.unread, 0);
+        assert.equal(after.notifications[0]?.read, true);
+      } finally {
+        await third.stop();
+      }
+    } finally {
+      if (!firstStopped) await first.stop().catch(() => undefined);
+      const cleanup = new MongoClient(uri as string);
+      await cleanup.connect().catch(() => undefined);
+      await cleanup.db(databaseName).dropDatabase().catch(() => undefined);
+      await cleanup.close().catch(() => undefined);
+      rmSync(workspace, { recursive: true, force: true });
     }
   },
 );

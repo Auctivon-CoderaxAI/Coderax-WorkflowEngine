@@ -29,7 +29,7 @@ are clients of the same versioned API.
 | Atomic claim, renewal, durable cancel, prune | Implemented | `src/persistence/work-runs.ts` |
 | Terminal-state fencing (stale run cannot overwrite) | Implemented | `src/persistence/tasks.ts`, fencing tests |
 | Heartbeat, crash detection, interrupted-task recovery | Implemented | `src/execution/runner.ts`, `src/orchestration/service.ts` |
-| Cancellation, resume, bounded same-engine retry | Implemented | `src/orchestration/service.ts`, e2e tests |
+| Cancellation, resume, owner-triggered retry | Implemented | `src/orchestration/service.ts`, e2e tests |
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
@@ -54,11 +54,13 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm run verify                    # build + all non-live quality gates
+npm run verify                    # build + every quality gate, including real MongoDB
 npm run openapi:check             # fails if the published contract drifted
 ```
 
-The gate matrix, the real-MongoDB job and the coordination notes are in
+`npm run verify` requires `CODERAX_TEST_MONGO_URI` to name a disposable MongoDB;
+the gate fails rather than skipping when no database is present. The gate matrix,
+the pinned MongoDB job and the coordination notes are in
 `docs/quality-gates.md`.
 
 Run the engine (it refuses to start until every startup check passes):
@@ -95,7 +97,7 @@ src/bootstrap        composition root, named dependency container, startup gate
 src/api              transport-agnostic router, route handlers, Node HTTP server
 src/routing          dispatch through the registry (no fallback, no UI logic)
 src/orchestration    Work lifecycle: submit, execute, cancel, resume, retry, recover
-src/execution        leases, arbitration, heartbeat runner, retry, workspace confinement
+src/execution        leases, heartbeat runner, workspace confinement
 src/persistence      task repository (fenced writes), lease tables, conversations
 src/agents           registry, Coderax Native, isolated external adapters
 src/models           verified catalogue, zero-cost route, daily budget ledger

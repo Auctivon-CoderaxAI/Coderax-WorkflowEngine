@@ -12,7 +12,10 @@ function runPlan(plan: GatePlan): boolean {
     const result = spawnSync(process.execPath, ['--test', ...relative], {
       cwd: root,
       stdio: 'inherit',
-      env: process.env,
+      // A required live gate must fail, not skip, when infrastructure is absent.
+      env: plan.gate.live
+        ? { ...process.env, CODERAX_REQUIRE_MONGO: '1' }
+        : process.env,
     });
     if (result.status !== 0) return false;
   }
@@ -62,21 +65,7 @@ try {
     process.exit(1);
   }
 
-  const selected =
-    argument === 'all'
-      ? plans.filter(
-          (plan) =>
-            !plan.gate.live ||
-            process.env.CODERAX_TEST_MONGO_URI !== undefined ||
-            process.env.CODERAX_REQUIRE_MONGO === '1',
-        )
-      : [byId.get(argument) as GatePlan];
-
-  if (argument === 'all' && selected.length < plans.length) {
-    process.stdout.write(
-      'mongo-live skipped locally: set CODERAX_TEST_MONGO_URI to run the real-database gate\n',
-    );
-  }
+  const selected = argument === 'all' ? plans : [byId.get(argument) as GatePlan];
 
   let failed = 0;
   for (const plan of selected) {

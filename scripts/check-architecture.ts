@@ -1,8 +1,12 @@
 import path from 'node:path';
 import { checkArchitecture, formatFinding, loadRepository } from './architecture.js';
+import { checkCapabilities } from './capabilities.js';
 
 const root = path.resolve(import.meta.dirname, '..', '..');
-const findings = checkArchitecture(loadRepository(root));
+const findings = [
+  ...checkArchitecture(loadRepository(root)),
+  ...checkCapabilities(root),
+];
 
 if (findings.length > 0) {
   for (const finding of findings) process.stderr.write(`${formatFinding(finding)}\n`);

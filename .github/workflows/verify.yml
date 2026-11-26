@@ -91,7 +91,9 @@ jobs:
     timeout-minutes: 20
     services:
       mongodb:
-        image: mongo:7
+        # Pinned so the gate cannot silently change server behavior. No
+        # production database or credential is ever connected to this job.
+        image: mongo:7.0.14
         ports:
           - 27017:27017
         options: >-

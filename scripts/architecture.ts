@@ -147,6 +147,14 @@ const CONSTRUCTIONS: ReadonlyArray<{
   },
 ];
 
+/** The runtime network seams: inference, explicit tools and MCP transports. */
+const EGRESS_ALLOWED = [
+  'src/agents/native/gateway.ts',
+  'src/models/providers/',
+  'src/mcp/',
+  'src/tools/',
+];
+
 const UNIQUE_DECLARATIONS: ReadonlyArray<{ rule: string; token: string }> = [
   { rule: 'duplicate_workflow_engine', token: 'export function createApplicationService(' },
   { rule: 'duplicate_task_runner', token: 'export function createTaskRunner(' },
@@ -212,6 +220,16 @@ export function checkArchitecture(repository: Repository): Finding[] {
         rule: construction.rule,
         path: construction.allowed[0] ?? entry,
         detail: `expected at least ${construction.minimum} occurrence of "${construction.token}"`,
+      });
+    }
+  }
+
+  for (const file of files) {
+    if (file.text.includes('fetch(') && !EGRESS_ALLOWED.some((prefix) => file.path.startsWith(prefix))) {
+      findings.push({
+        rule: 'unauthorized_inference',
+        path: file.path,
+        detail: 'only the model gateway and provider adapters may call fetch',
       });
     }
   }
