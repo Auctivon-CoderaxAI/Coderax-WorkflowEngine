@@ -20,7 +20,7 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | TypeScript compilation | `npm run build` (`tsc -b`, project references) | compiler exit status |
 | Unit tests | `unit` | `tests/unit/**` |
 | Integration tests | `integration` | `tests/integration/**` (collection fake) |
-| Real database integration | `mongo-live` (also part of `verify`; separate CI job) | `tests/live/mongo.test.ts` against a pinned `mongo:7.0.14` service |
+| Real database integration | `mongo-live` (also inside the required `verify` CI job) | `tests/live/mongo.test.ts` against a pinned `mongo:7.0.14` service |
 | Security regression tests | `security` | `tests/security/**` |
 | Adversarial execution tests | `adversarial` | `tests/adversarial/**` |
 | OpenAPI drift | `openapi` | `dist/scripts/check-openapi.js` |
@@ -29,6 +29,9 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | Dependency wiring | `architecture` | `tests/architecture/wiring.test.ts`, `dist/scripts/check-architecture.js` |
 | Unused/disconnected capabilities | `architecture` | reachability and factory-consumer checks in the same pair |
 | Capability ownership (type-based) | `architecture` | `dist/scripts/capabilities.js`, `tests/architecture/capabilities.test.ts` |
+| Execution boundaries | `architecture` | `scripts/architecture.ts`, `tests/architecture/graph.test.ts` |
+| Future durable live coverage | `architecture` | `scripts/live-coverage.ts`, `tests/architecture/live-coverage.test.ts` |
+| Workflow integrity | `architecture` | `tests/architecture/workflow.test.ts` |
 | Durable scheduling | `unit` (current in-process scheduler) | `tests/unit/scheduler.test.ts`; the durable scheduler owner must add a live test when it lands |
 | Dependency vulnerabilities | `audit` | `dist/scripts/check-audit.js` (high and critical fail) |
 | Model cost policy | `adversarial`, `unit` | `tests/adversarial/cost-policy.test.ts`, `tests/unit/models.test.ts` |
@@ -51,6 +54,11 @@ approvals and artifacts cannot be claimed against a database until their owning
 branches land; the gate will require their live tests then rather than treating
 the in-memory path as evidence.
 
+The repository's protected `main` requires the check context `verify`. That live
+gate is therefore a step in the required `verify` job, not merely a sibling
+`mongo-live` job that branch protection cannot see. This uses the same pinned
+service container and does not change repository protection settings.
+
 ## Architecture regression tests
 
 `dist/scripts/check-architecture.js`, `dist/scripts/capabilities.js`,
@@ -58,17 +66,25 @@ the in-memory path as evidence.
 enforce:
 
 - every `src/**/*.ts` module is reachable from `src/main.ts`;
-- exactly one construction site for the workflow service, task runner, model
-  catalog, event bus, route registry, HTTP server, scheduler and route catalogue;
+- exactly one construction root for the workflow service, task runner, event
+  bus, route registry, HTTP server, scheduler and route catalogue; the model
+  catalogue is at most one (PR #4 may replace it with a router), and factory
+  aliases or an alternative `src/bootstrap/*` root are rejected;
 - exactly one **value whose type satisfies** each capability contract
-  (`ModelCatalog`/`ModelRouter`, `TaskRunner`, `TaskScheduler`,
-  `PermissionGate`, `BudgetLedger`, `EventBus`, `ApplicationService`, HTTP
-  `Router`, `RouteRegistry`, `Planner`, `ExecutionSupervisor`), regardless of
-  factory name. Memory/Mongo persistence drivers are not authorities; the
-  decision layer is;
+  (`ModelCatalog`/`ModelRouter`/model `Router`, `TaskRunner`, `TaskScheduler`,
+  `ScheduleEngine`, `PermissionGate`/`CapabilityBroker`, `BudgetLedger`,
+  `EventBus`, `EventLog`, `ArtifactService`, `AgentRegistry`, `MediaService`,
+  `CreativeService`, `ApplicationService`, HTTP `Router`, `RouteRegistry`,
+  `Planner`, `ExecutionSupervisor`/`RunSupervisor`), regardless of factory name,
+  class, wrapper or indirect construction. Memory/Mongo persistence and
+  event-log drivers are not authorities; the decision/routing layer is;
 - a provider adapter returning `ProviderAdapter` is not a model router, and the
   tool/MCP network seams are not classified as unauthorized inference; the
   synthetic tests prove both distinctions;
+- outbound `fetch`, alternate HTTP clients, provider SDKs and subprocesses are
+  rejected outside the declared gateway/provider/tool/MCP/browser/media/artifact
+  seams; the inbound `src/api/server.ts` may import `node:http`; dynamic imports
+  are graph edges, and an unresolved or alternative-root dynamic import fails;
 - the composed container has exactly the declared keys, so an indirectly
   registered extra service is a finding;
 - only `src/orchestration/service.ts` starts a run, claims a lease or writes a
@@ -84,14 +100,14 @@ enforce:
 
 Every rule has a negative control. `graph.test.ts` injects a duplicate runner, a
 second HTTP server, a competing workflow engine, a duplicate model catalogue, an
-orphan module, an unconsumed factory, a boundary violation and a second route
-catalogue. `capabilities.test.ts` uses different factory names (`alpha`, `beta`,
-`renamedButAuthoritative`, `queue`) and an indirectly constructed value, proves
-the type checker rejects two owners, and proves a `ProviderAdapter` is not a
-model router. The real checked-in repository is required to report no finding;
-the PR #5 consolidated probe currently reports competing model-router
-implementations and two planners, which is the gate doing its job, not a green
-result.
+orphan module, an unconsumed factory, a boundary violation, a second route
+catalogue, a factory alias, a dynamic alternative root, an alternate HTTP
+client, a provider SDK and a subprocess. `capabilities.test.ts` uses different
+factory names (`alpha`, `beta`, `renamedButAuthoritative`, `queue`), indirect
+construction, a class implementation and a wrapper, proves the type checker
+rejects two owners, and proves a `ProviderAdapter` is not a model router. The
+real checked-in repository is required to report no finding; the exact-head
+branch matrix is in [`architecture-ownership.md`](architecture-ownership.md).
 
 ## Previously reported independent findings
 
@@ -140,13 +156,13 @@ exception or lowered threshold.
 
 This work is additive on a short-lived branch. It does not modify any active
 implementation branch. The inspected heads are intelligence/tools (PR #2),
-native reasoning/approvals (PR #3), the standalone model router (PR #4) and the
-execution supervisor plus intelligence merge (PR #5), plus the dedicated
-durable-events, durable-artifacts, artifact-intelligence, multimodal and
-security-remediation branches. PR #5 contains the same tools/knowledge routes as
-PR #2, and its model catalogue has both `createModelCatalog` and
-`createRouterCatalog`; the capability gate correctly reports those as competing
-routers. The files most likely to need a rebase are
+native reasoning/approvals (PR #3), the standalone model router (PR #4), the
+execution supervisor (PR #5), native teams (PR #8), durable scheduling (PR #9)
+and the dedicated durable-events, durable-artifacts, artifact-intelligence,
+multimodal, read-model, persistence, operability, gaming and security-remediation
+branches. PR #5 still carries competing model-router and planner values, which
+the capability gate correctly reports rather than blessing an unreviewed merge.
+The files most likely to need a rebase are
 `src/bootstrap/compose.ts`, `src/bootstrap/container.ts`,
 `src/configuration/schema.ts`, `src/orchestration/service.ts`,
 `src/permissions/store.ts`, `src/models/router.ts` and `packages/contracts/`
@@ -160,27 +176,12 @@ Cross-repository release certification stays outside this repository gate: the
 release owner consumes the evidence from the exact `verify` head, while this
 repository enforces only its own architecture and tests.
 
-### Consolidated-head probe (2026-11-26)
-
-The capability checker was run read-only against each current branch worktree;
-no branch was checked out into this history or modified. These are findings, not
-merge results:
-
-| Branch | Capability/architecture probe | Owner action before merge |
-| --- | --- | --- |
-| `feat/intelligence-core` (PR #2) | competing router + planner; disconnected arbiter/retry; model→agent boundary | remove legacy catalog/deterministic planner, adopt the retry decision, and add the SDK map for five new routes |
-| `feat/native-reasoning-planner` (PR #3) | clean after memory/Mongo permission drivers were classified as drivers; disconnected arbiter/retry | remove the two superseded execution helpers or rebase on their resolution |
-| `feat/zero-cost-model-router` (PR #4) | capability-clean; disconnected arbiter/retry | rebase on the execution-helper resolution |
-| `feat/execution-supervisor` (PR #5) | competing model routers and planners; disconnected arbiter/retry; unused MCP/catalog factories | consolidate the legacy catalog and deterministic planner, then add the SDK map |
-| `security/remediation-808dfd3` | capability-clean; same zod `4.6.7` line | coordinate the zod converter/config conflict with this branch |
-| `feat/durable-events-integration` | capability-clean; adds routes without the SDK map | add SDK operations and a live event-replay test when durable events land |
-| `feat/durable-artifacts`, `feat/artifact-intelligence` | capability-clean; no live artifact durability test on this base | add a live artifact test in the owning branch |
-| `feat/multimodal-creative-intelligence` | capability-clean | keep the media validation and live evidence with the owner |
-
-A provider adapter is not a router and the memory/Mongo permission stores are
-drivers, not competing authorities; the synthetic tests pin those distinctions.
-The probe intentionally reports the PR #5 duplicate rather than blessing a
-consolidated architecture that has not actually chosen one owner.
+See [`architecture-ownership.md`](architecture-ownership.md) for the exact-SHA
+matrix covering every active PR and relevant branch, the authoritative owner per
+capability and the classification of each finding. The probe is read-only: no
+branch was checked out into this history or modified. It reports the PR #5
+duplicate rather than blessing a consolidated architecture that has not actually
+chosen one owner.
 
 The SDK compatibility gate is intentionally strict: the tools, routing and
 knowledge operations in PR #2/#5 must add matching `SDK_OPERATIONS` entries
@@ -200,6 +201,13 @@ wiring. No runtime behavior was replaced: the existing owner-triggered retry
 path remains, and a future automatic retry must arrive with its own execution
 tests and owner coordination.
 
+Removing `execution.maxAttempts` and `execution.retryDelayMs` is a visible
+configuration break, not a silent one: the strict schema rejects those keys at
+startup, and `tests/unit/config.test.ts` pins that behavior. A deployment still
+setting them must remove them before upgrading; there is no ignored no-op that
+would make an operator believe retry policy is active. No HTTP, event, OpenAPI or
+SDK contract contained those fields, so published client contracts are unchanged.
+
 ## Real-MongoDB coverage
 
 The live suite covers the paths that exist on this base: official-driver
@@ -207,14 +215,38 @@ connection and index bootstrap, two-connection lease arbitration, completed-task
 restart, generation fencing across real task documents, expired-generation
 recovery plus resume, and notification unread/mark-read durability. Quota,
 durable events, approvals, artifacts and schedules are not claimed here because
-their implementation branches are not on this base; the capability and live
-gates are the place they must add evidence when they land.
+their implementation branches are not on this base; `scripts/live-coverage.ts`
+requires a standardized live suite as soon as an owning branch lands its source.
+
+Independently, the durable-artifacts branch was probed in its own worktree at
+`fd5edef2a2cfc83850fa43b19a813676c352bb92`: its five real-Mongo concurrency
+tests (deduplication, quota admission, abandoned reservation, corruption report
+and delete/read race) passed 5/5 with zero skips against a disposable real
+server. Those tests are in its integration gate and use
+`CODERAX_TEST_MONGODB_URI`; they still need a standardized live file before they
+can satisfy this lane. The branch's claimed 147-test total was not re-run here.
+
+## Hosted CI and protection state
+
+Read-only checks on 2026-11-26 found `main` protected, with the required status
+check context `verify` enforced for everyone. The repository has one active
+workflow, `.github/workflows/verify.yml`; it is the only workflow in the tree.
+The required `verify` job now contains the pinned MongoDB service and the live
+gate, so the protected check cannot pass while the database lane fails.
+
+The detailed protection endpoint (`/branches/main/protection`) requires
+authentication and returned HTTP 401 to this host. Required review counts,
+dismissal rules and the full settings were therefore not inspected, and no
+protection setting was changed. No pull request exists for
+`ci/permanent-quality-gates`; the workflow runs on pull requests and on pushes to
+`main`, so there is no hosted exact-head result to report before a PR is opened.
 
 ## Zero-cost and hosted-CI state
 
 - Runner: `ubuntu-latest` standard image, included minutes only.
-- Database: pinned `mongo:7.0.14` service container, no managed database and no
-  production URI. A missing service fails the required live gate.
+- Database: pinned `mongo:7.0.14` service container inside the required `verify`
+  job, no managed database and no production URI. A missing service fails the
+  required live gate.
 - No paid model is called by any gate; the test gateway is a deterministic fake,
   and the live database test executes Native against that fake.
 - No third-party action beyond `actions/checkout` and `actions/setup-node`.

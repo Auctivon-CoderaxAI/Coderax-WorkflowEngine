@@ -122,6 +122,24 @@ test('a competing workflow-engine declaration is rejected', () => {
   assert.ok(findings.some((finding) => finding.rule === 'duplicate_workflow_engine'));
 });
 
+test('a router-only tree does not require the legacy catalogue', () => {
+  const files = baseRepository().map((entry) => {
+    if (entry.path === 'src/bootstrap/compose.ts') {
+      return { ...entry, text: entry.text.replace('createModelCatalog({});', 'createModelRouter({});') };
+    }
+    if (entry.path === 'src/bootstrap/factories.ts') {
+      return {
+        ...entry,
+        text: entry.text
+          .replace('export function createModelCatalog() {}', 'export function createModelRouter() {}'),
+      };
+    }
+    return entry;
+  });
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(!findings.some((finding) => finding.rule === 'duplicate_model_catalog'));
+});
+
 test('a duplicated model catalogue declaration is rejected', () => {
   const files = [...baseRepository(), file('src/models/second.ts', 'export function createModelCatalog() {}\n')];
   const findings = checkArchitecture({ files, entry: 'src/main.ts' });
@@ -164,6 +182,61 @@ test('explicit tool and MCP transports are allowed network seams', () => {
   ];
   const findings = checkArchitecture({ files, entry: 'src/main.ts' });
   assert.ok(!findings.some((finding) => finding.rule === 'unauthorized_inference'));
+});
+
+test('an alternate HTTP client is rejected outside the provider/tool seams', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/agents/native/planner.ts', "import axios from 'axios';\nexport const call = () => axios.get('https://provider.test');\n"),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some((finding) => finding.rule === 'unauthorized_http_client'));
+});
+
+test('a provider SDK is rejected outside the provider adapter seam', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/agents/rogue.ts', "import OpenAI from 'openai';\nexport const client = new OpenAI();\n"),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some((finding) => finding.rule === 'unauthorized_provider_sdk'));
+});
+
+test('a subprocess outside the explicit tool seams is rejected', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/execution/rogue.ts', "import { spawn } from 'node:child_process';\nspawn('sh', []);\n"),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some((finding) => finding.rule === 'unauthorized_subprocess'));
+});
+
+test('the inbound API server may import node:http without being an inference path', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/api/server.ts', "import { createServer } from 'node:http';\nexport const server = createServer;\n"),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(!findings.some((finding) => finding.rule === 'unauthorized_http_client'));
+});
+
+test('a dynamically imported alternative composition root is rejected', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/main.ts', "import('./bootstrap/alt.js');\n"),
+    file('src/bootstrap/alt.ts', 'export const boot = true;\n'),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some((finding) => finding.rule === 'single_construction_root'));
+});
+
+test('a factory alias outside the composition root is rejected', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/api/alt.ts', 'const bootstrap = createTaskRunner;\nexport const ready = bootstrap;\n'),
+  ];
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some((finding) => finding.rule === 'single_construction_root'));
 });
 
 test('an orphaned capability module is rejected', () => {

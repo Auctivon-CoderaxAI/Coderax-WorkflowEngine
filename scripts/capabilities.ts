@@ -1,5 +1,6 @@
 import path from 'node:path';
 import ts from 'typescript';
+import { authorityFor } from './ownership.js';
 
 /**
  * Capability ownership by type, not by file name.
@@ -91,6 +92,58 @@ export const CAPABILITIES: readonly CapabilitySpec[] = Object.freeze([
     capability: 'execution_supervisor',
     typeName: 'ExecutionSupervisor',
     typePathPrefix: 'src/execution/',
+  },
+  {
+    // The security branch introduced its own execution-scoped supervisor. It is
+    // a legitimate isolated branch, but after PR #5 lands there must be one
+    // authority; the ownership probe is what forces that reconciliation.
+    capability: 'execution_supervisor',
+    typeName: 'RunSupervisor',
+    typePathPrefix: 'src/execution/',
+  },
+  {
+    // PR #5's execution-scoped broker is a second authorization authority when
+    // combined with PermissionGate. Both may be legitimate layers on their own
+    // branch; a merged tree must choose one decision chain.
+    capability: 'permission_gate',
+    typeName: 'CapabilityBroker',
+    typePathPrefix: 'src/execution/',
+  },
+  {
+    capability: 'artifact_service',
+    typeName: 'ArtifactService',
+    typePathPrefix: 'src/artifacts/',
+  },
+  {
+    // Agent discovery is the capability registry the API and native team use.
+    // A second registry is a competing discovery path even when it is called a
+    // map, a broker or a wrapper.
+    capability: 'capability_registry',
+    typeName: 'AgentRegistry',
+    typePathPrefix: 'src/agents/',
+  },
+  {
+    capability: 'schedule_engine',
+    typeName: 'ScheduleEngine',
+    typePathPrefix: 'src/scheduling/',
+  },
+  {
+    capability: 'event_log',
+    typeName: 'EventLog',
+    typePathPrefix: 'src/events/',
+    // Memory and Mongo are persistence drivers for the same log contract, not
+    // competing event-delivery authorities.
+    supporting: ['src/persistence/mongo-events.ts'],
+  },
+  {
+    capability: 'media_service',
+    typeName: 'MediaService',
+    typePathPrefix: 'src/media/',
+  },
+  {
+    capability: 'creative_service',
+    typeName: 'CreativeService',
+    typePathPrefix: 'src/creative/',
   },
 ]);
 
@@ -248,12 +301,13 @@ export function inspectCapabilities(
       (owner) => !(spec?.supporting ?? []).includes(owner.file),
     );
     if (authorities.length > 1) {
+      const owner = authorityFor(capability);
       findings.push({
         rule: `duplicate_${capability}`,
         path: authorities[0]?.file ?? 'src',
         detail: `expected at most one authority, found ${authorities
-          .map((owner) => `${owner.file}:${owner.exportName}`)
-          .join(', ')}`,
+          .map((candidate) => `${candidate.file}:${candidate.exportName}`)
+          .join(', ')}${owner ? `; authoritative owner: ${owner.owner} (${owner.branch})` : ''}`,
       });
     }
   }
@@ -270,8 +324,11 @@ export function checkCapabilities(root: string): CapabilityFinding[] {
 export function capabilityReport(root: string): string {
   const program = createProgram(root);
   const { owners } = inspectCapabilities(program, root);
-  const lines = owners.map(
-    (owner) => `${owner.capability}: ${owner.file}:${owner.exportName} (${owner.typeName})`,
-  );
+  const lines = owners.map((owner) => {
+    const authority = authorityFor(owner.capability);
+    return `${owner.capability}: ${owner.file}:${owner.exportName} (${owner.typeName})${
+      authority ? ` [owner: ${authority.owner}]` : ''
+    }`;
+  });
   return lines.length > 0 ? lines.join('\n') : 'no capability implementations found';
 }

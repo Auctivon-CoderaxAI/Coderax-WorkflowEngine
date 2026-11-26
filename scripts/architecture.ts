@@ -153,12 +153,107 @@ const EGRESS_ALLOWED = [
   'src/models/providers/',
   'src/mcp/',
   'src/tools/',
+  'src/browser/',
+  'src/media/',
+  'src/artifacts/',
 ];
 
-const UNIQUE_DECLARATIONS: ReadonlyArray<{ rule: string; token: string }> = [
+/**
+ * Outbound HTTP clients are not interchangeable with the inbound API server.
+ * `node:http` is allowed at the server seam because it creates a listener, not
+ * because it may issue provider requests. A provider SDK or alternate client is
+ * only legal in the model gateway/provider adapters.
+ */
+const OUTBOUND_HTTP_IMPORTS = new Set([
+  'node:http',
+  'node:https',
+  'node:http2',
+  'http',
+  'https',
+  'http2',
+  'axios',
+  'got',
+  'node-fetch',
+  'undici',
+  'request',
+  'superagent',
+]);
+const PROVIDER_SDK_IMPORTS = new Set([
+  'openai',
+  '@anthropic-ai/sdk',
+  '@google/generative-ai',
+  '@google/genai',
+  'groq-sdk',
+  '@mistralai/mistralai',
+  'cohere-ai',
+  '@aws-sdk/client-bedrock-runtime',
+]);
+const SUBPROCESS_IMPORTS = new Set([
+  'node:child_process',
+  'child_process',
+  'execa',
+  'shelljs',
+]);
+const HTTP_ALLOWED = ['src/api/server.ts', ...EGRESS_ALLOWED];
+const PROVIDER_ALLOWED = ['src/agents/native/gateway.ts', 'src/models/providers/'];
+const SUBPROCESS_ALLOWED = [
+  'src/tools/',
+  'src/mcp/',
+  'src/media/',
+  'src/browser/',
+  'src/artifacts/',
+  'src/agents/adapters/',
+  'src/agents/opencode/',
+  'src/agents/freebuff/',
+];
+
+function importFinding(rule: string, file: string, specifier: string, detail: string): Finding {
+  return { rule, path: file, detail: `${detail} (imports ${specifier})` };
+}
+
+/**
+ * Owner factories that must be referenced only by their declaration and the
+ * one composition root. This catches a wrapper or alias that evades the literal
+ * `factory({ ... })` construction token without pretending every factory in the
+ * repository has the same wiring rule.
+ */
+const OWNER_FACTORIES = [
+  'createApplicationService',
+  'createTaskRunner',
+  'createModelCatalog',
+  'createModelRouter',
+  'createEventBus',
+  'createEventLog',
+  'createTaskScheduler',
+  'createScheduleEngine',
+  'createHttpServer',
+  'createRouteRegistry',
+  'createAgentRegistry',
+  'createPermissionGate',
+  'createCapabilityBroker',
+  'createExecutionSupervisor',
+  'createRunSupervisor',
+  'createArtifactService',
+  'createMediaService',
+  'createCreativeService',
+];
+
+const UNIQUE_DECLARATIONS: ReadonlyArray<{
+  rule: string;
+  token: string;
+  minimum?: number;
+  maximum?: number;
+}> = [
   { rule: 'duplicate_workflow_engine', token: 'export function createApplicationService(' },
   { rule: 'duplicate_task_runner', token: 'export function createTaskRunner(' },
-  { rule: 'duplicate_model_catalog', token: 'export function createModelCatalog(' },
+  // PR #4 replaces the legacy catalogue with its router. Zero is valid during
+  // that transition; two catalogue implementations are not.
+  {
+    rule: 'duplicate_model_catalog',
+    token: 'export function createModelCatalog(',
+    minimum: 0,
+    maximum: 1,
+  },
   { rule: 'duplicate_event_bus', token: 'export function createEventBus(' },
   { rule: 'duplicate_route_catalogue', token: 'export const ROUTES' },
 ];
@@ -229,18 +324,81 @@ export function checkArchitecture(repository: Repository): Finding[] {
       findings.push({
         rule: 'unauthorized_inference',
         path: file.path,
-        detail: 'only the model gateway and provider adapters may call fetch',
+        detail:
+          'only the model gateway, provider adapters, explicit tools, MCP, browser and media seams may call fetch',
+      });
+    }
+
+    for (const ref of parseImports(file.text)) {
+      const specifier = ref.specifier;
+      if (
+        OUTBOUND_HTTP_IMPORTS.has(specifier) &&
+        !HTTP_ALLOWED.some((prefix) => file.path.startsWith(prefix))
+      ) {
+        findings.push(
+          importFinding(
+            'unauthorized_http_client',
+            file.path,
+            specifier,
+            'outbound HTTP must use the HTTP API server seam or an authorized provider/tool transport',
+          ),
+        );
+      }
+      if (
+        PROVIDER_SDK_IMPORTS.has(specifier) &&
+        !PROVIDER_ALLOWED.some((prefix) => file.path.startsWith(prefix))
+      ) {
+        findings.push(
+          importFinding(
+            'unauthorized_provider_sdk',
+            file.path,
+            specifier,
+            'provider SDKs may only be imported by the model gateway/provider adapters',
+          ),
+        );
+      }
+      if (
+        SUBPROCESS_IMPORTS.has(specifier) &&
+        !SUBPROCESS_ALLOWED.some((prefix) => file.path.startsWith(prefix))
+      ) {
+        findings.push(
+          importFinding(
+            'unauthorized_subprocess',
+            file.path,
+            specifier,
+            'subprocess execution requires an explicit tool, MCP, media, browser or agent-adapter seam',
+          ),
+        );
+      }
+    }
+  }
+
+  for (const file of files) {
+    for (const factory of OWNER_FACTORIES) {
+      if (!new RegExp(`\\b${factory}\\b`).test(file.text)) continue;
+      const declaration = files.some(
+        (candidate) =>
+          candidate.path === file.path &&
+          new RegExp(`export\\s+(?:async\\s+)?function\\s+${factory}\\b`).test(candidate.text),
+      );
+      if (declaration || file.path === 'src/bootstrap/compose.ts') continue;
+      findings.push({
+        rule: 'single_construction_root',
+        path: file.path,
+        detail: `${factory} may only be declared in its module and used by src/bootstrap/compose.ts`,
       });
     }
   }
 
   for (const declaration of UNIQUE_DECLARATIONS) {
     const count = occurrenceCount(files, declaration.token);
-    if (count !== 1) {
+    const minimum = declaration.minimum ?? 1;
+    const maximum = declaration.maximum ?? 1;
+    if (count < minimum || count > maximum) {
       findings.push({
         rule: declaration.rule,
         path: entry,
-        detail: `expected exactly one "${declaration.token}", found ${count}`,
+        detail: `expected ${minimum === maximum ? `exactly ${minimum}` : `${minimum}-${maximum}`} "${declaration.token}", found ${count}`,
       });
     }
   }
@@ -261,6 +419,39 @@ export function checkArchitecture(repository: Repository): Finding[] {
       path: 'src/models',
       detail: `expected at most one model router declaration, found ${modelRouterDeclarations}`,
     });
+  }
+
+  // Dynamic imports are edges too. A module that is only reached through
+  // `import()` is still reachable, while a dynamically imported second
+  // composition root is still a second root.
+  const dynamicImports = files.flatMap((file) =>
+    [...file.text.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)].map((match) => ({
+      from: file.path,
+      specifier: match[1] as string,
+    })),
+  );
+  for (const dynamic of dynamicImports) {
+    const target = resolveRelative(dynamic.from, dynamic.specifier);
+    if (!target) continue;
+    if (!files.some((file) => file.path === target)) {
+      findings.push({
+        rule: 'unresolved_dynamic_import',
+        path: dynamic.from,
+        detail: `dynamic import ${dynamic.specifier} does not resolve to a checked source file`,
+      });
+      continue;
+    }
+    if (
+      files.some((candidate) => candidate.path === target) &&
+      /(?:^|\/)bootstrap\/(?!compose\.ts)/.test(target) &&
+      target !== 'src/bootstrap/compose.ts'
+    ) {
+      findings.push({
+        rule: 'single_construction_root',
+        path: dynamic.from,
+        detail: `dynamic import reaches an alternative composition root ${target}`,
+      });
+    }
   }
 
   for (const file of files) {

@@ -108,6 +108,33 @@ test('two different type names for one capability still count as competitors', (
   }
 });
 
+test('class implementations and wrapper factories are still competitors', () => {
+  const root = fixture({
+    'src/models/types.ts': 'export type ModelCatalog = { list: () => string[] };',
+    'src/models/alpha.ts': `
+      import type { ModelCatalog } from './types.js';
+      export class Alpha implements ModelCatalog { list() { return []; } }
+    `,
+    'src/models/beta.ts': `
+      import type { ModelCatalog } from './types.js';
+      const make = (): ModelCatalog => ({ list: () => [] });
+      export function wrapper(): ModelCatalog { return make(); }
+      export const beta = make();
+    `,
+  });
+  try {
+    const result = inspectCapabilities(createProgram(root), root);
+    assert.ok(
+      result.findings.some((finding) => finding.rule === 'duplicate_model_router'),
+      JSON.stringify(result.findings),
+    );
+    assert.ok(result.owners.some((owner) => owner.exportName === 'Alpha'));
+    assert.ok(result.owners.some((owner) => owner.exportName === 'wrapper'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('one implementation is accepted and reported as the only owner', () => {
   const root = fixture({
     'src/models/types.ts': 'export type ModelCatalog = { list: () => string[] };',

@@ -11,7 +11,9 @@ function readBody(request: IncomingMessage): Promise<string> {
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
         reject(new Error('request body is too large'));
-        request.destroy();
+        // Do not destroy the socket before the typed 413 is written. Pause the
+        // stream here; the request handler drains or closes it after responding.
+        request.pause();
         return;
       }
       chunks.push(chunk);
@@ -49,6 +51,10 @@ export function createHttpServer(input: {
           bodyText = await readBody(request);
         }
       } catch {
+        // The client may still be writing. Drain it so the response is not lost,
+        // then close the connection instead of keeping an oversized request open.
+        request.resume();
+        response.setHeader('connection', 'close');
         sendJson(response, 413, {
           type: 'https://coderax.dev/problems/validation_failed',
           title: 'validation failed',

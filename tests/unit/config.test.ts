@@ -102,6 +102,28 @@ test('duplicate zero-cost candidates are refused', () => {
   }
 });
 
+test('removed retry settings are rejected visibly, not silently ignored', () => {
+  const ws = workspace();
+  try {
+    assert.throws(
+      () =>
+        EngineConfigSchema.parse({
+          auth: { ownerId: 'owner' },
+          workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+          models: { route: [{ providerId: 'free', modelId: 'm' }] },
+          execution: { maxAttempts: 3, retryDelayMs: 100 },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /execution|maxAttempts|retryDelayMs/i);
+        return true;
+      },
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('the persistence driver can be selected from the environment', () => {
   const ws = workspace();
   try {

@@ -3,10 +3,10 @@ name: verify
 # The permanent acceptance gate. Every job runs on a standard, free
 # GitHub-hosted runner. No paid runner, action or service is used.
 #
-# A passing run at an earlier head is not a pass, so the workflow runs on every
-# push to a pull request and on main after merge. The live-MongoDB job is a
-# separate job because it requires a real database service, not the collection
-# fake used by the integration gate.
+# The repository protects `main` with the required check named `verify`. The real
+# MongoDB lane must therefore live inside this job, not in a sibling job that the
+# required check cannot see. The service is an ephemeral, pinned database with no
+# production credentials.
 
 on:
   pull_request:
@@ -24,7 +24,22 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    services:
+      mongodb:
+        # Pinned so the gate cannot silently change server behavior. No
+        # production database or credential is ever connected to this job.
+        image: mongo:7.0.14
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CODERAX_REQUIRE_MONGO: '1'
+      CODERAX_TEST_MONGO_URI: mongodb://127.0.0.1:27017/coderax_ci
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +87,9 @@ jobs:
       - name: Dependency vulnerability scan (high and critical)
         run: node dist/scripts/run-gates.js audit
 
+      - name: Real MongoDB integration tests (required, no fake)
+        run: node dist/scripts/run-gates.js mongo-live
+
       - name: Reject committed secrets and local owner paths
         run: |
           if grep -rIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git \
@@ -85,38 +103,3 @@ jobs:
             exit 1
           fi
           echo "No committed secret values or owner paths found."
-
-  mongo-live:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      mongodb:
-        # Pinned so the gate cannot silently change server behavior. No
-        # production database or credential is ever connected to this job.
-        image: mongo:7.0.14
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      CODERAX_REQUIRE_MONGO: '1'
-      CODERAX_TEST_MONGO_URI: mongodb://127.0.0.1:27017/coderax_ci
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-
-      - name: Install from the lockfile
-        run: npm ci
-
-      - name: TypeScript compilation
-        run: npm run build
-
-      - name: Real MongoDB integration tests (no collection fake)
-        run: node dist/scripts/run-gates.js mongo-live
