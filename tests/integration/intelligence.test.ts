@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { ModelCompletionRequest } from '../../src/agents/native/types.js';
 import { startTestApp, waitFor } from '../helpers.js';
@@ -21,6 +21,9 @@ function scriptedGateway() {
       calls.push(request.prompt);
       if (request.prompt.includes('Return ONLY a JSON array')) {
         return { text: '["Write the report", "Confirm completion"]', usage: { inputTokens: 5, outputTokens: 5 } };
+      }
+      if (request.prompt.includes('Current step (step-1):') && !request.prompt.includes('Tool fs.read')) {
+        return { text: JSON.stringify({ tool: 'fs.read', input: { path: 'baseline.txt' } }) };
       }
       if (request.prompt.includes('Current step (step-2):') && request.prompt.includes('Tool fs.write succeeded')) return { text: '{"final":"Confirmed."}' };
       if (!request.prompt.includes('Tool fs.write succeeded')) {
@@ -45,6 +48,19 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
   const gateway = scriptedGateway();
   const started = await startTestApp({ gateway });
   try {
+    const baseline = path.join(started.workspace.cloudRoot, 'baseline.txt');
+    await writeFile(baseline, 'original baseline');
+    const { tasks } = started.app.dependencies;
+    const update = tasks.updateFenced;
+    const writes: string[] = [];
+    tasks.updateFenced = async (input) => {
+      if (input.patch.checkpoint && !input.patch.state) {
+        await new Promise(resolve => setTimeout(resolve, 40));
+        writes.push('report');
+      }
+      if (input.patch.state === 'awaiting_approval') writes.push('suspend');
+      return update(input);
+    };
     const submitted = await started.app.service.submitWork(principal, {
       objective: 'Write the report',
       mode: 'cloud',
@@ -74,6 +90,7 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
     );
     assert.equal(decided.ok, true);
 
+    await writeFile(baseline, 'changed baseline');
     const resumed = await started.app.service.resumeTask(
       principal,
       submitted.value.taskId,
@@ -103,6 +120,14 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
     assert.ok(completed.result?.summary?.includes('Confirmed.'));
     assert.deepEqual(completed.steps.map(step => step.state), ['completed', 'completed']);
 
+    assert.deepEqual(writes.slice(0, 3), ['suspend', 'report', 'suspend']);
+    const afterReplay = gateway.calls.filter(prompt => prompt.includes('Tool fs.write succeeded'));
+    assert.ok(afterReplay.some(prompt => prompt.includes('original baseline')));
+    assert.ok(!gateway.calls.some(prompt => prompt.includes('changed baseline')));
+    const secondStep = gateway.calls.filter(prompt => prompt.includes('Current step (step-2):'));
+    assert.equal(secondStep.length, 2);
+    assert.ok(secondStep.every(prompt => prompt.includes('Completed step results:') &&
+      prompt.includes('Wrote report.txt.')));
     const content = await readFile(
       path.join(started.workspace.cloudRoot, 'report.txt'),
       'utf8',
@@ -180,6 +205,30 @@ test('the owner can cancel a suspended task without executing its pending action
     assert.ok(cancelled.ok);
     assert.equal(cancelled.value.state, 'cancelled');
     await assert.rejects(readFile(path.join(started.workspace.cloudRoot, 'report.txt')), { code: 'ENOENT' });
+  } finally {
+    await started.close();
+  }
+});
+
+test('failed suspension persistence leaves the running task recoverable on lease expiry', async () => {
+  const started = await startTestApp({ gateway: scriptedGateway() });
+  try {
+    const { tasks, scheduler, clock } = started.app.dependencies;
+    const update = tasks.updateFenced;
+    tasks.updateFenced = async (input) => {
+      if (input.patch.state === 'awaiting_approval') throw new Error('storage unavailable');
+      return update(input);
+    };
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'Write the report', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(submitted.ok);
+    await scheduler.idle();
+    const id = submitted.value.taskId;
+    assert.equal((await tasks.get(id))?.state, 'running');
+    clock.now = () => new Date(Date.now() + 60_000);
+    const recovered = await started.app.service.task(principal, id);
+    assert.equal(recovered.ok && recovered.value.state, 'interrupted');
   } finally {
     await started.close();
   }

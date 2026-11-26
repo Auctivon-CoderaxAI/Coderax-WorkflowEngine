@@ -132,3 +132,19 @@ test('invalid input is rejected before any tool runs', async () => {
     space.cleanup();
   }
 });
+
+test('cancellation during approval prevents an approved write', async () => {
+  const space = workspace();
+  const controller = new AbortController();
+  try {
+    const outcome = await runtime().call({
+      name: 'fs.write', arguments: { path: 'report.txt', content: 'test' },
+      context: { ...context(space.root), signal: controller.signal },
+      gate: { ensure: async () => { controller.abort(); return { decision: 'granted' }; } },
+    });
+    assert.equal(!outcome.result.ok && outcome.result.code, 'cancelled');
+    assert.throws(() => readFileSync(path.join(space.root, 'report.txt')), { code: 'ENOENT' });
+  } finally {
+    space.cleanup();
+  }
+});

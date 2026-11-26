@@ -26,7 +26,7 @@ import type {
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskRecord } from '../domain.js';
+import type { TaskPatch, TaskRecord } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -250,6 +250,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ? {
             plannedSteps: input.task.steps.map((step) => ({ id: step.id, title: step.title })),
             completedSteps: [...input.task.checkpoint.completedSteps],
+            ...(input.task.checkpoint.outputs ? { priorOutputs: input.task.checkpoint.outputs } : {}),
             priorText: input.task.checkpoint.text,
             requireApproval: input.task.requireApproval,
           }
@@ -374,34 +375,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // A suspension keeps the task alive: the owner decides, and resume claims a
       // new generation. The checkpoint is written under the same fence, and the
       // lease is released so the conversation is not held by a run that stopped.
-      try {
-        const applied = await deps.tasks.updateFenced({
-          taskId: task.taskId,
-          token,
-          patch: {
-            state: 'awaiting_approval',
-            updatedAt: now,
-            failure: {
-              code: 'approval_required',
-              detail: outcome.detail,
-              retryable: true,
-            },
-            ...(checkpoint ? { checkpoint } : {}),
+      const applied = await deps.tasks.updateFenced({
+        taskId: task.taskId,
+        token,
+        patch: {
+          state: 'awaiting_approval',
+          updatedAt: now,
+          failure: {
+            code: 'approval_required',
+            detail: outcome.detail,
+            retryable: true,
           },
+          ...(checkpoint ? { checkpoint } : {}),
+        },
+      });
+      if (applied.applied) {
+        deps.audit.record({
+          actor: task.ownerId,
+          action: 'work.awaiting_approval',
+          taskId: task.taskId,
+          conversationId: task.conversationId,
+          outcome: 'accepted',
+          detail: 'approval_required',
         });
-        if (applied.applied) {
-          deps.audit.record({
-            actor: task.ownerId,
-            action: 'work.awaiting_approval',
-            taskId: task.taskId,
-            conversationId: task.conversationId,
-            outcome: 'accepted',
-            detail: 'approval_required',
-          });
-        }
-      } finally {
-        await releaseLease(task, token);
       }
+      await releaseLease(task, token);
       return;
     }
     const patch =
@@ -557,6 +555,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
+    const outputs = [...(started.task.checkpoint.outputs ?? (started.task.checkpoint.text
+      ? [{ stepId: completed.join(', '), text: started.task.checkpoint.text }] : []))];
+    let reports = Promise.resolve();
+    const saveReport = (patch: TaskPatch): void => {
+      reports = reports.then(async () => {
+        await deps.tasks.updateFenced({ taskId, token, patch });
+      }).catch(() => { /* The settlement checkpoint includes all completed steps. */ });
+    };
     let text = '';
     let visible = text;
     const emitText = (next: string, replace = false): void => {
@@ -572,11 +578,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'running';
         else steps.push({ id: event.stepId, title: event.title, state: 'running' });
         publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
-        });
+        saveReport({ steps: structuredClone(steps), updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'step.completed') {
@@ -584,14 +586,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'completed';
         completed.push(event.stepId);
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            checkpoint: { completedSteps: [...completed], text: visible },
-            updatedAt: deps.clock.iso(),
-          },
+        if (event.output !== undefined) outputs.push({ stepId: event.stepId, text: redactContent(event.output) });
+        saveReport({
+          steps: structuredClone(steps),
+          checkpoint: { completedSteps: [...completed], text: visible, outputs: [...outputs] },
+          updatedAt: deps.clock.iso(),
         });
         return;
       }
@@ -663,7 +662,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
                 ...await nativeContext({ ownerId: task.ownerId, mode: task.mode, task: started.task }),
                 pendingAction: started.task.pendingAction ?? null,
                 savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
-                  taskId, token, patch: { pendingAction },
+                  taskId, token, patch: { pendingAction: pendingAction?.observations
+                    ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) } : pendingAction },
                 })).applied,
                 savePlan: async (plan) => {
                   const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
@@ -690,7 +690,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outcome = result.outcome.kind === 'completed'
       ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
       : result.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    await reports;
+    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText, outputs });
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {

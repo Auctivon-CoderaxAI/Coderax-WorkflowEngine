@@ -95,6 +95,9 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
       }
     }
 
+    if (request.context.signal.aborted) {
+      return { result: failure('cancelled', 'The run was cancelled.'), approval };
+    }
     try {
       const result = await tool.run(parsed.data, request.context);
       return { result, approval };

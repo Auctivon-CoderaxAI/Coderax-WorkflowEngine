@@ -11,6 +11,7 @@ import type {
   ModelRef,
   Usage,
 } from '@coderax/contracts';
+import type { PendingAction, StepOutput } from '../domain.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 
 /**
@@ -41,12 +42,13 @@ export type AgentContext = {
   memory?: { list: () => Promise<string[]> };
   knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
   /** Persisted plan and finished steps, so a resume does not re-plan or re-run. */
-  pendingAction?: { stepId: string; json: string } | null;
-  savePendingAction?: (action: { stepId: string; json: string } | null) => Promise<boolean>;
+  pendingAction?: PendingAction | null;
+  savePendingAction?: (action: PendingAction | null) => Promise<boolean>;
   savePlan?: (steps: Array<{ id: string; title: string }>) => Promise<boolean>;
   plannedSteps?: Array<{ id: string; title: string }>;
   completedSteps?: string[];
   priorText?: string;
+  priorOutputs?: StepOutput[];
   /** Owner approval policy for tool actions that need a decision. */
   requireApproval?: boolean;
 };
@@ -73,7 +75,7 @@ export type AgentRunRequest = {
 
 export type AgentReportEvent =
   | { type: 'step.started'; stepId: string; title: string }
-  | { type: 'step.completed'; stepId: string; title: string }
+  | { type: 'step.completed'; stepId: string; title: string; output?: string }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
