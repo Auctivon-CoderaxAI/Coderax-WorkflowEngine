@@ -22,6 +22,7 @@ import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import { createArtifactService } from '../artifacts/service.js';
+import { createArtifactGenerator } from '../artifacts/generate.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
@@ -214,6 +215,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ids,
     settings: config.artifacts,
   });
+  const artifactGenerator = createArtifactGenerator({ artifacts: artifactService });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -346,6 +348,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     permissions,
     notifications,
     artifactService,
+    artifactGenerator,
     audit,
     events,
     runner,

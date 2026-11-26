@@ -384,6 +384,30 @@ export const SoftwareRequest = z
   .strict();
 export type SoftwareRequest = z.infer<typeof SoftwareRequest>;
 
+/**
+ * A document a durable generation can actually persist. `base` names a file on
+ * the engine host and HTML is not an accepted durable media type, so neither is
+ * part of this request; a client cannot ask for output the operation refuses.
+ */
+export const DurableDocumentRequest = DocumentRequest.omit({ base: true, formats: true }).extend({
+  formats: z.array(z.enum(['docx', 'pdf', 'markdown'])).min(1).max(3),
+});
+export type DurableDocumentRequest = z.infer<typeof DurableDocumentRequest>;
+
+/**
+ * The deliverable kinds that produce a durable file tree. Dataset and media
+ * operations transform or inspect bytes but produce no project, so a generation
+ * request cannot name them.
+ */
+export const DurableDeliverableRequest = z.discriminatedUnion('kind', [
+  DurableDocumentRequest,
+  SpreadsheetRequest,
+  PresentationRequest,
+  SoftwareRequest,
+]);
+export type DurableDeliverableRequest = z.infer<typeof DurableDeliverableRequest>;
+export type DurableDeliverableRequestInput = z.input<typeof DurableDeliverableRequest>;
+
 export const MediaInspectRequest = z
   .object({
     kind: z.literal('media'),

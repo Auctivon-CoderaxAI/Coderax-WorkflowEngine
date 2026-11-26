@@ -6,6 +6,7 @@ import {
   ArtifactDescriptor,
   ArtifactDescriptorList,
   ArtifactExport,
+  ArtifactGenerationResult,
   ArtifactProjectManifest,
   ArtifactPruneResult,
   ArtifactUploadResult,
@@ -26,6 +27,7 @@ import {
   TaskStatus,
 } from '@coderax/contracts';
 import type {
+  ArtifactGenerationRequest,
   ArtifactKind,
   ArtifactUploadRequest,
   ArtifactVersionRequest,
@@ -365,6 +367,19 @@ export class CoderaxClient {
     });
   }
 
+  /**
+   * Renders a deliverable and persists it as a durable project tree. The
+   * response is the manifest, so every file can then be downloaded by artifact
+   * id and immutable version.
+   */
+  generateArtifact(request: ArtifactGenerationRequest): Promise<ArtifactGenerationResult> {
+    return this.request<ArtifactGenerationResult>(ArtifactGenerationResult, {
+      method: 'POST',
+      path: '/v1/artifacts/generate',
+      body: request,
+    });
+  }
+
   uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
@@ -470,6 +485,7 @@ export class CoderaxClient {
 }
 
 export type {
+  ArtifactGenerationRequest,
   ArtifactKind,
   ArtifactUploadRequest,
   ArtifactVersionRequest,

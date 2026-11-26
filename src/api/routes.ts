@@ -1,4 +1,5 @@
 import type {
+  ArtifactGenerationRequest,
   ArtifactKind,
   ArtifactModeRequest,
   ArtifactUploadRequest,
@@ -235,6 +236,15 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     });
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('generateArtifact', async (context) => {
+    const result = await service.generateArtifact(
+      context.principal,
+      context.body as ArtifactGenerationRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
   });
 
   registry.register('uploadArtifact', async (context) => {

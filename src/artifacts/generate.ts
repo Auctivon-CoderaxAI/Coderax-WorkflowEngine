@@ -2,7 +2,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  DeliverableRequest,
+  DurableDeliverableRequest,
+  type ArtifactGenerationResult,
   type DocumentRequest,
   type PresentationRequest,
   type SoftwareRequest,
@@ -22,7 +23,7 @@ import {
 import { renderPresentation, verifyPresentation } from './deck.js';
 import { verifyPdf } from './pdf.js';
 import { buildSoftware } from './software.js';
-import { createArtifactTreeWriter, type GeneratedArtifactFile, type TreeWriteResult } from './tree.js';
+import { createArtifactTreeWriter, type GeneratedArtifactFile } from './tree.js';
 import { renderWorkbook, verifyWorkbook } from './workbook.js';
 import type { ArtifactService } from './service.js';
 
@@ -39,18 +40,16 @@ export type GeneratedTree = {
 
 export type GenerationInput = {
   projectId: string;
-  mode: 'private' | 'cloud';
-  request: DeliverableRequest;
+  request: DurableDeliverableRequest;
   conversationId?: string;
   taskId?: string;
   retentionDays?: number;
 };
 
-export type GenerationResult = TreeWriteResult & {
-  kind: GeneratedTree['kind'];
-  title: string;
-  checks: VerificationCheck[];
-};
+/** The contract response, minus the tree writer's internal file list. */
+export type GenerationResult = ArtifactGenerationResult;
+
+export type ArtifactGenerator = ReturnType<typeof createArtifactGenerator>;
 
 function modelOf(request: DocumentRequest): {
   version: 1;
@@ -281,7 +280,7 @@ async function generateSoftware(request: SoftwareRequest): Promise<GeneratedTree
 
 /** Produces the bytes and verification checks; it performs no durable write. */
 export async function generateTree(
-  request: DeliverableRequest,
+  request: DurableDeliverableRequest,
 ): Promise<ServiceResult<GeneratedTree>> {
   try {
     switch (request.kind) {
@@ -300,10 +299,12 @@ export async function generateTree(
         );
     }
   } catch (error) {
-    return fail(
-      error instanceof RangeError ? 'validation_failed' : 'internal_error',
-      error instanceof Error ? error.message : 'The deliverable could not be generated.',
-    );
+    // A renderer failure can carry a temporary path or a library message; only
+    // a range error is authored text that is safe to return to the client.
+    if (error instanceof RangeError && error.message.length > 0) {
+      return fail('validation_failed', error.message);
+    }
+    return fail('internal_error', 'The deliverable could not be generated.');
   }
 }
 
@@ -321,7 +322,7 @@ export function createArtifactGenerator(deps: { artifacts: ArtifactService }) {
       principal: Principal,
       input: GenerationInput,
     ): Promise<ServiceResult<GenerationResult>> => {
-      const parsed = DeliverableRequest.safeParse(input.request);
+      const parsed = DurableDeliverableRequest.safeParse(input.request);
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
         return fail(
@@ -333,14 +334,15 @@ export function createArtifactGenerator(deps: { artifacts: ArtifactService }) {
       if (!generated.ok) return generated;
       const failed = generated.value.checks.find((check) => !check.ok);
       if (failed) {
+        // The check name is stable; its detail can carry a renderer path.
         return fail(
           'internal_error',
-          `The ${generated.value.kind} did not pass verification: ${failed.name}: ${failed.detail}`,
+          `The ${generated.value.kind} did not pass verification: ${failed.name}.`,
         );
       }
       const written = await writer.persist(principal, {
         projectId: input.projectId,
-        mode: input.mode,
+        mode: parsed.data.mode,
         files: generated.value.files,
         ...(input.conversationId ? { conversationId: input.conversationId } : {}),
         ...(input.taskId ? { taskId: input.taskId } : {}),
@@ -350,9 +352,10 @@ export function createArtifactGenerator(deps: { artifacts: ArtifactService }) {
       });
       if (!written.ok) return written;
       return ok({
-        ...written.value,
+        projectId: written.value.projectId,
         kind: generated.value.kind,
         title: generated.value.title,
+        manifest: written.value.manifest,
         checks: generated.value.checks,
       });
     },

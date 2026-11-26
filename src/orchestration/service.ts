@@ -1,6 +1,8 @@
 import type {
   AgentId,
   AgentList,
+  ArtifactGenerationRequest,
+  ArtifactGenerationResult,
   BudgetState,
   ChatReply,
   ChatRequest,
@@ -42,6 +44,7 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import type { ArtifactService } from '../artifacts/service.js';
+import type { ArtifactGenerator } from '../artifacts/generate.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
 
@@ -60,6 +63,7 @@ export type ApplicationServiceDeps = {
   permissions: PermissionStore;
   notifications: NotificationStore;
   artifactService: ArtifactService;
+  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -114,6 +118,11 @@ export type ApplicationService = {
   notifications: (principal: Principal) => Promise<NotificationList>;
   /** Durable artifact storage; the only path that returns artifact bytes. */
   artifacts: ArtifactService;
+  /** Renders a deliverable and persists it through the artifact tree adapter. */
+  generateArtifact: (
+    principal: Principal,
+    request: ArtifactGenerationRequest,
+  ) => Promise<ServiceResult<ArtifactGenerationResult>>;
   events: (
     principal: Principal,
     taskId: string,
@@ -1016,6 +1025,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     notifications: (principal) => deps.notifications.list(principal.ownerId),
 
     artifacts: deps.artifactService,
+
+    generateArtifact: (principal, request) =>
+      deps.artifactGenerator.generate(principal, {
+        projectId: request.projectId,
+        request: request.deliverable,
+        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
+        ...(request.taskId ? { taskId: request.taskId } : {}),
+        ...(request.retentionDays !== undefined
+          ? { retentionDays: request.retentionDays }
+          : {}),
+      }),
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);

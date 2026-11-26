@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import {
-  DocumentRequest,
+  DurableDocumentRequest,
   PresentationRequest,
   SoftwareRequest,
   SpreadsheetRequest,
@@ -44,7 +44,7 @@ function resultOf<T>(value: ServiceResult<T>): T {
 }
 
 function find(result: GenerationResult, relativePath: string) {
-  const file = result.files.find((entry) => entry.relativePath === relativePath);
+  const file = result.manifest.files.find((entry) => entry.relativePath === relativePath);
   assert.ok(file, relativePath);
   return file;
 }
@@ -90,7 +90,7 @@ test(
       const projectId = 'proj_generated_e2e';
       const mode = 'cloud' as const;
 
-      const firstDocument = DocumentRequest.parse({
+      const firstDocument = DurableDocumentRequest.parse({
         kind: 'document',
         mode,
         filename: 'quarterly-report',
@@ -152,28 +152,24 @@ test(
       const documentOne = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: firstDocument,
         }),
       );
       const spreadsheetOne = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: firstSpreadsheet,
         }),
       );
       const presentationOne = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: firstPresentation,
         }),
       );
       const softwareOne = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: firstSoftware,
         }),
       );
@@ -200,7 +196,7 @@ test(
       assert.equal(firstBytes.get('pptx')?.subarray(0, 2).toString('latin1'), 'PK');
       assert.match(firstBytes.get('source')?.toString('utf8') ?? '', /export function run/);
 
-      const secondDocument = DocumentRequest.parse({
+      const secondDocument = DurableDocumentRequest.parse({
         ...firstDocument,
         edits: [
           { op: 'setTitle', title: 'Quarterly report (revised)' },
@@ -250,28 +246,24 @@ test(
       const documentTwo = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: secondDocument,
         }),
       );
       const spreadsheetTwo = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: secondSpreadsheet,
         }),
       );
       const presentationTwo = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: secondPresentation,
         }),
       );
       const softwareTwo = resultOf(
         await generator.generate(principal, {
           projectId,
-          mode,
           request: secondSoftware,
         }),
       );

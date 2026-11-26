@@ -13,6 +13,8 @@ export {
   DocumentBlock,
   DocumentEdit,
   DocumentRequest,
+  DurableDeliverableRequest,
+  DurableDocumentRequest,
   PresentationRequest,
   SheetRequest,
   SlideRequest,
@@ -25,6 +27,7 @@ export {
 export type {
   CapabilityReport,
   DeliverableRequestInput,
+  DurableDeliverableRequestInput,
   VerificationReport,
 } from './deliverables.js';
 export * from './events.js';
