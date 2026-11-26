@@ -2,6 +2,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+.release-evidence/
 .env.*
 !.env.example
 coverage/

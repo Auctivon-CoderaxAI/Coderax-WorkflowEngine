@@ -24,6 +24,9 @@
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
     "sdk:pack": "npm run build && node dist/scripts/pack-sdk.js",
     "sdk:verify": "node dist/scripts/pack-sdk.js --check",
+    "release:audit": "npm run build && node dist/scripts/release/audit-ci.js",
+    "release:pack": "npm run sdk:pack",
+    "release:verify": "npm run build && node dist/scripts/release/verify.js",
     "verify": "npm run build && node dist/scripts/pack-sdk.js && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
   },
   "dependencies": {

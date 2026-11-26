@@ -1,0 +1,2220 @@
+{
+  "schema": "coderax.ci-audit/1",
+  "generatedAt": "2026-11-26T18:21:10.809Z",
+  "repositories": {
+    "web": {
+      "repository": "Auctivon-CoderaxAI/Coderax",
+      "commit": "a5d237b0ff672356374849d565363955df69d298",
+      "files": [
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/a11y.yml",
+          "sha256": "da2d9fd03d2ef2b43234e7f6a4cdf5ca940ee21ce5555b4d9b467046b41ae8d9",
+          "triggers": [
+            "pull_request",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [
+            "pull-requests"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [
+            "AXE_LINTER_API_KEY",
+            "GITHUB_TOKEN"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "metadata-write-on-pull-request",
+              "severity": "low",
+              "line": 15,
+              "message": "pull-request context can write review metadata: pull-requests"
+            },
+            {
+              "rule": "service-secret-on-pull-request",
+              "severity": "medium",
+              "line": 31,
+              "message": "AXE_LINTER_API_KEY is a third-party service credential available to a pull-request-triggered workflow"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 33,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 44,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/agents-integration-tests.yml",
+          "sha256": "3fd60a25fbff475ee910aba714570359938188b39ef547d145841f3a3d9ef371",
+          "triggers": [
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 54,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 57,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 63,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 79,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 90,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 101,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/backend-review.yml",
+          "sha256": "0a1f5529b5719ec757211acde977b3b18714b5fd5ae7c7f196a0319b2c32c936",
+          "triggers": [
+            "push",
+            "pull_request",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "BAN_DURATION",
+            "BAN_INTERVAL",
+            "BAN_VIOLATIONS",
+            "CODEGRAPH_TOKEN",
+            "CODEGRAPH_URL",
+            "CREDS_IV",
+            "CREDS_KEY",
+            "JWT_SECRET",
+            "MONGO_URI",
+            "NODE_MAX_OLD_SPACE_SIZE",
+            "OPENAI_API_KEY"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 54,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 57,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 63,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 79,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 90,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 101,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 114,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 121,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 128,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "service-secret-on-pull-request",
+              "severity": "medium",
+              "line": 167,
+              "message": "CODEGRAPH_TOKEN is a third-party service credential available to a pull-request-triggered workflow"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 266,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 269,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 275,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 290,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 296,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 302,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 330,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 333,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 339,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "production-secret-on-pull-request",
+              "severity": "critical",
+              "line": 367,
+              "message": "MONGO_URI is available to a workflow a pull request can trigger; pull request code must never receive a production credential"
+            },
+            {
+              "rule": "production-secret-on-pull-request",
+              "severity": "critical",
+              "line": 368,
+              "message": "OPENAI_API_KEY is available to a workflow a pull request can trigger; pull request code must never receive a production credential"
+            },
+            {
+              "rule": "production-secret-on-pull-request",
+              "severity": "critical",
+              "line": 369,
+              "message": "JWT_SECRET is available to a workflow a pull request can trigger; pull request code must never receive a production credential"
+            },
+            {
+              "rule": "production-secret-on-pull-request",
+              "severity": "critical",
+              "line": 370,
+              "message": "CREDS_KEY is available to a workflow a pull request can trigger; pull request code must never receive a production credential"
+            },
+            {
+              "rule": "production-secret-on-pull-request",
+              "severity": "critical",
+              "line": 371,
+              "message": "CREDS_IV is available to a workflow a pull request can trigger; pull request code must never receive a production credential"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 376,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 379,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 385,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 400,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 406,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 412,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 432,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 471,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 486,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 489,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 495,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 510,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 522,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 556,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 571,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 574,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 580,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 595,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 601,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 613,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 647,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 670,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 673,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 679,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 694,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 700,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 706,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 718,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 752,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/cache-integration-tests.yml",
+          "sha256": "a5e31b16a1d2b7cdb72c3d39d3e92517c2f771b20fd2e395da59a3e3769ef193",
+          "triggers": [
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 38,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 41,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 90,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 106,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 117,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 128,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/ci-canary.yml",
+          "sha256": "fabe784f6370796f7d3e5e2c5c6f58ea671bc91a6e8d9d7285aa58a56f6eddfa",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/client.yml",
+          "sha256": "b119ab6c3f3e8714edf1b742c783f3bb694b5eb6eaaa8b960dee3440f0ccde58",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [
+            "id-token"
+          ],
+          "secrets": [],
+          "infraCommands": [
+            {
+              "line": 89,
+              "command": "package-publish"
+            }
+          ],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 20,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 23,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 56,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 73,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 82,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "infrastructure-mutation",
+              "severity": "high",
+              "line": 89,
+              "message": "package-publish mutates infrastructure without a recorded CI owner authorization"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/cloud-config.yml",
+          "sha256": "9507b112bcdb97873cfa54783e1beeda470a169b28b08b56033069e3ce7482c9",
+          "triggers": [
+            "pull_request",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 25,
+              "message": "actions/checkout@v4 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/cloudflare-production-verification.yml",
+          "sha256": "30292a84cdd0b4caa1dad01a0f0c66f38bc6e6d5d2f2963e6bccc9c3a78066f4",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/cloudflare-production.yml",
+          "sha256": "1929b782d61f6b11e59230581274a34de83b4e8b464e380ecf232bfb4ce5662e",
+          "triggers": [
+            "push",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/codegraph-e2e-votes.yml",
+          "sha256": "b0d060eff7828a7c1a4cdf392d8cacf1e54751d04846fcc8d69eaeca92267e14",
+          "triggers": [
+            "push"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 54,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 57,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 63,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 81,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 92,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 103,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 114,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 125,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 146,
+              "message": "actions/cache/restore@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 163,
+              "message": "actions/cache/save@v5 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/codegraph-select.yml",
+          "sha256": "8057e0e6d91f88dd610fc22a76105456f95649574bed39aceb14128ff797efc8",
+          "triggers": [
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "CODEGRAPH_TOKEN",
+            "CODEGRAPH_URL"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "service-secret-on-pull-request",
+              "severity": "medium",
+              "line": 32,
+              "message": "CODEGRAPH_TOKEN is a third-party service credential available to a pull-request-triggered workflow"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/coderax-deployment-readiness.yml",
+          "sha256": "b5225e88f2eaa26eecdb9d1269a5291ecccb5b406ba92fa4530d47e4e65c74d9",
+          "triggers": [
+            "pull_request",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/coderax-oci-proxy.yml",
+          "sha256": "821d32305814f5fe244ced80aec9ffc351ddc7ec7cfdac5302c6edde017d2021",
+          "triggers": [
+            "pull_request",
+            "push"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/coderax-selfhost.yml",
+          "sha256": "0e5ba84adec628dcfda3dfad296549eba3f9395be5112dc4e145e58d96f5c9b9",
+          "triggers": [
+            "pull_request",
+            "push"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/copilot-code-review.yml",
+          "sha256": "ffa84e19099b3223f0371d344ccf616b2651c387b5428b3f3b490679cced8030",
+          "triggers": [
+            "workflow_dispatch",
+            "push",
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 23,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/data-provider.yml",
+          "sha256": "eb82412bf0494d6e02a8139b3f72c7f38a89bf502eb979f490edda213d3be050",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [
+            "id-token"
+          ],
+          "secrets": [],
+          "infraCommands": [
+            {
+              "line": 62,
+              "command": "package-publish"
+            }
+          ],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 18,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 19,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 30,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 46,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 55,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "infrastructure-mutation",
+              "severity": "high",
+              "line": 62,
+              "message": "package-publish mutates infrastructure without a recorded CI owner authorization"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/data-schemas.yml",
+          "sha256": "9bb67d3f7f56d0f8166da2397a11dc5080693553249d6aaba2b119d5a792df23",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [
+            "id-token"
+          ],
+          "secrets": [],
+          "infraCommands": [
+            {
+              "line": 89,
+              "command": "package-publish"
+            }
+          ],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 20,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 23,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 56,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 73,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 82,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "infrastructure-mutation",
+              "severity": "high",
+              "line": 89,
+              "message": "package-publish mutates infrastructure without a recorded CI owner authorization"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/deployed-smoke.yml",
+          "sha256": "9e242da84041cbccefb40737239f44a5d220f4be75de00bc759163ddfb783dd6",
+          "triggers": [
+            "workflow_dispatch",
+            "schedule"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "CODERAX_SMOKE_BASE_URL",
+            "CODERAX_SMOKE_EMAIL",
+            "CODERAX_SMOKE_PASSWORD",
+            "CODERAX_SMOKE_TOKEN"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 22,
+              "message": "actions/checkout@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 23,
+              "message": "actions/setup-node@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 29,
+              "message": "CODERAX_SMOKE_TOKEN is used by a release-path workflow; keep it out of pull-request contexts"
+            },
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 31,
+              "message": "CODERAX_SMOKE_PASSWORD is used by a release-path workflow; keep it out of pull-request contexts"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 38,
+              "message": "actions/upload-artifact@v4 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/desktop-release.yml",
+          "sha256": "4992a56505c4ebb5651d64428fb0e41f9551062b34e1fae3db14e917df8f8389",
+          "triggers": [
+            "pull_request",
+            "push",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [
+            "contents"
+          ],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 26,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 31,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 61,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "job-write-on-pull-request",
+              "severity": "medium",
+              "line": 76,
+              "message": "job-scoped write permission in a pull-request-triggered workflow (contents); verify that job cannot run on untrusted code"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 79,
+              "message": "actions/download-artifact@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 89,
+              "message": "softprops/action-gh-release@v3 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/dev-images.yml",
+          "sha256": "77544c82c62faa3ff758d15ce7467b5c9e1121708e2553b50097a6324c472c23",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [
+            "packages"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [
+            "DOCKERHUB_TOKEN",
+            "DOCKERHUB_USERNAME"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 23,
+              "message": "DOCKERHUB_TOKEN is used by a release-path workflow; keep it out of pull-request contexts"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/dev-staging-images.yml",
+          "sha256": "901bef40f1deef0ee3b15dd9ad2e4d41d90bf132356bb858bed587a11f227305",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [
+            "packages"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [
+            "DOCKERHUB_TOKEN",
+            "DOCKERHUB_USERNAME"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 23,
+              "message": "DOCKERHUB_TOKEN is used by a release-path workflow; keep it out of pull-request contexts"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/docker-publish.yml",
+          "sha256": "f2ab320f675bb090d8be9af1e14dc8eeeea0a201745eade534bb2bdb8717a8ea",
+          "triggers": [
+            "workflow_call"
+          ],
+          "writePermissions": [
+            "packages"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [
+            "DOCKERHUB_TOKEN",
+            "DOCKERHUB_USERNAME",
+            "GITHUB_TOKEN"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 69,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 75,
+              "message": "docker/setup-buildx-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 78,
+              "message": "docker/login-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 85,
+              "message": "docker/login-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 88,
+              "message": "DOCKERHUB_TOKEN is used by a release-path workflow; keep it out of pull-request contexts"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 113,
+              "message": "docker/build-push-action@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 145,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 176,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 183,
+              "message": "docker/setup-buildx-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 186,
+              "message": "docker/login-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 193,
+              "message": "docker/login-action@v4 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/docker-smoke.yml",
+          "sha256": "1580036a1177c113b0dabb056c7eac31ecae18b5386898e0710448254e9c8978",
+          "triggers": [
+            "workflow_dispatch",
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "CODEGRAPH_TOKEN",
+            "CODEGRAPH_URL"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "service-secret-on-pull-request",
+              "severity": "medium",
+              "line": 56,
+              "message": "CODEGRAPH_TOKEN is a third-party service credential available to a pull-request-triggered workflow"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 124,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 127,
+              "message": "docker/setup-buildx-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 130,
+              "message": "docker/build-push-action@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 147,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 152,
+              "message": "dorny/paths-filter@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 162,
+              "message": "docker/setup-buildx-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 166,
+              "message": "docker/build-push-action@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 183,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 186,
+              "message": "docker/setup-buildx-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 192,
+              "message": "docker/build-push-action@v7 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/frontend-review.yml",
+          "sha256": "14a9186b4e88159e06f33928dd5d5a097f39154027bb0a5c0032ab56a7c4f249",
+          "triggers": [
+            "pull_request",
+            "push",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "CODEGRAPH_TOKEN",
+            "CODEGRAPH_URL",
+            "NODE_MAX_OLD_SPACE_SIZE"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 52,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 53,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "service-secret-on-pull-request",
+              "severity": "medium",
+              "line": 89,
+              "message": "CODEGRAPH_TOKEN is a third-party service credential available to a pull-request-triggered workflow"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 167,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 170,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 176,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 191,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 202,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 212,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 219,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 231,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 234,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 240,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 254,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 260,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 278,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 281,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 287,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 301,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 339,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 360,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 363,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 369,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 383,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 389,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 422,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 436,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 439,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 445,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 459,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 465,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/frontend-windows-nightly.yml",
+          "sha256": "b21510e0463634cce4c8c84204fded71d9299ee8212842bec11a993822f241ca",
+          "triggers": [
+            "schedule",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "NODE_MAX_OLD_SPACE_SIZE"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 26,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 36,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 42,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 57,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 68,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 78,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 85,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 101,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 106,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 112,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 126,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 132,
+              "message": "actions/download-artifact@v7 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/helmcharts.yml",
+          "sha256": "b582fb30aad2ff68e37a148120c8ded9b1900d1f3637b918cce43cd838ff3dcc",
+          "triggers": [
+            "push",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [
+            "packages"
+          ],
+          "secrets": [
+            "GITHUB_TOKEN"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 51,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 63,
+              "message": "azure/setup-helm@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 76,
+              "message": "docker/login-action@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 85,
+              "message": "appany/helm-oci-chart-releaser@v0.5.0 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 97,
+              "message": "appany/helm-oci-chart-releaser@v0.5.0 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/langfuse-fanout.yml",
+          "sha256": "63160130cd9501821c473df561c4442dc17f08ccc6148bfd040760b0095bbab6",
+          "triggers": [
+            "workflow_dispatch",
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 24,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 27,
+              "message": "actions/setup-go@v6 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/lighthouse.yml",
+          "sha256": "604a6a7b63ab4222d070460eadc118657150b0ea15abe8d6bb3c7f8ba46f7bb5",
+          "triggers": [
+            "pull_request",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [
+            "pull-requests"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "metadata-write-on-pull-request",
+              "severity": "low",
+              "line": 17,
+              "message": "pull-request context can write review metadata: pull-requests"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 32,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 33,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 64,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/locize-i18n-sync.yml",
+          "sha256": "211b1ef5bdcc2b4fa507823788d037acf096c833eabeacfd68408ffdd4a1131c",
+          "triggers": [
+            "push",
+            "repository_dispatch",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [
+            "contents",
+            "pull-requests"
+          ],
+          "secrets": [
+            "LOCIZE_API_KEY",
+            "LOCIZE_PROJECT_ID"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 25,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 30,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 42,
+              "message": "LOCIZE_API_KEY is used by a release-path workflow; keep it out of pull-request contexts"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 64,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 75,
+              "message": "locize/download@v2 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 97,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 107,
+              "message": "peter-evans/create-pull-request@v8 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/main-branch-images.yml",
+          "sha256": "b8218b9b098533b32ac1513cb68c10a47ce2ff0be358f02dc43d58d92523598c",
+          "triggers": [
+            "workflow_dispatch",
+            "push"
+          ],
+          "writePermissions": [
+            "packages"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [
+            "DOCKERHUB_TOKEN",
+            "DOCKERHUB_USERNAME"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 48,
+              "message": "DOCKERHUB_TOKEN is used by a release-path workflow; keep it out of pull-request contexts"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/main-image-workflow.yml",
+          "sha256": "42aee5b70899e1382d4d7d2646035c025c6ee9d9da51633488dcca225e14e16e",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [
+            "packages"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [
+            "DOCKERHUB_TOKEN",
+            "DOCKERHUB_USERNAME"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 21,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 59,
+              "message": "DOCKERHUB_TOKEN is used by a release-path workflow; keep it out of pull-request contexts"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/playwright-bombadil.yml",
+          "sha256": "6ee8557fca7f0fa597cec29b87c4ca6ecb38bd10771161678dfeac72e4160da5",
+          "triggers": [
+            "pull_request",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "NODE_MAX_OLD_SPACE_SIZE"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 42,
+              "message": "actions/checkout@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 45,
+              "message": "actions/setup-node@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 51,
+              "message": "actions/cache@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 69,
+              "message": "actions/cache@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 80,
+              "message": "actions/cache@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 91,
+              "message": "actions/cache@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 102,
+              "message": "actions/cache@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 113,
+              "message": "actions/cache@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 149,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 160,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/playwright-mock.yml",
+          "sha256": "84c8da046e92e2a90dcd6792ae3ae4391b48c3cd7f89e7ce010c214ecd35390f",
+          "triggers": [
+            "pull_request",
+            "schedule",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "CODEGRAPH_TOKEN",
+            "CODEGRAPH_URL",
+            "NODE_MAX_OLD_SPACE_SIZE"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "service-secret-on-pull-request",
+              "severity": "medium",
+              "line": 65,
+              "message": "CODEGRAPH_TOKEN is a third-party service credential available to a pull-request-triggered workflow"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 199,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 202,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 208,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 229,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 240,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 251,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 262,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 273,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 308,
+              "message": "actions/cache/restore@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 325,
+              "message": "actions/cache/save@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 391,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 400,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 419,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 450,
+              "message": "actions/checkout@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 453,
+              "message": "actions/setup-node@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 459,
+              "message": "actions/cache@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 490,
+              "message": "actions/cache/restore@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 507,
+              "message": "actions/cache/save@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 557,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 566,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 596,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 599,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 605,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 637,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 648,
+              "message": "actions/upload-artifact@v7 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/portfolio-agent-registry.yml",
+          "sha256": "a252e398ec9c4e24b1128cce94a3c5dab5c663e89859b2e6ac2a8d10a2ccd426",
+          "triggers": [
+            "pull_request",
+            "push",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/retry-docker-builds.yml",
+          "sha256": "50d14d9b2a5c72e1b016dd06127c55f55addec8c7f18700ecf7c2a66617192ec",
+          "triggers": [
+            "workflow_run"
+          ],
+          "writePermissions": [
+            "actions"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "workflow-run",
+              "severity": "high",
+              "line": 4,
+              "message": "workflow_run executes in a privileged context; verify it never checks out untrusted pull request code"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/static-checks.yml",
+          "sha256": "eec0d155bd08b72462ba17d3efb5467122ff7352cff003fdb81c172e2fd674e3",
+          "triggers": [
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [
+            "NODE_MAX_OLD_SPACE_SIZE"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 46,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 57,
+              "message": "dorny/paths-filter@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 156,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 378,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 393,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 408,
+              "message": "actions/cache@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 815,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 823,
+              "message": "dorny/paths-filter@v4 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 833,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/sync-helm-chart-tags.yml",
+          "sha256": "622724535c437431d59299daeced59210c337de95d9e397a7d6c863fd2719924",
+          "triggers": [
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [
+            "actions",
+            "contents"
+          ],
+          "secrets": [
+            "GITHUB_TOKEN"
+          ],
+          "infraCommands": [],
+          "findings": []
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/tag-images.yml",
+          "sha256": "8ec8b3938f94d80ec8a071130f8c17249cd3d97b4e2da1a1bc3e9f105f0e3be1",
+          "triggers": [
+            "push"
+          ],
+          "writePermissions": [
+            "packages"
+          ],
+          "jobWritePermissions": [],
+          "secrets": [
+            "DOCKERHUB_TOKEN",
+            "DOCKERHUB_USERNAME"
+          ],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 23,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "release-path-secret",
+              "severity": "low",
+              "line": 75,
+              "message": "DOCKERHUB_TOKEN is used by a release-path workflow; keep it out of pull-request contexts"
+            }
+          ]
+        },
+        {
+          "repository": "Auctivon-CoderaxAI/Coderax",
+          "path": ".github/workflows/workspace-acceptance.yml",
+          "sha256": "979651234e6e958cd76854c6e63f42f9a49b071037e5a341368a7372794f6065",
+          "triggers": [
+            "pull_request",
+            "workflow_dispatch"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": [
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 27,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 33,
+              "message": "actions/checkout@v5 is not pinned to a full commit SHA"
+            },
+            {
+              "rule": "unpinned-action",
+              "severity": "medium",
+              "line": 40,
+              "message": "actions/setup-node@v5 is not pinned to a full commit SHA"
+            }
+          ]
+        }
+      ]
+    },
+    "cli": {
+      "repository": "Auctivon-CoderaxAI/CoderaxCLI",
+      "commit": "1b7c8e0a429755502f7563b16a8a09db899452d8",
+      "files": [
+        {
+          "repository": "Auctivon-CoderaxAI/CoderaxCLI",
+          "path": ".github/workflows/ci.yml",
+          "sha256": "7db366d4dea28ee02714f22c00f567cb18dc185c3311f07416298390776e98ff",
+          "triggers": [
+            "push",
+            "pull_request"
+          ],
+          "writePermissions": [],
+          "jobWritePermissions": [],
+          "secrets": [],
+          "infraCommands": [],
+          "findings": []
+        }
+      ]
+    }
+  },
+  "summary": {
+    "critical": 5,
+    "high": 4,
+    "medium": 230,
+    "low": 11
+  }
+}

@@ -1,0 +1,441 @@
+{
+  "schema": "coderax.release-train/1",
+  "train": "rc-2026.11.26",
+  "createdAt": "2026-11-26T18:21:39Z",
+  "cutover": {
+    "executed": false,
+    "at": null
+  },
+  "authoritativeEngine": {
+    "origin": null,
+    "apiPrefix": "/v1",
+    "contractVersion": "1.1.0",
+    "eventSchema": 1
+  },
+  "engine": {
+    "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+    "commit": "9a386db9ff4970f59a300f5eb3d5f5b1627ef9b6",
+    "ref": "integration/v1.1-reconciliation",
+    "version": "0.2.0",
+    "apiContract": "1.1.0",
+    "sdkVersion": "1.1.0",
+    "eventSchema": 1,
+    "sdkArtifact": {
+      "path": "release/artifacts/coderax-sdk-1.1.0.tgz",
+      "sha256": "c2599576231c85c3f6e68a31933ab2833627582e3f7d5f791fc46becacc79b33",
+      "sha512": "bb4d6df057c4e4e8869ed0ed682b037d89d457d6db30e3de420d91ca70b4a61f61a7c0755d4a2651bf732514ef230e3aa6c7252820d992915f92a126e3263adf",
+      "integrity": "sha512-u01t8FfE5OiGntDtaCsDfYnUV9bbMOPeQg2RynC0ph9hp8B1XUomUb9zJRTvIw46psclKCDZkpFfkqEm4yY63w==",
+      "files": [
+        "package/README.md",
+        "package/dist/client.d.ts",
+        "package/dist/client.js",
+        "package/dist/errors.d.ts",
+        "package/dist/errors.js",
+        "package/dist/index.d.ts",
+        "package/dist/index.js",
+        "package/dist/manifest.d.ts",
+        "package/dist/manifest.js",
+        "package/dist/stream.d.ts",
+        "package/dist/stream.js",
+        "package/dist/version.d.ts",
+        "package/dist/version.js",
+        "package/package.json"
+      ]
+    },
+    "openapi": {
+      "path": "openapi.json",
+      "sha256": "71d13264b8550e5cb5ee710c9e83558601ccf56eadf65ef5785343264ce6dcef"
+    },
+    "migrations": [
+      {
+        "id": "mongo.work_runs.key",
+        "collection": "work_runs",
+        "operation": "createIndex",
+        "keys": {
+          "key": 1
+        },
+        "unique": true,
+        "name": "work_run_key",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the work_run_key index; lease rows remain readable"
+      },
+      {
+        "id": "mongo.work_runs.expiry",
+        "collection": "work_runs",
+        "operation": "createIndex",
+        "keys": {
+          "expiresAt": 1
+        },
+        "unique": false,
+        "name": "work_run_expires",
+        "required": true,
+        "reversible": true,
+        "rollback": "drop the work_run_expires index; no data is deleted"
+      }
+    ],
+    "requiredChecks": [
+      {
+        "workflow": "verify",
+        "job": "verify",
+        "required": true,
+        "headSha": null,
+        "conclusion": "not-run",
+        "url": null,
+        "checkedAt": null
+      },
+      {
+        "workflow": "release-verify",
+        "job": "release-verify",
+        "required": true,
+        "headSha": null,
+        "conclusion": "not-run",
+        "url": null,
+        "checkedAt": null
+      }
+    ],
+    "review": {
+      "author": "@nnabdelshahid",
+      "reviewer": null,
+      "status": "not-reviewed",
+      "headSha": null,
+      "reviewedAt": null
+    },
+    "deployment": {
+      "deployed": false,
+      "origin": null,
+      "servedCommit": null,
+      "healthContractVersion": null,
+      "verifiedAt": null
+    },
+    "rollback": {
+      "mode": "pre-cutover-abort",
+      "targetCommit": null,
+      "dataDeletion": false,
+      "contractCompatible": true,
+      "notes": "No production cutover has occurred. Abort the release PR and keep the legacy Coderax engine authoritative; the engine database is additive and is not dropped."
+    },
+    "localVerification": {
+      "command": "npm run verify",
+      "headCommit": "9a386db9ff4970f59a300f5eb3d5f5b1627ef9b6",
+      "exitCode": 0,
+      "tests": 177,
+      "failures": 0,
+      "ranAt": "2026-11-26T19:42:31Z",
+      "path": "release/evidence/engine-verify-9a386db-merged.log",
+      "outputSha256": "600a588875306d77bbe5ab96173ae1902f021d43a69d4f3694c717bd94f3f63a"
+    }
+  },
+  "web": {
+    "repository": "Auctivon-CoderaxAI/Coderax",
+    "commit": "a5d237b0ff672356374849d565363955df69d298",
+    "ref": "main",
+    "version": "v0.8.8",
+    "integration": {
+      "status": "not-integrated",
+      "reason": "Coderax v0.8.8 proxies only its own /api, /oauth and health surface to CODERAX_API_ORIGIN. It has no @coderax/sdk dependency and no route to the WorkflowEngine /v1 surface.",
+      "sdkVersion": null,
+      "sdkArtifactSha256": null,
+      "apiContract": null,
+      "eventSchema": null,
+      "engineOrigin": null
+    },
+    "evidence": [
+      {
+        "path": "package.json",
+        "line": 3,
+        "statement": "The web repository is version v0.8.8 at the pinned commit.",
+        "sha256": "a5c8a077780181dd38e04ebbd77750dfca37af97c73ffe71cbd6ca2b22fa2e9b"
+      },
+      {
+        "path": "worker/index.mjs",
+        "line": 162,
+        "statement": "The edge Worker parses CODERAX_API_ORIGIN and proxies API traffic there; it has no WorkflowEngine route.",
+        "sha256": "e196da9c75cb190f8a0baa4aff7e930fc3463923055e0a8eee4fc9657e0803a1"
+      },
+      {
+        "path": "wrangler.jsonc",
+        "line": 20,
+        "statement": "run_worker_first is limited to /api, /oauth and health paths, so /v1 is served as a static SPA route.",
+        "sha256": "c1cd36114dd206ef0056f7e88dbf679120f502cc073642c10d2f032f4f4aa192"
+      },
+      {
+        "path": "api/server/index.js",
+        "line": 512,
+        "statement": "Work is mounted on the legacy /api/work Express route, not the engine's /v1/work contract.",
+        "sha256": "580ebe3486c9982ad60a38e9ec956cff03b2829ebfd133b81008cb03c1300344"
+      }
+    ],
+    "requiredChecks": [
+      {
+        "workflow": "static-checks",
+        "job": "static-checks",
+        "required": true,
+        "headSha": null,
+        "conclusion": "unknown",
+        "url": null,
+        "checkedAt": null
+      },
+      {
+        "workflow": "coderax-deployment-readiness",
+        "job": "contract",
+        "required": true,
+        "headSha": null,
+        "conclusion": "unknown",
+        "url": null,
+        "checkedAt": null
+      },
+      {
+        "workflow": "cloudflare-production",
+        "job": "verify",
+        "required": true,
+        "headSha": null,
+        "conclusion": "unknown",
+        "url": null,
+        "checkedAt": null
+      }
+    ],
+    "review": {
+      "author": null,
+      "reviewer": null,
+      "status": "not-reviewed",
+      "headSha": null,
+      "reviewedAt": null
+    },
+    "deployment": {
+      "deployed": true,
+      "origin": "https://coderax.nnabdelshahid.workers.dev",
+      "servedCommit": "a5d237b0ff672356374849d565363955df69d298",
+      "healthContractVersion": null,
+      "verifiedAt": "2026-11-26T18:21:00Z"
+    },
+    "rollback": {
+      "mode": "pre-cutover-abort",
+      "targetCommit": null,
+      "dataDeletion": false,
+      "contractCompatible": true,
+      "notes": "This train does not change the web deployment; aborting leaves the current Worker version in place."
+    }
+  },
+  "cli": {
+    "repository": "Auctivon-CoderaxAI/CoderaxCLI",
+    "commit": "1b7c8e0a429755502f7563b16a8a09db899452d8",
+    "ref": "main",
+    "version": "0.1.0",
+    "integration": {
+      "status": "not-integrated",
+      "reason": "CoderaxCLI 0.1.0 targets a Coderax deployment base URL, defaults to /api/ask/agents and /api/work/chat, and resolves operations from the deployment's OpenAPI document. It has no @coderax/sdk dependency.",
+      "sdkVersion": null,
+      "sdkArtifactSha256": null,
+      "apiContract": null,
+      "eventSchema": null,
+      "engineOrigin": null
+    },
+    "evidence": [
+      {
+        "path": "package.json",
+        "line": 3,
+        "statement": "The CLI is version 0.1.0 at the pinned commit.",
+        "sha256": "013955ba1cfb8a0eaac2cf96b905036cababee24350e7363ce45912cd547b6df"
+      },
+      {
+        "path": "src/config.js",
+        "line": 15,
+        "statement": "The default chat path is the legacy /api/ask/agents route.",
+        "sha256": "82ccb7a208b89c63ebc1038dcce1a78a8ca4ed37908560344b6c35ddeadb0f29"
+      },
+      {
+        "path": "src/product-commands.js",
+        "line": 219,
+        "statement": "Work mode calls /api/work/chat on the configured Coderax deployment.",
+        "sha256": "7adab880b2473adf3a20e036b25eda8d9b64c520377a479781d18158e171543b"
+      },
+      {
+        "path": "docs/CONTRACT.md",
+        "line": 3,
+        "statement": "The CLI contract targets Coderax deployments that publish an OpenAPI 3.x document.",
+        "sha256": "e10b4aa9fc1fac5ffbdd66539ebf85bd829a408334c0bd59547a846cc501ec06"
+      }
+    ],
+    "requiredChecks": [
+      {
+        "workflow": "ci",
+        "job": "test",
+        "required": true,
+        "headSha": null,
+        "conclusion": "unknown",
+        "url": null,
+        "checkedAt": null
+      }
+    ],
+    "review": {
+      "author": null,
+      "reviewer": null,
+      "status": "not-reviewed",
+      "headSha": null,
+      "reviewedAt": null
+    },
+    "deployment": {
+      "deployed": false,
+      "origin": null,
+      "servedCommit": null,
+      "healthContractVersion": null,
+      "verifiedAt": null
+    },
+    "rollback": {
+      "mode": "pre-cutover-abort",
+      "targetCommit": null,
+      "dataDeletion": false,
+      "contractCompatible": true,
+      "notes": "This train does not publish a CLI release; aborting leaves the current CLI in place."
+    }
+  },
+  "ci": {
+    "audit": {
+      "path": "release/ci-audit.json",
+      "sha256": "4c894b4c2ad44d1f88f6c2174c10f11fd633b646c4d1594b707a81a677d06c65"
+    },
+    "authorizedDeployWorkflows": [],
+    "ownerSignoffs": [
+      {
+        "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+        "owner": "@nnabdelshahid",
+        "requiredChecks": [
+          "verify",
+          "release-verify"
+        ],
+        "status": "pending",
+        "signedAt": null
+      },
+      {
+        "repository": "Auctivon-CoderaxAI/Coderax",
+        "owner": "@nnabdelshahid",
+        "requiredChecks": [
+          "static-checks",
+          "coderax-deployment-readiness",
+          "cloudflare-production"
+        ],
+        "status": "pending",
+        "signedAt": null
+      },
+      {
+        "repository": "Auctivon-CoderaxAI/CoderaxCLI",
+        "owner": "Auctivon-CoderaxAI repository owner (no CODEOWNERS file)",
+        "requiredChecks": [
+          "ci"
+        ],
+        "status": "pending",
+        "signedAt": null
+      }
+    ]
+  },
+  "unpublished": [
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "feat/durable-events-integration",
+      "commit": "2554edcfd99d85ab6e330f948663490460757017",
+      "ahead": 2,
+      "behind": 0,
+      "disposition": "pending-merge",
+      "summary": "Clean integration of durable execution events, notification mark-read and workspace quarantine, based directly on main. Adds POST /v1/notifications/read and an SDK method without changing CONTRACT_VERSION or EVENT_SCHEMA_VERSION.",
+      "supersededBy": null,
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "docs/durable-events.md",
+          "line": 1,
+          "statement": "The branch documents durable events, notification mark-read and quarantine as a reconciliation of the preserved change set.",
+          "sha256": "1c6f3ac514fc183caffd26162c836be2c3548b6e718bcea3b53a72b1f106c4a2"
+        },
+        {
+          "path": "packages/contracts/src/routes.ts",
+          "line": 234,
+          "statement": "The branch adds the markNotificationsRead operation to the route catalogue.",
+          "sha256": "bfdbda586520a373ba6113b2a22fad0cc69b04a9240dc08e496c07342d4b647d"
+        },
+        {
+          "path": "docs/parity-matrix.md",
+          "line": 1,
+          "statement": "The branch closes parity rows 18, 22 and 23 in the tracked matrix.",
+          "sha256": "a7df317448b9b5fa9bde2f20d3d8d22f0dc51199db1de8f83f1186ad5880880c"
+        }
+      ]
+    },
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "feat/durable-events",
+      "commit": "9b3fd7dacd4ad750989c621565c8168b1290134d",
+      "ahead": 8,
+      "behind": 1,
+      "disposition": "superseded",
+      "summary": "Base64 snapshot carrier for the durable-events change set. The integration branch contains the applied change; this branch is preserved as provenance and is not a merge candidate.",
+      "supersededBy": "2554edcfd99d85ab6e330f948663490460757017",
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "snapshots/durable-events.part0.b64",
+          "line": 1,
+          "statement": "The branch carries the preserved base64 snapshot instead of the applied source change.",
+          "sha256": "fb4a73870bc8c5669e6fdb9c516221cbfd6f9d05087f6fd91b0bf648c48c370b"
+        }
+      ]
+    },
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "feat/intelligence-core",
+      "commit": "c8f9a348e40d7c49bca0d6ba2fd432271112df74",
+      "ahead": 3,
+      "behind": 0,
+      "disposition": "pending-merge",
+      "summary": "Open feature branch adding zero-cost routing, a native tool loop and durable tool approvals. It touches the same route catalogue, composition root and orchestration service as the integration branch.",
+      "supersededBy": null,
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "docs/parity-matrix.md",
+          "line": 1,
+          "statement": "The branch updates the parity matrix for the intelligence capabilities it adds.",
+          "sha256": "b2e068282f01bef28734d15a6c7675ded6166aaad72c26af0e51293ee0ec28c1"
+        }
+      ]
+    },
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "feat/native-reasoning-planner",
+      "commit": "efd760a58cfa20a3b1caddc4f31db774389ab19d",
+      "ahead": 2,
+      "behind": 0,
+      "disposition": "pending-merge",
+      "summary": "Open feature branch adding dependency-aware reasoning, verification and escalation to the native agent. It does not change the HTTP contract.",
+      "supersededBy": null,
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "docs/parity-matrix.md",
+          "line": 1,
+          "statement": "The branch records the native reasoning capabilities in the parity matrix.",
+          "sha256": "edabe2ea91235ba592d49a544dc01b13fa46aeafc2cef06c97b098d8277fba38"
+        }
+      ]
+    },
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "feat/zero-cost-model-router",
+      "commit": "7ae5cbc59fe0595bed285901fbf16b622321d055",
+      "ahead": 1,
+      "behind": 0,
+      "disposition": "pending-merge",
+      "summary": "Open feature branch adding a provider-independent zero-cost inference router. It does not change the HTTP contract.",
+      "supersededBy": null,
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "docs/parity-matrix.md",
+          "line": 1,
+          "statement": "The branch records the zero-cost router in the parity matrix.",
+          "sha256": "22851813898e2312759c8b89bdedac448c800ef38dcab1690042b94497ff5583"
+        }
+      ]
+    }
+  ]
+}
