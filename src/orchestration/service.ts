@@ -610,9 +610,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    * terminal state: the request slot stays charged because the run may have
    * reached the provider, and its unspent token allowance returns to the day.
    */
-  async function releaseBudget(task: TaskRecord): Promise<void> {
+  async function releaseBudget(
+    task: TaskRecord,
+    options: { dispatched: boolean } = { dispatched: true },
+  ): Promise<void> {
     await deps.budget
-      .release(`budget_${task.taskId}_${task.generation}`, { dispatched: true })
+      .release(`budget_${task.taskId}_${task.generation}`, options)
       .catch(() => false);
   }
 
@@ -626,6 +629,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     token: string,
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
+    /** `release` is for a run that ended before anything was dispatched. */
+    budget: 'settle' | 'release' = 'settle',
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       await releaseBudget(task);
@@ -729,11 +734,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       // The terminal event must be durable before the lease can be reissued.
       await deps.events.flush(settled.taskId).catch(() => undefined);
-      // Settle is idempotent and owner-independent: the reservation id derives
-      // from task and generation, so a replay cannot charge twice.
-      await deps.budget
-        .settle(`budget_${settled.taskId}_${settled.generation}`, settled.usage ?? {})
-        .catch(() => false);
+      if (budget === 'release') {
+        // Nothing reached the provider, so neither the request slot nor the
+        // token allowance was spent.
+        await releaseBudget(settled, { dispatched: false });
+      } else {
+        // Settle is idempotent and owner-independent: the reservation id derives
+        // from task and generation, so a replay cannot charge twice.
+        await deps.budget
+          .settle(`budget_${settled.taskId}_${settled.generation}`, settled.usage ?? {})
+          .catch(() => false);
+      }
     } finally {
       await releaseLease(task, token);
     }
@@ -745,27 +756,39 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
     if (!lease || !lease.live) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: 'server_unavailable',
-        detail: 'The run lost its lease before it started.',
-        retryable: true,
-      });
+      await settle(
+        task,
+        token,
+        {
+          kind: 'failed',
+          code: 'server_unavailable',
+          detail: 'The run lost its lease before it started.',
+          retryable: true,
+        },
+        undefined,
+        'release',
+      );
       return;
     }
     if (lease.cancelRequested) {
-      await settle(task, token, { kind: 'cancelled' });
+      await settle(task, token, { kind: 'cancelled' }, undefined, 'release');
       return;
     }
 
     const adapter = deps.agents.resolve(task.agent);
     if (!adapter.ok) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: 'not_configured',
-        detail: adapter.detail,
-        retryable: false,
-      });
+      await settle(
+        task,
+        token,
+        {
+          kind: 'failed',
+          code: 'not_configured',
+          detail: adapter.detail,
+          retryable: false,
+        },
+        undefined,
+        'release',
+      );
       return;
     }
 
@@ -773,12 +796,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       ? deps.models.resolve(task.model, task.mode)
       : deps.models.resolve(null, task.mode);
     if (!model.ok) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: model.code === 'paid_model_refused' ? 'paid_model_refused' : 'not_configured',
-        detail: model.detail,
-        retryable: false,
-      });
+      await settle(
+        task,
+        token,
+        {
+          kind: 'failed',
+          code: model.code === 'paid_model_refused' ? 'paid_model_refused' : 'not_configured',
+          detail: model.detail,
+          retryable: false,
+        },
+        undefined,
+        'release',
+      );
       return;
     }
 
@@ -787,12 +816,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       roots: workspaceRoots(deps.config.workspaces),
     });
     if (!workspace.ok) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: 'workspace_denied',
-        detail: workspace.detail,
-        retryable: false,
-      });
+      await settle(
+        task,
+        token,
+        {
+          kind: 'failed',
+          code: 'workspace_denied',
+          detail: workspace.detail,
+          retryable: false,
+        },
+        undefined,
+        'release',
+      );
       return;
     }
     const started = await deps.tasks.updateFenced({
@@ -955,21 +990,33 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (executionsByTask.get(taskId) === executionId) executionsByTask.delete(taskId);
 
     if (!supervised) {
-      await settle(started.task, token, {
-        kind: 'failed',
-        code: 'server_unavailable',
-        detail: 'The execution supervisor could not admit or record this run.',
-        retryable: true,
-      });
+      await settle(
+        started.task,
+        token,
+        {
+          kind: 'failed',
+          code: 'server_unavailable',
+          detail: 'The execution supervisor could not admit or record this run.',
+          retryable: true,
+        },
+        undefined,
+        'release',
+      );
       return;
     }
     if (!supervised.admitted) {
-      await settle(started.task, token, {
-        kind: 'failed',
-        code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
-        detail: supervised.detail,
-        retryable: supervised.code !== 'workspace_denied',
-      });
+      await settle(
+        started.task,
+        token,
+        {
+          kind: 'failed',
+          code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
+          detail: supervised.detail,
+          retryable: supervised.code !== 'workspace_denied',
+        },
+        undefined,
+        'release',
+      );
       return;
     }
     if (supervised.ownershipLost) {

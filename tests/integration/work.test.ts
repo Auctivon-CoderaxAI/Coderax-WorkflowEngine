@@ -331,3 +331,41 @@ test('submission holds a token reservation, not just a request slot', async () =
     await started.close();
   }
 });
+
+test('a run refused before dispatch returns its reservation', async () => {
+  const started = await startTestApp();
+  try {
+    const deps = started.app.dependencies;
+    // Hold the cloud root so the supervisor refuses admission. The task fails,
+    // but no adapter was called, so neither the request slot nor the reserved
+    // token allowance may be charged to the day.
+    await deps.quarantine.poison({
+      root: started.workspace.cloudRoot,
+      generation: 1,
+      taskId: 'task_refused',
+      reason: 'test hold',
+      now: Date.now(),
+    });
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'Refused run',
+      mode: 'cloud',
+      requireApproval: false,
+    });
+    assert.equal(submitted.ok, true);
+    if (!submitted.ok) return;
+
+    const failed = await waitFor(async () => {
+      const status = await started.app.service.task(principal, submitted.value.taskId);
+      return status.ok && status.value.state === 'failed' ? status.value : null;
+    });
+    assert.equal(failed.failure?.code, 'workspace_denied');
+
+    const budget = await waitFor(async () => {
+      const state = await started.app.service.budget(principal);
+      return state.used.requests === 0 ? state : null;
+    });
+    assert.deepEqual(budget.used.usage, { inputTokens: 0, outputTokens: 0 });
+  } finally {
+    await started.close();
+  }
+});
