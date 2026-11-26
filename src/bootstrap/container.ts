@@ -17,6 +17,7 @@ import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { ArtifactService } from '../artifacts/service.js';
+import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
 
 /**
@@ -42,6 +43,7 @@ export type InfrastructureDependencies = {
   permissions: PermissionStore;
   notifications: NotificationStore;
   artifactService: ArtifactService;
+  deliverables: DeliverableService;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -64,6 +66,7 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'permissions',
   'notifications',
   'artifactService',
+  'deliverables',
   'audit',
   'events',
   'runner',

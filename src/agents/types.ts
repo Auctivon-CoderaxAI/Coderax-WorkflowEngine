@@ -29,6 +29,8 @@ export type AgentHistoryTurn = {
 };
 
 export type AgentRunRequest = {
+  /** Present for a durable Work run; absent for a single Chat turn. */
+  taskId?: string;
   ownerId: string;
   tenantId: string | null;
   conversationId: string;

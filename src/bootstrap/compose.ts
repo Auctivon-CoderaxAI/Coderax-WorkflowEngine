@@ -22,6 +22,9 @@ import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import { createArtifactService } from '../artifacts/service.js';
+import { createArtifactToolkit } from '../artifacts/toolkit.js';
+import { createDeliverableService } from '../artifacts/deliver.js';
+import type { DeliverableService } from '../artifacts/deliver.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
@@ -144,7 +147,57 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
 
   const gateway = buildGateway(input);
-  const native = createNativeAgent({ enabled: config.engines.native.enabled, gateway });
+  // The generator is constructed after persistence exists; the agent receives a
+  // delegating port so composition order stays one-directional.
+  let deliverableService: DeliverableService | null = null;
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway,
+    deliverable: async (tool) => {
+      const service = deliverableService;
+      if (!service) {
+        return {
+          ok: false,
+          code: 'not_configured',
+          detail: 'Deliverable generation is not available on this deployment.',
+        };
+      }
+      const result = await service.deliver(
+        { ownerId: tool.ownerId, isOwner: true },
+        tool.request,
+        {
+          conversationId: tool.conversationId,
+          ...(tool.taskId ? { taskId: tool.taskId } : {}),
+          signal: tool.signal,
+        },
+      );
+      if (!result.ok) {
+        return {
+          ok: false,
+          code:
+            result.code === 'cancelled'
+              ? 'cancelled'
+              : result.code === 'busy'
+                ? 'busy'
+                : result.code === 'budget_exhausted'
+                  ? 'budget_exhausted'
+                  : result.code === 'paid_model_refused'
+                    ? 'paid_model_refused'
+                    : result.code === 'engine_not_configured'
+                      ? 'not_configured'
+                      : 'protocol_error',
+          detail: result.detail,
+        };
+      }
+      return {
+        ok: true,
+        descriptors: result.value.artifacts,
+        summary: `${result.value.title}: ${result.value.artifacts.length} stored artifact(s) (${result.value.artifacts
+          .map((artifact) => artifact.filename)
+          .join(', ')}). ${result.value.summary}`.slice(0, 4000),
+      };
+    },
+  });
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
@@ -214,6 +267,20 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ids,
     settings: config.artifacts,
   });
+  const roots = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
+  if (!roots.ok) {
+    throw new StartupError([roots.detail]);
+  }
+  const deliverables = createDeliverableService({
+    toolkit: createArtifactToolkit(),
+    artifacts: artifactService,
+    audit,
+    clock,
+    ids,
+    roots: roots.value,
+  });
+  deliverableService = deliverables;
+
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -346,6 +413,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     permissions,
     notifications,
     artifactService,
+    deliverables,
     audit,
     events,
     runner,
@@ -390,10 +458,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     );
   }
 
-  const rootCheck = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
-  if (!rootCheck.ok) {
-    throw new StartupError([rootCheck.detail]);
-  }
   const startupIssues = await health.verifyStartup();
   if (startupIssues.length > 0) {
     throw new StartupError(startupIssues);
@@ -421,8 +485,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
-      // Retention and abandoned reservations are enforced at startup too.
+      // Retention and abandoned reservations are enforced at startup too, and a
+      // staging directory left by a crashed generation is removed.
       await service.artifacts.sweepExpiredArtifacts();
+      await deliverables.sweepStaging();
       return { url };
     },
     stop: async () => {

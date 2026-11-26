@@ -4,6 +4,7 @@ import type {
   ArtifactUploadRequest,
   ArtifactVersionRequest,
   DataMode,
+  DeliverableRequestInput,
 } from '@coderax/contracts';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { RouteRegistry } from './router.js';
@@ -304,6 +305,15 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('generateDeliverable', async (context) => {
+    const result = await service.deliver(
+      context.principal,
+      context.body as DeliverableRequestInput,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
   });
 
   // Registration order follows the catalogue order so the served OpenAPI
