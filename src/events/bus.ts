@@ -39,6 +39,8 @@ export type Unsubscribe = () => void;
 export type OpenedStream = {
   replay: Replay;
   subscribe: (listener: (event: ExecutionEvent) => void) => Unsubscribe;
+  /** Releases the buffered subscription when the consumer never subscribes. */
+  close: () => void;
 };
 
 /**
@@ -323,7 +325,13 @@ export function createEventBus(input: {
       // Subscribe before the read. `cursor` starts at what this process already
       // knows, so only genuinely new events are buffered, and the replay covers
       // everything at or below that point.
-      const subscriber: Subscriber = { cursor: state.seq, listener: null, backlog: [] };
+      // The live cursor must never go below the cursor the client asked for: a
+      // client that reconnected at 10 must not receive 6..9 from the tail.
+      const subscriber: Subscriber = {
+        cursor: Math.max(after, state.seq),
+        listener: null,
+        backlog: [],
+      };
       state.listeners.add(subscriber);
       let replay: Replay;
       try {
@@ -340,13 +348,22 @@ export function createEventBus(input: {
         replay,
         subscribe: (listener) => {
           // Runs to completion without awaiting, so draining the backlog and
-          // going live cannot interleave with a publish.
-          for (const event of subscriber.backlog) listener(event);
+          // going live cannot interleave with a publish. A buffered event a
+          // later page already replayed is skipped, so a sequence is delivered
+          // exactly once.
+          for (const event of subscriber.backlog) {
+            if (event.seq <= subscriber.cursor) continue;
+            subscriber.cursor = event.seq;
+            listener(event);
+          }
           subscriber.backlog.length = 0;
           subscriber.listener = listener;
           return () => {
             state.listeners.delete(subscriber);
           };
+        },
+        close: () => {
+          state.listeners.delete(subscriber);
         },
       };
     },

@@ -26,21 +26,33 @@ function mongoLog(bufferSize = 100) {
  * A log that can hold a read open. It is how a publish is forced to land in the
  * middle of `open`, which is the window the replay-to-subscribe gap lived in.
  */
-function gatedLog(inner: EventLog): { log: EventLog; release: () => void } {
+function gatedLog(inner: EventLog): {
+  log: EventLog;
+  release: () => void;
+  entered: Promise<void>;
+} {
   let release!: () => void;
+  let enter!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
   });
   return {
     log: {
       ...inner,
       read: async (input) => {
+        // Resolve once the read has actually started, after `open` registered
+        // its subscriber, so a publish in the test lands in the real window.
+        enter();
         const result = await inner.read(input);
         await gate;
         return result;
       },
     },
     release: () => release(),
+    entered,
   };
 }
 
@@ -110,7 +122,9 @@ test('opening a stream does not drop an event published during the durable read'
   await bus.hydrate('t1');
 
   const opening = bus.open('t1', 0);
-  // The read is now blocked. This publish happens exactly in the old gap.
+  // The subscriber is registered and the durable read is in flight: this is the
+  // exact window the replay-to-subscribe gap lived in.
+  await gate.entered;
   const published = bus.publish({ taskId: 't1', agent: 'coderax', generation: 1, type: 'task.queued' });
   assert.ok(published);
   gate.release();
@@ -315,4 +329,59 @@ test('a replay longer than one page still reaches the terminal event', async () 
   assert.equal(opened.replay.events.length, 35);
   assert.equal(opened.replay.events.at(-1)?.type, 'task.completed');
   assert.deepEqual(opened.replay.events.map((event) => event.seq), Array.from({ length: 35 }, (_, index) => index + 1));
+});
+
+test('a reconnect cursor ahead of the local head is not rewound by live events', async () => {
+  const log = createInMemoryEventLog({ bufferSize: 100 });
+  const writer = createEventBus({ bufferSize: 100, eventId: ids, iso, log });
+  await writer.hydrate('t_cursor');
+  for (let index = 0; index < 5; index += 1) {
+    writer.publish({ taskId: 't_cursor', agent: 'coderax', generation: 1, type: 'text.delta', payload: { text: '.' } });
+  }
+  await writer.flush('t_cursor');
+
+  const reader = createEventBus({ bufferSize: 100, eventId: ids, iso, log });
+  const opened = await reader.open('t_cursor', 10, 10);
+  assert.deepEqual(opened.replay.events, []);
+
+  const delivered: number[] = [];
+  const unsubscribe = opened.subscribe((event) => delivered.push(event.seq));
+  // The tail continues at 6, below the requested cursor, so it is not delivered.
+  reader.publish({ taskId: 't_cursor', agent: 'coderax', generation: 1, type: 'task.completed' });
+  unsubscribe();
+  opened.close();
+  assert.deepEqual(delivered, []);
+});
+
+test('a watermark recovers a row inserted before a crash reached the head', async () => {
+  const store = mongoLog();
+  await ensureEventIndexes({ events: store.collection, heads: store.heads });
+  await store.collection.insertOne({
+    v: 1,
+    taskId: 't_wm',
+    seq: 7,
+    eventId: 'evt-wm-7',
+    at: new Date().toISOString(),
+    agent: 'coderax',
+    generation: 1,
+    type: 'text.delta',
+    payload: { text: '.' },
+  });
+
+  // The head was never advanced, but the row is committed: the sequence must
+  // continue after it, not reuse 7.
+  assert.equal((await store.log.watermark('t_wm')).seq, 7);
+  const next = await store.log.append({
+    v: 1,
+    taskId: 't_wm',
+    seq: 8,
+    eventId: 'evt-wm-8',
+    at: new Date().toISOString(),
+    agent: 'coderax',
+    generation: 1,
+    type: 'task.completed',
+    payload: {},
+  });
+  assert.deepEqual(next, { appended: true });
+  assert.deepEqual(await store.log.watermark('t_wm'), { seq: 8, generation: 1 });
 });
