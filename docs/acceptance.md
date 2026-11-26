@@ -11,8 +11,10 @@
   required job (`verify`). No `scripts/gate/*` implementation survives.
 - The reconciliation on top of `d00156a` adds the competing branch's verified
   unique regression suites and the controls those suites proved missing. It does
-  not change the gate runner, manifest, workflow or required-job shape, and it
-  needs its own hosted run; run `45888790260` covers `d00156a` only.
+  not change the gate runner, manifest, workflow or required-job shape.
+  Reconciliation tree `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed its own
+  hosted run `45900429936` (single `verify` job, 23 steps); run `45888790260`
+  covers `d00156a` only.
 
 ## Candidate integration head
 
@@ -39,8 +41,10 @@
 Verified integration head: `d00156a1597e5d908d21d3886272f5710a0df721`. The
 hosted `verify` job passed at this exact SHA in run `45888790260`, and the
 earlier run `45888499599` passed at `d6f877c283b64e8a243b862789b3b6e4e5fb6082`.
-A later record or reconciliation commit changes the review head but not the
-gate implementation accepted by that run.
+The reconciliation merge `e49568b2df0e3b70ca63e756d4c1639aa6048977` and its
+content commit `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed run
+`45900429936`; a later docs-only record commit changes the review head but not
+that code tree.
 
 ## Exact-tree acceptance
 
@@ -226,8 +230,10 @@ no shell-execution path is admitted outside the declared tool seam.
   all 23 steps, including `Real MongoDB integration tests (required, no fake)`,
   and every step passed. Run `45888499599` passed earlier at
   `d6f877c283b64e8a243b862789b3b6e4e5fb6082`; run `45888302201` was cancelled
-  when the branch advanced and is not counted. The reconciliation commit has no
-  hosted run yet.
+  when the branch advanced and is not counted. The reconciliation tree
+  `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed run `45900429936` with the
+  same single `verify` job and all 23 steps; the record commit after it is
+  docs-only.
 - Creating the PR requires an authorized GitHub write integration. This host has
   no `gh` binary and no GitHub write credential; the unauthenticated API cannot
   create a pull request. No PR, self-approval or independent review was
