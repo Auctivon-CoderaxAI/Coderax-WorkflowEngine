@@ -1,9 +1,18 @@
 import { z } from 'zod';
 import {
   ArtifactContent,
-  ArtifactCreateRequest,
-  ArtifactList,
-  ArtifactRecord,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactKind,
+  ArtifactModeRequest,
+  ArtifactPruneResult,
+  ArtifactUploadRequest,
+  ArtifactUploadResult,
+  ArtifactVersionList,
+  ArtifactVersionRequest,
+  TaskArtifactUploadRequest,
 } from './artifacts.js';
 import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
@@ -11,7 +20,14 @@ import { CapabilityHandshake, HandshakeQuery, RouteMethodSchema } from './handsh
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
 import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
-import { ConversationId, ArtifactId, ScheduleId, TaskId } from './primitives.js';
+import {
+  ArtifactId,
+  ConversationId,
+  DataMode,
+  ProjectId,
+  ScheduleId,
+  TaskId,
+} from './primitives.js';
 import {
   Schedule,
   ScheduleControlRequest,
@@ -83,7 +99,28 @@ export type RouteSpec = {
 const TaskParams = z.object({ taskId: TaskId }).strict();
 const ConversationParams = z.object({ conversationId: ConversationId }).strict();
 const ScheduleParams = z.object({ scheduleId: ScheduleId }).strict();
-const ArtifactParams = z.object({ taskId: TaskId, artifactId: ArtifactId }).strict();
+const TaskArtifactParams = z.object({ taskId: TaskId, artifactId: ArtifactId }).strict();
+const ArtifactParams = z.object({ artifactId: ArtifactId }).strict();
+
+const ArtifactListQuery = z
+  .object({
+    mode: DataMode.optional(),
+    kind: ArtifactKind.optional(),
+    projectId: ProjectId.optional(),
+    conversationId: ConversationId.optional(),
+    taskId: TaskId.optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+  })
+  .strict();
+
+const ArtifactModeQuery = z.object({ mode: DataMode.optional() }).strict();
+
+const ArtifactContentQuery = z
+  .object({
+    mode: DataMode.optional(),
+    version: z.coerce.number().int().positive().optional(),
+  })
+  .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
@@ -234,32 +271,132 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
     operationId: 'listArtifacts',
     method: 'GET',
-    path: '/v1/work/{taskId}/artifacts',
-    summary: 'Artifacts a task produced or the owner attached, with their digests.',
+    path: '/v1/artifacts',
+    summary: 'Owner-scoped durable artifacts in one data-mode partition.',
     tags: ['artifacts'],
     auth: 'owner',
-    params: TaskParams,
-    response: { status: 200, description: 'Artifact list', schema: ArtifactList },
+    query: ArtifactListQuery,
+    response: {
+      status: 200,
+      description: 'Artifact list and storage quota',
+      schema: ArtifactDescriptorList,
+    },
   },
   {
-    operationId: 'createArtifact',
+    operationId: 'uploadArtifact',
     method: 'POST',
-    path: '/v1/work/{taskId}/artifacts',
-    summary: 'Attach an owner artifact to a task; the engine computes its digest.',
+    path: '/v1/artifacts',
+    summary: 'Store a new artifact version from base64-encoded bytes.',
     tags: ['artifacts'],
     auth: 'owner',
-    params: TaskParams,
-    body: ArtifactCreateRequest,
-    response: { status: 201, description: 'Artifact record', schema: ArtifactRecord },
+    body: ArtifactUploadRequest,
+    response: { status: 201, description: 'Stored artifact', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'pruneArtifacts',
+    method: 'POST',
+    path: '/v1/artifacts/prune',
+    summary: 'Delete this owner’s artifacts whose retention has expired.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: ArtifactModeRequest,
+    response: { status: 200, description: 'Prune result', schema: ArtifactPruneResult },
   },
   {
     operationId: 'getArtifact',
     method: 'GET',
-    path: '/v1/work/{taskId}/artifacts/{artifactId}',
-    summary: 'Read one artifact with its recorded digest and encoding.',
+    path: '/v1/artifacts/{artifactId}',
+    summary: 'Authoritative metadata for one artifact in the requested mode.',
     tags: ['artifacts'],
     auth: 'owner',
     params: ArtifactParams,
+    query: ArtifactModeQuery,
+    response: { status: 200, description: 'Artifact descriptor', schema: ArtifactDescriptor },
+  },
+  {
+    operationId: 'uploadArtifactVersion',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/versions',
+    summary: 'Append a new immutable version to an existing artifact.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactVersionRequest,
+    response: { status: 201, description: 'Stored artifact version', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'listArtifactVersions',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/versions',
+    summary: 'Retained version history for one artifact, newest last.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactModeQuery,
+    response: { status: 200, description: 'Artifact version list', schema: ArtifactVersionList },
+  },
+  {
+    operationId: 'downloadArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/content',
+    summary: 'Exact bytes of one artifact version, integrity-verified on read.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactContentQuery,
+    response: { status: 200, description: 'Artifact content', schema: ArtifactContent },
+  },
+  {
+    operationId: 'exportArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/export',
+    summary: 'Portable export: descriptor, version manifest and exact bytes.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactContentQuery,
+    response: { status: 200, description: 'Artifact export', schema: ArtifactExport },
+  },
+  {
+    operationId: 'deleteArtifact',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/delete',
+    summary: 'Delete an artifact and every retained version it owns.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactModeRequest,
+    response: { status: 200, description: 'Delete result', schema: ArtifactDeleteResult },
+  },
+  {
+    operationId: 'listTaskArtifacts',
+    method: 'GET',
+    path: '/v1/work/{taskId}/artifacts',
+    summary: 'Artifacts projected for one task, with their digests and quota.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: TaskParams,
+    response: { status: 200, description: 'Artifact list', schema: ArtifactDescriptorList },
+  },
+  {
+    operationId: 'createTaskArtifact',
+    method: 'POST',
+    path: '/v1/work/{taskId}/artifacts',
+    summary: 'Attach an owner artifact to a task; mode and conversation come from the task.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: TaskParams,
+    body: TaskArtifactUploadRequest,
+    response: { status: 201, description: 'Stored artifact', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'getTaskArtifact',
+    method: 'GET',
+    path: '/v1/work/{taskId}/artifacts/{artifactId}',
+    summary: 'Read one task artifact with its recorded digest and encoding.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: TaskArtifactParams,
     response: { status: 200, description: 'Artifact content', schema: ArtifactContent },
   },
   {

@@ -1,9 +1,5 @@
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
-import {
-  ARTIFACT_MAX_BYTES,
-  ARTIFACT_MAX_PER_TASK,
-  SCHEDULE_MIN_INTERVAL_MS,
-} from '@coderax/contracts';
+import { SCHEDULE_MIN_INTERVAL_MS } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
@@ -39,7 +35,7 @@ import {
   type InfrastructureDependencies,
 } from './container.js';
 import { buildPersistence, MEMORY_VALUE_LIMIT } from './persistence.js';
-import { createArtifactStore } from '../artifacts/store.js';
+import { createArtifactService } from '../artifacts/service.js';
 import { createScheduleStore, SCHEDULE_TICK_MS } from '../scheduling/store.js';
 import { createIdempotencyStore } from '../persistence/idempotency.js';
 import { ENGINE_NAME, ENGINE_VERSION } from '../version.js';
@@ -210,14 +206,21 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const memory = persistence.memory;
   const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
-  const artifacts = createArtifactStore({
-    clock,
-    maxBytes: ARTIFACT_MAX_BYTES,
-    maxPerTask: ARTIFACT_MAX_PER_TASK,
-  });
   const schedules = createScheduleStore({ clock });
   const idempotency = createIdempotencyStore({ clock });
   const audit = createAuditLog({ clock, ids });
+  const artifactService = createArtifactService({
+    artifacts: persistence.artifacts,
+    blobs: persistence.blobs,
+    capacity: persistence.capacity,
+    ownerId: config.auth.ownerId,
+    conversations,
+    tasks,
+    audit,
+    clock,
+    ids,
+    settings: config.artifacts,
+  });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -276,6 +279,34 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         }),
       },
       {
+        // Required only when the deployment selected durable persistence. A
+        // memory deployment still starts, but reports honestly that artifact
+        // writes are refused rather than pretending they would survive.
+        name: 'artifacts',
+        required: persistence.driver === 'mongo',
+        check: async () => {
+          if (!persistence.blobs.durable) {
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
+            };
+          }
+          try {
+            await persistence.blobs.check();
+            return {
+              status: 'ok' as const,
+              detail: 'Artifact metadata and content are stored durably in MongoDB.',
+            };
+          } catch {
+            return {
+              status: 'failed' as const,
+              detail: 'Artifact storage could not be read.',
+            };
+          }
+        },
+      },
+      {
         name: 'engine',
         required: true,
         check: async () => {
@@ -318,7 +349,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
-    artifacts,
+    artifactService,
     schedules,
     idempotency,
     audit,
@@ -346,7 +377,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       eventBufferSize: config.execution.eventBufferSize,
       maxConcurrentTasks: config.execution.maxConcurrentTasks,
       scheduleMinIntervalMs: SCHEDULE_MIN_INTERVAL_MS,
-      artifactMaxBytes: ARTIFACT_MAX_BYTES,
+      artifactMaxBytes: config.artifacts.maxBytesPerArtifact,
       memoryMaxValueLength: MEMORY_VALUE_LIMIT,
     },
   });
@@ -406,10 +437,16 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     server,
     persistence: { driver: persistence.driver },
     start: async () => {
+      // Rebuild quota availability from committed rows before the socket is
+      // open, so an early request cannot be admitted against stale capacity.
+      // The reconcile refuses to run while another replica's reservation is live.
+      await service.artifacts.reconcile();
       const { url } = await server.listen();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // Retention and abandoned reservations are enforced at startup too.
+      await service.artifacts.sweepExpiredArtifacts();
       return { url };
     },
     stop: async () => {

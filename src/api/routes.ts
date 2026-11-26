@@ -202,7 +202,7 @@ export function registerRoutes(
       notifications: has('listNotifications'),
       notificationRead: has('markNotificationRead'),
       schedules: has('listSchedules') && has('createSchedule'),
-      artifacts: has('listArtifacts') && has('getArtifact') && has('createArtifact'),
+      artifacts: has('listArtifacts') && has('getArtifact') && has('uploadArtifact'),
       memory: has('listMemory') && has('writeMemory') && has('deleteMemory'),
       memorySearch: has('searchMemory'),
       conversations: has('listConversations') && has('getConversation'),
@@ -335,13 +335,96 @@ export function registerRoutes(
   });
 
   registry.register('listArtifacts', async (context) => {
-    const result = await service.artifacts(context.principal, context.params.taskId ?? '');
+    const result = await service.artifacts.list(context.principal, context.query as never);
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
 
-  registry.register('createArtifact', async (context) => {
-    const result = await service.createArtifact(
+  registry.register('uploadArtifact', async (context) => {
+    const result = await service.artifacts.upload(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('pruneArtifacts', async (context) => {
+    const body = context.body as { mode?: DataMode };
+    const result = await service.artifacts.prune(context.principal, body.mode ?? 'private');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getArtifact', async (context) => {
+    const query = context.query as { mode?: DataMode };
+    const result = await service.artifacts.get(
+      context.principal,
+      context.params.artifactId ?? '',
+      query.mode ?? 'private',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('uploadArtifactVersion', async (context) => {
+    const result = await service.artifacts.addVersion(
+      context.principal,
+      context.params.artifactId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('listArtifactVersions', async (context) => {
+    const query = context.query as { mode?: DataMode };
+    const result = await service.artifacts.versions(
+      context.principal,
+      context.params.artifactId ?? '',
+      query.mode ?? 'private',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('downloadArtifact', async (context) => {
+    const result = await service.artifacts.download(
+      context.principal,
+      context.params.artifactId ?? '',
+      context.query as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('exportArtifact', async (context) => {
+    const result = await service.artifacts.exportBundle(
+      context.principal,
+      context.params.artifactId ?? '',
+      context.query as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('deleteArtifact', async (context) => {
+    const body = context.body as { mode?: DataMode };
+    const result = await service.artifacts.remove(
+      context.principal,
+      context.params.artifactId ?? '',
+      body.mode ?? 'private',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  // Task routes project the same durable store; they add scoping, not storage.
+  registry.register('listTaskArtifacts', async (context) => {
+    const result = await service.taskArtifacts(context.principal, context.params.taskId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('createTaskArtifact', async (context) => {
+    const result = await service.createTaskArtifact(
       context.principal,
       context.params.taskId ?? '',
       context.body as never,
@@ -350,8 +433,8 @@ export function registerRoutes(
     return { kind: 'json', status: 201, body: result.value };
   });
 
-  registry.register('getArtifact', async (context) => {
-    const result = await service.artifact(
+  registry.register('getTaskArtifact', async (context) => {
+    const result = await service.taskArtifact(
       context.principal,
       context.params.taskId ?? '',
       context.params.artifactId ?? '',

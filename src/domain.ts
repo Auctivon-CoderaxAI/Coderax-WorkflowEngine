@@ -1,5 +1,7 @@
 import type {
   AgentId,
+  ArtifactKind,
+  ArtifactMediaType,
   Budget,
   DataMode,
   EngineId,
@@ -114,20 +116,48 @@ export type MemoryRecord = {
 };
 
 /**
- * A stored artifact. The bytes live with the record because the engine, not a
- * client, computes and reports the digest the record claims.
+ * A durable artifact. The bytes live in the content-addressed blob store; this
+ * row is the authoritative metadata and names the current immutable version.
  */
-export type ArtifactBlob = {
+export type ArtifactRecord = {
   artifactId: string;
-  taskId: string;
-  conversationId: string;
-  path: string;
-  mediaType: string;
+  ownerId: string;
+  tenantId: string | null;
+  mode: DataMode;
+  kind: ArtifactKind;
+  filename: string;
+  /** Metadata only; never a filesystem path. Basename equals `filename`. */
+  relativePath?: string;
+  mediaType: ArtifactMediaType;
   bytes: number;
-  digest: string;
-  origin: 'engine' | 'owner';
+  sha256: string;
+  /** Current version number. Immutable version rows live alongside. */
+  version: number;
+  /** Retained version count, including the current one. */
+  versions: number;
+  projectId: string | null;
+  conversationId: string | null;
+  taskId: string | null;
   createdAt: IsoDateTime;
-  content: Buffer;
+  updatedAt: IsoDateTime;
+  expiresAt: IsoDateTime | null;
+};
+
+export type ArtifactVersionRecord = {
+  ownerId: string;
+  mode: DataMode;
+  artifactId: string;
+  version: number;
+  filename: string;
+  relativePath?: string;
+  mediaType: ArtifactMediaType;
+  /** Immutable per version, so a rollback restores the kind that version had. */
+  kind: ArtifactKind;
+  /** Size and digest of this exact version, so history is independently auditable. */
+  bytes: number;
+  sha256: string;
+  note?: string;
+  createdAt: IsoDateTime;
 };
 
 /**

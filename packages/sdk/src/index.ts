@@ -3,8 +3,13 @@ import {
   CONTRACT_FINGERPRINT,
   AgentList,
   ArtifactContent,
-  ArtifactList,
-  ArtifactRecord,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactPruneResult,
+  ArtifactUploadResult,
+  ArtifactVersionList,
   CapabilityHandshake,
   ChatReply,
   ChatStreamEvent,
@@ -31,7 +36,9 @@ import {
   isTerminalChatEvent,
 } from '@coderax/contracts';
 import type {
-  ArtifactCreateRequestInput,
+  ArtifactKind,
+  ArtifactUploadRequestInput,
+  ArtifactVersionRequestInput,
   ChatRequestInput,
   DataMode,
   MemoryDeleteRequestInput,
@@ -39,6 +46,7 @@ import type {
   PermissionDecisionRequest,
   ScheduleAction,
   ScheduleCreateRequestInput,
+  TaskArtifactUploadRequestInput,
   TaskListQuery,
   WorkSubmitRequestInput,
 } from '@coderax/contracts';
@@ -125,9 +133,18 @@ export const SDK_OPERATION_COVERAGE: Readonly<Record<string, string>> = Object.f
   resumeTask: 'resume',
   retryTask: 'retry',
   streamTaskEvents: 'events',
-  listArtifacts: 'artifacts',
-  createArtifact: 'createArtifact',
-  getArtifact: 'artifact',
+  listArtifacts: 'listArtifacts',
+  uploadArtifact: 'uploadArtifact',
+  pruneArtifacts: 'pruneArtifacts',
+  getArtifact: 'getArtifact',
+  uploadArtifactVersion: 'uploadArtifactVersion',
+  listArtifactVersions: 'listArtifactVersions',
+  downloadArtifact: 'downloadArtifact',
+  exportArtifact: 'exportArtifact',
+  deleteArtifact: 'deleteArtifact',
+  listTaskArtifacts: 'artifacts',
+  createTaskArtifact: 'createArtifact',
+  getTaskArtifact: 'artifact',
   listConversations: 'conversations',
   getConversation: 'conversation',
   listMemory: 'memory',
@@ -444,8 +461,9 @@ export class CoderaxClient {
     });
   }
 
-  artifacts(taskId: string): Promise<ArtifactList> {
-    return this.request<ArtifactList>(ArtifactList, {
+  /** The task-scoped projection of the durable artifact store. */
+  artifacts(taskId: string): Promise<ArtifactDescriptorList> {
+    return this.request<ArtifactDescriptorList>(ArtifactDescriptorList, {
       method: 'GET',
       path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
     });
@@ -458,11 +476,105 @@ export class CoderaxClient {
     });
   }
 
-  createArtifact(taskId: string, request: ArtifactCreateRequestInput): Promise<ArtifactRecord> {
-    return this.request<ArtifactRecord>(ArtifactRecord, {
+  createArtifact(
+    taskId: string,
+    request: TaskArtifactUploadRequestInput,
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
       path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
-      body: this.encodeBody('createArtifact', request),
+      body: this.encodeBody('createTaskArtifact', request),
+    });
+  }
+
+  listArtifacts(query: {
+    mode?: DataMode;
+    kind?: ArtifactKind;
+    projectId?: string;
+    conversationId?: string;
+    taskId?: string;
+    limit?: number;
+  } = {}): Promise<ArtifactDescriptorList> {
+    return this.request<ArtifactDescriptorList>(ArtifactDescriptorList, {
+      method: 'GET',
+      path: '/v1/artifacts',
+      query,
+    });
+  }
+
+  uploadArtifact(request: ArtifactUploadRequestInput): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: '/v1/artifacts',
+      body: this.encodeBody('uploadArtifact', request),
+    });
+  }
+
+  pruneArtifacts(mode: DataMode = 'private'): Promise<ArtifactPruneResult> {
+    return this.request<ArtifactPruneResult>(ArtifactPruneResult, {
+      method: 'POST',
+      path: '/v1/artifacts/prune',
+      body: this.encodeBody('pruneArtifacts', { mode }),
+    });
+  }
+
+  getArtifact(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactDescriptor> {
+    return this.request<ArtifactDescriptor>(ArtifactDescriptor, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+      query: { mode },
+    });
+  }
+
+  uploadArtifactVersion(
+    artifactId: string,
+    request: ArtifactVersionRequestInput,
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      body: this.encodeBody('uploadArtifactVersion', request),
+    });
+  }
+
+  listArtifactVersions(
+    artifactId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactVersionList> {
+    return this.request<ArtifactVersionList>(ArtifactVersionList, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      query: { mode },
+    });
+  }
+
+  downloadArtifact(
+    artifactId: string,
+    query: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactContent> {
+    return this.request<ArtifactContent>(ArtifactContent, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+      query,
+    });
+  }
+
+  exportArtifact(
+    artifactId: string,
+    query: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactExport> {
+    return this.request<ArtifactExport>(ArtifactExport, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
+      query,
+    });
+  }
+
+  deleteArtifact(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactDeleteResult> {
+    return this.request<ArtifactDeleteResult>(ArtifactDeleteResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/delete`,
+      body: this.encodeBody('deleteArtifact', { mode }),
     });
   }
 
@@ -623,7 +735,9 @@ export {
 
 // Consumers get the input shapes, where defaulted fields may be omitted.
 export type {
-  ArtifactCreateRequestInput as ArtifactCreateRequest,
+  ArtifactUploadRequestInput as ArtifactUploadRequest,
+  ArtifactVersionRequestInput as ArtifactVersionRequest,
+  TaskArtifactUploadRequestInput as TaskArtifactUploadRequest,
   ChatRequestInput as ChatRequest,
   DataMode,
   MemoryDeleteRequestInput as MemoryDeleteRequest,

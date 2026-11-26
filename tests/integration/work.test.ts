@@ -320,7 +320,12 @@ test('a rejected completion fence never publishes a transcript', async () => {
   let rejected = false;
   deps.tasks.updateFenced = async (input) => {
     if (input.patch.state !== 'completed') return update(input);
-    assert.deepEqual(await deps.artifacts.list(input.taskId), []);
+    const staged = await deps.artifactService.list(principal, {
+      mode: 'cloud',
+      taskId: input.taskId,
+    });
+    assert.ok(staged.ok);
+    assert.deepEqual(staged.value.artifacts, []);
     rejected = true;
     return { applied: false, reason: 'superseded' };
   };
@@ -331,7 +336,12 @@ test('a rejected completion fence never publishes a transcript', async () => {
     assert.ok(result.ok);
     await deps.scheduler.idle();
     assert.ok(rejected);
-    assert.deepEqual(await deps.artifacts.list(result.value.taskId), []);
+    const settled = await deps.artifactService.list(principal, {
+      mode: 'cloud',
+      taskId: result.value.taskId,
+    });
+    assert.ok(settled.ok);
+    assert.deepEqual(settled.value.artifacts, []);
   } finally {
     await started.close();
   }

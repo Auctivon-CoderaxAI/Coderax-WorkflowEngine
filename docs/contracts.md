@@ -143,9 +143,22 @@ new submission.
   an idempotency key derived from its slot, so an overlapping tick cannot submit
 the same firing twice. `nextRunAt` always moves a full interval from the firing
   time, so a paused or busy period produces skipped firings, not a catch-up storm.
-- An artifact's `digest` is `sha256:` over the bytes the engine stored. A caller
-  never supplies `bytes` or `digest`; an owner attachment is hashed on arrival and
-  a completed run's transcript is stored as `result.md`.
+- An artifact has one global identity. `GET /v1/artifacts` lists the owner's
+  artifacts in one data-mode partition; `GET /v1/artifacts/{artifactId}`,
+  `…/versions`, `…/content` and `…/export` read one, and `POST /v1/artifacts`
+  uploads base64 bytes. The task-scoped routes (`/v1/work/{taskId}/artifacts`)
+  are projections of the same store: they scope by task and derive the mode and
+  conversation from the task, but they add no second storage path.
+- `sha256` is lowercase hex over the exact stored bytes, and `bytes` and
+  `sha256` are never supplied by a caller. Versions are immutable rows: uploading
+  a new version leaves the previous one downloadable by number.
+- Durable means durable. When `persistence.driver=memory` the blob store reports
+  `durable: false` and every artifact write is refused with
+  `storage_unavailable` (503) instead of being accepted and lost on restart. An
+  owner over quota gets `quota_exceeded` (507); a request body over the limit gets
+  `payload_too_large` (413). The engine no longer records a run transcript as an
+  artifact, because a file it cannot keep is not a result. Task status reads
+  result artifacts back from the artifact store.
 - `searchMemory` is lexical and deterministic. It is retrieval, not a model call,
   and it only ever sees the owner's single data-mode partition.
 

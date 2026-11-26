@@ -76,6 +76,25 @@ for await (const frame of client.chatStream({ message: 'Hello' })) {
 `client.chat()` performs the same turn and returns the `chat.completed` reply as
 one JSON body. Both paths run the same server code; only the transport differs.
 
+## Artifacts
+
+```ts
+const stored = await client.uploadArtifact({
+  filename: 'notes.txt',
+  mediaType: 'text/plain',
+  contentBase64: Buffer.from('owner note').toString('base64'),
+});
+const bytes = await client.downloadArtifact(stored.artifact.artifactId);
+const history = await client.listArtifactVersions(stored.artifact.artifactId);
+```
+
+`sha256` and `bytes` are computed by the engine. Uploading a new version leaves
+the old one addressable by number; `deleteArtifact` releases every retained
+version. The task-scoped `client.artifacts(taskId)`, `client.artifact(...)` and
+`client.createArtifact(...)` are projections over the same store. A deployment
+with `persistence.driver=memory` refuses uploads with `storage_unavailable`
+rather than accepting bytes it cannot keep.
+
 ## Work streaming and replay
 
 ```ts

@@ -2,9 +2,9 @@ import type {
   AgentId,
   AgentList,
   ArtifactContent,
-  ArtifactCreateRequest,
-  ArtifactList,
-  ArtifactRecord,
+  ArtifactDescriptorList,
+  ArtifactUploadResult,
+  TaskArtifactUploadRequestInput,
   BudgetState,
   ChatReply,
   ChatRequest,
@@ -66,8 +66,7 @@ import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
-import type { ArtifactStore } from '../artifacts/store.js';
-import { encodingFor, toArtifactRecord } from '../artifacts/store.js';
+import type { ArtifactService } from '../artifacts/service.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
@@ -94,7 +93,7 @@ export type ApplicationServiceDeps = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
-  artifacts: ArtifactStore;
+  artifactService: ArtifactService;
   schedules: ScheduleStore;
   idempotency: IdempotencyStore;
   audit: AuditLog;
@@ -177,17 +176,22 @@ export type ApplicationService = {
     principal: Principal,
     taskId: string,
   ) => Promise<ServiceResult<NotificationList>>;
-  artifacts: (principal: Principal, taskId: string) => Promise<ServiceResult<ArtifactList>>;
-  artifact: (
+  /** Durable artifact storage; the only path that returns artifact bytes. */
+  artifacts: ArtifactService;
+  taskArtifacts: (
+    principal: Principal,
+    taskId: string,
+  ) => Promise<ServiceResult<ArtifactDescriptorList>>;
+  taskArtifact: (
     principal: Principal,
     taskId: string,
     artifactId: string,
   ) => Promise<ServiceResult<ArtifactContent>>;
-  createArtifact: (
+  createTaskArtifact: (
     principal: Principal,
     taskId: string,
-    body: ArtifactCreateRequest,
-  ) => Promise<ServiceResult<ArtifactRecord>>;
+    body: TaskArtifactUploadRequestInput,
+  ) => Promise<ServiceResult<ArtifactUploadResult>>;
   schedules: (principal: Principal) => Promise<ScheduleList>;
   createSchedule: (
     principal: Principal,
@@ -407,23 +411,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   }
 
   /**
-   * The transcript is the run's visible output, so it is also its artifact. A
-   * completion with no text produces no artifact rather than an empty one.
-   * A store failure costs the artifact, never the settlement.
-   */
-  function stageTranscript(task: TaskRecord, text: string) {
-    if (!text) return null;
-    const staged = deps.artifacts.stage({
-      taskId: task.taskId,
-      conversationId: task.conversationId,
-      path: 'result.md',
-      mediaType: 'text/markdown; charset=utf-8',
-      content: Buffer.from(text, 'utf8'),
-      origin: 'engine',
-    });
-    return staged.ok ? staged.value : null;
-  }
-
   /**
    * Persists a terminal outcome only while this generation still owns the task.
    * When ownership was lost the function writes nothing at all: a superseded run
@@ -439,17 +426,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const now = deps.clock.iso();
-    const staged = outcome.kind === 'completed' ? stageTranscript(task, checkpoint?.text ?? '') : null;
     let patch: Parameters<TaskRepository['updateFenced']>[0]['patch'];
     if (outcome.kind === 'completed') {
       const summary = outcome.summary.slice(0, 20_000);
       patch = {
         state: 'completed',
         updatedAt: now,
-        result: {
-          summary,
-          artifacts: staged ? [{ path: staged.blob.path, bytes: staged.blob.bytes, digest: staged.blob.digest }] : [],
-        },
+        result: { summary, artifacts: [] },
         ...(outcome.usage ? { usage: outcome.usage } : {}),
       };
     } else if (outcome.kind === 'cancelled') {
@@ -470,11 +453,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       taskId: task.taskId,
       token,
       patch: checkpoint ? { ...patch, checkpoint } : patch,
-    }).catch((error: unknown) => {
-      staged?.finish(false);
-      throw error;
     });
-    staged?.finish(applied.applied);
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
         await releaseLease(task, token);
@@ -1195,7 +1174,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const reconciled = await reconcile(found.value);
-      return ok(toStatus(reconciled));
+      const status = toStatus(reconciled);
+      // Result artifacts are read from the artifact service rather than copied
+      // into the fenced task row. The task remains the authority on state; the
+      // artifact store is the authority on files, and a download can be made
+      // from exactly the descriptors reported here.
+      const listed = await deps.artifactService.list(principal, {
+        mode: reconciled.mode,
+        taskId: reconciled.taskId,
+        limit: 100,
+      });
+      if (listed.ok && listed.value.artifacts.length > 0) {
+        status.result = {
+          ...(status.result ?? {}),
+          artifacts: listed.value.artifacts.map((artifact) => ({
+            path: artifact.relativePath ?? artifact.filename,
+            bytes: artifact.bytes,
+            digest: artifact.sha256,
+          })),
+        };
+      }
+      return ok(status);
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -1455,59 +1454,47 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return ok(await deps.notifications.list(principal.ownerId));
     },
 
-    artifacts: async (principal, taskId) => {
+    artifacts: deps.artifactService,
+
+    /**
+     * The task routes are projections, not a second artifact authority: a task
+     * only scopes the same owner- and mode-partitioned store the global routes
+     * use. A known artifact id that belongs to another task is reported absent.
+     */
+    taskArtifacts: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      return ok({
-        artifacts: (await deps.artifacts.list(taskId)).map(toArtifactRecord),
+      return deps.artifactService.list(principal, {
+        mode: found.value.mode,
+        taskId,
+        limit: 200,
       });
     },
 
-    artifact: async (principal, taskId, artifactId) => {
+    taskArtifact: async (principal, taskId, artifactId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      const blob = await deps.artifacts.get(taskId, artifactId);
-      if (!blob) return fail('not_found', 'That artifact does not exist for this task.');
-      const encoding = encodingFor(blob);
-      return ok({
-        artifact: toArtifactRecord(blob),
-        encoding,
-        content: blob.content.toString(encoding === 'base64' ? 'base64' : 'utf8'),
-      });
-    },
-
-    createArtifact: async (principal, taskId, body) => {
-      const found = ownedTask(await deps.tasks.get(taskId), principal);
-      if (!found.ok) return found;
-      let content: Buffer;
-      if (body.encoding === 'base64') {
-        const normalized = body.content.replace(/\s+/g, '');
-        content = Buffer.from(normalized, 'base64');
-        // Buffer.from is lenient about malformed base64; a round-trip is not.
-        if (content.toString('base64').replace(/=+$/, '') !== normalized.replace(/=+$/, '')) {
-          return fail('validation_failed', 'content is not valid base64.');
-        }
-      } else {
-        content = Buffer.from(body.content, 'utf8');
+      const descriptor = await deps.artifactService.get(
+        principal,
+        artifactId,
+        found.value.mode,
+      );
+      if (!descriptor.ok) return descriptor;
+      if (descriptor.value.taskId !== taskId) {
+        return fail('not_found', 'That artifact does not exist for this task.');
       }
-      const stored = await deps.artifacts.write({
+      return deps.artifactService.download(principal, artifactId, { mode: found.value.mode });
+    },
+
+    createTaskArtifact: async (principal, taskId, body) => {
+      const found = ownedTask(await deps.tasks.get(taskId), principal);
+      if (!found.ok) return found;
+      return deps.artifactService.upload(principal, {
+        ...body,
+        mode: found.value.mode,
         taskId,
         conversationId: found.value.conversationId,
-        path: body.path,
-        mediaType: body.mediaType,
-        content,
-        origin: 'owner',
       });
-      if (!stored.ok) return stored;
-      deps.audit.record({
-        actor: principal.ownerId,
-        action: 'artifact.created',
-        taskId,
-        conversationId: found.value.conversationId,
-        outcome: 'accepted',
-        detail: `path=${body.path} bytes=${stored.value.bytes}`,
-      });
-      return ok(toArtifactRecord(stored.value));
     },
 
     schedules: async (principal) => ({

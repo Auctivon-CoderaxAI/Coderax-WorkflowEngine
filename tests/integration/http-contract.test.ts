@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { CoderaxApiError } from '@coderax/sdk';
 import { CONTRACT_VERSION } from '@coderax/contracts';
@@ -115,48 +114,37 @@ test('Chat, Work, read models, artifacts, permissions, notifications and memory 
     assert.equal(completed.generation, 1);
     assert.equal(completed.cancelRequested, false);
     assert.ok(completed.result?.summary);
-    assert.equal(completed.result?.artifacts.length, 1, 'the run transcript is not an artifact');
+    assert.equal(completed.result?.artifacts.length, 0);
 
     // Task read model.
     const tasks = await client.tasks({ limit: 10 });
     assert.ok(tasks.tasks.some((entry) => entry.taskId === accepted.taskId));
     assert.equal((await client.tasks({ state: 'failed' })).tasks.length, 0);
 
-    // Artifacts: the engine computed the digest over the stored bytes.
+    // Artifacts are durable by contract. This deployment is process-local, so
+    // the engine records no file it could not keep, and an upload is refused
+    // with a named storage failure rather than accepted and lost on restart.
     const artifacts = await client.artifacts(accepted.taskId);
-    const record = artifacts.artifacts[0];
-    assert.ok(record);
-    assert.equal(record.path, 'result.md');
-    assert.equal(record.origin, 'engine');
-    const content = await client.artifact(accepted.taskId, record.artifactId);
-    assert.equal(content.encoding, 'utf8');
-    assert.equal(
-      `sha256:${createHash('sha256').update(content.content, 'utf8').digest('hex')}`,
-      record.digest,
-      'the reported digest does not match the stored bytes',
+    assert.deepEqual(artifacts.artifacts, []);
+    assert.equal(artifacts.quota.artifacts, 0);
+    assert.deepEqual((await client.listArtifacts()).artifacts, []);
+
+    await assert.rejects(
+      () =>
+        client.createArtifact(accepted.taskId, {
+          filename: 'notes.txt',
+          mediaType: 'text/plain',
+          contentBase64: Buffer.from('owner note', 'utf8').toString('base64'),
+        }),
+      (error: unknown) =>
+        error instanceof CoderaxApiError &&
+        error.status === 503 &&
+        error.code === 'storage_unavailable',
     );
-
-    // An owner attachment is stored with an engine-computed digest too.
-    const attached = await client.createArtifact(accepted.taskId, {
-      path: 'notes.txt',
-      mediaType: 'text/plain',
-      encoding: 'utf8',
-      content: 'owner note',
-    });
-    assert.equal(attached.origin, 'owner');
-    assert.equal(attached.bytes, 10);
-    assert.equal((await client.artifacts(accepted.taskId)).artifacts.length, 2);
-
-    const binary = Buffer.from([0, 1, 2, 250, 251]).toString('base64');
-    const stored = await client.createArtifact(accepted.taskId, {
-      path: 'raw.bin',
-      mediaType: 'application/octet-stream',
-      encoding: 'base64',
-      content: binary,
-    });
-    const read = await client.artifact(accepted.taskId, stored.artifactId);
-    assert.equal(read.encoding, 'base64');
-    assert.equal(read.content, binary);
+    await assert.rejects(
+      () => client.getArtifact('art_missing'),
+      (error: unknown) => error instanceof CoderaxApiError && error.status === 404,
+    );
 
     // Permissions: nothing was requested, and an unknown request is a 404 Problem.
     assert.deepEqual((await client.permissions(accepted.taskId)).requests, []);

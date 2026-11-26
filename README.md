@@ -36,7 +36,7 @@ are clients of the same versioned API.
 | Cursor replay with an explicit truncation frame | Implemented | `stream.truncated`, `tests/integration/streaming.test.ts` |
 | Task list read model, notification read, memory write/search | Implemented | `/v1/tasks` (`/v1/work` alias), `/v1/notifications/{taskId}`, `/v1/memory` |
 | Schedule operations (create, list, pause, resume, delete) | Implemented, process-local | `src/scheduling`, `tests/integration/lifecycle.test.ts` |
-| Artifact operations with engine-computed sha256 digests | Implemented, process-local | `src/artifacts`, `src/api/routes.ts` |
+| Durable artifacts: global identity, immutable versions, quota admission | Implemented; MongoDB-backed when selected, uploads refused on `memory` | `src/artifacts`, `src/persistence/mongo-artifacts.ts` |
 | Idempotent task submission | Implemented | `src/persistence/idempotency.ts` |
 | Reproducible SDK artifact with checksums | Implemented | `packages/sdk/sdk-artifact.json`, `npm run sdk:check` |
 | Cross-repository HTTP contract harness | Implemented | `tests/integration/http-contract.test.ts` |
@@ -48,7 +48,7 @@ are clients of the same versioned API.
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
-| Schedule, artifact and idempotency-key persistence | In-memory only; lost on restart | `src/scheduling`, `src/artifacts`, `src/persistence/idempotency.ts` |
+| Schedule and idempotency-key persistence | In-memory only; lost on restart | `src/scheduling`, `src/persistence/idempotency.ts` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |
 
@@ -64,7 +64,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 131 tests: unit, contract, integration, security, e2e
+npm test                          # 135 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 npm run sdk:check                 # fails if the committed SDK artifact drifted
 ```

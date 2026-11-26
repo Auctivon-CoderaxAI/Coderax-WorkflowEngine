@@ -2,68 +2,269 @@ import { z } from 'zod';
 import {
   ArtifactId,
   ConversationId,
+  DataMode,
   IsoDateTime,
+  ProjectId,
+  Sha256,
   TaskId,
 } from './primitives.js';
 
 /**
- * Artifacts are the files a run produced, addressed by task.
+ * Durable artifacts.
  *
- * The digest is computed by the engine over the stored bytes, so a client can
- * verify that what it downloaded is what the engine recorded. `bytes` and
- * `digest` are never supplied by a caller: a caller that could state them could
- * lie about content the engine is about to hand to someone else.
+ * An artifact is the authoritative record of a file the owner uploaded or the
+ * engine generated. The bytes are content-addressed and stored behind the same
+ * durable persistence the rest of the engine uses; the descriptor is the only
+ * shape a client sees. Padding, offsets and storage keys never appear on the
+ * wire.
+ *
+ * Two boundaries are contractual rather than advisory:
+ *
+ * - `inferenceExposure` is the literal `'none'`. An artifact is never handed to
+ *   a model or an external agent implicitly; only an explicit, scoped read by
+ *   the owner through this API retrieves it.
+ * - Media types are a closed allowlist. Executable, scriptable and generic
+ *   archive formats are not on it, so a stored artifact cannot become a code
+ *   path and archive contents are never expanded.
  */
 
-/** 1 MiB, the same ceiling the HTTP transport enforces for a request body. */
-export const ARTIFACT_MAX_BYTES = 1_048_576;
-/** Beyond this a task's artifact list is truncated at write time, not read time. */
-export const ARTIFACT_MAX_PER_TASK = 64;
+/** Decoded byte ceiling for one artifact version. */
+export const MAX_ARTIFACT_BYTES = 10_485_760;
+/** Base64 ceiling for a request body carrying one version. */
+export const MAX_ARTIFACT_BASE64_CHARS = 14_000_000;
+/** JSON envelope ceiling for upload operations, including base64 expansion. */
+export const ARTIFACT_BODY_LIMIT_BYTES = 16_777_216;
 
-export const ArtifactOrigin = z.enum(['engine', 'owner']);
-export type ArtifactOrigin = z.infer<typeof ArtifactOrigin>;
+export const ArtifactKind = z.enum([
+  'document',
+  'pdf',
+  'spreadsheet',
+  'presentation',
+  'image',
+  'audio',
+  'video',
+  'source',
+  'project',
+  'game',
+  'visualization',
+  'execution',
+  'data',
+  'software',
+  'dataset',
+  'other',
+]);
+export type ArtifactKind = z.infer<typeof ArtifactKind>;
 
-export const ArtifactRecord = z
+/**
+ * The accepted media types. `text/html`, `image/svg+xml` and every generic
+ * archive type are deliberately absent: a client that renders a download must
+ * never receive active content from this service.
+ */
+export const ARTIFACT_MEDIA_TYPES = [
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'text/tab-separated-values',
+  'application/json',
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.oasis.opendocument.text',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.oasis.opendocument.spreadsheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.oasis.opendocument.presentation',
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/ogg',
+  'audio/flac',
+  'audio/mp4',
+  'video/mp4',
+  'video/webm',
+  'video/ogg',
+  'video/quicktime',
+] as const;
+
+export const ArtifactMediaType = z.enum(ARTIFACT_MEDIA_TYPES);
+export type ArtifactMediaType = z.infer<typeof ArtifactMediaType>;
+
+export const ArtifactFilename = z.string().trim().min(1).max(200).describe('artifact file name');
+
+export const ArtifactDescriptor = z
   .object({
     artifactId: ArtifactId,
-    taskId: TaskId,
-    conversationId: ConversationId,
-    path: z.string().min(1).max(1024),
-    mediaType: z.string().min(1).max(160),
-    bytes: z.number().int().nonnegative(),
-    /** `sha256:` followed by lowercase hex, computed over the stored bytes. */
-    digest: z
-      .string()
-      .regex(/^sha256:[0-9a-f]{64}$/, 'digest must be sha256:<64 lowercase hex characters>'),
-    origin: ArtifactOrigin,
+    kind: ArtifactKind,
+    filename: ArtifactFilename,
+    /**
+     * A validated workspace-relative path for a file inside a multi-file
+     * project. It is metadata only: storage keys are digests, and no path is
+     * ever opened. The basename always equals `filename`.
+     */
+    relativePath: z.string().min(1).max(1024).optional(),
+    mediaType: ArtifactMediaType,
+    bytes: z.number().int().nonnegative().max(MAX_ARTIFACT_BYTES),
+    /** Lowercase hex SHA-256 of the current version's exact bytes. */
+    sha256: Sha256,
+    mode: DataMode,
+    version: z.number().int().positive(),
+    /** Retained version count, including the current one. */
+    versions: z.number().int().positive(),
+    projectId: ProjectId.optional(),
+    conversationId: ConversationId.optional(),
+    taskId: TaskId.optional(),
     createdAt: IsoDateTime,
+    updatedAt: IsoDateTime,
+    expiresAt: IsoDateTime.optional(),
+    /**
+     * Immutable. The service has no path that submits artifact content to a
+     * model, an adapter or an inference provider.
+     */
+    inferenceExposure: z.literal('none'),
   })
   .strict();
-export type ArtifactRecord = z.infer<typeof ArtifactRecord>;
+export type ArtifactDescriptor = z.infer<typeof ArtifactDescriptor>;
 
-export const ArtifactList = z.object({ artifacts: z.array(ArtifactRecord) }).strict();
-export type ArtifactList = z.infer<typeof ArtifactList>;
+export const ArtifactVersionDescriptor = z
+  .object({
+    artifactId: ArtifactId,
+    version: z.number().int().positive(),
+    filename: ArtifactFilename,
+    relativePath: z.string().min(1).max(1024).optional(),
+    mediaType: ArtifactMediaType,
+    kind: ArtifactKind,
+    bytes: z.number().int().nonnegative().max(MAX_ARTIFACT_BYTES),
+    sha256: Sha256,
+    createdAt: IsoDateTime,
+    note: z.string().max(500).optional(),
+  })
+  .strict();
+export type ArtifactVersionDescriptor = z.infer<typeof ArtifactVersionDescriptor>;
 
-export const ArtifactEncoding = z.enum(['utf8', 'base64']);
-export type ArtifactEncoding = z.infer<typeof ArtifactEncoding>;
+export const ArtifactQuota = z
+  .object({
+    usedBytes: z.number().int().nonnegative(),
+    maxBytes: z.number().int().nonnegative(),
+    artifacts: z.number().int().nonnegative(),
+    maxArtifacts: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ArtifactQuota = z.infer<typeof ArtifactQuota>;
+
+export const ArtifactDescriptorList = z
+  .object({ artifacts: z.array(ArtifactDescriptor), quota: ArtifactQuota })
+  .strict();
+export type ArtifactDescriptorList = z.infer<typeof ArtifactDescriptorList>;
+
+export const ArtifactVersionList = z
+  .object({ artifactId: ArtifactId, versions: z.array(ArtifactVersionDescriptor) })
+  .strict();
+export type ArtifactVersionList = z.infer<typeof ArtifactVersionList>;
+
+/**
+ * Upload accepts base64 so the bytes travel through the single validated JSON
+ * surface instead of a second transport contract. `sha256` is optional; when a
+ * client sends it, a mismatch rejects the upload rather than storing different
+ * bytes than the client believes it sent.
+ */
+export const ArtifactUploadRequest = z
+  .object({
+    filename: ArtifactFilename,
+    relativePath: z.string().min(1).max(1024).optional(),
+    mediaType: ArtifactMediaType,
+    contentBase64: z.string().min(1).max(MAX_ARTIFACT_BASE64_CHARS),
+    sha256: Sha256.optional(),
+    kind: ArtifactKind.optional(),
+    mode: DataMode.default('private'),
+    projectId: ProjectId.optional(),
+    conversationId: ConversationId.optional(),
+    taskId: TaskId.optional(),
+    /** 0 keeps the artifact until it is deleted. Bounded by engine config. */
+    retentionDays: z.number().int().min(0).max(3650).optional(),
+    note: z.string().max(500).optional(),
+  })
+  .strict();
+export type ArtifactUploadRequest = z.infer<typeof ArtifactUploadRequest>;
+export type ArtifactUploadRequestInput = z.input<typeof ArtifactUploadRequest>;
+
+export const ArtifactVersionRequest = z
+  .object({
+    filename: ArtifactFilename,
+    relativePath: z.string().min(1).max(1024).optional(),
+    mediaType: ArtifactMediaType,
+    contentBase64: z.string().min(1).max(MAX_ARTIFACT_BASE64_CHARS),
+    sha256: Sha256.optional(),
+    kind: ArtifactKind.optional(),
+    mode: DataMode.default('private'),
+    retentionDays: z.number().int().min(0).max(3650).optional(),
+    note: z.string().max(500).optional(),
+  })
+  .strict();
+export type ArtifactVersionRequest = z.infer<typeof ArtifactVersionRequest>;
+export type ArtifactVersionRequestInput = z.input<typeof ArtifactVersionRequest>;
+
+/**
+ * The task-scoped projection of an upload. Mode, task and conversation are
+ * derived from the task, never stated by the caller: a client cannot attach
+ * bytes to a task in another owner's partition by supplying an id.
+ */
+export const TaskArtifactUploadRequest = ArtifactUploadRequest.omit({
+  mode: true,
+  taskId: true,
+  conversationId: true,
+});
+export type TaskArtifactUploadRequest = z.infer<typeof TaskArtifactUploadRequest>;
+export type TaskArtifactUploadRequestInput = z.input<typeof TaskArtifactUploadRequest>;
+
+export const ArtifactUploadResult = z
+  .object({ artifact: ArtifactDescriptor, version: ArtifactVersionDescriptor })
+  .strict();
+export type ArtifactUploadResult = z.infer<typeof ArtifactUploadResult>;
 
 export const ArtifactContent = z
   .object({
-    artifact: ArtifactRecord,
-    encoding: ArtifactEncoding,
-    content: z.string(),
+    artifact: ArtifactDescriptor,
+    version: ArtifactVersionDescriptor,
+    contentBase64: z.string().max(MAX_ARTIFACT_BASE64_CHARS),
   })
   .strict();
 export type ArtifactContent = z.infer<typeof ArtifactContent>;
 
-export const ArtifactCreateRequest = z
+/**
+ * A portable export: the descriptor, every retained version's metadata and the
+ * exact bytes of one version. Export never widens access; it is the same
+ * owner-scoped read as a download with the version manifest attached.
+ */
+export const ArtifactExport = z
   .object({
-    path: z.string().min(1).max(1024),
-    mediaType: z.string().min(1).max(160).default('text/plain'),
-    encoding: ArtifactEncoding.default('utf8'),
-    /** Bounded so a base64 payload cannot exceed the transport's body limit. */
-    content: z.string().max(700_000),
+    artifact: ArtifactDescriptor,
+    versions: z.array(ArtifactVersionDescriptor),
+    version: ArtifactVersionDescriptor,
+    contentBase64: z.string().max(MAX_ARTIFACT_BASE64_CHARS),
+    exportedAt: IsoDateTime,
   })
   .strict();
-export type ArtifactCreateRequest = z.infer<typeof ArtifactCreateRequest>;
-export type ArtifactCreateRequestInput = z.input<typeof ArtifactCreateRequest>;
+export type ArtifactExport = z.infer<typeof ArtifactExport>;
+
+export const ArtifactModeRequest = z.object({ mode: DataMode.default('private') }).strict();
+export type ArtifactModeRequest = z.infer<typeof ArtifactModeRequest>;
+
+export const ArtifactDeleteResult = z
+  .object({
+    artifactId: ArtifactId,
+    deletedVersions: z.number().int().nonnegative(),
+    releasedBytes: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ArtifactDeleteResult = z.infer<typeof ArtifactDeleteResult>;
+
+export const ArtifactPruneResult = z
+  .object({
+    pruned: z.number().int().nonnegative(),
+    releasedBytes: z.number().int().nonnegative(),
+    at: IsoDateTime,
+  })
+  .strict();
+export type ArtifactPruneResult = z.infer<typeof ArtifactPruneResult>;
