@@ -108,6 +108,10 @@ export async function ensureArtifactIndexes(
     { name: 'artifact_version_digest' },
   );
   await blobs.createIndex({ key: 1 }, { unique: true, name: 'artifact_blob_key' });
+  await blobs.createIndex(
+    { refCount: 1, createdAtMs: 1 },
+    { name: 'artifact_blob_references' },
+  );
   await chunks.createIndex({ key: 1, index: 1 }, { unique: true, name: 'artifact_chunk_key' });
 }
 
@@ -356,6 +360,7 @@ export function createMongoBlobStore(input: {
       let chunkCount = 0;
       try {
         chunkCount = await commitChunks(key, content);
+        const createdAt = input.clock.iso();
         await blobs.insertOne({
           key,
           ownerId,
@@ -363,7 +368,9 @@ export function createMongoBlobStore(input: {
           sha256,
           bytes,
           chunks: chunkCount,
-          createdAt: input.clock.iso(),
+          refCount: 0,
+          createdAt,
+          createdAtMs: Date.parse(createdAt),
         });
         return { created: true };
       } catch (error) {
@@ -394,6 +401,37 @@ export function createMongoBlobStore(input: {
       return content;
     },
 
+    acquire: async ({ ownerId, mode, sha256 }) => {
+      const key = blobKey({ ownerId, mode, sha256 });
+      const acquired = await blobs.updateOne(
+        { key },
+        { $inc: { refCount: 1 } },
+        { upsert: false },
+      );
+      return (acquired.matchedCount ?? 0) === 1;
+    },
+
+    release: async ({ ownerId, mode, sha256 }) => {
+      const key = blobKey({ ownerId, mode, sha256 });
+      const updated = await blobs.findOneAndUpdate(
+        { key, refCount: { $gt: 0 } },
+        { $inc: { refCount: -1 } },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      return updated && typeof updated.refCount === 'number' ? updated.refCount : 0;
+    },
+
+    deleteIfUnreferenced: async ({ ownerId, mode, sha256 }) => {
+      const key = blobKey({ ownerId, mode, sha256 });
+      // The condition is in the delete itself. If an acquire wins the race the
+      // delete matches nothing; if the delete wins the acquire finds no document
+      // and the writer re-puts the bytes. Neither ordering can lose a reference.
+      const removed = await blobs.deleteOne({ key, refCount: { $lte: 0 } });
+      if ((removed.deletedCount ?? 0) !== 1) return false;
+      await chunks.deleteMany({ key });
+      return true;
+    },
+
     delete: async ({ ownerId, mode, sha256 }) => {
       const key = blobKey({ ownerId, mode, sha256 });
       // Descriptor first: once it is gone the blob is unreachable, so a crash
@@ -401,6 +439,45 @@ export function createMongoBlobStore(input: {
       const removed = await blobs.deleteOne({ key });
       await chunks.deleteMany({ key });
       return (removed.deletedCount ?? 0) === 1;
+    },
+
+    maintain: async ({ graceMs, limit }) => {
+      const boundedLimit = Math.max(1, Math.floor(limit));
+      const cutoff = Date.parse(input.clock.iso()) - Math.max(0, graceMs);
+      const stale = await blobs
+        .find({ refCount: { $lte: 0 }, createdAtMs: { $lt: cutoff } })
+        .limit(boundedLimit)
+        .toArray();
+      let unreferencedBlobs = 0;
+      for (const document of stale) {
+        if (typeof document.key !== 'string') continue;
+        const removed = await blobs.deleteOne({
+          key: document.key,
+          refCount: { $lte: 0 },
+        });
+        if ((removed.deletedCount ?? 0) === 1) {
+          await chunks.deleteMany({ key: document.key });
+          unreferencedBlobs += 1;
+        }
+      }
+
+      // A sample of chunk rows is enough to reclaim the common failure: chunks
+      // committed before their descriptor, or left by a delete that crashed.
+      const sample = await chunks.find({}).limit(boundedLimit * 8).toArray();
+      const keys = [
+        ...new Set(
+          sample
+            .map((document) => document.key)
+            .filter((key): key is string => typeof key === 'string'),
+        ),
+      ].slice(0, boundedLimit);
+      let orphanChunks = 0;
+      for (const key of keys) {
+        if (await blobs.findOne({ key })) continue;
+        const removed = await chunks.deleteMany({ key });
+        orphanChunks += removed.deletedCount ?? 0;
+      }
+      return { orphanChunks, unreferencedBlobs };
     },
 
     check: async () => {

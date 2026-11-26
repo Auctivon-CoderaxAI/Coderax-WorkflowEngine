@@ -6,6 +6,11 @@ import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
 import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 import { base64, pngBytes } from '../fixtures/artifacts.js';
 import {
+  requireRealMongo,
+  startRealMongo,
+  type RealMongo,
+} from '../fixtures/real-mongo.js';
+import {
   baseConfig,
   createWorkspaces,
   fakeGateway,
@@ -26,46 +31,8 @@ import {
  * version history, and that deletion releases the stored chunks.
  */
 
-type RealMongo = {
-  uri: string;
-  describe: string;
-  stop: () => Promise<void>;
-};
-
-async function startRealMongo(): Promise<RealMongo | null> {
-  const configured = process.env.CODERAX_TEST_MONGODB_URI?.trim();
-  if (configured) {
-    return {
-      uri: configured,
-      describe: 'CODERAX_TEST_MONGODB_URI',
-      stop: async () => undefined,
-    };
-  }
-
-  const specifier = 'mongodb-memory-server';
-  try {
-    const module = (await import(specifier)) as {
-      MongoMemoryServer: {
-        create: (options?: unknown) => Promise<{
-          getUri: () => string;
-          stop: () => Promise<boolean>;
-        }>;
-      };
-    };
-    const server = await module.MongoMemoryServer.create();
-    return {
-      uri: server.getUri(),
-      describe: 'mongodb-memory-server (real mongod)',
-      stop: async () => {
-        await server.stop();
-      },
-    };
-  } catch {
-    return null;
-  }
-}
-
 const maybeMongo = await startRealMongo();
+requireRealMongo(maybeMongo);
 
 async function startEngine(input: {
   database: MongoDatabase;

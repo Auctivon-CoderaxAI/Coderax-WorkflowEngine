@@ -20,6 +20,8 @@ import type { ArtifactRecord, ArtifactVersionRecord } from '../domain.js';
 import type { ArtifactKey, ArtifactRepository } from '../persistence/artifacts.js';
 import type { BlobStore } from '../persistence/blobs.js';
 import { BlobIntegrityError, verifyContent } from '../persistence/blobs.js';
+import type { CapacityReservation, CapacityStore } from '../persistence/capacity.js';
+import { RESERVATION_TTL_MS } from '../persistence/capacity.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -56,6 +58,8 @@ export type ArtifactService = {
   /** True only when the configured backend can survive a restart. */
   durable: boolean;
   backend: string;
+  /** Rebuilds quota availability from committed rows; refuses while a reservation is live. */
+  reconcile: () => Promise<void>;
   list: (
     principal: Principal,
     query: {
@@ -112,6 +116,9 @@ export type ArtifactService = {
 export type ArtifactServiceDeps = {
   artifacts: ArtifactRepository;
   blobs: BlobStore;
+  capacity: CapacityStore;
+  /** The single owner whose quota this instance reconciles and admits. */
+  ownerId: string;
   conversations: ConversationRepository;
   tasks: TaskRepository;
   audit: AuditLog;
@@ -278,13 +285,113 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     return ok(validated.value);
   }
 
-  async function releaseIfUnreferenced(key: {
+  /** One version owns one reference; releasing it can delete only at zero. */
+  async function releaseDigest(ref: {
     ownerId: string;
     mode: DataMode;
     sha256: string;
   }): Promise<void> {
-    if (await deps.artifacts.referenced(key)) return;
-    await deps.blobs.delete(key);
+    await deps.blobs.release(ref);
+    await deps.blobs.deleteIfUnreferenced(ref);
+  }
+
+  /**
+   * Writes the bytes once and takes a counted reference. A maintenance sweep can
+   * delete a zero-reference blob between `put` and `acquire`; the retry re-puts
+   * the same content and tries again. Only a genuine write failure escapes.
+   */
+  async function retainBytes(
+    ref: { ownerId: string; mode: DataMode; sha256: string },
+    content: Uint8Array,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await deps.blobs.put({ ...ref, bytes: content.length, content });
+      if (await deps.blobs.acquire(ref)) return true;
+    }
+    await deps.blobs.deleteIfUnreferenced(ref).catch(() => undefined);
+    return false;
+  }
+
+  function quotaFailure(reason: 'bytes' | 'artifacts') {
+    return reason === 'artifacts'
+      ? fail(
+          'quota_exceeded',
+          `The artifact count quota of ${settings.maxArtifactsPerOwner} is exhausted for this mode.`,
+        )
+      : fail(
+          'quota_exceeded',
+          `The artifact storage quota of ${settings.maxBytesPerOwner} bytes is exhausted for this mode.`,
+        );
+  }
+
+  async function reserveQuota(input: {
+    principal: Principal;
+    mode: DataMode;
+    bytes: number;
+    artifacts: number;
+    artifactId: string;
+    version: number;
+  }): Promise<ServiceResult<CapacityReservation>> {
+    const decision = await deps.capacity.reserve({
+      ownerId: input.principal.ownerId,
+      mode: input.mode,
+      bytes: input.bytes,
+      artifacts: input.artifacts,
+      artifactId: input.artifactId,
+      version: input.version,
+      now: deps.clock.iso(),
+      maxBytes: settings.maxBytesPerOwner,
+      maxArtifacts: settings.maxArtifactsPerOwner,
+      ttlMs: RESERVATION_TTL_MS,
+    });
+    return decision.ok ? ok(decision.reservation) : quotaFailure(decision.reason);
+  }
+
+  /** Releases the references and the quota of an artifact that no longer exists. */
+  async function refundRemoved(input: {
+    ownerId: string;
+    mode: DataMode;
+    artifact: ArtifactRecord | null;
+    versions: ArtifactVersionRecord[];
+  }): Promise<number> {
+    if (!input.artifact) return 0;
+    const bytes = input.versions.reduce((total, row) => total + row.bytes, 0);
+    for (const row of input.versions) {
+      await releaseDigest({
+        ownerId: input.ownerId,
+        mode: input.mode,
+        sha256: row.sha256,
+      });
+    }
+    await deps.capacity.refund({
+      ownerId: input.ownerId,
+      mode: input.mode,
+      bytes,
+      artifacts: 1,
+    });
+    return bytes;
+  }
+
+  /**
+   * Resolves admissions that outlived their process. A reservation whose version
+   * row exists is committed; one whose row never materialized returns its quota.
+   */
+  async function sweepReservations(at: string): Promise<void> {
+    const expired = await deps.capacity.expired({ now: at, limit: SWEEP_LIMIT });
+    for (const reservation of expired) {
+      const materialized = await deps.artifacts.version({
+        ownerId: reservation.ownerId,
+        mode: reservation.mode,
+        artifactId: reservation.artifactId,
+        version: reservation.version,
+      });
+      if (materialized) await deps.capacity.commit(reservation);
+      else await deps.capacity.release(reservation);
+    }
+    await deps.capacity.discardStale({
+      before: new Date(Date.parse(at) - 3_600_000).toISOString(),
+      limit: SWEEP_LIMIT,
+    });
   }
 
   function audit(input: {
@@ -313,10 +420,16 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       if (!removed) continue;
       count -= 1;
       released += removed.bytes;
-      await releaseIfUnreferenced({
+      await releaseDigest({
         ownerId: key.ownerId,
         mode: key.mode,
         sha256: removed.sha256,
+      });
+      await deps.capacity.refund({
+        ownerId: key.ownerId,
+        mode: key.mode,
+        bytes: removed.bytes,
+        artifacts: 0,
       });
     }
     return released;
@@ -395,32 +508,32 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const expires = expiryFor(request.retentionDays, now);
         if (!expires.ok) return expires;
 
-        const usage = await deps.artifacts.usage({ ownerId: principal.ownerId, mode: request.mode });
-        if (usage.artifacts >= settings.maxArtifactsPerOwner) {
-          return fail(
-            'quota_exceeded',
-            `The artifact count quota of ${settings.maxArtifactsPerOwner} is exhausted for this mode.`,
-          );
-        }
-        if (usage.bytes + prepared.value.bytes.length > settings.maxBytesPerOwner) {
-          return fail(
-            'quota_exceeded',
-            `The artifact storage quota of ${settings.maxBytesPerOwner} bytes is exhausted for this mode.`,
-          );
-        }
-
         const artifactId = deps.ids.artifactId();
         const sha256 = prepared.value.sha256;
         const bytes = prepared.value.bytes.length;
         const createdAt = now.toISOString();
 
-        await deps.blobs.put({
-          ownerId: principal.ownerId,
+        // Admission is one conditional decrement on the durable capacity row,
+        // not a usage read followed by a write. Two replicas racing the last
+        // byte cannot both be admitted.
+        const reservation = await reserveQuota({
+          principal,
           mode: request.mode,
-          sha256,
           bytes,
-          content: prepared.value.bytes,
+          artifacts: 1,
+          artifactId,
+          version: 1,
         });
+        if (!reservation.ok) return reservation;
+
+        const ref = { ownerId: principal.ownerId, mode: request.mode, sha256 };
+        if (!(await retainBytes(ref, prepared.value.bytes))) {
+          await deps.capacity.release(reservation.value).catch(() => undefined);
+          return fail(
+            'storage_unavailable',
+            'The artifact bytes could not be written durably, so no quota was kept.',
+          );
+        }
 
         const artifact: ArtifactRecord = {
           artifactId,
@@ -457,40 +570,15 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
         const created = await deps.artifacts.create({ artifact, version });
         if (!created.ok) {
-          await releaseIfUnreferenced({
-            ownerId: principal.ownerId,
-            mode: request.mode,
-            sha256,
-          });
+          await releaseDigest(ref).catch(() => undefined);
+          await deps.capacity.release(reservation.value).catch(() => undefined);
           return fail('conflict', 'That artifact identity is already in use.');
         }
 
-        // Quota is re-read after the write: a concurrent upload that pushed the
-        // total over the bound removes its own write here, so storage converges
-        // to the limit instead of exceeding it silently.
-        const after = await deps.artifacts.usage({
-          ownerId: principal.ownerId,
-          mode: request.mode,
-        });
-        if (
-          after.bytes > settings.maxBytesPerOwner ||
-          after.artifacts > settings.maxArtifactsPerOwner
-        ) {
-          await deps.artifacts.remove({
-            ownerId: principal.ownerId,
-            mode: request.mode,
-            artifactId,
-          });
-          await releaseIfUnreferenced({
-            ownerId: principal.ownerId,
-            mode: request.mode,
-            sha256,
-          });
-          return fail(
-            'quota_exceeded',
-            `The artifact storage quota of ${settings.maxBytesPerOwner} bytes is exhausted for this mode.`,
-          );
-        }
+        // The version row exists, so the admission is committed usage. A failed
+        // commit is not a failed upload: the reservation expires and the sweep
+        // sees the version row and commits it without a refund.
+        await deps.capacity.commit(reservation.value).catch(() => undefined);
 
         audit({
           ownerId: principal.ownerId,
@@ -528,27 +616,27 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
               : expiryFor(request.retentionDays, now);
           if (!expires.ok) return expires;
 
-          const usage = await deps.artifacts.usage({
-            ownerId: principal.ownerId,
-            mode: request.mode,
-          });
-          if (usage.bytes + prepared.value.bytes.length > settings.maxBytesPerOwner) {
-            return fail(
-              'quota_exceeded',
-              `The artifact storage quota of ${settings.maxBytesPerOwner} bytes is exhausted for this mode.`,
-            );
-          }
-
           const sha256 = prepared.value.sha256;
           const bytes = prepared.value.bytes.length;
           const nextVersion = current.version + 1;
-          await deps.blobs.put({
-            ownerId: principal.ownerId,
+          const reservation = await reserveQuota({
+            principal,
             mode: request.mode,
-            sha256,
             bytes,
-            content: prepared.value.bytes,
+            artifacts: 0,
+            artifactId,
+            version: nextVersion,
           });
+          if (!reservation.ok) return reservation;
+
+          const ref = { ownerId: principal.ownerId, mode: request.mode, sha256 };
+          if (!(await retainBytes(ref, prepared.value.bytes))) {
+            await deps.capacity.release(reservation.value).catch(() => undefined);
+            return fail(
+              'storage_unavailable',
+              'The artifact bytes could not be written durably, so no quota was kept.',
+            );
+          }
 
           const updated: ArtifactRecord = {
             ...current,
@@ -582,34 +670,18 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             version,
           });
           if (!appended.ok) {
-            await releaseIfUnreferenced({
-              ownerId: principal.ownerId,
-              mode: request.mode,
-              sha256,
-            });
+            await releaseDigest(ref).catch(() => undefined);
+            await deps.capacity.release(reservation.value).catch(() => undefined);
             if (appended.reason === 'conflict' && attempt === 0) continue;
             return appended.reason === 'not_found'
               ? fail('not_found', 'That artifact does not exist for this owner.')
               : fail('conflict', 'That artifact changed concurrently; retry the upload.');
           }
 
+          // The version row exists, so this admission is committed usage. A
+          // lost commit is resolved by the expiry sweep against that row.
+          await deps.capacity.commit(reservation.value).catch(() => undefined);
           const released = await pruneVersions(key, nextVersion);
-          const after = await deps.artifacts.usage({
-            ownerId: principal.ownerId,
-            mode: request.mode,
-          });
-          if (after.bytes > settings.maxBytesPerOwner) {
-            await deps.artifacts.rollbackVersion({ ...key, version: nextVersion });
-            await releaseIfUnreferenced({
-              ownerId: principal.ownerId,
-              mode: request.mode,
-              sha256,
-            });
-            return fail(
-              'quota_exceeded',
-              `The artifact storage quota of ${settings.maxBytesPerOwner} bytes is exhausted for this mode.`,
-            );
-          }
 
           audit({
             ownerId: principal.ownerId,
@@ -638,23 +710,33 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const versionNumber = query.version ?? artifact.version;
         const version = await deps.artifacts.version({ ...key, version: versionNumber });
         if (!version) return fail('not_found', 'That artifact version does not exist.');
-        const content = await deps.blobs.get({
-          ownerId: principal.ownerId,
-          mode,
-          sha256: version.sha256,
-        });
-        if (!content) {
+        const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
+        if (!(await deps.blobs.acquire(ref))) {
           return fail(
             'storage_unavailable',
             'The stored bytes are unavailable; the artifact was not reconstructed from memory.',
           );
         }
-        verifyContent({ content, sha256: version.sha256, bytes: version.bytes });
-        return ok({
-          artifact: toDescriptor(artifact),
-          version: toVersionDescriptor(version),
-          contentBase64: Buffer.from(content).toString('base64'),
-        });
+        try {
+          const content = await deps.blobs.get(ref);
+          if (!content) {
+            return fail(
+              'storage_unavailable',
+              'The stored bytes are unavailable; the artifact was not reconstructed from memory.',
+            );
+          }
+          verifyContent({ content, sha256: version.sha256, bytes: version.bytes });
+          return ok({
+            artifact: toDescriptor(artifact),
+            version: toVersionDescriptor(version),
+            contentBase64: Buffer.from(content).toString('base64'),
+          });
+        } finally {
+          // A temporary reference keeps a concurrent delete from removing the
+          // chunks between the first and the last chunk read.
+          await deps.blobs.release(ref).catch(() => undefined);
+          await deps.blobs.deleteIfUnreferenced(ref).catch(() => undefined);
+        }
       }),
 
     exportBundle: (principal, artifactId, query) =>
@@ -667,36 +749,45 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const versionNumber = query.version ?? artifact.version;
         const version = rows.find((row) => row.version === versionNumber);
         if (!version) return fail('not_found', 'That artifact version does not exist.');
-        const content = await deps.blobs.get({
-          ownerId: principal.ownerId,
-          mode,
-          sha256: version.sha256,
-        });
-        if (!content) {
+        const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
+        if (!(await deps.blobs.acquire(ref))) {
           return fail(
             'storage_unavailable',
             'The stored bytes are unavailable; the export was not fabricated.',
           );
         }
-        verifyContent({ content, sha256: version.sha256, bytes: version.bytes });
-        return ok({
-          artifact: toDescriptor(artifact),
-          versions: rows.map(toVersionDescriptor),
-          version: toVersionDescriptor(version),
-          contentBase64: Buffer.from(content).toString('base64'),
-          exportedAt: deps.clock.iso(),
-        });
+        try {
+          const content = await deps.blobs.get(ref);
+          if (!content) {
+            return fail(
+              'storage_unavailable',
+              'The stored bytes are unavailable; the export was not fabricated.',
+            );
+          }
+          verifyContent({ content, sha256: version.sha256, bytes: version.bytes });
+          return ok({
+            artifact: toDescriptor(artifact),
+            versions: rows.map(toVersionDescriptor),
+            version: toVersionDescriptor(version),
+            contentBase64: Buffer.from(content).toString('base64'),
+            exportedAt: deps.clock.iso(),
+          });
+        } finally {
+          await deps.blobs.release(ref).catch(() => undefined);
+          await deps.blobs.deleteIfUnreferenced(ref).catch(() => undefined);
+        }
       }),
 
     remove: (principal, artifactId, mode) =>
       guard(async () => {
         const key = { ownerId: principal.ownerId, mode, artifactId };
         const removed = await deps.artifacts.remove(key);
-        const releasedBytes = removed.versions.reduce((total, row) => total + row.bytes, 0);
-        const digests = new Set(removed.versions.map((row) => row.sha256));
-        for (const sha256 of digests) {
-          await releaseIfUnreferenced({ ownerId: principal.ownerId, mode, sha256 });
-        }
+        const releasedBytes = await refundRemoved({
+          ownerId: principal.ownerId,
+          mode,
+          artifact: removed.artifact,
+          versions: removed.versions,
+        });
         if (!removed.artifact) {
           return fail('not_found', 'That artifact does not exist for this owner.');
         }
@@ -717,6 +808,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     prune: (principal, mode) =>
       guard(async () => {
         const at = deps.clock.iso();
+        await sweepReservations(at);
         const expired = await deps.artifacts.listExpired({
           now: at,
           limit: SWEEP_LIMIT,
@@ -730,14 +822,12 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             mode: record.mode,
             artifactId: record.artifactId,
           });
-          releasedBytes += removed.versions.reduce((total, row) => total + row.bytes, 0);
-          for (const row of removed.versions) {
-            await releaseIfUnreferenced({
-              ownerId: record.ownerId,
-              mode: record.mode,
-              sha256: row.sha256,
-            });
-          }
+          releasedBytes += await refundRemoved({
+            ownerId: record.ownerId,
+            mode: record.mode,
+            artifact: removed.artifact,
+            versions: removed.versions,
+          });
         }
         if (expired.length > 0) {
           audit({
@@ -751,9 +841,32 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         return ok({ pruned: expired.length, releasedBytes, at });
       }),
 
+    reconcile: async () => {
+      if (!deps.blobs.durable) return;
+      for (const mode of ['private', 'cloud'] as const) {
+        const usage = await deps.artifacts.usage({ ownerId: deps.ownerId, mode });
+        await deps.capacity.reconcile({
+          ownerId: deps.ownerId,
+          mode,
+          usedBytes: usage.bytes,
+          usedArtifacts: usage.artifacts,
+          maxBytes: settings.maxBytesPerOwner,
+          maxArtifacts: settings.maxArtifactsPerOwner,
+        });
+      }
+      await deps.capacity.discardStale({
+        before: new Date(deps.clock.now().getTime() - 3_600_000).toISOString(),
+        limit: SWEEP_LIMIT,
+      });
+    },
+
     sweepExpiredArtifacts: async () => {
       const at = deps.clock.iso();
       if (!deps.blobs.durable) return { pruned: 0, releasedBytes: 0, at };
+      // Reclaim abandoned chunks and old zero-reference blobs, then resolve
+      // admissions whose process died. Both are bounded so startup stays fast.
+      await deps.blobs.maintain({ graceMs: 86_400_000, limit: 200 });
+      await sweepReservations(at);
       const expired = await deps.artifacts.listExpired({ now: at, limit: SWEEP_LIMIT });
       let releasedBytes = 0;
       for (const record of expired) {
@@ -762,14 +875,12 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           mode: record.mode,
           artifactId: record.artifactId,
         });
-        releasedBytes += removed.versions.reduce((total, row) => total + row.bytes, 0);
-        for (const row of removed.versions) {
-          await releaseIfUnreferenced({
-            ownerId: record.ownerId,
-            mode: record.mode,
-            sha256: row.sha256,
-          });
-        }
+        releasedBytes += await refundRemoved({
+          ownerId: record.ownerId,
+          mode: record.mode,
+          artifact: removed.artifact,
+          versions: removed.versions,
+        });
       }
       return { pruned: expired.length, releasedBytes, at };
     },

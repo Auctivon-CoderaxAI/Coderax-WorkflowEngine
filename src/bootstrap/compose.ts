@@ -205,6 +205,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const artifactService = createArtifactService({
     artifacts: persistence.artifacts,
     blobs: persistence.blobs,
+    capacity: persistence.capacity,
+    ownerId: config.auth.ownerId,
     conversations,
     tasks,
     audit,
@@ -411,12 +413,15 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     server,
     persistence: { driver: persistence.driver },
     start: async () => {
+      // Rebuild quota availability from committed rows before the socket is
+      // open, so an early request cannot be admitted against stale capacity.
+      // The reconcile refuses to run while another replica's reservation is live.
+      await service.artifacts.reconcile();
       const { url } = await server.listen();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
-      // Retention is enforced at startup too, so a stale artifact does not
-      // depend on the next client request to be removed.
+      // Retention and abandoned reservations are enforced at startup too.
       await service.artifacts.sweepExpiredArtifacts();
       return { url };
     },

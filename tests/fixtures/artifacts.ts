@@ -3,6 +3,7 @@ import { ArtifactsConfig, type ArtifactsSettings } from '../../src/configuration
 import type { ArtifactRecord, ArtifactVersionRecord } from '../../src/domain.js';
 import { createArtifactRepository } from '../../src/persistence/artifacts.js';
 import { createInMemoryBlobStore, type BlobStore } from '../../src/persistence/blobs.js';
+import { createInMemoryCapacityStore } from '../../src/persistence/capacity.js';
 import { createConversationRepository } from '../../src/persistence/conversations.js';
 import { createTaskRepository } from '../../src/persistence/tasks.js';
 import { createArtifactService, type ArtifactService } from '../../src/artifacts/service.js';
@@ -112,10 +113,13 @@ export function artifactHarness(
   const audit = createAuditLog({ clock, ids });
   const repository = createArtifactRepository();
   const blobs = options.durable === false ? createInMemoryBlobStore() : testDurableBlobs();
+  const capacity = createInMemoryCapacityStore();
   const settings = artifactSettings(options.settings);
   const service = createArtifactService({
     artifacts: repository,
     blobs,
+    capacity,
+    ownerId: OWNER_ID,
     conversations,
     tasks,
     audit,

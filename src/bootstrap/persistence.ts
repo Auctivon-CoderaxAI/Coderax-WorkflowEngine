@@ -19,6 +19,12 @@ import type { ArtifactRepository } from '../persistence/artifacts.js';
 import { createInMemoryBlobStore } from '../persistence/blobs.js';
 import type { BlobStore } from '../persistence/blobs.js';
 import {
+  createInMemoryCapacityStore,
+  createMongoCapacityStore,
+  ensureCapacityIndexes,
+} from '../persistence/capacity.js';
+import type { CapacityStore } from '../persistence/capacity.js';
+import {
   createMongoArtifactRepository,
   createMongoBlobStore,
   ensureArtifactIndexes,
@@ -49,6 +55,8 @@ export type PersistenceStores = {
    * artifact service refuses uploads through it rather than losing them later.
    */
   blobs: BlobStore;
+  /** Atomic quota admission and expiring reservations. */
+  capacity: CapacityStore;
   close: () => Promise<void>;
 };
 
@@ -117,6 +125,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       notifications: createNotificationStore(),
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
+      capacity: createInMemoryCapacityStore(),
       close: NO_CLOSE,
     };
   }
@@ -132,6 +141,10 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactVersions = database.collection(collectionName(config, 'artifact_versions'));
   const artifactBlobs = database.collection(collectionName(config, 'artifact_blobs'));
   const artifactChunks = database.collection(collectionName(config, 'artifact_chunks'));
+  const artifactCapacity = database.collection(collectionName(config, 'artifact_capacity'));
+  const artifactReservations = database.collection(
+    collectionName(config, 'artifact_reservations'),
+  );
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -146,6 +159,10 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
     await ensureArtifactIndexes(artifactCollections);
+    await ensureCapacityIndexes({
+      capacity: artifactCapacity,
+      reservations: artifactReservations,
+    });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -169,6 +186,10 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       collections: { blobs: artifactBlobs, chunks: artifactChunks },
       clock,
       chunkBytes: config.artifacts.chunkBytes,
+    }),
+    capacity: createMongoCapacityStore({
+      capacity: artifactCapacity,
+      reservations: artifactReservations,
     }),
     close: database.close,
   };

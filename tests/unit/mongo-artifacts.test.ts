@@ -5,7 +5,7 @@ import {
   createMongoBlobStore,
   ensureArtifactIndexes,
 } from '../../src/persistence/mongo-artifacts.js';
-import { BlobIntegrityError, verifyContent } from '../../src/persistence/blobs.js';
+import { blobKey, BlobIntegrityError, verifyContent } from '../../src/persistence/blobs.js';
 import { digestOf } from '../../src/artifacts/media.js';
 import { createFakeDatabase, type FakeCollection } from '../fakes/mongo.js';
 import { cryptoRandomBytes } from '../fixtures/bytes.js';
@@ -194,6 +194,79 @@ test('content is chunked, verified on read and removed with its descriptor', asy
   assert.equal(await blobs.delete({ ownerId: OWNER_ID, mode: 'cloud', sha256 }), true);
   assert.equal(collections.blobs.documents.length, 0);
   assert.equal(collections.chunks.documents.length, 0);
+});
+
+test('references are counted and deletion is conditional on zero', async () => {
+  const { collections } = setup();
+  await ensureArtifactIndexes(collections);
+  const blobs = createMongoBlobStore({
+    collections: { blobs: collections.blobs, chunks: collections.chunks },
+    clock: mutableClock(),
+    chunkBytes: 65_536,
+  });
+  const content = Buffer.from('shared bytes');
+  const sha256 = digestOf(content);
+  const ref = { ownerId: OWNER_ID, mode: 'cloud' as const, sha256 };
+
+  await blobs.put({ ...ref, bytes: content.length, content });
+  assert.equal(await blobs.acquire(ref), true);
+  assert.equal(await blobs.acquire(ref), true);
+  assert.equal(await blobs.release(ref), 1);
+  // One reference remains, so the conditional delete must refuse.
+  assert.equal(await blobs.deleteIfUnreferenced(ref), false);
+  assert.ok(await blobs.get(ref));
+
+  assert.equal(await blobs.release(ref), 0);
+  assert.equal(await blobs.deleteIfUnreferenced(ref), true);
+  assert.equal(await blobs.get(ref), null);
+  assert.equal(await blobs.acquire(ref), false);
+  assert.equal(await blobs.deleteIfUnreferenced(ref), false);
+});
+
+test('maintenance reclaims orphaned chunks and old zero-reference blobs', async () => {
+  const { collections } = setup();
+  await ensureArtifactIndexes(collections);
+  const clock = mutableClock();
+  const blobs = createMongoBlobStore({
+    collections: { blobs: collections.blobs, chunks: collections.chunks },
+    clock,
+    chunkBytes: 65_536,
+  });
+
+  await collections.chunks.insertOne({
+    key: blobKey({ ownerId: OWNER_ID, mode: 'cloud', sha256: 'f'.repeat(64) }),
+    index: 0,
+    data: Buffer.from('orphan').toString('base64'),
+  });
+  const first = await blobs.maintain({ graceMs: 0, limit: 10 });
+  assert.ok(first.orphanChunks >= 1);
+  assert.equal(collections.chunks.documents.length, 0);
+
+  const abandoned = Buffer.from('abandoned content');
+  const abandonedSha = digestOf(abandoned);
+  await blobs.put({
+    ownerId: OWNER_ID,
+    mode: 'cloud',
+    sha256: abandonedSha,
+    bytes: abandoned.length,
+    content: abandoned,
+  });
+  clock.advance(2 * 86_400_000);
+  const second = await blobs.maintain({ graceMs: 86_400_000, limit: 10 });
+  assert.equal(second.unreferencedBlobs, 1);
+  assert.equal(collections.blobs.documents.length, 0);
+  assert.equal(collections.chunks.documents.length, 0);
+
+  const kept = Buffer.from('still referenced');
+  const keptSha = digestOf(kept);
+  const keptRef = { ownerId: OWNER_ID, mode: 'cloud' as const, sha256: keptSha };
+  await blobs.put({ ...keptRef, bytes: kept.length, content: kept });
+  await blobs.acquire(keptRef);
+  clock.advance(2 * 86_400_000);
+  const third = await blobs.maintain({ graceMs: 86_400_000, limit: 10 });
+  assert.equal(third.unreferencedBlobs, 0);
+  assert.equal(collections.blobs.documents.length, 1);
+  assert.ok(await blobs.get(keptRef));
 });
 
 test('identical content is stored once and is idempotent', async () => {

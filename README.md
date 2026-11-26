@@ -38,7 +38,7 @@ are clients of the same versioned API.
 | Coderax Native agent | Implemented | `src/agents/native` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
-| Durable artifacts (metadata, versions, content) | Implemented; MongoDB-backed, verified across a real engine restart | `docs/artifacts.md`, `tests/integration/artifacts-durable.test.ts` |
+| Durable artifacts (metadata, versions, content) | Implemented; MongoDB-backed, verified across a real engine restart and two-replica concurrency | `docs/artifacts.md`, `tests/integration/artifacts-durable.test.ts`, `tests/integration/artifacts-concurrency.test.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |

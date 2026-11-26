@@ -17,8 +17,10 @@ content-addressed bytes in the database the engine already uses.
 | --- | --- | --- |
 | Artifact descriptor | `artifact` collection | One authoritative row per artifact |
 | Immutable versions | `artifact_versions` collection | History is auditable; a version is never rewritten |
-| Content descriptor | `artifact_blobs` collection | Commit marker for one digest |
+| Content descriptor | `artifact_blobs` collection | Commit marker for one digest and its reference count |
 | Content chunks | `artifact_chunks` collection | 1 MiB chunks keep each document under MongoDB's 16 MiB limit |
+| Quota capacity | `artifact_capacity` collection | Atomic available bytes and artifacts per owner and mode |
+| Admissions | `artifact_reservations` collection | Expiring, recoverable in-flight quota |
 
 - **Durability requires `persistence.driver=mongo`.** With `memory`, the service
   reports `durable: false` and every write is refused with
@@ -35,6 +37,11 @@ content-addressed bytes in the database the engine already uses.
   stored once *within a partition*. Deliberately, the same bytes in `private`
   and `cloud` are stored twice: deduplicating across modes would create a
   cross-mode side channel.
+- **Counted references.** Each retained version owns exactly one reference on
+  its digest. The reference is acquired before the version row is written and
+  released after it is removed. Deletion is a conditional delete at count zero,
+  so a version that appears while a delete is in flight wins and keeps the
+  bytes.
 
 ## Data model
 
@@ -147,11 +154,24 @@ Defaults (all overridable in `engine.json` under `artifacts`):
 | `maxRetentionDays` | 365 | 3,650 |
 | `chunkBytes` | 1 MiB | 64 KiB–4 MiB |
 
-Quota is checked before a write and re-read afterwards under the same owner and
-mode. A write that pushed the partition over the bound removes itself and its
-unreferenced content, so durable usage converges to the limit instead of
-exceeding it silently. Pruning an old version decrements usage and releases a
-digest only when no retained version still references it.
+Admission is **one conditional `$inc`** on the partition's capacity row, not a
+usage read followed by a write. The filter requires enough available bytes and
+artifacts and the increment spends them in the same server-side operation, so
+two replicas racing the last slot cannot both be admitted. A refusal is
+`507 quota_exceeded`, and a refusal never leaves a blob or a reservation behind.
+
+Every admission also writes an expiring reservation before the capacity moves.
+The sweep resolves an expired reservation against its claimed version: if the
+version row exists the reservation is committed (the capacity is real usage); if
+not, the capacity is released. A crash can therefore under-admit temporarily,
+but it cannot permanently reserve quota or over-admit. A release marks the row
+before refunding, so a crash during release loses a refund that startup
+`reconcile` repairs rather than issuing the refund twice.
+
+`reconcile` rebuilds availability from committed rows at startup and refuses to
+run while another replica's reservation is live. Pruning an old version refunds
+its bytes and releases its digest reference; deleting an artifact refunds its
+current bytes and its artifact slot.
 
 Retention is artifact-level. `POST /v1/artifacts/prune` enforces it on demand and
 `app.start()` runs the same sweep, so an expired artifact does not wait for a
@@ -187,7 +207,39 @@ node --test dist/tests/integration/artifacts-durable.test.js
 ```
 
 When neither is available the test **skips with that reason**. A skip is not
-evidence of durability and is reported as a skip, not as a pass.
+evidence of durability and is reported as a skip, not as a pass. Setting
+`CODERAX_REQUIRE_MONGODB=1` turns a missing server into a failure; the required
+`verify` workflow sets it and runs against a pinned `mongo:7.0` service
+container, so the real-database lane cannot silently disappear. Hosted execution
+is evidence only when the `verify` workflow has actually run at the exact head;
+a local green run does not imply a hosted run.
+
+At the artifact branch head, `npm run verify` passed **147/147 tests with zero
+skips** against a real mongod, and `openapi:check` passed. The durable restart
+test and the five concurrency tests are the evidence for the claims above; no
+production database has been exercised.
+
+### Concurrency and recovery
+
+`tests/integration/artifacts-concurrency.test.ts` runs two engine processes
+against one real deployment and proves:
+
+- an artifact written by one replica is listed and downloaded by the other;
+- six concurrent uploads of identical bytes produce one blob row with six
+  references, and deleting one leaves the other five readable;
+- ten uploads racing a three-artifact byte quota admit exactly three, leave no
+  reservation rows, and delete back to the full quota;
+- an abandoned admission returns its capacity, while a reservation whose
+  version exists is committed rather than refunded;
+- a deleted chunk makes download and export fail as corruption, never return
+  reconstructed bytes;
+- deleting an artifact while a reader holds a temporary reference keeps the
+  bytes readable until that reference is released.
+
+Startup maintenance also removes chunk rows whose descriptor never committed
+and zero-reference descriptors older than a grace period. A crash between a
+chunk write and its descriptor leaves an inert, reclaimable chunk rather than a
+read that promises missing bytes.
 
 ## Limits that remain
 
@@ -196,6 +248,16 @@ evidence of durability and is reported as a skip, not as a pass.
 - There is no background scheduler; retention runs at startup and on request.
 - There is no archive extraction, by design.
 - There is no sharing surface: Coderax has exactly one principal.
+- Preview and filename search are **not exposed**. Listing filters by kind,
+  project, conversation and task; every descriptor carries its digest, and a
+  download re-verifies it. No endpoint advertises a capability that does not
+  exist.
+- The ledger and the metadata write are separate documents, not one transaction.
+  A crash between them under-admits until the expiry sweep or startup reconcile;
+  it never over-admits.
+- Coderax Web and CoderaxCLI live in other repositories. They can use the shared
+  SDK's artifact methods, but no client change or cross-client test was made in
+  this repository.
 - The Native agent returns text; artifacts are stored when a client or a task
   uploads them or associates them with a task. Nothing generates files on its
   own.
