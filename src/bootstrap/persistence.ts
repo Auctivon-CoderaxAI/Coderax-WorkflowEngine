@@ -33,11 +33,14 @@ import {
   ensureNotificationIndexes,
   ensureTaskIndexes,
 } from '../persistence/mongo-tables.js';
+import { budgetCollectionName, ensureBudgetIndexes } from '../persistence/budgets.js';
 import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
   permissionCollection?: MongoCollectionLike;
+  /** Present only for the durable driver; the quota window is shared state. */
+  budgetCollection?: MongoCollectionLike;
   lease: LeaseStore;
   tasks: TaskRepository;
   executions: ExecutionRepository;
@@ -130,6 +133,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const eventHeads = database.collection(collectionName(config, 'event_heads'));
 
   const permissionCollection = database.collection(collectionName(config, 'permissions'));
+  const budgetCollection = database.collection(budgetCollectionName(collectionName(config, '')));
   try {
     await permissionCollection.createIndex({ requestId: 1 }, { unique: true, name: 'permission_request' });
     await permissionCollection.createIndex({ ownerId: 1, taskId: 1 }, { name: 'permission_task' });
@@ -140,6 +144,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
     await ensureEventIndexes({ events, heads: eventHeads });
+    await ensureBudgetIndexes(budgetCollection);
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -150,6 +155,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   return {
     driver: 'mongo',
     permissionCollection,
+    budgetCollection,
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
     executions: createMongoExecutionRepository(executions),

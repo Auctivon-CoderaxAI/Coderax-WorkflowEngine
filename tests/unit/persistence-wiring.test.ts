@@ -7,6 +7,7 @@ import { createFakeCollection, createFakeDatabase } from '../fakes/mongo.js';
 import {
   baseConfig,
   createWorkspaces,
+  fakeGateway,
   fakeProvider,
   OWNER_TOKEN,
   waitFor,

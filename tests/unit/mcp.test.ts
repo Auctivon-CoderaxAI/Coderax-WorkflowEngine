@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { connectMcpServer, createMcpTools } from '../../src/mcp/client.js';
+import { attachMcpServers } from '../../src/mcp/client.js';
 import type { ToolContext } from '../../src/tools/types.js';
 
 function context(): ToolContext {
@@ -79,9 +79,9 @@ test('an HTTP MCP server contributes namespaced tools that can be called', async
   assert.ok(address && typeof address === 'object');
   const url = `http://127.0.0.1:${address.port}/mcp`;
 
-  const connection = await connectMcpServer({ name: 'demo', transport: 'http', url });
+  const attachment = await attachMcpServers([{ name: 'demo', transport: 'http', url }]);
   try {
-    const tools = await createMcpTools({ connection });
+    const tools = attachment.tools;
     assert.equal(tools.length, 1);
     const tool = tools[0];
     assert.ok(tool);
@@ -93,7 +93,7 @@ test('an HTTP MCP server contributes namespaced tools that can be called', async
     assert.equal(result.ok && result.output, 'echo:hello');
     assert.deepEqual(seen, ['initialize', 'tools/list', 'tools/call']);
   } finally {
-    await connection.close();
+    await attachment.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

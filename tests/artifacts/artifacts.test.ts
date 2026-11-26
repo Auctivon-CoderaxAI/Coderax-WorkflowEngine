@@ -36,7 +36,7 @@ for (const workspace of ['contracts', 'sdk']) {
     const pkg = manifest(workspace);
     assert.equal(pkg.private, true, 'a private repository must not publish an accidental package');
     assert.deepEqual(pkg.files, ['dist']);
-    assert.equal(pkg.version, '1.0.0');
+    assert.equal(pkg.version, '1.1.0');
     assert.equal(pkg.type, 'module');
     assert.equal(pkg.main, './dist/index.js');
     assert.equal(pkg.types, './dist/index.d.ts');

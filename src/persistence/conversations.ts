@@ -2,6 +2,26 @@ import type { ConversationRecord, StoredMessage } from '../domain.js';
 import type { Conversation, ConversationList, Message } from '@coderax/contracts';
 import type { AgentId, DataMode } from '@coderax/contracts';
 
+/**
+ * A conversation carries an owner, a data mode and a kind of work.
+ *
+ * Reusing an identifier across any of them would move a private transcript into a
+ * cloud run (or a Work transcript into a chat), so `ensure` refuses the collision
+ * instead of returning the existing row. The caller maps the reason onto a stable
+ * problem; the repository is the authority.
+ */
+export type ConversationConflictReason = 'owner' | 'mode' | 'kind';
+
+export class ConversationConflictError extends Error {
+  readonly reason: ConversationConflictReason;
+
+  constructor(reason: ConversationConflictReason) {
+    super('conversation identity conflict');
+    this.name = 'ConversationConflictError';
+    this.reason = reason;
+  }
+}
+
 export type ConversationRepository = {
   ensure: (record: ConversationRecord) => Promise<ConversationRecord>;
   get: (ownerId: string, conversationId: string) => Promise<ConversationRecord | null>;
@@ -33,9 +53,9 @@ export function createConversationRepository(): ConversationRepository {
     ensure: async (record) => {
       const existing = conversations.get(record.conversationId);
       if (existing) {
-        if (existing.ownerId !== record.ownerId) {
-          throw new Error('conversation identity collision across owners');
-        }
+        if (existing.ownerId !== record.ownerId) throw new ConversationConflictError('owner');
+        if (existing.mode !== record.mode) throw new ConversationConflictError('mode');
+        if (existing.isWork !== record.isWork) throw new ConversationConflictError('kind');
         return existing;
       }
       conversations.set(record.conversationId, { ...record });

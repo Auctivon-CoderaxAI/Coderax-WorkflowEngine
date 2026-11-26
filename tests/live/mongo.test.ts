@@ -6,10 +6,13 @@ import { test } from 'node:test';
 import { MongoClient } from 'mongodb';
 import { composeApplication } from '../../src/bootstrap/compose.js';
 import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
+import type { MongoCollectionLike } from '../../src/persistence/mongo.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../../src/persistence/budgets.js';
+import { createBudgetLedger } from '../../src/models/budget.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../../src/persistence/mongo.js';
 import { createLeaseStore } from '../../src/persistence/work-runs.js';
 import { workRunKey } from '../../src/execution/lease.js';
-import { baseConfig, fakeGateway, OWNER_TOKEN, taskRecord, waitFor } from '../helpers.js';
+import { baseConfig, fakeGateway, fakeProvider, OWNER_TOKEN, taskRecord, waitFor } from '../helpers.js';
 
 /**
  * Real MongoDB only.
@@ -62,6 +65,7 @@ test(
           },
         ),
         env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+        providers: [{ adapter: fakeProvider() }],
         gateway: fakeGateway(),
       });
       assert.deepEqual(app.persistence, { driver: 'mongo' });
@@ -177,6 +181,7 @@ test(
     const first = await composeApplication({
       config: appConfig,
       env,
+      providers: [{ adapter: fakeProvider() }],
       gateway: fakeGateway(),
     });
     let taskId = '';
@@ -203,6 +208,7 @@ test(
       const second = await composeApplication({
         config: appConfig,
         env,
+        providers: [{ adapter: fakeProvider() }],
         gateway: fakeGateway(),
       });
       try {
@@ -251,6 +257,7 @@ test(
         },
       ),
       env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+      providers: [{ adapter: fakeProvider() }],
       gateway: fakeGateway(),
     });
     try {
@@ -322,6 +329,7 @@ test(
         },
       ),
       env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+      providers: [{ adapter: fakeProvider() }],
       gateway: fakeGateway(),
     });
     const principal = { ownerId: 'owner-test', isOwner: true as const };
@@ -400,7 +408,7 @@ test(
       },
     );
     const env = { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string };
-    const first = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+    const first = await composeApplication({ config: appConfig, env, providers: [{ adapter: fakeProvider() }], gateway: fakeGateway() });
     const notification = {
       taskId: 'task_notify_live',
       ownerId: 'owner-test',
@@ -418,7 +426,7 @@ test(
       await first.stop();
       firstStopped = true;
 
-      const second = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+      const second = await composeApplication({ config: appConfig, env, providers: [{ adapter: fakeProvider() }], gateway: fakeGateway() });
       try {
         const before = await second.dependencies.notifications.list(notification.ownerId);
         assert.equal(before.unread, 1);
@@ -428,7 +436,7 @@ test(
         await second.stop();
       }
 
-      const third = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+      const third = await composeApplication({ config: appConfig, env, providers: [{ adapter: fakeProvider() }], gateway: fakeGateway() });
       try {
         const after = await third.dependencies.notifications.list(notification.ownerId);
         assert.equal(after.unread, 0);
@@ -443,6 +451,65 @@ test(
       await cleanup.db(databaseName).dropDatabase().catch(() => undefined);
       await cleanup.close().catch(() => undefined);
       rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'a real database shares one quota window and settles a reservation once',
+  { skip: uri ? false : required ? false : 'CODERAX_TEST_MONGO_URI is not set' },
+  async () => {
+    requiresDatabase();
+    const client = new MongoClient(uri as string);
+    await client.connect();
+    const database = client.db(databaseName);
+    const collection = database.collection('live_budget') as unknown as MongoCollectionLike;
+    try {
+      await collection.deleteMany({});
+      await ensureBudgetIndexes(collection);
+      const now = new Date('2026-11-26T10:00:00.000Z');
+      const first = createBudgetLedger({
+        maxRequestsPerDay: 1,
+        maxTokensPerDay: 1_000,
+        store: createMongoBudgetStore(collection),
+      });
+      const second = createBudgetLedger({
+        maxRequestsPerDay: 1,
+        maxTokensPerDay: 1_000,
+        store: createMongoBudgetStore(collection),
+      });
+
+      // Two replicas race for the only request slot in the day.
+      const outcomes = await Promise.all([
+        first.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
+        second.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
+      ]);
+      assert.equal(outcomes.filter((outcome) => outcome.allowed).length, 1);
+      const winner = outcomes.find((outcome) => outcome.allowed);
+      assert.ok(winner && winner.allowed);
+      if (!winner || !winner.allowed) return;
+
+      // A replayed settlement must not charge the owner twice.
+      await Promise.all([
+        first.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 }),
+        first.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 }),
+      ]);
+
+      // A fresh process reads the same durable window, not a local copy.
+      const restarted = createBudgetLedger({
+        maxRequestsPerDay: 1,
+        maxTokensPerDay: 1_000,
+        store: createMongoBudgetStore(collection),
+      });
+      assert.deepEqual(await restarted.snapshot('owner', now), {
+        requests: 1,
+        inputTokens: 7,
+        outputTokens: 3,
+      });
+      assert.equal(await restarted.available('owner', now), false);
+    } finally {
+      await database.collection('live_budget').drop().catch(() => undefined);
+      await client.close().catch(() => undefined);
     }
   },
 );

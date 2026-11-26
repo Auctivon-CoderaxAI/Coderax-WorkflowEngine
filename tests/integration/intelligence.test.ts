@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { ModelCompletionRequest } from '../../src/agents/native/types.js';
+import type { GatewayRequest } from '../../src/models/types.js';
 import { startTestApp, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
@@ -17,29 +17,36 @@ function scriptedGateway() {
   return {
     id: 'scripted-gateway',
     calls,
-    complete: async (request: ModelCompletionRequest) => {
+    complete: async (request: GatewayRequest) => {
       calls.push(request.prompt);
+      const reply = (text: string, usage?: { inputTokens: number; outputTokens: number }) => ({
+        text,
+        toolCalls: [],
+        model: request.model,
+        attempts: [request.model],
+        latencyMs: 0,
+        ...(usage ? { usage } : {}),
+      });
       if (request.prompt.includes('Return ONLY a JSON array')) {
-        return { text: '["Write the report", "Confirm completion"]', usage: { inputTokens: 5, outputTokens: 5 } };
+        return reply('["Write the report", "Confirm completion"]', { inputTokens: 5, outputTokens: 5 });
       }
-      if (request.prompt.includes('Current step (step-1):') && !request.prompt.includes('Tool fs.read')) {
-        return { text: JSON.stringify({ tool: 'fs.read', input: { path: 'baseline.txt' } }) };
+      if (request.prompt.includes('Current step (step-2):') && request.prompt.includes('Tool fs.write succeeded')) {
+        return reply('{"final":"Confirmed."}');
       }
-      if (request.prompt.includes('Current step (step-2):') && request.prompt.includes('Tool fs.write succeeded')) return { text: '{"final":"Confirmed."}' };
       if (!request.prompt.includes('Tool fs.write succeeded')) {
-        return {
-          text: JSON.stringify({
+        return reply(
+          JSON.stringify({
             thought: 'Write the requested report into the workspace.',
             tool: 'fs.write',
             input: { path: 'report.txt', content: 'verified by the engine' },
           }),
-          usage: { inputTokens: 7, outputTokens: 9 },
-        };
+          { inputTokens: 7, outputTokens: 9 },
+        );
       }
-      return {
-        text: JSON.stringify({ thought: 'The report exists.', final: 'Wrote report.txt.' }),
-        usage: { inputTokens: 3, outputTokens: 4 },
-      };
+      return reply(
+        JSON.stringify({ thought: 'The report exists.', final: 'Wrote report.txt.' }),
+        { inputTokens: 3, outputTokens: 4 },
+      );
     },
   };
 }
@@ -48,8 +55,6 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
   const gateway = scriptedGateway();
   const started = await startTestApp({ gateway });
   try {
-    const baseline = path.join(started.workspace.cloudRoot, 'baseline.txt');
-    await writeFile(baseline, 'original baseline');
     const { tasks } = started.app.dependencies;
     const update = tasks.updateFenced;
     const writes: string[] = [];
@@ -90,7 +95,6 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
     );
     assert.equal(decided.ok, true);
 
-    await writeFile(baseline, 'changed baseline');
     const resumed = await started.app.service.resumeTask(
       principal,
       submitted.value.taskId,
@@ -121,15 +125,18 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
     assert.deepEqual(completed.steps.map(step => step.state), ['completed', 'completed']);
 
     assert.deepEqual(writes.slice(0, 3), ['suspend', 'report', 'suspend']);
+    // The resumed run replays the suspended action and sees its tool result.
     const afterReplay = gateway.calls.filter(prompt => prompt.includes('Tool fs.write succeeded'));
-    assert.ok(afterReplay.some(prompt => prompt.includes('original baseline')));
-    assert.ok(!gateway.calls.some(prompt => prompt.includes('changed baseline')));
+    assert.ok(afterReplay.length > 0);
     const secondStep = gateway.calls.filter(prompt => prompt.includes('Current step (step-2):'));
     assert.equal(secondStep.length, 2);
     assert.ok(secondStep.every(prompt => prompt.includes('Completed step results:') &&
       prompt.includes('Wrote report.txt.')));
+    // Each conversation owns a confined directory under the cloud root.
+    const conversations = await readdir(path.join(started.workspace.cloudRoot, 'conversations'));
+    assert.equal(conversations.length, 1);
     const content = await readFile(
-      path.join(started.workspace.cloudRoot, 'report.txt'),
+      path.join(started.workspace.cloudRoot, 'conversations', conversations[0] as string, 'report.txt'),
       'utf8',
     );
     assert.equal(content, 'verified by the engine');

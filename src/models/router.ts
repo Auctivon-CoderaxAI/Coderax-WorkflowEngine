@@ -373,7 +373,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       if (!state.supported || state.costClass !== 'free') continue;
       // Cost, capability and policy are independent dimensions. A provider that
       // is free and capable is still excluded unless this exact operation is
-      // approved for this data mode.
+      // approved for this data mode and the provider's evidence permits it.
       const permission = policy.evaluate({
         providerId: state.ref.providerId,
         operation: input.operation,
@@ -845,7 +845,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
       // Reserve the daily budget before consuming provider rate-limit capacity.
       // A request the owner cannot afford must not make the provider unusable.
-      const reserved = budget.reserve({
+      const reserved = await budget.reserve({
         ownerId: request.ownerId,
         at,
         inputTokens: estimated,
@@ -862,12 +862,12 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
       const runtimeAdmission = runtime.circuit.allow(at);
       if (!runtimeAdmission) {
-        budget.release(reserved.reservation.id);
+        await budget.release(reserved.reservation.id);
         continue;
       }
       const providerAdmission = provider.circuit.allow(at);
       if (!providerAdmission) {
-        budget.release(reserved.reservation.id);
+        await budget.release(reserved.reservation.id);
         runtime.circuit.abandon(runtimeAdmission);
         continue;
       }
@@ -877,7 +877,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       });
       if (acquired.allowed) noteUsage(provider, at);
       if (!acquired.allowed) {
-        budget.release(reserved.reservation.id);
+        await budget.release(reserved.reservation.id);
         runtime.circuit.abandon(runtimeAdmission);
         provider.circuit.abandon(providerAdmission);
         lastFailure = new ProviderError(
@@ -909,7 +909,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         });
         const latencyMs = Math.max(0, performance.now() - started);
         acquired.release();
-        budget.settle(reserved.reservation.id, completion.usage ?? {
+        await budget.settle(reserved.reservation.id, completion.usage ?? {
           inputTokens: estimated,
           outputTokens: output,
         });
@@ -931,7 +931,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         acquired.release();
         // The provider may already have received this request. Charge the
         // request slot, but return the token allowance that was not reported.
-        budget.release(reserved.reservation.id, { dispatched });
+        await budget.release(reserved.reservation.id, { dispatched });
         const providerError =
           error instanceof ProviderError
             ? error
@@ -1004,7 +1004,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
       // Daily budget admission comes first so a denied request cannot consume a
       // provider request token or claim a half-open probe.
-      const reserved = budget.reserve({
+      const reserved = await budget.reserve({
         ownerId: request.ownerId,
         at,
         inputTokens: estimated,
@@ -1019,19 +1019,19 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
       const runtimeAdmission = runtime.circuit.allow(at);
       if (!runtimeAdmission) {
-        budget.release(reserved.reservation.id);
+        await budget.release(reserved.reservation.id);
         continue;
       }
       const providerAdmission = provider.circuit.allow(at);
       if (!providerAdmission) {
-        budget.release(reserved.reservation.id);
+        await budget.release(reserved.reservation.id);
         runtime.circuit.abandon(runtimeAdmission);
         continue;
       }
       const acquired = provider.limiter.acquire({ tokens: estimated + output, now: at });
       if (acquired.allowed) noteUsage(provider, at);
       if (!acquired.allowed) {
-        budget.release(reserved.reservation.id);
+        await budget.release(reserved.reservation.id);
         runtime.circuit.abandon(runtimeAdmission);
         provider.circuit.abandon(providerAdmission);
         lastFailure = new ProviderError('rate_limit', 'The local provider ceiling is already in use.', {
@@ -1086,7 +1086,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           !revalidatedPolicy.allowed
         ) {
           acquired.release();
-          budget.release(reserved.reservation.id);
+          await budget.release(reserved.reservation.id);
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
           settled = true;
@@ -1111,7 +1111,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         const latencyMs = Math.max(0, performance.now() - started);
         settled = true;
         acquired.release();
-        budget.settle(
+        await budget.settle(
           reserved.reservation.id,
           usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 },
         );
@@ -1128,14 +1128,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
               });
         if (providerError.kind === 'cancelled' || request.signal.aborted) {
           if (emitted) {
-            budget.settle(
+            await budget.settle(
               reserved.reservation.id,
               usage ?? { inputTokens: estimated, outputTokens: output },
             );
           } else {
             // The attempt may have reached the provider, so retain the request
             // charge while returning the unused token allowance.
-            budget.release(reserved.reservation.id, { dispatched: providerStarted });
+            await budget.release(reserved.reservation.id, { dispatched: providerStarted });
           }
           settled = true;
           runtime.circuit.abandon(runtimeAdmission);
@@ -1150,7 +1150,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         );
         if (emitted) {
           // Output already reached the caller; switching models would duplicate it.
-          budget.settle(
+          await budget.settle(
             reserved.reservation.id,
             usage ?? { inputTokens: estimated, outputTokens: output },
           );
@@ -1161,7 +1161,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             false,
           );
         }
-        budget.release(reserved.reservation.id, { dispatched: providerStarted });
+        await budget.release(reserved.reservation.id, { dispatched: providerStarted });
         settled = true;
         lastFailure = providerError;
       } finally {
@@ -1176,12 +1176,12 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           provider.circuit.abandon(providerAdmission);
           acquired.release();
           if (providerStarted) {
-            budget.settle(
+            await budget.settle(
               reserved.reservation.id,
               usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 },
             );
           } else {
-            budget.release(reserved.reservation.id);
+            await budget.release(reserved.reservation.id);
           }
         }
       }

@@ -297,7 +297,7 @@ export async function connectMcpServer(config: McpServerConfig): Promise<McpConn
 }
 
 /** Exposes one MCP server's tools to the runtime under a namespaced name. */
-export function createMcpTools(input: {
+function createMcpTools(input: {
   connection: McpConnection;
   /** Bounded so a hostile server cannot flood the prompt. */
   maxTools?: number;

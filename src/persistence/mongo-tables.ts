@@ -6,9 +6,17 @@ import type {
   StoredMessage,
   TaskRecord,
 } from '../domain.js';
-import type { ConversationRepository } from './conversations.js';
+import {
+  ConversationConflictError,
+  type ConversationRepository,
+} from './conversations.js';
 import type { NotificationStore } from './notifications.js';
-import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
+import type {
+  ApprovalWriteResult,
+  CreateTaskResult,
+  FencedWriteResult,
+  TaskRepository,
+} from './tasks.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { Clock } from '../support/clock.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
@@ -193,6 +201,50 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
+    recordApproval: async ({
+      taskId,
+      requestId,
+      scope,
+      resource,
+      decision,
+      decidedAt,
+    }): Promise<ApprovalWriteResult> => {
+      // Conditional in the database: only a non-terminal task, and only when it
+      // has no other request recorded, accepts a new decision.
+      const updated = await collection.findOneAndUpdate(
+        {
+          taskId,
+          state: { $nin: TERMINAL },
+          // An unconsumed decision may be replaced by a later, still-pending
+          // request; a spent grant may not be replaced at all.
+          $or: [{ approval: null }, { 'approval.consumedAt': { $exists: false } }],
+        },
+        { $set: { approval: { requestId, scope, resource, decision, decidedAt }, updatedAt: decidedAt } },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      if (updated) return { applied: true, task: toTask(updated) };
+      const current = await collection.findOne({ taskId });
+      if (!current) return { applied: false, reason: 'not_found' };
+      return {
+        applied: false,
+        reason: isTerminalState(toTask(current).state) ? 'terminal' : 'decided',
+      };
+    },
+
+    consumeApproval: async ({ taskId, requestId, now }) => {
+      const updated = await collection.findOneAndUpdate(
+        {
+          taskId,
+          'approval.requestId': requestId,
+          'approval.decision': 'approved',
+          'approval.consumedAt': { $exists: false },
+        },
+        { $set: { 'approval.consumedAt': now, updatedAt: now } },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      return updated !== null;
+    },
+
     reissue: async ({ taskId, token, now, leaseExpiresAt, expected }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
@@ -251,15 +303,18 @@ export function createMongoConversationRepository(input: {
 }): ConversationRepository {
   const { conversations, messages } = input;
 
-  function collision(): never {
-    throw new Error('conversation identity collision across owners');
+  /** The row's identity is immutable; a different owner, mode or kind collides. */
+  function assertSameIdentity(found: ConversationRecord, record: ConversationRecord): void {
+    if (found.ownerId !== record.ownerId) throw new ConversationConflictError('owner');
+    if (found.mode !== record.mode) throw new ConversationConflictError('mode');
+    if (found.isWork !== record.isWork) throw new ConversationConflictError('kind');
   }
 
   async function ensure(record: ConversationRecord): Promise<ConversationRecord> {
     const existing = await conversations.findOne({ conversationId: record.conversationId });
     if (existing) {
       const found = toConversation(existing);
-      if (found.ownerId !== record.ownerId) collision();
+      assertSameIdentity(found, record);
       return found;
     }
     try {
@@ -271,7 +326,7 @@ export function createMongoConversationRepository(input: {
       const raced = await conversations.findOne({ conversationId: record.conversationId });
       if (!raced) throw error;
       const found = toConversation(raced);
-      if (found.ownerId !== record.ownerId) collision();
+      assertSameIdentity(found, record);
       return found;
     }
   }

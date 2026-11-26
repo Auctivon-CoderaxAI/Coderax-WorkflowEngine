@@ -124,7 +124,7 @@ const CONSTRUCTIONS: ReadonlyArray<{
 }> = [
   { rule: 'single_workflow_engine', token: 'createApplicationService({', allowed: ['src/bootstrap/compose.ts'] },
   { rule: 'single_task_runner', token: 'createTaskRunner({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_model_router', token: 'createModelCatalog({', allowed: ['src/bootstrap/compose.ts'] },
+  { rule: 'single_model_router', token: 'createModelRouter({', allowed: ['src/bootstrap/compose.ts'] },
   { rule: 'single_event_bus', token: 'createEventBus({', allowed: ['src/bootstrap/compose.ts'] },
   { rule: 'single_route_registry', token: 'createRouteRegistry();', allowed: ['src/bootstrap/compose.ts'] },
   { rule: 'single_http_server', token: 'createHttpServer({', allowed: ['src/bootstrap/compose.ts'] },
@@ -149,7 +149,6 @@ const CONSTRUCTIONS: ReadonlyArray<{
 
 /** The runtime network seams: inference, explicit tools and MCP transports. */
 const EGRESS_ALLOWED = [
-  'src/agents/native/gateway.ts',
   'src/models/providers/',
   'src/mcp/',
   'src/tools/',
@@ -158,7 +157,6 @@ const EGRESS_ALLOWED = [
 const UNIQUE_DECLARATIONS: ReadonlyArray<{ rule: string; token: string }> = [
   { rule: 'duplicate_workflow_engine', token: 'export function createApplicationService(' },
   { rule: 'duplicate_task_runner', token: 'export function createTaskRunner(' },
-  { rule: 'duplicate_model_catalog', token: 'export function createModelCatalog(' },
   { rule: 'duplicate_event_bus', token: 'export function createEventBus(' },
   { rule: 'duplicate_route_catalogue', token: 'export const ROUTES' },
 ];

@@ -5,6 +5,7 @@ import type {
   EngineId,
   IsoDateTime,
   ModelRef,
+  PermissionScope,
   TaskState,
   Usage,
 } from '@coderax/contracts';
@@ -45,6 +46,20 @@ export type TaskFailure = {
 };
 
 /**
+ * The owner's decision on one permission request, stored on the task row so it
+ * survives a restart and is consumed exactly once. The in-process request list is
+ * only the prompt; the durable row is the grant.
+ */
+export type TaskApproval = {
+  requestId: string;
+  scope: PermissionScope;
+  resource: string;
+  decision: 'approved' | 'denied';
+  decidedAt: IsoDateTime;
+  consumedAt?: IsoDateTime;
+};
+
+/**
  * The authoritative record of a Work task. Only the engine writes it, and only
  * through a fenced repository call: `runToken` names the generation allowed to
  * write. A token is unique per claim, so a stale generation can never equal a
@@ -76,6 +91,8 @@ export type TaskRecord = {
   leaseExpiresAt: IsoDateTime | null;
   cancelRequested: boolean;
   requireApproval: boolean;
+  /** Durable owner decision; null until one is recorded. */
+  approval: TaskApproval | null;
   budget: Budget | null;
   usage: Usage | null;
   result: TaskResult | null;
@@ -93,6 +110,7 @@ export type TaskPatch = Partial<
     | 'leaseExpiresAt'
     | 'cancelRequested'
     | 'runToken'
+    | 'approval'
     | 'usage'
     | 'result'
     | 'failure'

@@ -27,7 +27,7 @@ function baseRepository(): SourceFile[] {
         'factories();',
         'createApplicationService({});',
         'createTaskRunner({});',
-        'createModelCatalog({});',
+        'createModelRouter({});',
         'createEventBus({});',
         'createRouteRegistry();',
         'createHttpServer({});',
@@ -39,7 +39,7 @@ function baseRepository(): SourceFile[] {
       [
         'export function createApplicationService() {}',
         'export function createTaskRunner() {}',
-        'export function createModelCatalog() {}',
+        'export function createModelRouter() {}',
         'export function createEventBus() {}',
       ].join('\n'),
     ),
@@ -120,12 +120,6 @@ test('a competing workflow-engine declaration is rejected', () => {
   ];
   const findings = checkArchitecture({ files, entry: 'src/main.ts' });
   assert.ok(findings.some((finding) => finding.rule === 'duplicate_workflow_engine'));
-});
-
-test('a duplicated model catalogue declaration is rejected', () => {
-  const files = [...baseRepository(), file('src/models/second.ts', 'export function createModelCatalog() {}\n')];
-  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
-  assert.ok(findings.some((finding) => finding.rule === 'duplicate_model_catalog'));
 });
 
 test('two competing model router implementations are rejected', () => {

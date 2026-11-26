@@ -10,7 +10,8 @@ import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
 import { probeAgents } from '../agents/probe.js';
-import { createBudgetLedger } from '../models/budget.js';
+import { createBudgetLedger, createMemoryBudgetStore } from '../models/budget.js';
+import { createMongoBudgetStore } from '../persistence/budgets.js';
 import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js';
 import { createGeminiProvider } from '../models/providers/gemini.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
@@ -47,6 +48,7 @@ import { registerRoutes } from '../api/routes.js';
 import { createHttpServer } from '../api/server.js';
 import type { HttpServer } from '../api/server.js';
 import { validateWorkspaceRoots, workspaceRoots } from '../execution/workspace.js';
+import { classifyEndpoint } from '../security/endpoint.js';
 import {
   createApplicationContainer,
   createDependencyContainer,
@@ -235,7 +237,10 @@ function buildProviders(input: {
         : createOpenAiProvider(common);
     registrations.push({
       adapter,
-      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
+      settings: {
+        ...PROVIDER_DEFAULTS,
+        discoveryIntervalMs,
+      },
     });
     configured.add(provider.id);
   }
@@ -243,15 +248,22 @@ function buildProviders(input: {
   const customBase = input.env.CODERAX_INFERENCE_BASE_URL;
   const customKey = input.env.CODERAX_INFERENCE_KEY;
   if (customBase && customKey && !configured.has('custom')) {
-    registrations.push({
-      adapter: createOpenAiProvider({
-        id: 'custom',
-        baseURL: customBase,
-        apiKey: customKey,
-        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-      }),
-      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
-    });
+    // This variable is not covered by the configuration schema, so the same
+    // endpoint rule is applied here instead of trusting the value.
+    const verdict = classifyEndpoint(customBase);
+    if (!verdict.ok) {
+      issues.push(`CODERAX_INFERENCE_BASE_URL ${verdict.reason}`);
+    } else {
+      registrations.push({
+        adapter: createOpenAiProvider({
+          id: 'custom',
+          baseURL: customBase,
+          apiKey: customKey,
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        }),
+        settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
+      });
+    }
   }
 
   return { registrations, issues };
@@ -299,9 +311,20 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     throw error;
   }
 
+  const persistence = await buildPersistence({
+    config,
+    env,
+    clock,
+    ...(input.persistence ?? {}),
+  });
   const budget = createBudgetLedger({
     maxRequestsPerDay: config.models.dailyRequestBudget,
     maxTokensPerDay: config.models.dailyTokenBudget,
+    // One ledger, two storage choices: the shared Mongo window when the driver
+    // is durable, otherwise the same atomic window inside this process.
+    store: persistence.budgetCollection
+      ? createMongoBudgetStore(persistence.budgetCollection)
+      : createMemoryBudgetStore(),
   });
 
   const providerBuild = input.providers
@@ -380,7 +403,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     enabled: config.engines.native.enabled,
     gateway,
     planner: createNativePlanner(),
-    modelsAvailable: () => models.hasVerifiedFreeRoute(),
+    // An injected transport is a test seam. A real provider registration only
+    // counts once the router has verified a zero-cost route; a key alone never
+    // makes a model free.
+    modelsAvailable: () =>
+      (input.gateway !== undefined && input.gateway !== null) || models.hasVerifiedFreeRoute(),
     unavailableDetail:
       providerBuild.registrations.length === 0
         ? 'No inference provider is configured; add a provider credential or models.providers entry. A key alone would not make a model free.'
@@ -440,12 +467,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
           : 'coderax',
   });
 
-  const persistence = await buildPersistence({
-    config,
-    env,
-    clock,
-    ...(input.persistence ?? {}),
-  });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;

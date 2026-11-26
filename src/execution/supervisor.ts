@@ -126,6 +126,8 @@ export type ExecutionSupervisor = {
   interrupt: (executionId: string, reason?: string) => boolean;
   shutdown: () => Promise<ShutdownReport>;
   isolation: () => IsolationReport;
+  /** The reason a root is held after an unverified termination, if any. */
+  held: (root: string) => string | null;
   active: () => Promise<ExecutionSummary[]>;
   history: (taskId: string) => Promise<ExecutionSummary[]>;
   retireStale: (staleAfterMs: number) => Promise<number>;
@@ -593,6 +595,14 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         else unverified += 1;
       }
       return { aborted: entries.length, verified, unverified };
+    },
+
+    held: (root) => {
+      const entry = heldRoots.get(root);
+      if (!entry) return null;
+      if (entry.until > deps.clock.now().getTime()) return entry.reason;
+      heldRoots.delete(root);
+      return null;
     },
 
     isolation: () => {

@@ -6,7 +6,7 @@ import { buildPlanPrompt } from './prompt.js';
  * structure. It is always available, so Native can plan without a model and a
  * persisted plan is reproducible for verification.
  */
-export function createDeterministicPlanner(): Planner {
+function createDeterministicPlanner(): Planner {
   return {
     plan: ({ objective, maxSteps }) => {
       const explicit = objective

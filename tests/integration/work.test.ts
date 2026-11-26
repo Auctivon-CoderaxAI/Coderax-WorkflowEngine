@@ -163,11 +163,21 @@ test('cancellation releases a hung adapter and ignores its late reports', { time
     late();
     assert.doesNotMatch(JSON.stringify(started.app.dependencies.events.replay(task.value.taskId, 0)), /stale/);
     agent.run = async () => ({ ok: true, summary: 'done' });
+    // The abandoned adapter may still be writing to this conversation's workspace,
+    // so the supervisor quarantines it and the next run there is refused at
+    // submit, not accepted and failed later.
     const next = await started.app.service.submitWork(principal, {
       objective: 'next', conversationId: task.value.conversationId, mode: 'cloud', requireApproval: true,
     });
-    assert.ok(next.ok);
-    await started.app.service.cancelTask(principal, next.value.taskId);
+    assert.equal(next.ok, false);
+    assert.equal(next.ok === false && next.code, 'workspace_denied');
+
+    // A different conversation has its own directory and is unaffected.
+    const elsewhere = await started.app.service.submitWork(principal, {
+      objective: 'elsewhere', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(elsewhere.ok);
+    await started.app.service.cancelTask(principal, elsewhere.value.taskId);
   } finally {
     await started.close();
   }

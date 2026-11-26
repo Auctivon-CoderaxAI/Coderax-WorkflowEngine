@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ModelRef } from '@coderax/contracts';
-import { createBudgetLedger } from '../../src/models/budget.js';
+import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 import { createModelRouter } from '../../src/models/router.js';
 import { createProviderPolicyRegistry, PROCESSING_OPERATIONS } from '../../src/models/policy.js';
 import type { DiscoveredModel, ProviderAdapter } from '../../src/models/types.js';
@@ -98,7 +98,7 @@ test('a paid model is refused, not silently replaced', async () => {
 
 test('an unknown model is refused with a configuration error', async () => {
   const router = createModelRouter({
-    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })    ]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
+    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
     budget: budget(),
     policy: policy(),
   });
@@ -121,56 +121,56 @@ test('discovery never advertises paid routing', async () => {
   assert.equal(router.list().models[0]?.availability.available, ready.available);
 });
 
-test('an exhausted daily budget fails closed', () => {
+test('an exhausted daily budget fails closed', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 100 });
   const now = new Date('2026-11-26T10:00:00.000Z');
-  const reservation = ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 });
+  const reservation = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 });
   assert.equal(reservation.allowed, true);
   assert.equal(
-    ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }).allowed,
+    (await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 })).allowed,
     false,
   );
-  if (reservation.allowed) ledger.settle(reservation.reservation.id, { inputTokens: 10, outputTokens: 10 });
+  if (reservation.allowed) await ledger.settle(reservation.reservation.id, { inputTokens: 10, outputTokens: 10 });
   const nextDay = new Date('2026-11-27T10:00:00.000Z');
   assert.equal(
-    ledger.reserve({ ownerId: 'owner', at: nextDay, inputTokens: 10, outputTokens: 10 }).allowed,
+    (await ledger.reserve({ ownerId: 'owner', at: nextDay, inputTokens: 10, outputTokens: 10 })).allowed,
     true,
   );
 });
 
-test('tokens are reserved, not merely counted after a call', () => {
+test('tokens are reserved, not merely counted after a call', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 100 });
   const now = new Date('2026-11-26T10:00:00.000Z');
-  const first = ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 60, outputTokens: 30 });
+  const first = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 60, outputTokens: 30 });
   assert.equal(first.allowed, true);
   // The second request cannot spend the 90 tokens already reserved.
-  const second = ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 20, outputTokens: 20 });
+  const second = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 20, outputTokens: 20 });
   assert.equal(second.allowed, false);
-  if (first.allowed) ledger.release(first.reservation.id);
+  if (first.allowed) await ledger.release(first.reservation.id);
   assert.equal(
-    ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 20, outputTokens: 20 }).allowed,
+    (await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 20, outputTokens: 20 })).allowed,
     true,
   );
 });
 
-test('an external engine is charged once after its run, not reserved twice', () => {
+test('an external engine is charged once after its run, not reserved twice', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 100 });
   const now = new Date('2026-11-26T10:00:00.000Z');
-  ledger.charge('owner', { inputTokens: 30, outputTokens: 20 }, now);
-  assert.deepEqual(ledger.snapshot('owner', now), {
+  await ledger.charge('owner', { inputTokens: 30, outputTokens: 20 }, now);
+  assert.deepEqual(await ledger.snapshot('owner', now), {
     requests: 1,
     inputTokens: 30,
     outputTokens: 20,
   });
-  assert.equal(ledger.available('owner', now), true);
-  ledger.charge('owner', { inputTokens: 40, outputTokens: 20 }, now);
-  assert.equal(ledger.available('owner', now), false);
+  assert.equal(await ledger.available('owner', now), true);
+  await ledger.charge('owner', { inputTokens: 40, outputTokens: 20 }, now);
+  assert.equal(await ledger.available('owner', now), false);
 });
 
-test('partial provider usage is settled against the reservation, not zero', () => {
+test('partial provider usage is settled against the reservation, not zero', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 1_000 });
   const now = new Date('2026-11-26T10:00:00.000Z');
-  const reservation = ledger.reserve({
+  const reservation = await ledger.reserve({
     ownerId: 'owner',
     at: now,
     inputTokens: 80,
@@ -178,18 +178,67 @@ test('partial provider usage is settled against the reservation, not zero', () =
   });
   assert.equal(reservation.allowed, true);
   if (!reservation.allowed) return;
-  ledger.settle(reservation.reservation.id, { outputTokens: 5 });
-  assert.deepEqual(ledger.snapshot('owner', now), {
+  await ledger.settle(reservation.reservation.id, { outputTokens: 5 });
+  assert.deepEqual(await ledger.snapshot('owner', now), {
     requests: 1,
     inputTokens: 80,
     outputTokens: 5,
   });
 });
 
-test('a dispatched reservation keeps its request charge when it is released', () => {
+test('two replicas share one durable quota window', async () => {
+  const store = createMemoryBudgetStore();
+  const first = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 1_000, store });
+  const second = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 1_000, store });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+  const outcomes = await Promise.all([
+    first.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
+    second.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.allowed).length, 1);
+  assert.equal(await second.available('owner', now), false);
+});
+
+test('a replayed settlement charges the owner exactly once', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 1_000 });
   const now = new Date('2026-11-26T10:00:00.000Z');
-  const reservation = ledger.reserve({
+  const reservation = await ledger.reserve({
+    ownerId: 'owner', at: now, inputTokens: 40, outputTokens: 10,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+  await Promise.all([
+    ledger.settle(reservation.reservation.id, { inputTokens: 7, outputTokens: 3 }),
+    ledger.settle(reservation.reservation.id, { inputTokens: 7, outputTokens: 3 }),
+  ]);
+  assert.deepEqual(await ledger.snapshot('owner', now), {
+    requests: 1,
+    inputTokens: 7,
+    outputTokens: 3,
+  });
+});
+
+test('a replayed release charges one request, not two', async () => {
+  const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 1_000 });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+  const reservation = await ledger.reserve({
+    ownerId: 'owner', at: now, inputTokens: 40, outputTokens: 10,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+  await ledger.release(reservation.reservation.id, { dispatched: true });
+  await ledger.release(reservation.reservation.id, { dispatched: true });
+  assert.deepEqual(await ledger.snapshot('owner', now), {
+    requests: 1,
+    inputTokens: 0,
+    outputTokens: 0,
+  });
+});
+
+test('a dispatched reservation keeps its request charge when it is released', async () => {
+  const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 1_000 });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+  const reservation = await ledger.reserve({
     ownerId: 'owner',
     at: now,
     inputTokens: 40,
@@ -197,8 +246,8 @@ test('a dispatched reservation keeps its request charge when it is released', ()
   });
   assert.equal(reservation.allowed, true);
   if (!reservation.allowed) return;
-  ledger.release(reservation.reservation.id, { dispatched: true });
-  assert.deepEqual(ledger.snapshot('owner', now), {
+  await ledger.release(reservation.reservation.id, { dispatched: true });
+  assert.deepEqual(await ledger.snapshot('owner', now), {
     requests: 1,
     inputTokens: 0,
     outputTokens: 0,

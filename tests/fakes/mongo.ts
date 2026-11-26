@@ -7,14 +7,38 @@ type Index = {
   options?: { unique?: boolean; name?: string };
 };
 
+/** Mongo semantics for the filters this engine uses: dotted paths and `$or`. */
+function atPath(document: Document, field: string): unknown {
+  let current: unknown = document;
+  for (const part of field.split('.')) {
+    if (current === null || typeof current !== 'object') return undefined;
+    current = (current as Document)[part];
+  }
+  return current;
+}
+
 function matches(document: Document, filter: MongoFilter): boolean {
-  return Object.entries(filter).every(([field, condition]) => {
-    const value = document[field];
+  const anyOf = (filter as Record<string, unknown>).$or;
+  if (Array.isArray(anyOf)) {
+    if (!anyOf.some((option) => matches(document, option as MongoFilter))) return false;
+  }
+  return Object.entries(filter)
+    .filter(([field]) => field !== '$or')
+    .every(([field, condition]) => {
+    const value = atPath(document, field);
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
+      if ('$exists' in operators) {
+        const shouldExist = operators.$exists === true;
+        if (shouldExist !== (value !== undefined)) return false;
+      }
+      if ('$ne' in operators && value === operators.$ne) return false;
       const compare = (bound: unknown): number => {
         if (value instanceof Date && bound instanceof Date) return value.getTime() - bound.getTime();
         if (typeof value === 'number' && typeof bound === 'number') return value - bound;
+        if (typeof value === 'string' && typeof bound === 'string') {
+          return value < bound ? -1 : value > bound ? 1 : 0;
+        }
         return Number.NaN;
       };
       if ('$ne' in operators && value === operators.$ne) return false;
@@ -46,6 +70,17 @@ function matches(document: Document, filter: MongoFilter): boolean {
     }
     return value === condition;
   });
+}
+
+function setPath(document: Document, field: string, value: unknown): void {
+  const parts = field.split('.');
+  let current = document;
+  for (const part of parts.slice(0, -1)) {
+    const next = current[part];
+    if (next === null || typeof next !== 'object') current[part] = {};
+    current = current[part] as Document;
+  }
+  current[parts[parts.length - 1] as string] = value;
 }
 
 function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
@@ -135,12 +170,20 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = { ...documents[index], ...update.$set };
-      return { ...documents[index] };
+      const next = { ...documents[index] };
+      for (const [field, value] of Object.entries(update.$set ?? {})) {
+        setPath(next, field, value);
+      }
+      assertUnique(next, index);
+      documents[index] = next;
+      return { ...next };
     },
     updateOne: async (filter, update, options) => {
       const apply = (document: Document): Document => {
-        const next = { ...document, ...update.$set };
+        const next = { ...document };
+        for (const [field, value] of Object.entries(update.$set ?? {})) {
+          setPath(next, field, value);
+        }
         // `$max` is monotonic under concurrency, which is exactly what the event
         // head and the generation guard rely on.
         for (const [field, value] of Object.entries(update.$max ?? {})) {

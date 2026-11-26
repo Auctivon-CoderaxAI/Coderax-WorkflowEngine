@@ -17,6 +17,11 @@ import { fail, ok } from '../support/result.js';
  * resource only, so an agent cannot widen `workspace.read` into a broader path by
  * asking once. External agents begin with nothing; Native is the only agent whose
  * isolation already includes memory and conversations.
+ *
+ * A decision is durable when the deployment has a collection: the check and the
+ * consume are one conditional update, so two replicas cannot both spend the same
+ * grant. The in-memory store is atomic for the same reason: a synchronous
+ * section cannot interleave.
  */
 export type PermissionStore = {
   request: (input: {
@@ -48,6 +53,8 @@ export function createPermissionStore(input: {
   clock: Clock;
   ids: IdGenerator;
   collection?: MongoCollectionLike;
+  /** Prompt lifetime when a request does not name one. */
+  defaultTtlMs?: number;
 }): PermissionStore {
   type Row = PermissionRequest & { ownerId: string; binding: string; consumed: boolean };
   const rows = new Map<string, Row>();
@@ -81,7 +88,8 @@ export function createPermissionStore(input: {
       const now = input.clock.now();
       const row: Row = {
         ...fields, binding, consumed: false, requestId: input.ids.requestId(),
-        requestedAt: now.toISOString(), expiresAt: new Date(now.getTime() + (ttlMs ?? 900_000)).toISOString(),
+        requestedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + (ttlMs ?? input.defaultTtlMs ?? 900_000)).toISOString(),
         decision: 'pending',
       };
       if (collection) await collection.insertOne({ ...row, validUntil: new Date(row.expiresAt) });

@@ -27,7 +27,7 @@ import type {
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskPatch, TaskRecord } from '../domain.js';
+import type { ConversationRecord, TaskApproval, TaskPatch, TaskRecord } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -63,7 +63,8 @@ import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
-import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
+import { resolveConversationWorkspace, workspaceRoots } from '../execution/workspace.js';
+import { ConversationConflictError } from '../persistence/conversations.js';
 import { buildTranscript } from './transcript.js';
 
 export type ApplicationServiceDeps = {
@@ -159,7 +160,7 @@ export type ApplicationService = {
     taskId: string,
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
-  budget: (principal: Principal) => BudgetState;
+  budget: (principal: Principal) => Promise<BudgetState>;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
   shutdown: () => Promise<void>;
@@ -377,6 +378,107 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return ok(task);
   }
 
+  /**
+   * A conversation may only be reused for the same owner, data mode and kind of
+   * work. The repository is the authority; this maps its refusal onto a stable
+   * problem and never confirms whether a foreign id exists.
+   */
+  async function ensureConversation(
+    record: ConversationRecord,
+  ): Promise<ServiceResult<ConversationRecord>> {
+    try {
+      return ok(await deps.conversations.ensure(record));
+    } catch (error) {
+      if (error instanceof ConversationConflictError) {
+        return error.reason === 'owner'
+          ? fail('not_found', 'That conversation does not exist for this owner.')
+          : fail(
+              'conflict',
+              `That conversation belongs to a different ${error.reason === 'mode' ? 'data mode' : 'kind of work'}.`,
+            );
+      }
+      throw error;
+    }
+  }
+
+  /** The supervisor's hold and the abandoned-run quarantine are the only workspace authority. */
+  function quarantineDetail(root: string): string | null {
+    const held = deps.supervisor.held(root);
+    if (held) {
+      return `A previous execution could not be verified as terminated: ${held}`;
+    }
+    const entry = deps.quarantine.check(root, deps.clock.now().getTime());
+    return entry
+      ? `${entry.reason} The workspace is refused until the quarantine expires.`
+      : null;
+  }
+
+  const APPROVAL_SCOPE = 'command.execute' as const;
+
+  /** The one grant this task may hold, if it is still usable. */
+  function executionGrant(task: TaskRecord): TaskApproval | null {
+    const approval = task.approval;
+    if (!approval || approval.decision !== 'approved' || approval.consumedAt) return null;
+    if (approval.scope !== APPROVAL_SCOPE || approval.resource !== task.taskId) return null;
+    return approval;
+  }
+
+  /**
+   * Park a run until the owner decides. The task stays non-terminal and its lease
+   * is released, so the conversation is not held by a run that is waiting, and a
+   * resume claims a new generation after the decision.
+   */
+  async function suspendForApproval(task: TaskRecord, token: string): Promise<void> {
+    const existing = await deps.permissions.list(task.ownerId, task.taskId);
+    const pending = existing.requests.find(
+      (entry) =>
+        entry.decision === 'pending' &&
+        entry.scope === APPROVAL_SCOPE &&
+        entry.resource === task.taskId,
+    );
+    const request =
+      pending ??
+      (await deps.permissions.request({
+        ownerId: task.ownerId,
+        taskId: task.taskId,
+        agent: task.agent,
+        scope: APPROVAL_SCOPE,
+        resource: task.taskId,
+        description: `Run the ${task.agent} agent on this task.`,
+      }));
+
+    const applied = await deps.tasks.updateFenced({
+      taskId: task.taskId,
+      token,
+      patch: {
+        state: 'awaiting_approval',
+        updatedAt: deps.clock.iso(),
+        failure: {
+          code: 'approval_required',
+          detail: 'Owner approval is required before this agent may run.',
+          retryable: true,
+        },
+      },
+    });
+    if (applied.applied) {
+      publish(applied.task, 'approval.required', {
+        requestId: request.requestId,
+        tool: task.agent,
+        description: `Run the ${task.agent} agent on this task.`,
+      });
+      deps.audit.record({
+        actor: task.ownerId,
+        action: 'work.awaiting_approval',
+        taskId: task.taskId,
+        conversationId: task.conversationId,
+        outcome: 'accepted',
+        detail: APPROVAL_SCOPE,
+      });
+    }
+    await deps.events.flush(task.taskId).catch(() => undefined);
+    await releaseLease(task, token);
+  }
+
   async function notifyTerminal(
     task: TaskRecord,
     state: 'completed' | 'failed' | 'cancelled' | 'interrupted',
@@ -389,7 +491,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       agent: task.agent,
       mode: task.mode,
       state,
-      ...(summary ? { summary: summary.slice(0, 500) } : {}),
+      // Provider and adapter text reaches the notification store, so it is
+      // scrubbed here as well as on the event stream.
+      ...(summary ? { summary: redactText(summary, [], 500) } : {}),
       createdAt: deps.clock.iso(),
       read: false,
     });
@@ -470,7 +574,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               updatedAt: now,
               failure: {
                 code: outcome.code,
-                detail: outcome.detail,
+                // Persisted, so it must already be scrubbed: a reader of the row
+                // is not guaranteed to pass through `toStatus`.
+                detail: redactText(outcome.detail, [], 1000),
                 retryable: outcome.retryable,
               },
             };
@@ -525,6 +631,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const detail = outcome.kind === 'completed' ? outcome.summary
         : outcome.kind === 'failed' ? outcome.detail : undefined;
       await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
+      // The prompt list dies with the task; the durable decision stays on the row.
+      deps.permissions.clear(settled.taskId);
       deps.audit.record({
         actor: task.ownerId,
         action: `work.${outcome.kind}`,
@@ -589,9 +697,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    const workspace = await resolveEngineWorkspace({
+    const workspace = await resolveConversationWorkspace({
       mode: task.mode,
       roots: workspaceRoots(deps.config.workspaces),
+      conversationId: task.conversationId,
     });
     if (!workspace.ok) {
       await settle(task, token, {
@@ -602,15 +711,34 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       return;
     }
-    const quarantined = deps.quarantine.check(workspace.value.root, deps.clock.now().getTime());
+    const quarantined = quarantineDetail(workspace.value.root);
     if (quarantined) {
       await settle(task, token, {
         kind: 'failed',
         code: 'workspace_denied',
-        detail: `${quarantined.reason} The workspace is refused until the quarantine expires.`,
+        detail: quarantined,
         retryable: true,
       });
       return;
+    }
+
+    // An external agent executes actions outside this process. When the owner
+    // asked to approve actions, the engine cannot mediate them, so the run needs
+    // an explicit, durable, single-use grant. Coderax Native acts only through
+    // the engine's own tool runtime, so it is not gated here.
+    if (task.requireApproval && task.agent !== 'coderax' && adapter.value.capabilities.tools) {
+      const grant = executionGrant(task);
+      const consumed = grant
+        ? await deps.tasks.consumeApproval({
+            taskId,
+            requestId: grant.requestId,
+            now: deps.clock.iso(),
+          })
+        : false;
+      if (!consumed) {
+        await suspendForApproval(task, token);
+        return;
+      }
     }
 
     const started = await deps.tasks.updateFenced({
@@ -715,7 +843,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     };
 
-    const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
+    // An external agent's isolation says `conversations: none`; handing it the
+    // transcript would contradict that promise.
+    const history =
+      started.task.agent === 'coderax'
+        ? await historyFor(task.conversationId, task.objective)
+        : [];
     const identity: ExecutionIdentity = {
       executionId: deps.ids.executionId(),
       kind: 'work',
@@ -735,7 +868,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const externalReservation =
       started.task.engine === 'native'
         ? null
-        : deps.budget.reserve({
+        : await deps.budget.reserve({
             ownerId: task.ownerId,
             at: deps.clock.now(),
             inputTokens: estimateTokens([task.objective]),
@@ -831,11 +964,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // reservation before any guard that can return early.
     if (held) {
       if (supervised.admitted && supervised.outcome.kind === 'completed') {
-        deps.budget.settle(held.id, supervised.outcome.usage ?? {});
+        await deps.budget.settle(held.id, supervised.outcome.usage ?? {});
       } else {
         // The external engine may have dispatched before failing; retain the
         // request charge while returning its unused token allowance.
-        deps.budget.release(held.id, { dispatched: true });
+        await deps.budget.release(held.id, { dispatched: true });
       }
     }
 
@@ -982,7 +1115,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!model.ok) return model;
 
-      if (!deps.budget.available(principal.ownerId, deps.clock.now())) {
+      if (!await deps.budget.available(principal.ownerId, deps.clock.now())) {
         return fail(
           'budget_exhausted',
           'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -991,7 +1124,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
-      await deps.conversations.ensure({
+      const ensured = await ensureConversation({
         conversationId,
         ownerId: principal.ownerId,
         tenantId: null,
@@ -1002,6 +1135,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
         updatedAt: now,
       });
+      if (!ensured.ok) return ensured;
+
+      const workspace = await resolveConversationWorkspace({
+        mode: request.mode,
+        roots: workspaceRoots(deps.config.workspaces),
+        conversationId,
+      });
+      if (!workspace.ok) return workspace;
+      const quarantined = quarantineDetail(workspace.value.root);
+      if (quarantined) return fail('workspace_denied', quarantined);
+
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1033,6 +1177,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         leaseExpiresAt: null,
         cancelRequested: false,
         requireApproval: request.requireApproval,
+        approval: null,
         budget: request.budget ?? null,
         usage: null,
         result: null,
@@ -1142,7 +1287,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         now: deps.clock.now(),
       });
       if (outcome === 'none') {
-        return fail('not_found', 'No live run exists for that task.');
+        // A suspended run holds no lease, so there is nothing to signal. The
+        // owner's cancel still retires it under the same fence a live run uses.
+        const applied = await deps.tasks.updateFenced({
+          taskId: task.taskId,
+          token: task.runToken ?? '',
+          patch: {
+            state: 'cancelled',
+            updatedAt: deps.clock.iso(),
+            cancelRequested: true,
+          },
+        });
+        if (!applied.applied) {
+          return fail('conflict', 'That task changed before it could be cancelled.');
+        }
+        publish(applied.task, 'task.cancelled', {});
+        await deps.events.flush(applied.task.taskId).catch(() => undefined);
+        await notifyTerminal(applied.task, 'cancelled');
+        deps.permissions.clear(applied.task.taskId);
+        return ok({
+          taskId: task.taskId,
+          state: 'cancelled',
+          generation: task.generation,
+          outcome: 'accepted',
+        });
       }
 
       if (outcome === 'requested') {
@@ -1313,25 +1481,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!model.ok) return model;
 
-      if (!deps.budget.available(principal.ownerId, deps.clock.now())) {
+      if (!await deps.budget.available(principal.ownerId, deps.clock.now())) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
-      const workspace = await resolveEngineWorkspace({
-        mode: request.mode,
-        roots: workspaceRoots(deps.config.workspaces),
-      });
-      if (!workspace.ok) return workspace;
-      const quarantined = deps.quarantine.check(workspace.value.root, deps.clock.now().getTime());
-      if (quarantined) {
-        return fail(
-          'workspace_denied',
-          `${quarantined.reason} The workspace is refused until the quarantine expires.`,
-        );
-      }
-
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
-      const conversation = await deps.conversations.ensure({
+      const conversation = await ensureConversation({
         conversationId,
         ownerId: principal.ownerId,
         tenantId: null,
@@ -1341,6 +1496,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
         updatedAt: now,
       });
+      if (!conversation.ok) return conversation;
+
+      const workspace = await resolveConversationWorkspace({
+        mode: request.mode,
+        roots: workspaceRoots(deps.config.workspaces),
+        conversationId,
+      });
+      if (!workspace.ok) return workspace;
+      const quarantined = quarantineDetail(workspace.value.root);
+      if (quarantined) return fail('workspace_denied', quarantined);
+
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1349,14 +1515,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
-      const history = request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
+      // Only Native may see the transcript; an external agent is isolated from it.
+      const history =
+        request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
       const identity: ExecutionIdentity = {
         executionId: deps.ids.executionId(),
         kind: 'chat',
         taskId: null,
         conversationId,
         ownerId: principal.ownerId,
-        tenantId: conversation.tenantId,
+        tenantId: conversation.value.tenantId,
         agent: request.agent,
         mode: request.mode,
         generation: 0,
@@ -1368,7 +1536,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const reservation =
         adapter.value.engine === 'native'
           ? null
-          : deps.budget.reserve({
+          : await deps.budget.reserve({
               ownerId: principal.ownerId,
               at: deps.clock.now(),
               inputTokens: estimateTokens([request.message]),
@@ -1392,7 +1560,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           const outcome = await adapter.value.run(
             {
               ownerId: principal.ownerId,
-              tenantId: conversation.tenantId,
+              tenantId: conversation.value.tenantId,
               conversationId,
               objective: request.message,
               history,
@@ -1438,39 +1606,44 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (!supervised.admitted) {
-        if (held) deps.budget.release(held.id, { dispatched: false });
+        if (held) await deps.budget.release(held.id, { dispatched: false });
         return fail('engine_unavailable', supervised.detail, supervised.code !== 'workspace_denied');
       }
       const outcome = supervised.outcome;
       if (outcome.kind !== 'completed') {
-        if (held) deps.budget.release(held.id, { dispatched: true });
+        if (held) await deps.budget.release(held.id, { dispatched: true });
         return fail(
           outcome.kind === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          outcome.kind === 'cancelled'
-            ? 'The chat turn was cancelled.'
-            : outcome.kind === 'failed'
-              ? outcome.detail
-              : outcome.kind === 'suspended'
+          redactText(
+            outcome.kind === 'cancelled'
+              ? 'The chat turn was cancelled.'
+              : outcome.kind === 'failed'
                 ? outcome.detail
-                : 'The chat turn lost execution authority.',
+                : outcome.kind === 'suspended'
+                  ? outcome.detail
+                  : 'The chat turn lost execution authority.',
+            [],
+            1000,
+          ),
           outcome.kind === 'failed' ? outcome.retryable : false,
         );
       }
+      const summary = redactContent(outcome.summary);
       const usedModel = outcome.model ?? model.value.ref;
-      if (held) deps.budget.settle(held.id, outcome.usage ?? {});
+      if (held) await deps.budget.settle(held.id, outcome.usage ?? {});
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
         conversationId,
         role: 'assistant',
-        text: outcome.summary,
+        text: summary,
         createdAt: deps.clock.iso(),
         agent: request.agent,
       });
       return ok({
         conversationId,
         messageId,
-        text: outcome.summary,
+        text: summary,
         agent: request.agent,
         model: usedModel,
         ...(outcome.usage ? { usage: outcome.usage } : {}),
@@ -1497,13 +1670,44 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     decidePermission: async (principal, taskId, body) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      return deps.permissions.decide({
+      if (isTerminalState(found.value.state)) {
+        return fail('conflict', 'That task is already settled; its permissions cannot change.');
+      }
+      const decided = await deps.permissions.decide({
         ownerId: principal.ownerId,
         taskId,
         requestId: body.requestId,
         decision: body.decision,
         ...(body.reason ? { reason: body.reason } : {}),
       });
+      if (!decided.ok) return decided;
+      const request = decided.value.requests.find((entry) => entry.requestId === body.requestId);
+      if (!request) {
+        return fail('not_found', 'That permission request does not exist for this task.');
+      }
+      // The durable copy is what an execution consults; the in-process request is
+      // only the prompt. A later request may replace an undecided or denied one,
+      // and a grant is consumed before the run it authorizes.
+      const recorded = await deps.tasks.recordApproval({
+        taskId,
+        requestId: request.requestId,
+        scope: request.scope,
+        resource: request.resource,
+        decision: request.decision === 'approved' ? 'approved' : 'denied',
+        decidedAt: request.decidedAt ?? deps.clock.iso(),
+      });
+      if (!recorded.applied) {
+        return fail('conflict', 'That task could not record the decision.');
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: `permission.${request.decision}`,
+        taskId,
+        conversationId: found.value.conversationId,
+        outcome: 'accepted',
+        detail: request.scope,
+      });
+      return decided;
     },
 
     notifications: (principal) => deps.notifications.list(principal.ownerId),
@@ -1528,8 +1732,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    budget: (principal) => {
-      const used = deps.budget.snapshot(principal.ownerId, deps.clock.now());
+    budget: async (principal) => {
+      const used = await deps.budget.snapshot(principal.ownerId, deps.clock.now());
       const budget = {
         maxRequests: deps.config.models.dailyRequestBudget,
         maxInputTokens: deps.config.models.dailyTokenBudget,
@@ -1542,7 +1746,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           usage: { inputTokens: used.inputTokens, outputTokens: used.outputTokens },
         },
         remaining: { requests: Math.max(0, budget.maxRequests - used.requests) },
-        exhausted: !deps.budget.available(principal.ownerId, deps.clock.now()),
+        exhausted: !await deps.budget.available(principal.ownerId, deps.clock.now()),
       };
     },
 

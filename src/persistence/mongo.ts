@@ -36,7 +36,13 @@ export type MongoCollectionLike = {
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;
   findOneAndUpdate: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown> },
+    update: {
+      $set?: Record<string, unknown>;
+      /** Atomic counters used by the durable quota windows. */
+      $inc?: Record<string, number>;
+      /** Reservation ids, which make settlement and release exactly-once. */
+      $push?: Record<string, unknown>;
+    },
     options: { returnDocument: 'after'; includeResultMetadata: false },
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
@@ -46,6 +52,7 @@ export type MongoCollectionLike = {
       $setOnInsert?: Record<string, unknown>;
       /** Monotonic update used by the event head; never lowers a value. */
       $max?: Record<string, unknown>;
+      $inc?: Record<string, number>;
     },
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
