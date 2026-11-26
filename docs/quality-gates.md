@@ -160,6 +160,28 @@ Cross-repository release certification stays outside this repository gate: the
 release owner consumes the evidence from the exact `verify` head, while this
 repository enforces only its own architecture and tests.
 
+### Consolidated-head probe (2026-11-26)
+
+The capability checker was run read-only against each current branch worktree;
+no branch was checked out into this history or modified. These are findings, not
+merge results:
+
+| Branch | Capability/architecture probe | Owner action before merge |
+| --- | --- | --- |
+| `feat/intelligence-core` (PR #2) | competing router + planner; disconnected arbiter/retry; model→agent boundary | remove legacy catalog/deterministic planner, adopt the retry decision, and add the SDK map for five new routes |
+| `feat/native-reasoning-planner` (PR #3) | clean after memory/Mongo permission drivers were classified as drivers; disconnected arbiter/retry | remove the two superseded execution helpers or rebase on their resolution |
+| `feat/zero-cost-model-router` (PR #4) | capability-clean; disconnected arbiter/retry | rebase on the execution-helper resolution |
+| `feat/execution-supervisor` (PR #5) | competing model routers and planners; disconnected arbiter/retry; unused MCP/catalog factories | consolidate the legacy catalog and deterministic planner, then add the SDK map |
+| `security/remediation-808dfd3` | capability-clean; same zod `4.6.7` line | coordinate the zod converter/config conflict with this branch |
+| `feat/durable-events-integration` | capability-clean; adds routes without the SDK map | add SDK operations and a live event-replay test when durable events land |
+| `feat/durable-artifacts`, `feat/artifact-intelligence` | capability-clean; no live artifact durability test on this base | add a live artifact test in the owning branch |
+| `feat/multimodal-creative-intelligence` | capability-clean | keep the media validation and live evidence with the owner |
+
+A provider adapter is not a router and the memory/Mongo permission stores are
+drivers, not competing authorities; the synthetic tests pin those distinctions.
+The probe intentionally reports the PR #5 duplicate rather than blessing a
+consolidated architecture that has not actually chosen one owner.
+
 The SDK compatibility gate is intentionally strict: the tools, routing and
 knowledge operations in PR #2/#5 must add matching `SDK_OPERATIONS` entries
 (and client methods) before the contract gate can pass. That is the
