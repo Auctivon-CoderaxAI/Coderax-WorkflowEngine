@@ -15,15 +15,15 @@ Status vocabulary:
 | # | Capability | Coderax | WorkflowEngine | Status |
 | --- | --- | --- | --- | --- |
 | 1 | Normalized engine event contract | `engines/types.ts` (11 event types) | `packages/contracts/src/events.ts` (14 types, versioned envelope with `eventId` + `seq`) | Strengthened |
-| 2 | `file.edit` progress event | `types.ts` | added in this review | Preserved |
+| 2 | `file.edit` progress event | `types.ts` | `packages/contracts/src/events.ts` | Preserved |
 | 3 | Engine session id on start | `started.sessionId` | `task.started.payload.sessionId` (optional) | Preserved |
 | 4 | Fail-closed selection, never substitute | `registry.ts` | `src/agents/registry.ts` | Preserved |
-| 5 | Configuration admission vs runtime readiness | `describe()` / `describeForStart()` | `availability()` only | Simplified — no live probe (review F11) |
-| 6 | Live readiness probe (`/global/health`) | `opencode/adapter.ts` | none | Missing |
+| 5 | Configuration admission vs runtime readiness | `describe()` / `describeForStart()` | `availability()` for admission + `probe()` per adapter | Preserved |
+| 6 | Live readiness probe (`/global/health`) | `opencode/adapter.ts` | `src/agents/probe.ts`, non-required `agents` health check, 2 s bound | Preserved (no live agent contacted in tests) |
 | 7 | Single-run arbitration per task | in-process `arbiter.ts` | lease uniqueness on `[tenant, owner, conversation]` | Strengthened — works across replicas |
 | 8 | One settlement per run | `run.ts` | `src/execution/runner.ts` | Preserved |
 | 9 | Stream ending without a terminal event is a failure | `run.ts` (`protocol_error`) | `runner.ts` | Preserved |
-| 10 | Bounded cancellation cleanup (5 s) | `run.ts` | none | Missing (review F6) |
+| 10 | Bounded cancellation cleanup (5 s) | `run.ts` | `src/execution/runner.ts` `cancelGraceMs` (5 s default) | Preserved |
 | 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Preserved |
 | 12 | Workspace confinement, symlink-resolved, mode-partitioned, Windows-safe | `workspace.ts` | `src/execution/workspace.ts` | Preserved |
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
@@ -32,11 +32,11 @@ Status vocabulary:
 | 16 | MongoDB-backed lease table | `createWorkRunMethods` (mongoose) | `src/persistence/mongo.ts` (driver-agnostic port) + index bootstrap, selected at startup by `persistence.driver` | Preserved (verified against a fake; no live DB) |
 | 17 | Fenced terminal write for the task record | `fenceWorkRun` on the conversation row | `TaskRepository.updateFenced` on the task row | Preserved |
 | 18 | Fenced conversation write | `fenceWorkRun` | not implemented; conversations are written after settlement | Missing |
-| 19 | Persistent task records | MongoDB (conversations + messages) | in-memory `TaskRepository` | Missing (review F2) |
-| 20 | Persistent conversations and messages | MongoDB | in-memory `ConversationRepository` | Missing (review F2) |
-| 21 | Persistent memory | conversation/agent files | in-memory, mode-partitioned | Missing (review F2) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing (review F2) |
-| 23 | Completion notifications | client polling of conversation state | notification store + endpoint (in-memory) | Simplified |
+| 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
+| 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
+| 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
+| 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
@@ -48,7 +48,7 @@ Status vocabulary:
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
 | 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | new deterministic planner + gateway (`src/agents/native`) | Changed — not the same agent; see #34 |
 | 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | absent; `tools: false` | Missing |
-| 35 | Secret redaction of provider text | `cloud/redact.ts` | `src/observability/redact.ts` | Preserved (added in this review) |
+| 35 | Secret redaction of provider text | `cloud/redact.ts` | `src/observability/redact.ts` | Preserved |
 | 36 | Private/cloud mode denial for providers | `cloud/mode.ts` | workspace + memory partitioning only | Simplified |
 | 37 | Durable cancellation | lease flag | lease flag + service cancel | Preserved |
 | 38 | Resume / retry of an interrupted task | partial (retry of start failures) | `resume` and `retry` on the service, with checkpoints | Strengthened |
@@ -69,10 +69,10 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 15 |
+| Preserved | 22 |
 | Strengthened | 10 |
-| Simplified | 7 |
-| Missing | 15 |
+| Simplified | 5 |
+| Missing | 10 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 1 |
 
@@ -83,17 +83,29 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 5, 6, 10, 18–22, 24, 27–30, 32–34, 36,
-40, 44 and 47 are closed, migrating a client would remove functionality, which
-the brief forbids.
+capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
+are closed, migrating a client would remove functionality, which the brief
+forbids.
 
 Dependency order for closing them:
 
-1. Persistence for tasks, conversations, memory, events, notifications (rows 18–22).
-2. Prompt construction from the transcript (row 24).
-3. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
-4. Native tools (34) — the largest single item, and the one that decides whether
-   Coderax Native can actually replace the LibreChat agent stack.
-5. Approvals (40), bounded cleanup (10), live probes (5–6).
-6. Schedules (44) and plugins (47).
-7. Only then Phase 5/6 client migration, Phase 8 deployment, Phase 9 removal.
+1. Persistent execution events and replay across restart (row 22), then fenced
+   conversation writes (row 18).
+2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
+3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
+   and the one that decides whether Coderax Native can replace the LibreChat
+   agent stack.
+4. Approvals bound to a resource (40), provider mode denial (36), caller-supplied
+   workspace confinement (13).
+5. Schedules (44) and DeploymentPlatformAI (46).
+6. Only then Phase 5/6 client migration, Phase 8 deployment, Phase 9 removal.
+
+## Verification status
+
+- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- Durable stores are verified against a semantics-faithful collection fake that
+  enforces unique indexes and cursor semantics. **No live MongoDB has been
+  contacted**; "durable" here means the adapter and wiring are proven, not that a
+  real server has stored a row.
+- No hosted CI run exists: the GitHub Actions job is blocked by account billing.
+  The local run above is the only executed evidence.
