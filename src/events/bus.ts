@@ -4,7 +4,7 @@ import type {
   ExecutionEventType,
 } from '@coderax/contracts';
 import { EVENT_SCHEMA_VERSION } from '@coderax/contracts';
-import type { EventLog } from './log.js';
+import type { AppendResult, EventLog } from './log.js';
 
 export type EventDraft = {
   taskId: string;
@@ -33,9 +33,11 @@ export type Unsubscribe = () => void;
  *
  * `seq` is assigned here and never by a caller, so two producers cannot create a
  * tie. Persistence is asynchronous because `publish` is called from inside an
- * adapter's report loop and must never block it; `flush` is the barrier the
- * service awaits before it writes a terminal task state, so the stream and the
- * task record cannot disagree about whether a run finished.
+ * adapter's report loop and must never block it. A coalescing timer stores the
+ * pending batch shortly after it is published, so the stream is durable while
+ * the run is still executing and another replica can replay it; `flush` is the
+ * barrier the service awaits before it writes a terminal task state, so the
+ * stream and the task record cannot disagree about whether a run finished.
  *
  * A bounded pending queue is deliberate: an adapter that emits faster than the
  * database accepts must lose intermediate `text.delta` events (the client has
@@ -90,6 +92,8 @@ export function createEventBus(input: {
   retain?: number;
 }): EventBus {
   const streams = new Map<string, Stream>();
+  const flushing = new Map<string, Promise<void>>();
+  const timers = new Map<string, NodeJS.Timeout>();
   const maxPending = Math.max(16, input.maxPending ?? 512);
   const retain = Math.max(1, input.retain ?? input.bufferSize);
   let dropped = 0;
@@ -139,7 +143,9 @@ export function createEventBus(input: {
     if (state.hydrated) return state.hydrated;
     state.hydrated = (async () => {
       const last = await input.log!.lastSeq(taskId);
+      const advanced = last > state.seq;
       state.seq = Math.max(state.seq, last);
+      if (!advanced) return state.seq;
       const recent = await input.log!.read(taskId, Math.max(0, last - input.bufferSize), input.bufferSize);
       for (const event of recent) {
         if (state.seen.has(event.eventId)) continue;
@@ -153,27 +159,78 @@ export function createEventBus(input: {
     })();
     try {
       return await state.hydrated;
-    } catch (error) {
-      // A failed hydration must not pin the task to a stale watermark; the next
-      // call retries instead of publishing unverified sequence numbers forever.
+    } finally {
+      // The watermark is a moving target: another replica keeps writing while
+      // this one reads, so a cached result would report a watermark the replay
+      // has already passed. A failed hydration also retries on the next call
+      // instead of pinning the task to a stale sequence forever.
       state.hydrated = null;
-      throw error;
     }
   }
 
-  async function flush(taskId: string): Promise<void> {
+  function cancelTimer(taskId: string): void {
+    const timer = timers.get(taskId);
+    if (timer) {
+      clearTimeout(timer);
+      timers.delete(taskId);
+    }
+  }
+
+  /**
+   * One timer per task coalesces a burst of deltas into a single write attempt
+   * and keeps the stream durable between settlement points. The delay is only a
+   * turn of the event loop: a synchronous burst still fills the bounded pending
+   * queue, so backpressure is unchanged.
+   */
+  function schedule(taskId: string): void {
+    if (!input.log || timers.has(taskId)) return;
+    const timer = setTimeout(() => {
+      timers.delete(taskId);
+      void flushPending(taskId).catch(() => undefined);
+    }, 0);
+    timer.unref();
+    timers.set(taskId, timer);
+  }
+
+  async function flushPending(taskId: string): Promise<void> {
+    const running = flushing.get(taskId);
+    if (running) return running;
     const state = streams.get(taskId);
-    if (!state || !input.log) return;
-    while (state.pending.length > 0) {
-      const batch = state.pending.splice(0, 200);
-      const results = await input.log.append(batch);
-      if (results.includes('stale_generation')) {
-        // This process no longer owns the task. Stop writing rather than
-        // interleaving a superseded generation into the newer stream.
-        state.fenced = true;
-        state.pending.length = 0;
-        return;
+    if (!state || !input.log || state.fenced) return;
+    const run = (async () => {
+      while (state.pending.length > 0 && !state.fenced) {
+        const batch = state.pending.splice(0, 200);
+        let results: AppendResult[];
+        try {
+          results = await input.log!.append(batch);
+        } catch (error) {
+          // Keep the batch queued; the log's unique indexes turn a repeated
+          // insert into a duplicate, so a retry cannot fork the stream.
+          state.pending.unshift(...batch);
+          throw error;
+        }
+        if (results.includes('stale_generation')) {
+          // This process no longer owns the task. Stop writing rather than
+          // interleaving a superseded generation into the newer stream.
+          state.fenced = true;
+          state.pending.length = 0;
+          return;
+        }
       }
+    })().finally(() => {
+      flushing.delete(taskId);
+    });
+    flushing.set(taskId, run);
+    return run;
+  }
+
+  /** The settlement barrier: everything published so far is stored. */
+  async function drain(taskId: string): Promise<void> {
+    cancelTimer(taskId);
+    for (;;) {
+      await flushPending(taskId);
+      const state = streams.get(taskId);
+      if (!state || !input.log || state.fenced || state.pending.length === 0) return;
     }
   }
 
@@ -202,6 +259,7 @@ export function createEventBus(input: {
           break;
         }
       }
+      schedule(draft.taskId);
       return event;
     },
 
@@ -216,6 +274,7 @@ export function createEventBus(input: {
       state.seq = event.seq;
       append(state, event);
       state.pending.push(event);
+      schedule(event.taskId);
       return { accepted: true, event };
     },
 
@@ -260,7 +319,7 @@ export function createEventBus(input: {
     hydrate,
 
     flush: async (taskId) => {
-      await flush(taskId);
+      await drain(taskId);
       const state = streams.get(taskId);
       if (!state || !input.log || state.fenced) return;
       const last = state.events.at(-1);
@@ -270,7 +329,8 @@ export function createEventBus(input: {
     },
 
     close: async () => {
-      await Promise.all([...streams.keys()].map((taskId) => flush(taskId)));
+      for (const taskId of [...timers.keys()]) cancelTimer(taskId);
+      await Promise.all([...streams.keys()].map((taskId) => drain(taskId)));
     },
 
     dropped: () => dropped,

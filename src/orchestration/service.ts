@@ -835,6 +835,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
+        // Continue the shared sequence: this replica may never have read the
+        // stream, and an event numbered from 1 is discarded as a duplicate,
+        // which would leave the recovery unexplained.
+        await deps.events.hydrate(task.taskId).catch(() => 0);
         publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
@@ -1155,6 +1159,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      // The first events of the new generation follow the durable watermark; a
+      // replica that never wrote this stream restarts at 1 and loses them to
+      // the unique sequence index.
+      await deps.events.hydrate(taskId).catch(() => 0);
       publish(applied.task, 'task.queued');
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -1204,6 +1212,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
+      // Same rule as resume: continue the shared sequence, never restart it.
+      await deps.events.hydrate(taskId).catch(() => 0);
       publish(applied.task, 'task.queued');
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));

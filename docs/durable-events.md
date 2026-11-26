@@ -33,9 +33,13 @@ Checked, not assumed, before anything was written:
   generation and is advanced with `$max`, so a stale replica cannot lower it.
 - `src/events/bus.ts` — the bus now persists. `flush` is the barrier, `hydrate`
   loads the durable watermark so a resumed task continues after it, `read` is the
-  durable replay, `close` flushes on shutdown. A bounded pending queue sheds the
-  oldest **non-terminal** events under backpressure; a terminal event is never
-  dropped.
+  durable replay, `close` flushes on shutdown. A coalescing timer persists each
+  pending batch between settlement points, so a second replica can replay a run
+  that is still executing; `hydrate` re-reads the watermark on every call because
+  another replica keeps advancing it. A control path that reissues a generation
+  (resume, retry, recovery) hydrates before its first event, so it continues the
+  shared sequence instead of colliding with the numbers already stored. A bounded pending queue sheds the oldest
+  **non-terminal** events under backpressure; a terminal event is never dropped.
 - `EventBus.read` is what `GET /v1/work/:id/events` now returns, so a reconnect
   after a restart replays what the previous process wrote instead of an empty
   in-process window. `Last-Event-ID` is honoured and the larger of the header and
@@ -181,6 +185,28 @@ filter's equality fields.
 **Not verified:** a live MongoDB (the same limitation as every other durable store
 here), a multi-replica race, hosted CI on this branch at the time of writing, and
 any deployment.
+
+### Live multi-replica coverage
+
+`tests/integration/mongo-live.test.ts` now runs two independently composed
+replicas against one real MongoDB and covers the durable stream end to end:
+
+- a replay from the replica that is not executing the task **while the owner is
+  still inside the adapter**, including the watermark it reports;
+- retention truncation performed through a replica's own `EventLog` and observed
+  as `truncated: true` by another replica, with a retained-edge cursor that is
+  not a gap;
+- generation fencing across replicas: the second replica creates generation 2
+  through the real `POST /v1/work/{id}/resume` route after the owner's lease
+  expires, and the owner's later generation-1 append is refused as
+  `stale_generation`, seals the owner's bus and leaves the shared `heads` row at
+  2. The resume's first events follow the durable watermark rather than
+  restarting at 1, so no event is dropped as a duplicate.
+
+Run it by setting `CODERAX_TEST_MONGODB_URI` to a MongoDB deployment you control,
+then `npm run verify`; the suite is skipped when the variable is unset. The
+connector accepts a seed on the engine's own host (including a Unix socket) or a
+TLS connection; an unencrypted remote seed is refused.
 
 ## Recovery artefacts
 
