@@ -665,12 +665,17 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         continue;
       }
       if (!runtime.circuit.allow(at)) continue;
-      if (!provider.circuit.allow(at)) continue;
+      if (!provider.circuit.allow(at)) {
+        runtime.circuit.abandon();
+        continue;
+      }
       const acquired = provider.limiter.acquire({
         tokens: estimated + output,
         now: at,
       });
       if (!acquired.allowed) {
+        runtime.circuit.abandon();
+        provider.circuit.abandon();
         lastFailure = new ProviderError(
           'rate_limit',
           `The local provider ${acquired.reason} ceiling is already in use.`,
@@ -687,6 +692,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       });
       if (!reserved.allowed) {
         acquired.release();
+        runtime.circuit.abandon();
+        provider.circuit.abandon();
         throw new ModelRoutingError(
           'budget_exhausted',
           'The daily zero-cost token or request budget is exhausted; the request was refused rather than sent.',
@@ -736,6 +743,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
                 retryable: true,
               });
         if (providerError.kind === 'cancelled' || request.signal.aborted) {
+          runtime.circuit.abandon();
+          provider.circuit.abandon();
           throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
         }
         recordFailure({ error: providerError, provider, runtime }, now());
@@ -782,9 +791,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         continue;
       }
       if (!runtime.circuit.allow(at)) continue;
-      if (!provider.circuit.allow(at)) continue;
+      if (!provider.circuit.allow(at)) {
+        runtime.circuit.abandon();
+        continue;
+      }
       const acquired = provider.limiter.acquire({ tokens: estimated + output, now: at });
       if (!acquired.allowed) {
+        runtime.circuit.abandon();
+        provider.circuit.abandon();
         lastFailure = new ProviderError('rate_limit', 'The local provider ceiling is already in use.', {
           retryAfterMs: acquired.retryAfterMs,
           retryable: true,
@@ -799,6 +813,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       });
       if (!reserved.allowed) {
         acquired.release();
+        runtime.circuit.abandon();
+        provider.circuit.abandon();
         throw new ModelRoutingError(
           'budget_exhausted',
           'The daily zero-cost token or request budget is exhausted; the request was refused rather than sent.',
@@ -806,8 +822,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         );
       }
 
+      let settled = false;
+      let providerStarted = false;
       attempts.push(runtime.state.ref);
-      yield { type: 'model', model: runtime.state.ref, attempts: [...attempts], latencyMs: 0 };
       let emitted = false;
       let usage: Usage | undefined;
       const started = performance.now();
@@ -827,6 +844,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       };
 
       try {
+        yield { type: 'model', model: runtime.state.ref, attempts: [...attempts], latencyMs: 0 };
+        providerStarted = true;
         const events = provider.adapter.stream
           ? provider.adapter.stream(providerRequest)
           : synthesize(provider.adapter.complete(providerRequest));
@@ -838,6 +857,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           yield event;
         }
         const latencyMs = Math.max(0, performance.now() - started);
+        settled = true;
         acquired.release();
         budget.settle(
           reserved.reservation.id,
@@ -855,6 +875,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
               });
         if (providerError.kind === 'cancelled' || request.signal.aborted) {
           budget.release(reserved.reservation.id);
+          settled = true;
+          runtime.circuit.abandon();
+          provider.circuit.abandon();
           throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
         }
         recordFailure({ error: providerError, provider, runtime }, now());
@@ -864,6 +887,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             reserved.reservation.id,
             usage ?? { inputTokens: estimated, outputTokens: output },
           );
+          settled = true;
           throw new ModelRoutingError(
             'engine_unavailable',
             'The provider stream failed after output started; it cannot be safely replaced.',
@@ -871,7 +895,25 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           );
         }
         budget.release(reserved.reservation.id);
+        settled = true;
         lastFailure = providerError;
+      } finally {
+        // A consumer can stop iterating before the provider finishes. Release the
+        // provider slot and account for the work already started; otherwise the
+        // concurrency ceiling and the reservation would leak for the rest of the day.
+        if (!settled) {
+          runtime.circuit.abandon();
+          provider.circuit.abandon();
+          acquired.release();
+          if (providerStarted) {
+            budget.settle(
+              reserved.reservation.id,
+              usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 },
+            );
+          } else {
+            budget.release(reserved.reservation.id);
+          }
+        }
       }
     }
 
@@ -919,6 +961,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         } catch (error) {
           failedProviders.add(providerId);
           provider.discoveryOk = false;
+          provider.verifiedFree = 0;
           provider.lastError = sanitizeDetail(
             error instanceof Error ? error.message : 'Provider discovery failed.',
           );

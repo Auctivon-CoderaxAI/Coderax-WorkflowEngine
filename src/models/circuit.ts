@@ -9,6 +9,8 @@ export type Circuit = {
   allow: (now: Date) => boolean;
   success: () => void;
   failure: (now: Date) => void;
+  /** Release a half-open probe that never produced an outcome. */
+  abandon: () => void;
   state: (now: Date) => CircuitState;
   retryAfterMs: (now: Date) => number;
 };
@@ -47,6 +49,9 @@ export function createCircuit(input: {
       if (failures >= input.failureThreshold) {
         openedAt = now.getTime();
       }
+    },
+    abandon: () => {
+      halfOpenProbe = false;
     },
     state,
     retryAfterMs: (now) => {

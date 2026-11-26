@@ -481,6 +481,7 @@ test('a discovery failure excludes every model from that provider', async () => 
   assert.equal(engine.hasVerifiedFreeRoute(), false);
   assert.equal(engine.route().length, 0);
   assert.equal(engine.health().providers[0]?.available, false);
+  assert.equal(engine.health().providers[0]?.verifiedFreeModels, 0);
 });
 
 test('the router normalizes a provider stream and records health', async () => {
@@ -510,6 +511,93 @@ test('the router normalizes a provider stream and records health', async () => {
   assert.equal(health.models[0]?.attempts, 1);
   assert.equal(health.models[0]?.successes, 1);
   assert.ok((health.models[0]?.latencyMs ?? 0) >= 0);
+});
+
+test('an abandoned half-open stream probe does not strand the circuit', async () => {
+  const model = freeModel('streamed');
+  let fail = true;
+  const provider = adapter({
+    models: [model],
+    complete: async () => {
+      if (fail) {
+        fail = false;
+        throw new ProviderError('server', 'first call fails', { retryable: true });
+      }
+      return { text: 'recovered', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+    },
+    stream: async function* () {
+      yield { type: 'text' as const, text: 'first' };
+      yield { type: 'text' as const, text: 'never read' };
+    },
+  });
+  let current = new Date('2026-11-26T12:00:00.000Z');
+  const engine = router({
+    adapters: [provider],
+    failureThreshold: 1,
+    cooldownMs: 1_000,
+    now: () => current,
+  });
+  await engine.refresh();
+
+  await assert.rejects(
+    () => engine.complete(request('streamed')),
+    (error: unknown) => error instanceof ModelRoutingError && error.code === 'engine_unavailable',
+  );
+  current = new Date(current.getTime() + 2_000);
+  for await (const event of engine.stream(request('streamed'))) {
+    if (event.type === 'text') break;
+  }
+  const recovered = await engine.complete(request('streamed'));
+  assert.equal(recovered.text, 'recovered');
+});
+
+test('stopping on the model event releases an unused reservation', async () => {
+  const model = freeModel('streamed');
+  const ledger = budget(1);
+  const provider = adapter({
+    models: [model],
+    stream: async function* () {
+      yield { type: 'text' as const, text: 'not reached' };
+    },
+  });
+  const engine = router({ adapters: [provider], ledger });
+  await engine.refresh();
+
+  for await (const event of engine.stream(request('streamed'))) {
+    if (event.type === 'model') break;
+  }
+
+  const completed = await engine.complete(request('streamed'));
+  assert.equal(completed.text, 'ok:streamed');
+  assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
+});
+
+test('stopping a stream early releases the provider slot and settles the reservation', async () => {
+  const model = freeModel('streamed');
+  const ledger = budget();
+  const provider = adapter({
+    models: [model],
+    stream: async function* () {
+      yield { type: 'text' as const, text: 'first' };
+      yield { type: 'text' as const, text: 'never read' };
+    },
+  });
+  const engine = router({
+    adapters: [provider],
+    ledger,
+    settings: { maxConcurrency: 1 },
+  });
+  await engine.refresh();
+
+  for await (const event of engine.stream(request('streamed'))) {
+    if (event.type === 'text') break;
+  }
+
+  // A leaked slot makes this fail with the local concurrency ceiling; a leaked
+  // reservation leaves the request count at one instead of two.
+  const completed = await engine.complete(request('streamed'));
+  assert.equal(completed.text, 'ok:streamed');
+  assert.equal(ledger.snapshot('owner', new Date()).requests, 2);
 });
 
 test('streaming fails over only before the first token', async () => {
