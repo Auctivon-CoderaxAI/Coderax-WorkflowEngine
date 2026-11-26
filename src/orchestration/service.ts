@@ -389,6 +389,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           ...(checkpoint ? { checkpoint } : {}),
         },
       });
+      if (!applied.applied && applied.reason === 'cancel_requested') {
+        await settle(task, token, { kind: 'cancelled' }, checkpoint);
+        return;
+      }
       if (applied.applied) {
         deps.audit.record({
           actor: task.ownerId,
@@ -414,7 +418,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           }
         : outcome.kind === 'cancelled'
-          ? { state: 'cancelled' as const, updatedAt: now }
+          ? { state: 'cancelled' as const, updatedAt: now, failure: null }
           : {
               state: 'failed' as const,
               updatedAt: now,
@@ -437,12 +441,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    const settled = applied.task;
+    await reportSettlement(applied.task, token, outcome, now, checkpoint);
+  }
+
+  async function reportSettlement(
+    settled: TaskRecord,
+    token: string,
+    outcome: Extract<RunOutcome, { kind: 'completed' | 'cancelled' | 'failed' }>,
+    now: string,
+    checkpoint?: TaskRecord['checkpoint'],
+  ): Promise<void> {
     try {
       if (outcome.kind === 'completed') {
         publish(settled, 'task.completed', {
           summary: outcome.summary.slice(0, 20_000),
-          ...(task.model ? { model: task.model } : {}),
+          ...(settled.model ? { model: settled.model } : {}),
           ...(outcome.usage ? { usage: outcome.usage } : {}),
         });
       } else if (outcome.kind === 'cancelled') {
@@ -457,26 +470,26 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (text.length > 0) {
         await deps.conversations.appendMessage({
           messageId: deps.ids.messageId(),
-          conversationId: task.conversationId,
+          conversationId: settled.conversationId,
           role: 'assistant',
           text,
           createdAt: now,
-          agent: task.agent,
+          agent: settled.agent,
         }).catch(() => undefined);
       }
       const detail = outcome.kind === 'completed' ? outcome.summary
         : outcome.kind === 'failed' ? outcome.detail : undefined;
       await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
       deps.audit.record({
-        actor: task.ownerId,
+        actor: settled.ownerId,
         action: `work.${outcome.kind}`,
-        taskId: task.taskId,
-        conversationId: task.conversationId,
+        taskId: settled.taskId,
+        conversationId: settled.conversationId,
         outcome: outcome.kind,
         ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
     } finally {
-      await releaseLease(task, token);
+      await releaseLease(settled, token);
     }
   }
 
@@ -571,8 +584,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       visible = next;
     };
 
+    let acceptingReports = true;
     const report = (event: AgentReportEvent): void => {
-      if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
+      if (!acceptingReports || controllers.get(taskId) !== controller || controller.signal.aborted) return;
       if (event.type === 'step.started') {
         const existing = steps.find((step) => step.id === event.stepId);
         if (existing) existing.state = 'running';
@@ -640,58 +654,67 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
 
     const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
-    const result = await deps.runner.run({
-      scope: scopeOf(started.task),
-      token,
-      adapter: adapter.value as AgentAdapter,
-      request: {
-        ownerId: task.ownerId,
-        tenantId: task.tenantId,
-        conversationId: task.conversationId,
-        objective: task.objective,
-        history,
-        model: model.value.ref,
-        mode: task.mode,
-        workspaceRoot: workspace.value.root,
-        maxSteps: deps.config.engines.native.maxSteps,
-        budget: task.budget,
-        signal: controller.signal,
-        ...(started.task.agent === 'coderax'
-          ? {
-              context: {
-                ...await nativeContext({ ownerId: task.ownerId, mode: task.mode, task: started.task }),
-                pendingAction: started.task.pendingAction ?? null,
-                savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
-                  taskId, token, patch: { pendingAction: pendingAction?.observations
-                    ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) } : pendingAction },
-                })).applied,
-                savePlan: async (plan) => {
-                  const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
-                  const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
-                  if (saved.applied) steps.splice(0, steps.length, ...planned);
-                  return saved.applied;
+    try {
+      const result = await deps.runner.run({
+        scope: scopeOf(started.task),
+        token,
+        adapter: adapter.value as AgentAdapter,
+        request: {
+          ownerId: task.ownerId,
+          tenantId: task.tenantId,
+          conversationId: task.conversationId,
+          objective: task.objective,
+          history,
+          model: model.value.ref,
+          mode: task.mode,
+          workspaceRoot: workspace.value.root,
+          maxSteps: deps.config.engines.native.maxSteps,
+          budget: task.budget,
+          signal: controller.signal,
+          ...(started.task.agent === 'coderax'
+            ? {
+                context: {
+                  ...await nativeContext({ ownerId: task.ownerId, mode: task.mode, task: started.task }),
+                  pendingAction: started.task.pendingAction ?? null,
+                  savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
+                    taskId, token, patch: { pendingAction: pendingAction?.observations
+                      ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) } : pendingAction },
+                  })).applied,
+                  savePlan: async (plan) => {
+                    const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
+                    const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
+                    if (saved.applied) steps.splice(0, steps.length, ...planned);
+                    return saved.applied;
+                  },
                 },
-              },
-            }
-          : {}),
-      },
-      report,
-    });
-    if (controllers.get(taskId) !== controller) return;
-    controllers.delete(taskId);
+              }
+            : {}),
+        },
+        report,
+      });
+      acceptingReports = false;
+      if (controllers.get(taskId) !== controller) return;
 
-    if (result.ownershipLost) {
-      // Deliberately no terminal write and no notification: this run no longer
-      // owns the task, and the new owner is the only writer of its state.
-      return;
+      if (result.ownershipLost) {
+        // Deliberately no terminal write and no notification: this run no longer
+        // owns the task, and the new owner is the only writer of its state.
+        return;
+      }
+      const safeText = redactContent(text);
+      emitText(safeText);
+      const outcome = result.outcome.kind === 'completed'
+        ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
+        : result.outcome;
+      await reports;
+      if (controllers.get(taskId) !== controller) return;
+      await settle(
+        started.task, token,
+        outcome.kind === 'suspended' && controller.signal.aborted ? { kind: 'cancelled' } : outcome,
+        { completedSteps: completed, text: safeText, outputs },
+      );
+    } finally {
+      if (controllers.get(taskId) === controller) controllers.delete(taskId);
     }
-    const safeText = redactContent(text);
-    emitText(safeText);
-    const outcome = result.outcome.kind === 'completed'
-      ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
-      : result.outcome;
-    await reports;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText, outputs });
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
@@ -900,14 +923,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           return fail('busy', 'Another run holds this conversation.');
         }
         const claimed = await deps.tasks.reissue({
-          taskId, token, expected: { state: task.state, generation: task.generation },
+          taskId, token, cancelSuspended: true, expected: { state: task.state, generation: task.generation },
           now: now.toISOString(), leaseExpiresAt: expiresAt.toISOString(),
         });
         if (!claimed.applied) {
           await releaseLease(task, token);
           return fail('conflict', 'The suspended task changed before cancellation.');
         }
-        await settle(claimed.task, token, { kind: 'cancelled' });
+        await reportSettlement(claimed.task, token, { kind: 'cancelled' }, now.toISOString());
         return ok({ taskId, state: 'cancelled', generation: claimed.task.generation, outcome: 'accepted' });
       }
       const outcome = await deps.lease.cancel({
@@ -919,12 +942,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
 
       if (outcome === 'requested') {
-        await deps.tasks.updateFenced({
+        const marked = await deps.tasks.updateFenced({
           taskId: task.taskId,
           token: task.runToken ?? '',
           patch: { cancelRequested: true, updatedAt: deps.clock.iso() },
         });
+        if (!marked.applied) {
+          const current = await deps.tasks.get(taskId);
+          return ok({
+            taskId, state: current?.state ?? task.state, generation: current?.generation ?? task.generation,
+            outcome: marked.reason === 'terminal' ? 'already_terminal' : 'superseded',
+          });
+        }
         controllers.get(task.taskId)?.abort();
+        // Suspension may have won the race with the durable cancellation flag.
+        if (marked.task.state === 'awaiting_approval' && marked.task.runToken) {
+          await settle(marked.task, marked.task.runToken, { kind: 'cancelled' });
+          const current = await deps.tasks.get(taskId);
+          if (current?.state === 'cancelled') {
+            return ok({ taskId, state: current.state, generation: current.generation, outcome: 'accepted' });
+          }
+        }
         return ok({
           taskId: task.taskId,
           state: task.state,

@@ -294,3 +294,25 @@ test('notifications are written once per task and marked read per owner', async 
   await notifications.markRead('owner-test', 'task_1');
   assert.equal((await notifications.list('owner-test')).unread, 0);
 });
+
+test('durable cancellation blocks a fenced suspension even without a local controller', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1', state: 'running' }));
+  await tasks.updateFenced({ taskId: 'task_1', token: 'run-1', patch: { cancelRequested: true } });
+  assert.deepEqual(
+    await tasks.updateFenced({ taskId: 'task_1', token: 'run-1', patch: { state: 'awaiting_approval' } }),
+    { applied: false, reason: 'cancel_requested' },
+  );
+  assert.equal((await tasks.get('task_1'))?.state, 'running');
+});
+
+test('reissuing a suspended task for cancellation commits the terminal state atomically', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1', state: 'awaiting_approval' }));
+  const cancelled = await tasks.reissue({
+    taskId: 'task_1', token: 'run-2', now: NOW, leaseExpiresAt: NOW, cancelSuspended: true,
+  });
+  assert.equal(cancelled.applied && cancelled.task.state, 'cancelled');
+  assert.equal(cancelled.applied && cancelled.task.cancelRequested, true);
+  assert.deepEqual(await tasks.listUnsettled(), []);
+});

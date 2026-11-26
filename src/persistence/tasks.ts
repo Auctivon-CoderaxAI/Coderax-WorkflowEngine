@@ -8,7 +8,7 @@ export type CreateTaskResult =
 
 export type FencedWriteResult =
   | { applied: true; task: TaskRecord }
-  | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' };
+  | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' | 'cancel_requested' };
 
 /**
  * The only writer of task state.
@@ -34,6 +34,7 @@ export type TaskRepository = {
     taskId: string;
     token: string;
     expected?: Pick<TaskRecord, 'state' | 'generation'>;
+    cancelSuspended?: boolean;
     now: string;
     leaseExpiresAt: string;
   }) => Promise<FencedWriteResult>;
@@ -85,6 +86,9 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(task.state)) {
         return { applied: false, reason: 'terminal' };
       }
+      if (patch.state === 'awaiting_approval' && task.cancelRequested) {
+        return { applied: false, reason: 'cancel_requested' };
+      }
       const next: TaskRecord = { ...task, ...patch, runToken: task.runToken };
       tasks.set(taskId, next);
       if (isTerminalState(next.state)) {
@@ -100,28 +104,30 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(next.state)) settle(next);
       return true;
     },
-    reissue: async ({ taskId, token, now, leaseExpiresAt, expected }) => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, expected, cancelSuspended }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
-      if ((expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
+      if ((cancelSuspended && task.state !== 'awaiting_approval') ||
+          (expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
           (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
       const next: TaskRecord = {
         ...task,
-        state: 'queued',
+        state: cancelSuspended ? 'cancelled' : 'queued',
         generation: task.generation + 1,
         checkpoint: expected?.state === 'awaiting_approval'
               ? task.checkpoint : { ...task.checkpoint, text: '' },
         runToken: token,
         updatedAt: now,
         leaseExpiresAt,
-        cancelRequested: false,
+        cancelRequested: cancelSuspended ?? false,
         failure: null,
         result: null,
       };
       tasks.set(taskId, next);
-      activeByConversation.set(next.conversationId, next.taskId);
+      if (cancelSuspended) settle(next);
+      else activeByConversation.set(next.conversationId, next.taskId);
       return { applied: true, task: { ...next } };
     },
     listByConversation: async (conversationId) =>

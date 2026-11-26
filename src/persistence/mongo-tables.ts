@@ -169,7 +169,10 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
 
     updateFenced: async ({ taskId, token, patch }): Promise<FencedWriteResult> => {
       const updated = await collection.findOneAndUpdate(
-        { taskId, runToken: token, state: { $nin: TERMINAL } },
+        {
+          taskId, runToken: token, state: { $nin: TERMINAL },
+          ...(patch.state === 'awaiting_approval' ? { cancelRequested: { $ne: true } } : {}),
+        },
         { $set: { ...defined(patch), runToken: token } },
         { returnDocument: 'after', includeResultMetadata: false },
       );
@@ -180,6 +183,9 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       const task = toTask(current);
       if (!isAuthorizedGeneration(task.runToken, token)) {
         return { applied: false, reason: 'superseded' };
+      }
+      if (!isTerminalState(task.state) && patch.state === 'awaiting_approval' && task.cancelRequested) {
+        return { applied: false, reason: 'cancel_requested' };
       }
       return { applied: false, reason: 'terminal' };
     },
@@ -193,11 +199,12 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
-    reissue: async ({ taskId, token, now, leaseExpiresAt, expected }): Promise<FencedWriteResult> => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, expected, cancelSuspended }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
       const task = toTask(current);
-      if ((expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
+      if ((cancelSuspended && task.state !== 'awaiting_approval') ||
+          (expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
           (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
@@ -207,14 +214,14 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
         { taskId, generation: task.generation, state: task.state, runToken: task.runToken },
         {
           $set: {
-            state: 'queued',
+            state: cancelSuspended ? 'cancelled' : 'queued',
             generation: task.generation + 1,
             checkpoint: expected?.state === 'awaiting_approval'
               ? task.checkpoint : { ...task.checkpoint, text: '' },
             runToken: token,
             updatedAt: now,
             leaseExpiresAt,
-            cancelRequested: false,
+            cancelRequested: cancelSuspended ?? false,
             failure: null,
             result: null,
           },

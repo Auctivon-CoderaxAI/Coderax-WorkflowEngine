@@ -233,3 +233,39 @@ test('failed suspension persistence leaves the running task recoverable on lease
     await started.close();
   }
 });
+
+test('cancellation after the runner returns wins over suspension while reports drain', async () => {
+  const started = await startTestApp({ gateway: scriptedGateway() });
+  let releaseReports = (): void => {};
+  const reports = new Promise<void>(resolve => { releaseReports = resolve; });
+  let runnerReturned = false;
+  try {
+    const { tasks, runner, scheduler } = started.app.dependencies;
+    const update = tasks.updateFenced;
+    tasks.updateFenced = async (input) => {
+      if (input.patch.steps && input.patch.updatedAt && !input.patch.state) await reports;
+      return update(input);
+    };
+    const run = runner.run;
+    runner.run = async (input) => {
+      const result = await run(input);
+      runnerReturned = true;
+      return result;
+    };
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'Write the report', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(submitted.ok);
+    const { taskId } = submitted.value;
+    await waitFor(async () => runnerReturned || null);
+    const cancelled = await started.app.service.cancelTask(principal, taskId);
+    assert.equal(cancelled.ok && cancelled.value.outcome, 'accepted');
+    releaseReports();
+    await scheduler.idle();
+    assert.equal((await tasks.get(taskId))?.state, 'cancelled');
+    assert.equal(started.app.dependencies.events.replay(taskId, 0).events.at(-1)?.type, 'task.cancelled');
+  } finally {
+    releaseReports();
+    await started.close();
+  }
+});

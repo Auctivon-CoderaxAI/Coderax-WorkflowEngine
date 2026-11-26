@@ -20,6 +20,7 @@ function matches(document: Document, filter: MongoFilter): boolean {
         const bound = operators.$gt as Date;
         if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
       }
+      if ('$ne' in operators && value === operators.$ne) return false;
       if ('$in' in operators) {
         const list = operators.$in as unknown[];
         if (!list.includes(value)) return false;
