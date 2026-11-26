@@ -41,6 +41,7 @@ import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
+import type { ArtifactService } from '../artifacts/service.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
 
@@ -58,6 +59,7 @@ export type ApplicationServiceDeps = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifactService: ArtifactService;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -110,6 +112,8 @@ export type ApplicationService = {
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
   notifications: (principal: Principal) => Promise<NotificationList>;
+  /** Durable artifact storage; the only path that returns artifact bytes. */
+  artifacts: ArtifactService;
   events: (
     principal: Principal,
     taskId: string,
@@ -706,7 +710,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const reconciled = await reconcile(found.value);
-      return ok(toStatus(reconciled));
+      const status = toStatus(reconciled);
+      // Result artifacts are read from the artifact service rather than copied
+      // into the fenced task row. The task remains the authority on state; the
+      // artifact store is the authority on files, and a download can be made
+      // from exactly the descriptors reported here.
+      const listed = await deps.artifactService.list(principal, {
+        mode: reconciled.mode,
+        taskId: reconciled.taskId,
+        limit: 100,
+      });
+      if (listed.ok && listed.value.artifacts.length > 0) {
+        status.result = {
+          ...(status.result ?? {}),
+          artifacts: listed.value.artifacts.map((artifact) => ({
+            path: artifact.filename,
+            bytes: artifact.bytes,
+            digest: artifact.sha256,
+          })),
+        };
+      }
+      return ok(status);
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -988,6 +1012,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     notifications: (principal) => deps.notifications.list(principal.ownerId),
+
+    artifacts: deps.artifactService,
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);

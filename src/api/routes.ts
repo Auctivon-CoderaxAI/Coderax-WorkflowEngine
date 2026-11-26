@@ -1,4 +1,10 @@
-import type { DataMode } from '@coderax/contracts';
+import type {
+  ArtifactKind,
+  ArtifactModeRequest,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
+  DataMode,
+} from '@coderax/contracts';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { RouteRegistry } from './router.js';
 import { problemResult } from './router.js';
@@ -15,6 +21,11 @@ import type { ServiceFailure } from '../support/result.js';
 
 function fromFailure(failure: ServiceFailure, requestId: string) {
   return problemResult(failure.code, failure.detail, requestId, failure.retryable);
+}
+
+/** The query schema already validated the enum; this only names the default. */
+function modeFrom(value: unknown): DataMode {
+  return value === 'cloud' ? 'cloud' : 'private';
 }
 
 function isTerminalPayload(value: unknown): boolean {
@@ -202,6 +213,101 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('listArtifacts', async (context) => {
+    const query = context.query as {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    };
+    const result = await service.artifacts.list(context.principal, query);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('uploadArtifact', async (context) => {
+    const result = await service.artifacts.upload(
+      context.principal,
+      context.body as ArtifactUploadRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('pruneArtifacts', async (context) => {
+    const body = context.body as ArtifactModeRequest;
+    const result = await service.artifacts.prune(context.principal, modeFrom(body.mode));
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getArtifact', async (context) => {
+    const result = await service.artifacts.get(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(context.query.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('uploadArtifactVersion', async (context) => {
+    const result = await service.artifacts.addVersion(
+      context.principal,
+      context.params.artifactId ?? '',
+      context.body as ArtifactVersionRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('listArtifactVersions', async (context) => {
+    const result = await service.artifacts.versions(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(context.query.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('downloadArtifact', async (context) => {
+    const query = context.query as { mode?: DataMode; version?: number };
+    const result = await service.artifacts.download(
+      context.principal,
+      context.params.artifactId ?? '',
+      query,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('exportArtifact', async (context) => {
+    const query = context.query as { mode?: DataMode; version?: number };
+    const result = await service.artifacts.exportBundle(
+      context.principal,
+      context.params.artifactId ?? '',
+      query,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('deleteArtifact', async (context) => {
+    const body = context.body as ArtifactModeRequest;
+    const result = await service.artifacts.remove(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(body.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  // Registration order follows the catalogue order so the served OpenAPI
+  // document is byte-identical to the published one.
   registry.register('listNotifications', async (context) => ({
     kind: 'json',
     status: 200,

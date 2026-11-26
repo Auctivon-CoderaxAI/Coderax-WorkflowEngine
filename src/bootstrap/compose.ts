@@ -21,6 +21,7 @@ import { createTaskRunner } from '../execution/runner.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import { createArtifactService } from '../artifacts/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
@@ -201,6 +202,16 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
   const audit = createAuditLog({ clock, ids });
+  const artifactService = createArtifactService({
+    artifacts: persistence.artifacts,
+    blobs: persistence.blobs,
+    conversations,
+    tasks,
+    audit,
+    clock,
+    ids,
+    settings: config.artifacts,
+  });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -259,6 +270,37 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         }),
       },
       {
+        // Required only when the deployment selected durable persistence. A
+        // memory deployment still starts, but reports honestly that artifact
+        // writes are refused rather than pretending they would survive.
+        name: 'artifacts',
+        required: persistence.driver === 'mongo',
+        check: async () => {
+          if (!persistence.blobs.durable) {
+            // Consistent with the persistence probe: a memory deployment is a
+            // known non-durable configuration, reported as ok-with-limitation
+            // rather than as a fault. What matters is that it is never silent.
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
+            };
+          }
+          try {
+            await persistence.blobs.check();
+            return {
+              status: 'ok' as const,
+              detail: 'Artifact metadata and content are stored durably in MongoDB.',
+            };
+          } catch {
+            return {
+              status: 'failed' as const,
+              detail: 'Artifact storage could not be read.',
+            };
+          }
+        },
+      },
+      {
         name: 'engine',
         required: true,
         check: async () => {
@@ -301,6 +343,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    artifactService,
     audit,
     events,
     runner,
@@ -372,6 +415,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // Retention is enforced at startup too, so a stale artifact does not
+      // depend on the next client request to be removed.
+      await service.artifacts.sweepExpiredArtifacts();
       return { url };
     },
     stop: async () => {

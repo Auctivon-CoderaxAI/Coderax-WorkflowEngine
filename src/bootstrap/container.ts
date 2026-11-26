@@ -16,6 +16,7 @@ import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import type { ArtifactService } from '../artifacts/service.js';
 import type { Router } from '../api/router.js';
 
 /**
@@ -40,6 +41,7 @@ export type InfrastructureDependencies = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifactService: ArtifactService;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -61,6 +63,7 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'memory',
   'permissions',
   'notifications',
+  'artifactService',
   'audit',
   'events',
   'runner',
