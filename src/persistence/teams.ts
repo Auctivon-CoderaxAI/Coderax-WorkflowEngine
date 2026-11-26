@@ -38,6 +38,16 @@ export type TeamRepository = {
   heartbeat: (input: { teamId: string; token: string; at: string }) => Promise<boolean>;
   /** Durable and unfenced on purpose: a cancel may land on another replica. */
   requestCancel: (input: { ownerId: string; teamId: string; at: string }) => Promise<boolean>;
+  /**
+   * Cancels a team that has no live execution loop (queued, suspended or
+   * interrupted). The condition is part of the atomic write, so a concurrent
+   * claim cannot be cancelled out from under its runner.
+   */
+  cancelInactive: (input: {
+    ownerId: string;
+    teamId: string;
+    at: string;
+  }) => Promise<TeamRecord | null>;
   listByOwner: (ownerId: string) => Promise<TeamRecord[]>;
   listActive: () => Promise<TeamRecord[]>;
   retireStale: (input: { before: string; at: string }) => Promise<number>;
@@ -109,6 +119,22 @@ export function createTeamRepository(): TeamRepository {
       record.cancelRequested = true;
       record.updatedAt = at;
       return true;
+    },
+
+    cancelInactive: async ({ ownerId, teamId, at }) => {
+      const record = teams.get(teamId);
+      if (!record || record.ownerId !== ownerId || record.runToken !== null) return null;
+      if (!['queued', 'awaiting_approval', 'interrupted'].includes(record.state)) return null;
+      record.state = 'cancelled';
+      record.cancelRequested = true;
+      record.finishedAt = at;
+      record.updatedAt = at;
+      record.failure = {
+        code: 'cancelled',
+        detail: 'The team was cancelled before it acquired an execution.',
+        retryable: false,
+      };
+      return clone(record);
     },
 
     listByOwner: async (ownerId) =>
@@ -234,6 +260,32 @@ export function createMongoTeamRepository(input: {
         { upsert: false },
       );
       return (result.matchedCount ?? 0) === 1;
+    },
+
+    cancelInactive: async ({ ownerId, teamId, at }) => {
+      const document = await collection.findOneAndUpdate(
+        {
+          teamId,
+          ownerId,
+          runToken: null,
+          state: { $in: ['queued', 'awaiting_approval', 'interrupted'] },
+        },
+        {
+          $set: {
+            state: 'cancelled',
+            cancelRequested: true,
+            finishedAt: at,
+            updatedAt: at,
+            failure: {
+              code: 'cancelled',
+              detail: 'The team was cancelled before it acquired an execution.',
+              retryable: false,
+            },
+          },
+        },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      return document ? fromDocument(document) : null;
     },
 
     listByOwner: async (ownerId) => {

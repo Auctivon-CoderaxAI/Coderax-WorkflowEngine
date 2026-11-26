@@ -56,6 +56,39 @@ function identity(overrides: Partial<ExecutionIdentity> = {}): ExecutionIdentity
 
 const SCOPES: readonly PermissionScope[] = ['workspace.read', 'workspace.write'];
 
+test('two concurrent writers cannot both own one workspace root', async () => {
+  const h = harness();
+  const original = h.executions.create.bind(h.executions);
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  h.executions.create = async (record) => {
+    await gate;
+    return original(record);
+  };
+  const launch = async (): Promise<SupervisionLaunch> => ({
+    outcome: { kind: 'completed', summary: 'done' },
+  });
+  const start = (executionId: string, conversationId: string) =>
+    h.supervisor.run({
+      identity: identity({ executionId, conversationId }),
+      adapter: { agent: 'coderax', workload: 'in-process' },
+      workspaceRoot: '/work/cloud',
+      scopes: SCOPES,
+      launch,
+    });
+  const first = start('exec_a', 'conv_a');
+  const second = start('exec_b', 'conv_b');
+  release();
+  const outcomes = await Promise.all([first, second]);
+  assert.equal(
+    outcomes.filter((outcome) => outcome.admitted).length,
+    1,
+    'the workspace root is reserved before the first await',
+  );
+});
+
 test('an execution is recorded durably and its capability is revoked when it ends', async () => {
   const h = harness();
   const id = identity();

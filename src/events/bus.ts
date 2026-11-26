@@ -70,6 +70,8 @@ type Stream = {
   pending: ExecutionEvent[];
   fenced: boolean;
   hydrated: Promise<number> | null;
+  /** Serializes flushes so a retry cannot interleave older and newer batches. */
+  flushing: Promise<void> | null;
 };
 
 const TERMINAL: ReadonlySet<ExecutionEventType> = new Set([
@@ -105,6 +107,7 @@ export function createEventBus(input: {
       pending: [],
       fenced: false,
       hydrated: null,
+      flushing: null,
     };
     streams.set(taskId, created);
     return created;
@@ -164,17 +167,34 @@ export function createEventBus(input: {
   async function flush(taskId: string): Promise<void> {
     const state = streams.get(taskId);
     if (!state || !input.log) return;
-    while (state.pending.length > 0) {
-      const batch = state.pending.splice(0, 200);
-      const results = await input.log.append(batch);
-      if (results.includes('stale_generation')) {
-        // This process no longer owns the task. Stop writing rather than
-        // interleaving a superseded generation into the newer stream.
-        state.fenced = true;
-        state.pending.length = 0;
-        return;
+    if (state.flushing) return state.flushing;
+    state.flushing = (async () => {
+      try {
+        while (state.pending.length > 0) {
+          const batch = state.pending.splice(0, 200);
+          let results: Awaited<ReturnType<NonNullable<typeof input.log>['append']>>;
+          try {
+            results = await input.log!.append(batch);
+          } catch (error) {
+            // A failed append is not a lost append. Put the batch back ahead of
+            // anything published while it was in flight; the next flush retries
+            // in order, including terminal events.
+            state.pending.unshift(...batch);
+            throw error;
+          }
+          if (results.includes('stale_generation')) {
+            // This process no longer owns the task. Stop writing rather than
+            // interleaving a superseded generation into the newer stream.
+            state.fenced = true;
+            state.pending.length = 0;
+            return;
+          }
+        }
+      } finally {
+        state.flushing = null;
       }
-    }
+    })();
+    return state.flushing;
   }
 
   return {

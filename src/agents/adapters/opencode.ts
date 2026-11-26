@@ -39,7 +39,6 @@ export function createOpenCodeHttpTransport(input: {
   baseURL: string;
   /** Read by the caller from the environment; never logged or put in a URL. */
   password?: string;
-  model?: { providerId: string; modelId: string };
   fetchImpl?: FetchLike;
   timeoutMs?: number;
 }): ExternalAgentTransport {
@@ -125,7 +124,9 @@ export function createOpenCodeHttpTransport(input: {
         sessionId = session.id;
         report({ type: 'step.started', stepId: 'opencode-1', title: 'Execute with OpenCode' });
 
-        const model = input.model ?? { providerId: run.model.providerId, modelId: run.model.modelId };
+        // The router already resolved and admitted this model. The adapter must
+        // not substitute a configured preference after admission.
+        const model = run.model;
         const prompt = [
           `Objective:\n${run.objective}`,
           '',

@@ -20,6 +20,7 @@ function request(): AgentRunRequest {
 
 test('the OpenCode transport creates a session, sends the objective and reads its answer', async () => {
   const calls: string[] = [];
+  let sentModel: unknown = null;
   const fetchImpl = (async (input: unknown, init?: RequestInit) => {
     const url =
       typeof input === 'string'
@@ -37,6 +38,7 @@ test('the OpenCode transport creates a session, sends the objective and reads it
       });
     }
     if (url.includes('/session/session-1/message')) {
+      sentModel = (JSON.parse(String(init?.body)) as { model?: unknown }).model;
       return new Response(
         JSON.stringify({ parts: [{ type: 'text', text: 'OpenCode result.' }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -61,6 +63,7 @@ test('the OpenCode transport creates a session, sends the objective and reads it
   );
   assert.ok(calls.some((call) => call.startsWith('POST ') && call.endsWith('/session')));
   assert.ok(calls.some((call) => call.includes('/session/session-1/message')));
+  assert.deepEqual(sentModel, { providerID: 'free', modelID: 'coderax-small' });
   // The session is deleted after the run so the server does not accumulate them.
   assert.ok(calls.some((call) => call.startsWith('DELETE ')));
 });

@@ -326,6 +326,11 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         heldRoots.delete(root);
       }
 
+      // Reserve ownership before the first await. Two concurrent writers can
+      // otherwise both pass the `activeRoots` check above and register only
+      // after their durability writes resolve.
+      const previousRootOwner = exclusive ? activeRoots.get(root) : undefined;
+      if (exclusive) activeRoots.set(root, input.identity.executionId);
       const record: ExecutionRecord = {
         ...input.identity,
         workspaceRoot: root,
@@ -339,6 +344,10 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         processUseCount: 0,
       };
       if (!(await deps.executions.create(record))) {
+        if (exclusive) {
+          if (previousRootOwner === undefined) activeRoots.delete(root);
+          else activeRoots.set(root, previousRootOwner);
+        }
         return refused(
           'execution_duplicate',
           'That execution identity already exists.',
@@ -369,7 +378,6 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         done,
       };
       active.set(input.identity.executionId, entry);
-      if (exclusive) activeRoots.set(root, input.identity.executionId);
       void deps.executions
         .heartbeat(input.identity.executionId, startedAt)
         .catch(() => false);

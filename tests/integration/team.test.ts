@@ -74,8 +74,9 @@ async function start(options: {
 }
 
 test('a team runs dependency waves and completes only on verified artifacts and test results', async () => {
+  const gateway = teamGateway();
   const started = await start({
-    gateway: teamGateway(),
+    gateway,
     config: {
       teams: {
         maxMembers: 4,
@@ -124,6 +125,12 @@ test('a team runs dependency waves and completes only on verified artifacts and 
     );
     assert.equal(completed.verification?.artifacts[0]?.path, 'docs/spec.md');
     assert.match(completed.verification?.artifacts[0]?.sha256 ?? '', /^[a-f0-9]{64}$/);
+    assert.ok(
+      gateway.prompts.some(
+        (prompt) => prompt.includes('Dependency result 1') && prompt.includes('completed research'),
+      ),
+      'a dependent member receives the result produced earlier in the same run',
+    );
 
     const events = started.app.dependencies.events.replay(submitted.value.teamId, 0);
     const types = events.events.map((event) => event.type);
@@ -338,6 +345,39 @@ test('team execution is bounded by member count, parallelism and the deadline', 
     await parallel.close();
   }
 
+  const suspended = await start({ workspace: createWorkspaces(), gateway: teamGateway() });
+  try {
+    await writeFile(path.join(suspended.workspace.cloudRoot, 'gated.txt'), 'gated');
+    const submitted = await suspended.app.service.submitTeam(principal, {
+      objective: 'Suspended work',
+      mode: 'cloud',
+      members: [
+        { memberId: 'gated', agent: 'coderax', objective: 'Read gated', dependsOn: [], resources: ['gated.txt'] },
+      ],
+    });
+    assert.equal(submitted.ok, true);
+    if (!submitted.ok) return;
+    const awaiting = await waitFor(async () => {
+      const status = await suspended.app.service.team(principal, submitted.value.teamId);
+      return status.ok && status.value.state === 'awaiting_approval' ? status.value : null;
+    });
+    const cancelled = await suspended.app.service.cancelTeam(principal, submitted.value.teamId);
+    assert.equal(cancelled.ok, true);
+    const terminal = await waitFor(async () => {
+      const status = await suspended.app.service.team(principal, submitted.value.teamId);
+      return status.ok && status.value.state === 'cancelled' ? status.value : null;
+    });
+    assert.equal(terminal.failure?.code, 'cancelled');
+    const resumed = await suspended.app.service.resumeTeam(
+      principal,
+      submitted.value.teamId,
+      awaiting.generation,
+    );
+    assert.equal(resumed.ok, false, 'a cancelled team cannot be resumed');
+  } finally {
+    await suspended.close();
+  }
+
   const hanging: ExternalAgentTransport = {
     probe: async () => undefined,
     run: () => new Promise(() => undefined) as never,
@@ -378,10 +418,11 @@ test('a lock held by another replica refuses the member that needs the resource'
     gateway: teamGateway(),
     config: {
       persistence: { driver: 'mongo' },
-      teams: { maxMembers: 2, maxParallel: 1, maxDurationMs: 5_000, maxStepsPerMember: 1 },
+      teams: { maxMembers: 2, maxParallel: 2, maxDurationMs: 5_000, maxStepsPerMember: 1 },
     },
   });
   try {
+    await writeFile(path.join(workspace.cloudRoot, 'free.txt'), 'free');
     await writeFile(path.join(workspace.cloudRoot, 'shared.txt'), 'shared');
     const { createMongoResourceLockStore } = await import('../../src/execution/locks.js');
     const other = createMongoResourceLockStore({
@@ -402,7 +443,8 @@ test('a lock held by another replica refuses the member that needs the resource'
       objective: 'Read the shared file',
       mode: 'cloud',
       members: [
-        { memberId: 'reader', agent: 'coderax', objective: 'Read shared', dependsOn: [], resources: ['shared.txt'] },
+        { memberId: 'a-free', agent: 'coderax', objective: 'Read free', dependsOn: [], resources: ['free.txt'] },
+        { memberId: 'z-shared', agent: 'coderax', objective: 'Read shared', dependsOn: [], resources: ['shared.txt'] },
       ],
     });
     assert.equal(submitted.ok, true);
@@ -413,14 +455,15 @@ test('a lock held by another replica refuses the member that needs the resource'
     });
     const permissions = await started.app.service.teamPermissions(principal, submitted.value.teamId);
     assert.ok(permissions.ok);
-    const grant = permissions.value.requests[0];
-    assert.ok(grant);
-    assert.ok(
-      (await started.app.service.decideTeamPermission(principal, submitted.value.teamId, {
-        requestId: grant.requestId,
-        decision: 'approved',
-      })).ok,
-    );
+    assert.equal(permissions.value.requests.length, 2);
+    for (const grant of permissions.value.requests) {
+      assert.ok(
+        (await started.app.service.decideTeamPermission(principal, submitted.value.teamId, {
+          requestId: grant.requestId,
+          decision: 'approved',
+        })).ok,
+      );
+    }
     const status = await started.app.service.team(principal, submitted.value.teamId);
     assert.ok(status.ok);
     assert.ok((await started.app.service.resumeTeam(principal, submitted.value.teamId, status.value.generation)).ok);
@@ -428,6 +471,23 @@ test('a lock held by another replica refuses the member that needs the resource'
       const current = await started.app.service.team(principal, submitted.value.teamId);
       return current.ok && current.value.state === 'failed' ? current.value : null;
     });
+    assert.equal(failed.failure?.code, 'resource_locked');
+    // The first member acquired free.txt during preparation but never ran. Its
+    // lock must be released when the wave is refused.
+    const probe = createMongoResourceLockStore({
+      collection: database.collection('resource_locks'),
+    });
+    assert.equal(
+      (await probe.acquire({
+        key: 'free.txt',
+        ownerId: 'owner-test',
+        owner: 'probe-after-failure',
+        ttlMs: 5_000,
+        now: new Date(),
+      })).acquired,
+      true,
+      'locks taken by an undispatched wave are released',
+    );
     assert.equal(failed.failure?.code, 'resource_locked');
   } finally {
     await started.close();

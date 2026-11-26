@@ -231,7 +231,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       ? createOpenCodeHttpTransport({
           baseURL: config.engines.opencode.baseURL,
           ...(opencodePassword ? { password: opencodePassword } : {}),
-          ...(opencodeModel ? { model: opencodeModel } : {}),
           ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
         })
       : null);
@@ -269,6 +268,17 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
 
   const models = createRouterCatalog(modelRouter);
+  // A configured OpenCode preference is still a model choice, so it must pass
+  // the same zero-cost catalogue the run's resolved model passes. The adapter
+  // itself honors `run.model` and never substitutes after admission.
+  if (opencodeModel) {
+    const preference = models.resolve(opencodeModel, 'cloud');
+    if (!preference.ok) {
+      throw new StartupError([
+        `engines.opencode.model does not resolve through the verified zero-cost catalogue (${preference.code}).`,
+      ]);
+    }
+  }
 
   const persistence = await buildPersistence({
     config,

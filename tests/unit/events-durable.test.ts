@@ -56,6 +56,39 @@ test('a restarted process replays the durable stream and continues its sequence'
   assert.equal(await log.lastSeq('task-1'), 4);
 });
 
+test('a failed durable append restores the batch and a retry preserves terminal events', async () => {
+  const log = createMemoryEventLog();
+  let fail = true;
+  const flaky = {
+    ...log,
+    append: async (events: Parameters<typeof log.append>[0]) => {
+      if (fail) {
+        fail = false;
+        throw new Error('database unavailable');
+      }
+      return log.append(events);
+    },
+  };
+  const bus = busOver(flaky);
+  bus.publish({ taskId: 'task-retry', agent: 'coderax', generation: 1, type: 'task.queued' });
+  bus.publish({
+    taskId: 'task-retry',
+    agent: 'coderax',
+    generation: 1,
+    type: 'task.completed',
+    payload: { summary: 'done' },
+  });
+
+  await assert.rejects(bus.flush('task-retry'));
+  await bus.flush('task-retry');
+  const durable = await log.read('task-retry', 0, 100);
+  assert.deepEqual(
+    durable.map((event) => event.type),
+    ['task.queued', 'task.completed'],
+    'the retry writes the retained batch in order',
+  );
+});
+
 test('a duplicate event is stored once and an out-of-order one is refused', async () => {
   const log = createMemoryEventLog();
   const bus = busOver(log);

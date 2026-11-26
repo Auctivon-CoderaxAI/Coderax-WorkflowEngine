@@ -119,6 +119,27 @@ function bounded(text: string, max: number): string {
 export function createTeamService(deps: TeamServiceDeps): TeamService {
   const active = new Map<string, RunContext>();
   const memberExecutions = new Map<string, Set<string>>();
+  let closed = false;
+
+  async function reconcileStale(): Promise<{ interrupted: number }> {
+    const now = deps.clock.now();
+    const interrupted = await deps.teams.retireStale({
+      before: new Date(now.getTime() - deps.config.teams.staleAfterMs).toISOString(),
+      at: now.toISOString(),
+    });
+    return { interrupted };
+  }
+
+  // A replica can die after this process has started. Startup reconciliation
+  // alone would leave its fresh-heartbeat team running forever, so sweep on a
+  // bounded interval derived from the stale threshold.
+  const sweep = setInterval(
+    () => {
+      if (!closed) void reconcileStale().catch(() => undefined);
+    },
+    Math.min(30_000, Math.max(1_000, Math.floor(deps.config.teams.staleAfterMs / 2))),
+  );
+  sweep.unref();
 
   function limitsFor(config: EngineConfig) {
     return {
@@ -300,17 +321,18 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
 
   function memberObjective(input: {
     record: TeamRecord;
+    checkpoint: TeamRecord['checkpoint'];
     member: TeamMemberRecord;
     artifacts: TeamArtifact[];
   }): string {
     const prior = input.member.dependsOn
-      .map((id) => input.record.checkpoint.outputs[id])
+      .map((id) => input.checkpoint.outputs[id])
       .filter((text): text is string => typeof text === 'string' && text.length > 0)
       .map((text, index) => `Dependency result ${index + 1}:\n${bounded(redactContent(text), 1500)}`);
     const excerpts = input.artifacts
       .filter((artifact) => input.member.resources.includes(artifact.path))
       .map((artifact) => {
-        const text = input.record.checkpoint.outputs[`artifact:${artifact.path}`] ?? '';
+        const text = input.checkpoint.outputs[`artifact:${artifact.path}`] ?? '';
         return `Resource "${artifact.path}" (sha256 ${artifact.sha256.slice(0, 12)}…, ${artifact.bytes} bytes):\n${bounded(redactContent(text), 2000)}`;
       });
     return [
@@ -324,6 +346,8 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
 
   async function runMember(input: {
     record: TeamRecord;
+    /** The live checkpoint, including this wave's reads and prior results. */
+    checkpoint: TeamRecord['checkpoint'];
     member: TeamMemberRecord;
     adapter: AgentAdapter;
     model: { providerId: string; modelId: string };
@@ -358,6 +382,7 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
       conversationId: input.record.conversationId,
       objective: memberObjective({
         record: input.record,
+        checkpoint: input.checkpoint,
         member: input.member,
         artifacts: input.artifacts,
       }),
@@ -799,10 +824,20 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
         }
 
         const prepared: Array<{ member: TeamMemberRecord; artifacts: TeamArtifact[]; lockOwner: string }> = [];
+        const releasePreparedLocks = async (): Promise<void> => {
+          await Promise.all(
+            prepared.map((entry) =>
+              releaseLocks({ keys: entry.member.resources, owner: entry.lockOwner }),
+            ),
+          );
+        };
         for (const { member } of admitted) {
           const lockOwner = `${record.teamId}:${record.generation}:${member.memberId}`;
           const locks = await acquireLocks({ record, member, owner: lockOwner });
           if (!locks.ok) {
+            // Earlier members in this wave have not started yet; their locks
+            // must not outlive a preparation that will never dispatch them.
+            await releasePreparedLocks();
             await finish({
               record,
               token,
@@ -819,6 +854,7 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
             const artifact = await readArtifact(workspace.value.root, resource);
             if (!artifact) {
               await releaseLocks({ keys: locks.keys, owner: lockOwner });
+              await releasePreparedLocks();
               await finish({
                 record,
                 token,
@@ -884,6 +920,7 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
                 member,
                 ...(await runMember({
                   record,
+                  checkpoint,
                   member,
                   adapter,
                   model,
@@ -1115,7 +1152,15 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
       for (const executionId of memberExecutions.get(teamId) ?? []) {
         deps.supervisor.cancel(executionId, 'team_cancelled');
       }
-      publish({ ...record, cancelRequested: true }, 'task.cancelled', { reason: 'owner_cancelled' });
+      // A suspended or interrupted team has no execution loop left to observe
+      // the flag. Settle it atomically instead of leaving it resumable.
+      const inactive = context
+        ? null
+        : await deps.teams.cancelInactive({ ownerId: principal.ownerId, teamId, at });
+      publish({ ...(inactive ?? record), cancelRequested: true }, 'task.cancelled', {
+        reason: 'owner_cancelled',
+      });
+      await deps.events.flush(teamId).catch(() => undefined);
       const latest = await deps.teams.get(principal.ownerId, teamId);
       if (!latest) return fail('not_found', 'That team does not exist.');
       return ok({ teamId, outcome: 'accepted', state: latest.state, generation: latest.generation });
@@ -1174,16 +1219,11 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
       return decided;
     },
 
-    reconcile: async () => {
-      const now = deps.clock.now();
-      const interrupted = await deps.teams.retireStale({
-        before: new Date(now.getTime() - deps.config.teams.staleAfterMs).toISOString(),
-        at: now.toISOString(),
-      });
-      return { interrupted };
-    },
+    reconcile: reconcileStale,
 
     shutdown: async () => {
+      closed = true;
+      clearInterval(sweep);
       for (const context of active.values()) {
         context.controller.abort();
         for (const executionId of memberExecutions.get(context.teamId) ?? []) {
