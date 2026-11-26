@@ -10,6 +10,8 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
+  /** `Last-Event-ID`, the standard SSE resume cursor. */
+  lastEventId?: string;
 };
 
 export type HandlerResult =
@@ -25,6 +27,7 @@ export type RawRequest = {
   path: string;
   authorization: string | undefined;
   bodyText: string;
+  lastEventId?: string;
 };
 
 export type RouterResult =
@@ -220,6 +223,7 @@ export function createRouter(input: {
             query,
             body,
             requestId,
+            ...(raw.lastEventId ? { lastEventId: raw.lastEventId } : {}),
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);

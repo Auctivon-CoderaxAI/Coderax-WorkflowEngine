@@ -81,3 +81,15 @@ export const NotificationList = z
   })
   .strict();
 export type NotificationList = z.infer<typeof NotificationList>;
+
+/**
+ * Clearing the blue dot.
+ *
+ * Marking read is scoped to task ids the caller names, and the store only
+ * touches a row owned by the authenticated owner, so a client cannot clear
+ * another owner's notifications by guessing an id.
+ */
+export const NotificationReadRequest = z
+  .object({ taskIds: z.array(TaskId).min(1).max(100) })
+  .strict();
+export type NotificationReadRequest = z.infer<typeof NotificationReadRequest>;
