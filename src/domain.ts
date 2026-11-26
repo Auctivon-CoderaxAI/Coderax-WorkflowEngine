@@ -162,6 +162,37 @@ export type NotificationRecord = {
   read: boolean;
 };
 
+export type ScheduleRecord = {
+  scheduleId: string;
+  ownerId: string;
+  objective: string;
+  agent: AgentId;
+  mode: DataMode;
+  model: ModelRef | null;
+  requireApproval: boolean;
+  budget: Budget | null;
+  state: 'scheduled' | 'submitted' | 'cancelled' | 'failed';
+  runAt: IsoDateTime;
+  intervalMs: number | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  nextRunAt: IsoDateTime | null;
+  lastTaskId: string | null;
+  lastError: string | null;
+};
+
+export type ArtifactRow = {
+  artifactId: string;
+  ownerId: string;
+  taskId: string;
+  path: string;
+  mediaType: string;
+  bytes: number;
+  digest: string;
+  mode: DataMode;
+  createdAt: IsoDateTime;
+};
+
 export type AuditRecord = {
   at: IsoDateTime;
   /** The owner the evidence belongs to; `actor` is kept for the wire contract. */

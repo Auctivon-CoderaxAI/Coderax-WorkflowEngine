@@ -1,6 +1,6 @@
 {
   "name": "coderax-workflow-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "CoderaxAI's independent cloud-native intelligence, agent orchestration, durable workflow execution, model routing, and integration engine.",
   "type": "module",
@@ -20,11 +20,13 @@
     "test:contract": "npm run build && node --test \"dist/tests/contract/*.test.js\"",
     "test:integration": "npm run build && node --test \"dist/tests/integration/*.test.js\"",
     "test:security": "npm run build && node --test \"dist/tests/security/*.test.js\"",
-    "test:mongo": "npm run build && node --test \"dist/tests/integration/mongo-restart.test.js\"",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
-    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js",
-    "evidence": "npm run build && node dist/scripts/capability-evidence.js"
+    "sdk:pack": "npm run build && node dist/scripts/pack-sdk.js",
+    "sdk:verify": "node dist/scripts/pack-sdk.js --check",
+    "verify": "npm run build && node dist/scripts/pack-sdk.js && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js",
+    "evidence": "npm run build && node dist/scripts/capability-evidence.js",
+    "test:mongo": "npm run build && CODERAX_REQUIRE_MONGODB=1 node --test \"dist/tests/integration/mongo*.test.js\""
   },
   "dependencies": {
     "@coderax/contracts": "*",
@@ -33,8 +35,5 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.3"
-  },
-  "optionalDependencies": {
-    "mongodb": "^6.22.0"
   }
 }

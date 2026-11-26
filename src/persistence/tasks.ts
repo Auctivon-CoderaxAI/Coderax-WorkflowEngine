@@ -6,7 +6,9 @@ import { clampLimit, decodeCursor, encodeCursor } from './pagination.js';
 
 export type CreateTaskResult =
   | { ok: true; task: TaskRecord }
-  | { ok: false; reason: 'exists' | 'conversation_busy' };
+  | { ok: false; reason: 'exists' | 'conversation_busy' }
+  /** The same owner and idempotency key already created this task. */
+  | { ok: false; reason: 'idempotent'; task: TaskRecord };
 
 export type FencedWriteResult =
   | { applied: true; task: TaskRecord }
@@ -30,6 +32,10 @@ export type TaskPage = {
 
 export type TaskStateCounts = Record<TaskState, number>;
 
+export type CreateTaskOptions = {
+  /** Scoped by owner; the same key returns the task the first submission made. */
+  idempotencyKey?: string;
+};
 /**
  * The only writer of task state.
  *
@@ -39,8 +45,10 @@ export type TaskStateCounts = Record<TaskState, number>;
  * and it is enforced here rather than trusted to each caller.
  */
 export type TaskRepository = {
-  create: (task: TaskRecord) => Promise<CreateTaskResult>;
+  create: (task: TaskRecord, options?: CreateTaskOptions) => Promise<CreateTaskResult>;
   get: (taskId: string) => Promise<TaskRecord | null>;
+  /** Resolves a replayed submission without creating a second task. */
+  findByIdempotencyKey: (ownerId: string, key: string) => Promise<TaskRecord | null>;
   updateFenced: (
     input: { taskId: string; token: string; patch: TaskPatch },
   ) => Promise<FencedWriteResult>;
@@ -97,9 +105,16 @@ function matches(task: TaskRecord, input: TaskPageInput): boolean {
   );
 }
 
+function idempotencyKey(ownerId: string, key: string): string {
+  // NUL cannot appear in either component (identifiers are trimmed text and the
+  // key is URL-safe), so the pairing is unambiguous.
+  return JSON.stringify([ownerId, key]);
+}
+
 export function createTaskRepository(): TaskRepository {
   const tasks = new Map<string, TaskRecord>();
   const activeByConversation = new Map<string, string>();
+  const idempotency = new Map<string, string>();
 
   function settle(task: TaskRecord): void {
     const active = activeByConversation.get(task.conversationId);
@@ -109,7 +124,14 @@ export function createTaskRepository(): TaskRepository {
   }
 
   return {
-    create: async (task) => {
+    create: async (task, options) => {
+      if (options?.idempotencyKey) {
+        const existingId = idempotency.get(idempotencyKey(task.ownerId, options.idempotencyKey));
+        const existing = existingId ? tasks.get(existingId) : undefined;
+        if (existing) {
+          return { ok: false, reason: 'idempotent', task: { ...existing } };
+        }
+      }
       if (tasks.has(task.taskId)) {
         return { ok: false, reason: 'exists' };
       }
@@ -121,6 +143,9 @@ export function createTaskRepository(): TaskRepository {
         }
       }
       tasks.set(task.taskId, { ...task });
+      if (options?.idempotencyKey) {
+        idempotency.set(idempotencyKey(task.ownerId, options.idempotencyKey), task.taskId);
+      }
       if (!isTerminalState(task.state)) {
         activeByConversation.set(task.conversationId, task.taskId);
       }
@@ -128,6 +153,11 @@ export function createTaskRepository(): TaskRepository {
     },
     get: async (taskId) => {
       const task = tasks.get(taskId);
+      return task ? { ...task } : null;
+    },
+    findByIdempotencyKey: async (ownerId, key) => {
+      const taskId = idempotency.get(idempotencyKey(ownerId, key));
+      const task = taskId ? tasks.get(taskId) : undefined;
       return task ? { ...task } : null;
     },
     updateFenced: async ({ taskId, token, patch }) => {
@@ -230,4 +260,4 @@ export function createTaskRepository(): TaskRepository {
   };
 }
 
-export { STATES };
+export { STATES, idempotencyKey as taskIdempotencyKey };

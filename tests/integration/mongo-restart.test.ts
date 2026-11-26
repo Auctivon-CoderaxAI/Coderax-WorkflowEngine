@@ -17,11 +17,13 @@ const principal = { ownerId: 'owner-test', isOwner: true as const };
  *   CODERAX_TEST_MONGODB_URI=mongodb://127.0.0.1:27019 npm run test:mongo
  */
 const uri = process.env.CODERAX_TEST_MONGODB_URI?.trim();
+const required = process.env.CODERAX_REQUIRE_MONGODB === '1';
 
 test(
   'tasks, transcripts, events, memory, permissions, receipts, checkpoints and idempotency survive a restart',
-  { skip: uri ? false : 'CODERAX_TEST_MONGODB_URI is not set', timeout: 120_000 },
+  { skip: uri ? false : required ? false : 'CODERAX_TEST_MONGODB_URI is not set', timeout: 120_000 },
   async () => {
+    assert.ok(uri, 'CODERAX_REQUIRE_MONGODB=1 requires CODERAX_TEST_MONGODB_URI');
     const workspace = createWorkspaces();
     const database = `coderax_test_${randomUUID().replace(/-/g, '')}`;
     const config = baseConfig(workspace, {
@@ -128,7 +130,7 @@ test(
       assert.equal(notifications.value.unread, 1);
       assert.equal(notifications.value.notifications[0]?.state, 'completed');
 
-      const taskPage = await second.service.tasks(principal, { mode: 'cloud', limit: 1 });
+      const taskPage = await second.service.listTasks(principal, { mode: 'cloud', limit: 1 });
       assert.equal(taskPage.ok, true);
       assert.ok(taskPage.ok);
       assert.equal(taskPage.value.total, 1);

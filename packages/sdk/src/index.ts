@@ -1,23 +1,33 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  ArtifactContent,
   BudgetState,
+  MetricsReport,
+  ArtifactList,
+  ArtifactRecord,
+  ArtifactUploadRequest,
   ChatReply,
+  ChatStreamFrame,
   Conversation,
   ConversationDeletion,
   ConversationList,
+  EngineHandshake,
   ExecutionEvent,
   HealthReport,
   MemoryDeletion,
   MemoryEntry,
   MemoryList,
   ModelList,
-  MetricsReport,
   NotificationList,
   PermissionList,
   Problem,
-  ReadinessReport,
   ReceiptList,
+  ReadinessReport,
+  Schedule,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleList,
   TaskAccepted,
   TaskControlResult,
   TaskList,
@@ -25,15 +35,19 @@ import {
 } from '@coderax/contracts';
 import type {
   ChatRequest,
-  ConversationListQuery,
   DataMode,
+  MemoryPutRequest,
   NotificationListQuery,
+  NotificationReadRequest,
   PermissionDecisionRequest,
   PermissionListQuery,
   ReceiptListQuery,
-  WorkListQuery,
+  TaskState,
   WorkSubmitRequest,
 } from '@coderax/contracts';
+import { CoderaxApiError, CoderaxContractError } from './errors.js';
+import { parseSseFrames } from './stream.js';
+import { assertCompatible } from './version.js';
 
 /**
  * The one client both Coderax (web) and Coderax-CLI consume.
@@ -45,34 +59,29 @@ import type {
  * places the token in a URL or an error message.
  */
 
-export class CoderaxApiError extends Error {
-  readonly code: string;
-  readonly status: number;
-  readonly requestId: string | undefined;
-  readonly retryable: boolean;
-
-  constructor(input: {
-    code: string;
-    message: string;
-    status: number;
-    requestId?: string;
-    retryable?: boolean;
-  }) {
-    super(input.message);
-    this.name = 'CoderaxApiError';
-    this.code = input.code;
-    this.status = input.status;
-    this.requestId = input.requestId;
-    this.retryable = input.retryable ?? false;
-  }
-}
-
-export class CoderaxContractError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'CoderaxContractError';
-  }
-}
+export { CoderaxApiError, CoderaxCompatibilityError, CoderaxContractError } from './errors.js';
+export {
+  SDK_CONTRACT_VERSION,
+  SDK_ENGINE_CONTRACT,
+  SDK_EVENT_SCHEMA_VERSION,
+  SDK_VERSION,
+  SDK_VERSION_METADATA,
+  assertCompatible,
+  checkCompatibility,
+} from './version.js';
+export { parseSse, parseSseFrames } from './stream.js';
+export { SDK_COVERAGE, SDK_MANIFEST, SDK_STREAM_METHODS } from './manifest.js';
+export type { CompatibilityReport } from './version.js';
+export type { ParsedSseFrame } from './stream.js';
+export type {
+  ChatRequest,
+  DataMode,
+  MemoryPutRequest,
+  NotificationReadRequest,
+  PermissionDecisionRequest,
+  TaskState,
+  WorkSubmitRequest,
+} from '@coderax/contracts';
 
 export type CoderaxClientOptions = {
   baseUrl: string;
@@ -82,11 +91,13 @@ export type CoderaxClientOptions = {
 };
 
 type RequestInput = {
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method: 'GET' | 'POST' | 'DELETE';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   signal?: AbortSignal;
+  /** Extra headers, used for `Idempotency-Key` on Work submission. */
+  headers?: Record<string, string>;
 };
 
 function joinUrl(baseUrl: string, path: string, query?: RequestInput['query']): string {
@@ -99,36 +110,6 @@ function joinUrl(baseUrl: string, path: string, query?: RequestInput['query']): 
     throw new CoderaxContractError(`route ${path} resolves outside the configured origin`);
   }
   return url.toString();
-}
-
-async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    buffer = buffer.replace(/\r\n/g, '\n');
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary !== -1) {
-      const frame = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      const data = frame
-        .split('\n')
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n');
-      if (data.length > 0) {
-        try {
-          yield JSON.parse(data);
-        } catch {
-          throw new CoderaxContractError('an event frame was not valid JSON');
-        }
-      }
-      boundary = buffer.indexOf('\n\n');
-    }
-  }
 }
 
 export class CoderaxClient {
@@ -160,6 +141,7 @@ export class CoderaxClient {
         method: input.method,
         headers: {
           ...this.headers(),
+          ...(input.headers ?? {}),
           ...(input.body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
@@ -218,6 +200,19 @@ export class CoderaxClient {
     return this.request<ReadinessReport>(ReadinessReport, { method: 'GET', path: '/v1/ready' });
   }
 
+  /** The raw handshake. Use `negotiate()` to refuse an incompatible engine. */
+  handshake(): Promise<EngineHandshake> {
+    return this.request<EngineHandshake>(EngineHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+    });
+  }
+
+  /** Fetches the handshake and throws unless this SDK can parse it. */
+  async negotiate(): Promise<EngineHandshake> {
+    return assertCompatible(await this.handshake());
+  }
+
   agents(): Promise<AgentList> {
     return this.request<AgentList>(AgentList, { method: 'GET', path: '/v1/agents' });
   }
@@ -234,6 +229,44 @@ export class CoderaxClient {
     });
   }
 
+  /**
+   * The same Chat turn over the shared SSE transport. Each frame is validated
+   * against the published `ChatStreamFrame` schema, so a deployment that streams
+   * a shape the contract does not describe fails here instead of in a renderer.
+   */
+  async *chatStream(
+    request: ChatRequest,
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<ChatStreamFrame> {
+    const path = '/v1/chat';
+    const response = await this.options.fetchImpl(joinUrl(this.options.baseUrl, path), {
+      method: 'POST',
+      headers: {
+        ...this.headers('text/event-stream'),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      redirect: 'error',
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!response.ok || !response.body) {
+      await this.parse(ChatReply, response, path);
+      throw new CoderaxContractError('the chat stream had no body');
+    }
+    for await (const frame of parseSseFrames(response.body)) {
+      const parsed = ChatStreamFrame.safeParse(frame.data);
+      if (!parsed.success) {
+        throw new CoderaxContractError('a chat frame did not match the published schema');
+      }
+      yield parsed.data;
+    }
+  }
+
+  /**
+   * Submits durable Work. Reusing an idempotency key with the same request
+   * replays the original task; reusing it with a different request is refused.
+   * The key is sent as a header so it is never part of a logged URL.
+   */
   submitWork(
     request: WorkSubmitRequest,
     options: { idempotencyKey?: string } = {},
@@ -241,51 +274,10 @@ export class CoderaxClient {
     return this.request<TaskAccepted>(TaskAccepted, {
       method: 'POST',
       path: '/v1/work',
-      body: {
-        ...request,
-        ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-      },
-    });
-  }
-
-  /** Owner-scoped Work tasks, filtered and cursor-paged. */
-  tasks(query: WorkListQuery = {}): Promise<TaskList> {
-    return this.request<TaskList>(TaskList, {
-      method: 'GET',
-      path: '/v1/work',
-      query: {
-        state: query.state,
-        conversationId: query.conversationId,
-        agent: query.agent,
-        mode: query.mode,
-        limit: query.limit,
-        cursor: query.cursor,
-      },
-    });
-  }
-
-  /** Execution receipts for one task. */
-  receipts(taskId: string, query: ReceiptListQuery = {}): Promise<ReceiptList> {
-    return this.request<ReceiptList>(ReceiptList, {
-      method: 'GET',
-      path: `/v1/work/${encodeURIComponent(taskId)}/receipts`,
-      query: { limit: query.limit, cursor: query.cursor },
-    });
-  }
-
-  /** Process-local queue, execution, lease and persistence counters. */
-  metrics(): Promise<MetricsReport> {
-    return this.request<MetricsReport>(MetricsReport, {
-      method: 'GET',
-      path: '/v1/metrics',
-    });
-  }
-
-  /** Daily zero-cost budget and quota status. */
-  budget(): Promise<BudgetState> {
-    return this.request<BudgetState>(BudgetState, {
-      method: 'GET',
-      path: '/v1/budget',
+      body: request,
+      ...(options.idempotencyKey
+        ? { headers: { 'idempotency-key': options.idempotencyKey } }
+        : {}),
     });
   }
 
@@ -293,6 +285,31 @@ export class CoderaxClient {
     return this.request<TaskStatus>(TaskStatus, {
       method: 'GET',
       path: `/v1/work/${encodeURIComponent(taskId)}`,
+    });
+  }
+
+  /** The owner-scoped task read model, newest first. */
+  tasks(
+    options: {
+      limit?: number;
+      cursor?: string;
+      state?: TaskState;
+      mode?: DataMode;
+      agent?: string;
+      conversationId?: string;
+    } = {},
+  ): Promise<TaskList> {
+    return this.request<TaskList>(TaskList, {
+      method: 'GET',
+      path: '/v1/tasks',
+      query: {
+        limit: options.limit,
+        cursor: options.cursor,
+        state: options.state,
+        mode: options.mode,
+        agent: options.agent,
+        conversationId: options.conversationId,
+      },
     });
   }
 
@@ -320,16 +337,24 @@ export class CoderaxClient {
     });
   }
 
-  conversations(query: ConversationListQuery = {}): Promise<ConversationList> {
+  conversations(
+    options: {
+      mode?: DataMode;
+      isWork?: boolean;
+      agent?: string;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ): Promise<ConversationList> {
     return this.request<ConversationList>(ConversationList, {
       method: 'GET',
       path: '/v1/conversations',
       query: {
-        mode: query.mode,
-        isWork: query.isWork,
-        agent: query.agent,
-        limit: query.limit,
-        cursor: query.cursor,
+        mode: options.mode,
+        isWork: options.isWork === undefined ? undefined : String(options.isWork),
+        agent: options.agent,
+        limit: options.limit,
+        cursor: options.cursor,
       },
     });
   }
@@ -350,24 +375,12 @@ export class CoderaxClient {
 
   memory(
     mode: DataMode = 'private',
-    query: { limit?: number; cursor?: string } = {},
+    options: { limit?: number; cursor?: string } = {},
   ): Promise<MemoryList> {
     return this.request<MemoryList>(MemoryList, {
       method: 'GET',
       path: '/v1/memory',
-      query: { mode, limit: query.limit, cursor: query.cursor },
-    });
-  }
-
-  writeMemory(
-    key: string,
-    value: string,
-    mode: DataMode = 'private',
-  ): Promise<MemoryEntry> {
-    return this.request<MemoryEntry>(MemoryEntry, {
-      method: 'PUT',
-      path: `/v1/memory/${encodeURIComponent(key)}`,
-      body: { value, mode },
+      query: { mode, limit: options.limit, cursor: options.cursor },
     });
   }
 
@@ -379,14 +392,27 @@ export class CoderaxClient {
     });
   }
 
-  permissions(
-    taskId: string,
-    query: PermissionListQuery = {},
-  ): Promise<PermissionList> {
+  putMemory(request: MemoryPutRequest): Promise<MemoryEntry> {
+    return this.request<MemoryEntry>(MemoryEntry, {
+      method: 'POST',
+      path: '/v1/memory',
+      body: request,
+    });
+  }
+
+  permissions(taskId: string, query: PermissionListQuery = {}): Promise<PermissionList> {
     return this.request<PermissionList>(PermissionList, {
       method: 'GET',
       path: `/v1/work/${encodeURIComponent(taskId)}/permissions`,
-      query: { decision: query.decision, limit: query.limit, cursor: query.cursor },
+      query,
+    });
+  }
+
+  pendingPermissions(query: PermissionListQuery = {}): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'GET',
+      path: '/v1/permissions',
+      query,
     });
   }
 
@@ -405,11 +431,23 @@ export class CoderaxClient {
     return this.request<NotificationList>(NotificationList, {
       method: 'GET',
       path: '/v1/notifications',
-      query: {
-        unreadOnly: query.unreadOnly,
-        limit: query.limit,
-        cursor: query.cursor,
-      },
+      query,
+    });
+  }
+
+  budget(): Promise<BudgetState> {
+    return this.request<BudgetState>(BudgetState, { method: 'GET', path: '/v1/budget' });
+  }
+
+  metrics(): Promise<MetricsReport> {
+    return this.request<MetricsReport>(MetricsReport, { method: 'GET', path: '/v1/metrics' });
+  }
+
+  receipts(taskId: string, query: ReceiptListQuery = {}): Promise<ReceiptList> {
+    return this.request<ReceiptList>(ReceiptList, {
+      method: 'GET',
+      path: `/v1/work/${encodeURIComponent(taskId)}/receipts`,
+      query,
     });
   }
 
@@ -418,21 +456,93 @@ export class CoderaxClient {
     return this.request<NotificationList>(NotificationList, {
       method: 'POST',
       path: '/v1/notifications/read',
-      body: { taskIds },
+      body: { taskIds } satisfies NotificationReadRequest,
     });
   }
 
-  /** Replays and tails execution events from a sequence cursor. */
-  async *events(
+  schedules(): Promise<ScheduleList> {
+    return this.request<ScheduleList>(ScheduleList, {
+      method: 'GET',
+      path: '/v1/schedules',
+    });
+  }
+
+  createSchedule(request: ScheduleCreateRequest): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'POST',
+      path: '/v1/schedules',
+      body: request,
+    });
+  }
+
+  schedule(scheduleId: string): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+    });
+  }
+
+  cancelSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+    });
+  }
+
+  artifacts(taskId: string): Promise<ArtifactList> {
+    return this.request<ArtifactList>(ArtifactList, {
+      method: 'GET',
+      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
+    });
+  }
+
+  uploadArtifact(taskId: string, request: ArtifactUploadRequest): Promise<ArtifactRecord> {
+    return this.request<ArtifactRecord>(ArtifactRecord, {
+      method: 'POST',
+      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
+      body: request,
+    });
+  }
+
+  artifact(artifactId: string): Promise<ArtifactRecord> {
+    return this.request<ArtifactRecord>(ArtifactRecord, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+    });
+  }
+
+  artifactContent(artifactId: string): Promise<ArtifactContent> {
+    return this.request<ArtifactContent>(ArtifactContent, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+    });
+  }
+
+  /**
+   * Opens the durable Work stream. The returned generator replays from the
+   * cursor and then tails live events; `truncated` reports that the retained
+   * window no longer contains the requested cursor, and `lastSeq` is the engine's
+   * last assigned sequence at open. A consumer resumes with the last `seq` it
+   * applied, either as `after` or as `lastEventId`.
+   */
+  async openEvents(
     taskId: string,
-    options: { after?: number; signal?: AbortSignal } = {},
-  ): AsyncGenerator<ExecutionEvent> {
+    options: { after?: number; lastEventId?: number; signal?: AbortSignal } = {},
+  ): Promise<{
+    truncated: boolean;
+    lastSeq: number;
+    events: AsyncGenerator<ExecutionEvent>;
+  }> {
     const path = `/v1/work/${encodeURIComponent(taskId)}/events`;
+    const cursor = options.after ?? options.lastEventId;
     const response = await this.options.fetchImpl(
       joinUrl(this.options.baseUrl, path, { after: options.after }),
       {
         method: 'GET',
-        headers: this.headers('text/event-stream'),
+        headers: {
+          ...this.headers('text/event-stream'),
+          ...(cursor === undefined ? {} : { 'last-event-id': String(cursor) }),
+        },
         redirect: 'error',
         ...(options.signal ? { signal: options.signal } : {}),
       },
@@ -441,14 +551,33 @@ export class CoderaxClient {
       await this.parse(ExecutionEvent, response, path);
       throw new CoderaxContractError('the event stream had no body');
     }
-    for await (const frame of parseSse(response.body)) {
-      const parsed = ExecutionEvent.safeParse(frame);
-      if (!parsed.success) {
-        throw new CoderaxContractError('an event did not match the published event schema');
+    const truncated = response.headers.get('x-coderax-truncated') === 'true';
+    const headerSeq = Number(response.headers.get('x-coderax-last-seq') ?? '0');
+    const body = response.body;
+    async function* iterate(): AsyncGenerator<ExecutionEvent> {
+      for await (const frame of parseSseFrames(body)) {
+        const parsed = ExecutionEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          throw new CoderaxContractError('an event did not match the published event schema');
+        }
+        yield parsed.data;
       }
-      yield parsed.data;
+    }
+    return {
+      truncated,
+      lastSeq: Number.isFinite(headerSeq) ? headerSeq : 0,
+      events: iterate(),
+    };
+  }
+
+  /** Replays and tails execution events from a sequence cursor. */
+  async *events(
+    taskId: string,
+    options: { after?: number; lastEventId?: number; signal?: AbortSignal } = {},
+  ): AsyncGenerator<ExecutionEvent> {
+    const stream = await this.openEvents(taskId, options);
+    for await (const event of stream.events) {
+      yield event;
     }
   }
 }
-
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };

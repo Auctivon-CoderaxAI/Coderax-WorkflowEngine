@@ -100,9 +100,13 @@ export function createHttpServer(input: {
           authorization: request.headers.authorization,
           bodyText,
           requestId,
-          ...(typeof request.headers['last-event-id'] === 'string'
-            ? { lastEventId: request.headers['last-event-id'] }
-            : {}),
+          idempotencyKey: Array.isArray(request.headers['idempotency-key'])
+            ? request.headers['idempotency-key'][0]
+            : request.headers['idempotency-key'],
+          accept: request.headers.accept,
+          lastEventId: Array.isArray(request.headers['last-event-id'])
+            ? request.headers['last-event-id'][0]
+            : request.headers['last-event-id'],
         });
         status = result.status;
 
@@ -115,11 +119,15 @@ export function createHttpServer(input: {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',
           connection: 'keep-alive',
+          ...(result.headers ?? {}),
           'x-request-id': requestId,
         });
-        for await (const event of result.events) {
+        for await (const frame of result.events) {
           if (response.destroyed || response.writableEnded) break;
-          response.write(`data: ${JSON.stringify(event)}\n\n`);
+          if (frame.id !== undefined) {
+            response.write(`id: ${frame.id}\n`);
+          }
+          response.write(`data: ${JSON.stringify(frame.data)}\n\n`);
         }
         response.end();
       } catch {

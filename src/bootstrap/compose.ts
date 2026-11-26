@@ -1,3 +1,5 @@
+import { constants } from 'node:fs';
+import { access } from 'node:fs/promises';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -17,6 +19,7 @@ import { createHealthService } from '../observability/health.js';
 import { createMetricsRegistry } from '../observability/metrics.js';
 import { createJsonLogger } from '../observability/logger.js';
 import { createEventBus } from '../events/bus.js';
+import { createArtifactStorage } from '../artifacts/store.js';
 import { createTaskRunner } from '../execution/runner.js';
 import { createQuarantineRegistry } from '../execution/quarantine.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
@@ -210,6 +213,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const audit = persistence.audit;
   const checkpoints = persistence.checkpoints;
   const idempotency = persistence.idempotency;
+  const schedules = persistence.schedules;
+  const artifacts = persistence.artifacts;
+  const artifactStorage = createArtifactStorage(workspaceRoots(config.workspaces));
   const retention = createRetentionService({
     clock,
     config: config.retention,
@@ -314,6 +320,75 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
+        name: 'api',
+        required: true,
+        check: async () => ({
+          status: 'ok' as const,
+          detail: 'The HTTP transport answered this readiness request.',
+        }),
+      },
+      {
+        name: 'scheduler',
+        required: true,
+        check: async () => ({
+          status:
+            config.execution.maxConcurrentTasks > 0 ? ('ok' as const) : ('failed' as const),
+          detail: `${scheduler.active()} active, ${scheduler.pending()} pending, limit ${config.execution.maxConcurrentTasks}.`,
+        }),
+      },
+      {
+        name: 'models',
+        required: true,
+        check: async () => {
+          const available = models
+            .list()
+            .models.filter((descriptor) => descriptor.availability.available);
+          return available.length > 0
+            ? {
+                status: 'ok' as const,
+                detail: `${available.length} zero-cost model(s) available; allowPaid=false.`,
+              }
+            : {
+                status: 'failed' as const,
+                detail: 'No zero-cost model is available; Work cannot execute.',
+              };
+        },
+      },
+      {
+        name: 'events.durable',
+        required: true,
+        check: async () => {
+          // A read, not a flag: an event log that cannot answer would fail here
+          // even when the HTTP process itself is healthy.
+          await persistence.events.read('__readiness__', 0, 1);
+          return persistence.driver === 'mongo'
+            ? {
+                status: 'ok' as const,
+                detail: 'Execution events are stored in the durable event log.',
+              }
+            : {
+                status: 'ok' as const,
+                detail:
+                  'Execution events use the process-local log; selecting mongo makes delivery durable.',
+              };
+        },
+      },
+      {
+        name: 'artifacts.storage',
+        required: true,
+        check: async () => {
+          const roots = workspaceRoots(config.workspaces);
+          await Promise.all([
+            access(roots.private, constants.W_OK),
+            access(roots.cloud, constants.W_OK),
+          ]);
+          return {
+            status: 'ok' as const,
+            detail: 'Private and cloud artifact roots exist and are writable.',
+          };
+        },
+      },
+      {
         // Optional on purpose: an enabled external agent being down degrades the
         // report without stopping an engine that still has Native.
         name: 'agents',
@@ -352,6 +427,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    schedules,
+    artifacts,
+    artifactStorage,
     audit,
     events,
     runner,
@@ -373,6 +451,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const service = createApplicationService({
     ...infrastructure,
+    deploymentRevision: env.CODERAX_DEPLOYMENT_REVISION?.trim() || null,
   });
 
   const registry = createRouteRegistry();
@@ -421,6 +500,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ...(logger ? { logger } : {}),
   });
 
+  let scheduleTimer: NodeJS.Timeout | null = null;
+
   return {
     dependencies: finalContainer.dependencies,
     service,
@@ -441,11 +522,21 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // that has been offline for a week is trimmed without an operator.
       await retention.run().catch(() => undefined);
       retention.start();
+      if (config.schedules.enabled) {
+        scheduleTimer = setInterval(() => {
+          void service.tickSchedules().catch(() => undefined);
+        }, config.schedules.tickIntervalMs);
+        scheduleTimer.unref();
+      }
       return { url };
     },
     stop: async () => {
       logger?.info('engine.stopping', {});
       retention.stop();
+      if (scheduleTimer) {
+        clearInterval(scheduleTimer);
+        scheduleTimer = null;
+      }
       await service.shutdown();
       await server.close();
       await persistence.close();

@@ -15,6 +15,7 @@ test('request ids are accepted, echoed and replaced when unsafe', async () => {
     assert.equal(healthy.headers.get('x-request-id'), supplied);
 
     const unauthorized = await fetch(`${started.url}/v1/work`, {
+      method: 'POST',
       headers: { 'x-request-id': 'safe-id-12345678' },
     });
     assert.equal(unauthorized.status, 401);

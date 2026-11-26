@@ -17,14 +17,14 @@ downgrade.
 | Record | Collection | Key / index | Contract surface |
 | --- | --- | --- | --- |
 | Work lease | `work_runs` | unique `key`, `expiresAt` | internal fencing |
-| Task | `tasks` | unique `taskId`, `(ownerId, updatedAt, taskId)`, `state` | `GET /v1/work`, `GET /v1/work/{id}` |
+| Task | `tasks` | unique `taskId`, `(ownerId, updatedAt, taskId)`, `state`, unique `(ownerId, idempotencyKey)` | `GET /v1/tasks`, `GET /v1/work/{id}` |
 | Conversation | `conversations` | unique `conversationId`, `(ownerId, updatedAt, conversationId)` | `GET /v1/conversations` |
 | Message | `messages` | unique `messageId`, `(conversationId, createdAt)` | `GET /v1/conversations/{id}` |
 | Execution event | `events` + `event_heads` | unique `(taskId, seq)`, unique `(taskId, eventId)`, monotonic generation head | `GET /v1/work/{id}/events` |
 | Checkpoint | `checkpoints` | unique `checkpointId`, `(taskId, createdAt, checkpointId)` | recovery evidence |
 | Memory | `memory` | unique `(ownerId, mode, key)` | `GET /v1/memory` |
-| Notification | `notifications` | unique `taskId`, `(ownerId, createdAt, taskId)`, `(ownerId, read)` | `/v1/notifications` |
-| Permission request | `permissions` | unique `requestId`, `(ownerId, taskId, requestedAt)` | `/v1/work/{id}/permissions` |
+| Notification | `notifications` | unique `taskId` (one per terminal task), `(ownerId, createdAt, taskId)`, `(ownerId, read)` | `/v1/notifications` |
+| Permission request | `permissions` | unique `requestId`, `(ownerId, taskId, requestedAt)`, `(taskId, scope, resource, binding, decision, consumed)`, `expiresAt` | `/v1/work/{id}/permissions`, `/v1/permissions` |
 | Audit receipt | `audit_receipts` | unique `receipt`, `(actor, at)`, `(taskId, at)` | `GET /v1/work/{id}/receipts` |
 | Idempotency record | `idempotency` | unique `(ownerId, key)`, `expiresAt` | `POST /v1/work` |
 
@@ -42,6 +42,22 @@ database can host more than one deployment without sharing a row.
 - The conversation store deletes only for the owning owner, and every cascade
   target exposes an owner-scoped delete. The HTTP deletion operation refuses
   while a task is live and performs the cascade in one service call.
+
+## Permission grant lifecycle
+
+There is one permission service. A grant is bound to `(owner, task, scope,
+exact resource, binding)`, where `binding` names the exact action (for example a
+specific command) and an empty binding means the resource alone. Approval is
+single-use by default: `lookup({ consume: true })` performs one conditional
+update, so two replicas racing on the same approval produce exactly one grant and
+one `null`. A grant is repeatable only when it was explicitly created with
+`standing: true`; nothing infers standing authorization.
+
+An approved, unconsumed grant may be revoked by deciding `denied`; the row keeps
+`revokedAt` and the decision is final. A consumed grant cannot be changed or
+replayed. Expired grants authorize nothing and are removed by the permission
+retention window. Every decision and consumption is owner- and task-conditioned
+in the same write filter, not in a caller-side check.
 
 ## Bounded reads
 
@@ -62,18 +78,37 @@ their messages are deliberately not on an automatic timer: they are removed only
 by the owner-authorized conversation deletion, so a retention bug cannot erase
 user history.
 
-## Restart evidence
+## Retaining records an execution still needs
 
-`tests/integration/mongo-restart.test.ts` is skipped without a live server. Run it
-against a real MongoDB:
+The sweep never touches tasks, conversations, messages, execution events or
+artifacts. Permissions are removed only after expiry, checkpoints only after their
+window, and an idempotency record only after its replay window. A task that is
+still running, interrupted or awaiting approval therefore keeps the task row, its
+transcript, its event stream and its checkpoints regardless of age. Deleting user
+history is a separate, owner-authorized conversation deletion.
+
+## Restart and two-replica evidence
+
+Run the real-database suites against a MongoDB you own:
 
 ```sh
 CODERAX_TEST_MONGODB_URI='mongodb://127.0.0.1:27019/?directConnection=true' \
   npm run test:mongo
 ```
 
-It submits a task with an idempotency key, waits for completion, stops the whole
-application, starts a second application against the same database, and verifies
-the task, transcript, event tail, notification, memory entry, permission request,
-checkpoints, audit receipts and idempotent replay. A fake collection is used for
-adapter semantics only; it is not accepted as persistence evidence.
+`mongo-restart` submits with an idempotency key, waits for completion, stops the
+whole application, starts a second application against the same database, and
+verifies the task, transcript, event tail, notification, memory entry, permission
+request, checkpoints, audit receipts and idempotent replay.
+
+`mongo-replicas` starts two applications against one database and verifies one
+logical task and transcript for concurrent duplicate submissions, cross-replica
+event replay, notification deduplication, owner isolation, lease arbitration,
+exactly one consumption of one approval, concurrent memory convergence and
+retention safety for old user history.
+
+A fake collection is used for adapter semantics only; it is not accepted as
+persistence evidence. `npm run test:mongo` sets `CODERAX_REQUIRE_MONGODB=1`, so a
+missing URI fails the run instead of reporting a skipped check. The GitHub Actions
+`mongo` job provides an ephemeral `mongo:7` service; it never connects to a
+production database and uses no production credential.

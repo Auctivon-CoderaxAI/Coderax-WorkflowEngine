@@ -18,7 +18,7 @@ are clients of the same versioned API.
 
 | Capability | State | Evidence |
 | --- | --- | --- |
-| Versioned HTTP + event contracts | Implemented | `packages/contracts` |
+| Versioned HTTP + event contracts, including the capability handshake | Implemented | `packages/contracts`, `docs/api-v1.1.md` |
 | OpenAPI generated from those contracts | Implemented | `openapi.json`, `npm run openapi:check` |
 | Shared SDK consumed by UI and CLI | Implemented | `packages/sdk` |
 | Centralized route registration + completion gate | Implemented | `src/api/router.ts`, contract tests |
@@ -34,12 +34,12 @@ are clients of the same versioned API.
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
-| MongoDB runtime driver, lease table and index bootstrap | Implemented; verified against a live MongoDB restart suite | `src/persistence/mongo.ts`, `tests/integration/mongo-restart.test.ts` |
+| MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
-| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; live-verified | `src/bootstrap/compose.ts` |
-| Task, conversation, message, event, memory, notification, permission, receipt, checkpoint and idempotency persistence | MongoDB when `persistence.driver=mongo`; live restart test | `src/persistence/*`, `tests/integration/mongo-restart.test.ts` |
-| Retention and authorized deletion | Bounded sweeps and owner-scoped store deletes | `src/persistence/retention.ts` |
+| Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; live-verified by the restart and two-replica suites | `src/bootstrap/compose.ts` |
+| Task, conversation, memory, event, notification and permission persistence | `persistence.driver=mongo`; no silent in-memory downgrade; live-verified across restart and two replicas | `src/persistence/*` |
+| Distributed single-use permission consumption | One conditional update; two replicas racing one approval produce one grant | `src/permissions/store.ts` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |
 
@@ -54,8 +54,11 @@ simplified and what is still missing.
 
 ```bash
 npm install
-npm run build
-npm test                          # 129 tests: unit, contract, integration, security, e2e
+npm run verify                    # build, pack, 158 tests, OpenAPI drift gate
+npm test                          # tests only: unit, contract, integration, security, e2e
+CODERAX_TEST_MONGODB_URI='mongodb://127.0.0.1:27019/?directConnection=true' \
+  npm run test:mongo              # required real-MongoDB restart and two-replica lane
+npm run sdk:pack                  # reproducible tarballs + SHA256SUMS in dist-artifacts/
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -83,41 +86,6 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
 ```
 
 The engine binds `127.0.0.1` by default and is never public-facing.
-
-## Shared read models and API operations
-
-Coderax Web and CoderaxCLI consume the same authoritative endpoints through
-`packages/sdk`; neither keeps a competing database.
-
-| Operation | Endpoint | Bounds |
-| --- | --- | --- |
-| Owner Work list | `GET /v1/work` | state/agent/mode/conversation filters, newest-first cursor page, total |
-| Task receipts | `GET /v1/work/{taskId}/receipts` | owner-scoped, newest-first cursor page, total |
-| Conversation list | `GET /v1/conversations` | mode/agent/isWork filters, cursor page, total |
-| Conversation deletion | `DELETE /v1/conversations/{conversationId}` | refuses while a task is live; cascades messages, tasks, events, checkpoints, permissions, notifications, receipts and idempotency records |
-| Memory CRUD | `GET/PUT/DELETE /v1/memory[/{key}]` | owner + mode scoped; page limit 500 |
-| Notification page | `GET /v1/notifications` | unread filter, cursor page, total and durable unread count |
-| Mark notifications read | `POST /v1/notifications/read` | owner-scoped task ids |
-| Permission queue | `GET /v1/work/{taskId}/permissions` | decision filter, cursor page, total |
-| Permission decision | `POST /v1/work/{taskId}/permissions` | single decision, conflict after expiry or a second decision |
-| Budget and quota | `GET /v1/budget` | used, remaining, exhausted, UTC reset instant |
-| Idempotent submission | `POST /v1/work` with `idempotencyKey` | replay returns the original task; a different body conflicts |
-
-## Operability
-
-- Every response carries `x-request-id`. A bounded client-supplied value is
-  accepted and echoed; anything unsafe is replaced. The same id appears in a
-  Problem body and in the matching structured log line.
-- Request logs are JSON lines (`ts`, `level`, `event`, `requestId`, `method`,
-  `status`, `durationMs`) with no path, body or header. Strings pass through the
-  same redaction as provider output. Set `observability.requestLogs` to `false`
-  in `engine.json` to silence them.
-- `GET /v1/metrics` reports active/total requests, queue active and pending,
-  execution-state counts, dropped events, lease renewal/fencing failures,
-  receipt count and the live persistence ping. Counters are process-local and
-  reset on restart; durable facts stay in their stores.
-- `npm run evidence` runs the suite and the OpenAPI drift check, then writes
-  `docs/capability-evidence.md` from the actual result and route catalogue.
 
 ## Architecture
 

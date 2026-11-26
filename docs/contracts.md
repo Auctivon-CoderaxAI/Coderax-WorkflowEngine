@@ -29,9 +29,14 @@ the successful response; failures use the shared `Problem` body.
 
 | Surface | Version | Where |
 | --- | --- | --- |
-| HTTP contracts | `CONTRACT_VERSION = '1.0.0'`, served at `/v1` | `primitives.ts` |
+| HTTP contracts | `CONTRACT_VERSION = '1.1.0'`, served at `/v1` | `primitives.ts` |
 | Execution events | `EVENT_SCHEMA_VERSION = 1` | `events.ts` |
-| SDK | matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
+| Chat stream frames | `CHAT_STREAM_SCHEMA_VERSION = 1` | `chat.ts` |
+| SDK | `1.1.0`, matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
+
+The engine reports all three versions in `GET /v1/handshake`; a client calls
+`negotiate()` and refuses an incompatible deployment before issuing a request.
+`docs/api-v1.1.md` is the operative reference for this line.
 
 Rules:
 
@@ -64,8 +69,10 @@ Every event is an envelope plus a payload:
 - A consumer that has already seen an `eventId` must ignore it.
 - A consumer that receives `seq <= lastSeen` must ignore it and resync from
   `GET /v1/work/{taskId}/events?after=<lastSeen>`.
-- A bounded per-task buffer means an old cursor can be truncated; the replay
-  response says so, and the client must re-read task state.
+- A bounded per-task buffer means an old cursor can be truncated; the
+  `x-coderax-truncated` response header reports it, and the client must re-read
+  task state. The SSE `id:` line is the per-task `seq`, so `Last-Event-ID`
+  resumes exactly.
 
 ## SDK rules
 
@@ -78,18 +85,24 @@ Every event is an envelope plus a payload:
   describe;
 - throws `CoderaxApiError` with the stable `code`, HTTP `status`, `requestId` and
   `retryable` flag from the `Problem` body;
-- never places the token in a URL or an error message.
+- never places the token in a URL or an error message;
+- covers every published operation in `SDK_COVERAGE`, checked by a test against
+  the route catalogue and against the methods that exist on the client.
 
 Do not add a second client contract, a hand-written DTO, or a divergent copy of a
-payload in either consuming repository.
+payload in either consuming repository. The immutable distribution is the pair of
+checked-in tarballs under `dist-artifacts/` with `SHA256SUMS`; see
+`docs/api-v1.1.md` for installation and checksum reproduction.
 
 ## Adding an operation
 
 1. Add the `RouteSpec` to `ROUTES`.
 2. Register a handler in `src/api/routes.ts` and delegate to the service.
-3. Extend `packages/sdk` if a client needs it.
+3. Extend `packages/sdk` and add the operation to `SDK_COVERAGE`.
 4. `npm run openapi:write` and commit `openapi.json`.
-5. Add a contract test. `npm run verify` must pass.
+5. Add a contract test and an HTTP case in
+   `tests/integration/http-contract.test.ts`. `npm run verify` must pass, and the
+   handshake `capabilities` state must be updated if the domain was unavailable.
 
 ## Drift gate
 

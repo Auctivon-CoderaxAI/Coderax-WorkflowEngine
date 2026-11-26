@@ -98,6 +98,7 @@ export const NotificationList = z
     nextCursor: z.string().min(1).max(1024).optional(),
   })
   .strict();
+export type NotificationList = z.infer<typeof NotificationList>;
 
 export const NotificationListQuery = z
   .object({
@@ -107,14 +108,14 @@ export const NotificationListQuery = z
   })
   .strict();
 export type NotificationListQuery = z.infer<typeof NotificationListQuery>;
-export type NotificationList = z.infer<typeof NotificationList>;
 
 /**
- * Clearing the blue dot.
- *
- * Marking read is scoped to task ids the caller names, and the store only
- * touches a row owned by the authenticated owner, so a client cannot clear
+ * Clearing the blue dot. Marking read is scoped to named task ids and the store
+ * only touches rows owned by the authenticated owner, so a client cannot clear
  * another owner's notifications by guessing an id.
+ *
+ * Shape reserved by `feat/durable-events-integration`; the consolidation keeps
+ * it unchanged so that branch's client work merges without a second contract.
  */
 export const NotificationReadRequest = z
   .object({ taskIds: z.array(TaskId).min(1).max(100) })

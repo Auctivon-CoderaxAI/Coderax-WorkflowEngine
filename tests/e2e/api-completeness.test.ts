@@ -74,7 +74,7 @@ test('Work listing, receipts, budget, memory, notifications and deletion are sha
       privateTask.taskId,
     );
 
-    const conversations = await api.conversations({ isWork: 'true', limit: 2 });
+    const conversations = await api.conversations({ isWork: true, limit: 2 });
     assert.equal(conversations.total, 3);
     assert.equal(conversations.conversations.length, 2);
     assert.ok(conversations.nextCursor);
@@ -102,7 +102,11 @@ test('Work listing, receipts, budget, memory, notifications and deletion are sha
     assert.equal(budget.remaining.requests, budget.budget.maxRequests - budget.used.requests);
 
     // Memory is owner-scoped and partitioned by data mode.
-    const written = await api.writeMemory('release-notes', 'ready', 'private');
+    const written = await api.putMemory({
+      key: 'release-notes',
+      value: 'ready',
+      mode: 'private',
+    });
     assert.equal(written.value, 'ready');
     assert.equal(
       (await api.memory('private')).entries.find((entry) => entry.key === 'release-notes')?.value,

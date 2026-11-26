@@ -39,6 +39,9 @@ function matches(document: Document, filter: MongoFilter): boolean {
         const delta = compare(operators.$gte);
         if (Number.isNaN(delta) || delta < 0) return false;
       }
+      if ('$ne' in operators) {
+        if (value === operators.$ne) return false;
+      }
       if ('$in' in operators) {
         const list = operators.$in as unknown[];
         if (!list.includes(value)) return false;

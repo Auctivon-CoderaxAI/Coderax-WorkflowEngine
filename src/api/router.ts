@@ -10,13 +10,23 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
+  /** The client's Accept header, so a route can negotiate SSE against JSON. */
+  accept: string;
   /** `Last-Event-ID`, the standard SSE resume cursor. */
   lastEventId?: string;
 };
 
+/** One SSE frame: an optional cursor and the JSON payload the client parses. */
+export type SseFrame = { id?: string; data: unknown };
+
 export type HandlerResult =
   | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | {
+      kind: 'sse';
+      status: number;
+      events: AsyncIterable<SseFrame | unknown>;
+      headers?: Record<string, string>;
+    };
 
 export type RouteHandler = (context: RequestContext) => Promise<HandlerResult>;
 
@@ -27,14 +37,22 @@ export type RawRequest = {
   path: string;
   authorization: string | undefined;
   bodyText: string;
-  lastEventId?: string;
+  accept?: string | undefined;
+  lastEventId?: string | undefined;
+  /** `Idempotency-Key`; a transport alias for the submission body's key. */
+  idempotencyKey?: string | undefined;
   /** A validated correlation id supplied by the transport, or generated here. */
   requestId?: string;
 };
 
 export type RouterResult =
   | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | {
+      kind: 'sse';
+      status: number;
+      events: AsyncIterable<SseFrame>;
+      headers?: Record<string, string>;
+    };
 
 export type RouteRegistry = {
   register: (operationId: string, handler: RouteHandler) => void;
@@ -150,6 +168,43 @@ export type Router = {
   registry: RouteRegistry;
 };
 
+function toFrame(value: unknown): SseFrame {
+  // A wrapper is explicit: an execution event has a `type` and no `data`, so the
+  // two cannot be confused even after a new event type is added.
+  if (typeof value === 'object' && value !== null && 'data' in value && !('type' in value)) {
+    const candidate = value as { data: unknown; id?: unknown };
+    return {
+      ...(typeof candidate.id === 'string' ? { id: candidate.id } : {}),
+      data: candidate.data,
+    };
+  }
+  return { data: value };
+}
+
+/**
+ * Every SSE payload is validated against the route's frame schema before it
+ * reaches the socket, so a stream cannot teach a client a shape the catalogue
+ * does not describe. A violation breaks the stream instead of returning a 200
+ * that lies about its contents.
+ */
+async function* validatedFrames(
+  events: AsyncIterable<unknown>,
+  schema: RouteSpec['frames'],
+): AsyncIterable<SseFrame> {
+  for await (const value of events) {
+    const frame = toFrame(value);
+    if (!schema) {
+      yield frame;
+      continue;
+    }
+    const parsed = schema.safeParse(frame.data);
+    if (!parsed.success) {
+      throw new Error('a stream frame did not match its published contract');
+    }
+    yield { ...frame, data: parsed.data };
+  }
+}
+
 export function createRouter(input: {
   registry: RouteRegistry;
   auth: AuthService;
@@ -217,6 +272,18 @@ export function createRouter(input: {
           } catch {
             return problem('validation_failed', 'The request body is not valid JSON.', requestId);
           }
+          // The shared SDK sends the idempotency key as a header so it never
+          // appears in a logged URL. It is folded into the validated body here,
+          // keeping the contract's body schema the single definition.
+          if (
+            route.spec.operationId === 'submitWork' &&
+            raw.idempotencyKey &&
+            typeof json === 'object' &&
+            json !== null &&
+            !('idempotencyKey' in json)
+          ) {
+            json = { ...(json as Record<string, unknown>), idempotencyKey: raw.idempotencyKey };
+          }
           const parsed = route.spec.body.safeParse(json);
           if (!parsed.success) {
             const first = parsed.error.issues[0];
@@ -238,6 +305,7 @@ export function createRouter(input: {
             query,
             body,
             requestId,
+            accept: raw.accept ?? '',
             ...(raw.lastEventId ? { lastEventId: raw.lastEventId } : {}),
           });
         } catch {
@@ -258,7 +326,12 @@ export function createRouter(input: {
           }
           return { kind: 'json', status: result.status, body: parsed.data };
         }
-        return { kind: 'sse', status: result.status, events: result.events };
+        return {
+          kind: 'sse',
+          status: result.status,
+          events: validatedFrames(result.events, route.spec.frames),
+          ...(result.headers ? { headers: result.headers } : {}),
+        };
       }
 
       return problem('not_found', 'No operation matches that method and path.', requestId);

@@ -13,7 +13,12 @@ import {
   createMongoIdempotencyStore,
   ensureIdempotencyIndexes,
 } from '../../src/persistence/idempotency.js';
-import { createPermissionStore, ensurePermissionIndexes } from '../../src/permissions/store.js';
+import { createPermissionStore } from '../../src/permissions/store.js';
+import { createPermissionTable } from '../../src/persistence/permissions.js';
+import {
+  createMongoPermissionTable,
+  ensurePermissionIndexes,
+} from '../../src/persistence/mongo-records.js';
 import { createConversationRepository } from '../../src/persistence/conversations.js';
 import { createNotificationStore } from '../../src/persistence/notifications.js';
 import { createTaskRepository } from '../../src/persistence/tasks.js';
@@ -50,6 +55,8 @@ function ids(): IdGenerator {
     requestId: () => `req_${(seq += 1)}`,
     receipt: () => `rcpt_${(seq += 1)}`,
     checkpointId: () => `ckpt_${(seq += 1)}`,
+    scheduleId: () => `sched_${(seq += 1)}`,
+    artifactId: () => `art_${(seq += 1)}`,
   };
 }
 
@@ -67,7 +74,11 @@ test('permission requests persist, decide once, scope approvals and prune', asyn
   const collection = createFakeCollection();
   await ensurePermissionIndexes(collection);
   const clock = mutableClock();
-  const store = createPermissionStore({ clock, ids: ids(), collection });
+  const store = createPermissionStore({
+    clock,
+    ids: ids(),
+    table: createMongoPermissionTable(collection),
+  });
 
   const request = await store.request({
     ownerId: 'owner',
@@ -91,14 +102,23 @@ test('permission requests persist, decide once, scope approvals and prune', asyn
   assert.equal(await store.isApproved('task_1', 'workspace.read', '/src/app.ts'), true);
   assert.equal(await store.isApproved('task_1', 'workspace.read', '/src/other.ts'), false);
 
+  // An unconsumed approval can be revoked; the durable decision is then final.
   const second = await store.decide({
     ownerId: 'owner',
     taskId: 'task_1',
     requestId: request.requestId,
     decision: 'denied',
   });
-  assert.equal(second.ok, false);
-  assert.equal(second.ok === false && second.code, 'conflict');
+  assert.equal(second.ok, true);
+  assert.equal(await store.isApproved('task_1', 'workspace.read', '/src/app.ts'), false);
+  const third = await store.decide({
+    ownerId: 'owner',
+    taskId: 'task_1',
+    requestId: request.requestId,
+    decision: 'approved',
+  });
+  assert.equal(third.ok, false);
+  assert.equal(third.ok === false && third.code, 'conflict');
 
   assert.equal(await store.deleteByTaskIds(['task_1']), 1);
   assert.equal((await store.list('owner', 'task_1')).requests.length, 0);
@@ -306,7 +326,11 @@ test('retention removes only rows older than each configured window', async () =
   });
   const notifications = createNotificationStore();
   const audit = createAuditLog({ clock, ids: ids() });
-  const permissions = createPermissionStore({ clock, ids: ids() });
+  const permissions = createPermissionStore({
+    clock,
+    ids: ids(),
+    table: createPermissionTable(),
+  });
   const checkpoints = createCheckpointStore();
   const idempotency = createIdempotencyStore();
 

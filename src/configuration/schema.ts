@@ -133,6 +133,23 @@ export const RetentionConfig = z
   })
   .strict();
 
+export const ScheduleConfig = z
+  .object({
+    /** A durable schedule is only fired by a running engine tick. */
+    enabled: z.boolean().default(true),
+    tickIntervalMs: z.number().int().min(100).max(300_000).default(2_000),
+    /** Maximum due schedules handled in one tick, bounding a thundering herd. */
+    tickBatch: z.number().int().min(1).max(100).default(10),
+  })
+  .strict();
+
+export const ArtifactConfig = z
+  .object({
+    /** Decoded bytes accepted for one artifact; the API also bounds base64. */
+    maxBytes: z.number().int().min(1).max(16_000_000).default(8_388_608),
+  })
+  .strict();
+
 export const PersistenceConfig = z
   .object({
     /**
@@ -175,6 +192,8 @@ export const EngineConfigSchema = z
     engines: EnginesConfig.default({}),
     models: ModelsConfig,
     execution: ExecutionConfig.default({}),
+    schedules: ScheduleConfig.default({}),
+    artifacts: ArtifactConfig.default({}),
     persistence: PersistenceConfig.default({}),
     retention: RetentionConfig.default({}),
     observability: ObservabilityConfig.default({}),

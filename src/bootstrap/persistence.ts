@@ -6,6 +6,8 @@ import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
+import type { ScheduleRepository } from '../persistence/schedules.js';
+import type { ArtifactRepository } from '../artifacts/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { CheckpointStore } from '../persistence/checkpoints.js';
 import type { IdempotencyStore } from '../persistence/idempotency.js';
@@ -21,7 +23,8 @@ import { createNotificationStore } from '../persistence/notifications.js';
 import { createMemoryStore } from '../memory/store.js';
 import { createMemoryEventLog } from '../events/log.js';
 import { createMongoEventLog, ensureEventIndexes } from '../persistence/mongo-events.js';
-import { createPermissionStore, ensurePermissionIndexes } from '../permissions/store.js';
+import { createPermissionStore } from '../permissions/store.js';
+import { createPermissionTable } from '../persistence/permissions.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createMongoAuditLog, ensureAuditIndexes } from '../persistence/mongo-audit.js';
 import {
@@ -34,6 +37,16 @@ import {
   createMongoIdempotencyStore,
   ensureIdempotencyIndexes,
 } from '../persistence/idempotency.js';
+import { createScheduleRepository } from '../persistence/schedules.js';
+import { createArtifactRepository } from '../artifacts/store.js';
+import {
+  createMongoArtifactRepository,
+  createMongoPermissionTable,
+  createMongoScheduleRepository,
+  ensureArtifactIndexes,
+  ensurePermissionIndexes,
+  ensureScheduleIndexes,
+} from '../persistence/mongo-records.js';
 import {
   createMongoConversationRepository,
   createMongoMemoryStore,
@@ -63,6 +76,8 @@ export type PersistenceStores = {
   memory: MemoryStore;
   notifications: NotificationStore;
   permissions: PermissionStore;
+  schedules: ScheduleRepository;
+  artifacts: ArtifactRepository;
   audit: AuditLog;
   checkpoints: CheckpointStore;
   idempotency: IdempotencyStore;
@@ -118,11 +133,12 @@ async function openDatabase(input: PersistenceInput): Promise<MongoDatabase> {
  * Builds every store from the validated persistence setting.
  *
  * `memory` is a single process and forgets tasks, transcripts, memory,
- * notifications, receipts and idempotency records on restart. `mongo` is the
- * production path; selecting it without a reachable, indexable database is a
- * startup failure, never a silent downgrade. The stores are returned together so
- * the composition root cannot mix a durable lease with a process-local task
- * record, which would make fencing meaningless after a restart.
+ * notifications, permissions, schedules, artifacts, receipts and idempotency
+ * records on restart. `mongo` is the production path; selecting it without a
+ * reachable, indexable database is a startup failure, never a silent downgrade.
+ * The stores are returned together so the composition root cannot mix a durable
+ * lease with a process-local task record, which would make fencing meaningless
+ * after a restart, or a durable task with a permission that vanishes on restart.
  */
 export async function buildPersistence(input: PersistenceInput): Promise<PersistenceStores> {
   const { config, clock, ids } = input;
@@ -135,7 +151,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       ok: true,
       latencyMs: 0,
       detail:
-        'Process-local stores are active; a restart loses tasks, transcripts, events, receipts, memory, notifications and idempotency records.',
+        'Process-local stores are active; a restart loses tasks, transcripts, events, receipts, memory, notifications, permissions, schedules and idempotency records.',
     });
     return {
       driver: 'memory',
@@ -144,7 +160,13 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       notifications: createNotificationStore(),
-      permissions: createPermissionStore({ clock, ids }),
+      permissions: createPermissionStore({
+        clock,
+        ids,
+        table: createPermissionTable(),
+      }),
+      schedules: createScheduleRepository(),
+      artifacts: createArtifactRepository(),
       audit: createAuditLog({ clock, ids }),
       checkpoints: createCheckpointStore(),
       idempotency: createIdempotencyStore(),
@@ -157,27 +179,31 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const database = await openDatabase(input);
   const workRuns: MongoCollectionLike = database.collection(collectionName(config, 'work_runs'));
   const tasks = database.collection(collectionName(config, 'tasks'));
+  const idempotency = database.collection(collectionName(config, 'idempotency'));
   const conversations = database.collection(collectionName(config, 'conversations'));
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
   const notifications = database.collection(collectionName(config, 'notifications'));
   const permissions = database.collection(collectionName(config, 'permissions'));
+  const schedules = database.collection(collectionName(config, 'schedules'));
+  const artifacts = database.collection(collectionName(config, 'artifacts'));
   const audit = database.collection(collectionName(config, 'audit_receipts'));
   const checkpoints = database.collection(collectionName(config, 'checkpoints'));
-  const idempotency = database.collection(collectionName(config, 'idempotency'));
   const events = database.collection(collectionName(config, 'events'));
   const eventHeads = database.collection(collectionName(config, 'event_heads'));
 
   try {
     await ensureWorkRunIndexes(workRuns);
     await ensureTaskIndexes(tasks);
+    await ensureIdempotencyIndexes(idempotency);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
     await ensurePermissionIndexes(permissions);
+    await ensureScheduleIndexes(schedules);
+    await ensureArtifactIndexes(artifacts);
     await ensureAuditIndexes(audit);
     await ensureCheckpointIndexes(checkpoints);
-    await ensureIdempotencyIndexes(idempotency);
     await ensureEventIndexes({ events, heads: eventHeads });
   } catch (error) {
     await database.close().catch(() => undefined);
@@ -211,7 +237,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   return {
     driver: 'mongo',
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
-    tasks: createMongoTaskRepository(tasks),
+    tasks: createMongoTaskRepository(tasks, idempotency),
     conversations: createMongoConversationRepository({ conversations, messages }),
     memory: createMongoMemoryStore({
       collection: memory,
@@ -222,8 +248,10 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     permissions: createPermissionStore({
       clock,
       ids,
-      collection: permissions,
+      table: createMongoPermissionTable(permissions),
     }),
+    schedules: createMongoScheduleRepository(schedules),
+    artifacts: createMongoArtifactRepository(artifacts),
     audit: createMongoAuditLog({ collection: audit, clock, ids }),
     checkpoints: createMongoCheckpointStore(checkpoints),
     idempotency: createMongoIdempotencyStore(idempotency),

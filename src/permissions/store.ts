@@ -1,5 +1,6 @@
 import type {
   PermissionList,
+  PermissionListQuery,
   PermissionRequest,
   PermissionScope,
 } from '@coderax/contracts';
@@ -8,27 +9,78 @@ import type { Clock } from '../support/clock.js';
 import type { IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
-import type { MongoCollectionLike } from '../persistence/mongo.js';
 import { clampLimit, decodeCursor, encodeCursor } from '../persistence/pagination.js';
-
-export type PermissionPageQuery = {
-  decision?: 'pending' | 'approved' | 'denied';
-  limit?: number;
-  cursor?: string;
-};
 
 /**
  * Permissions are asked for, never assumed.
  *
- * A request names one scope and one exact resource. A grant approves that
- * resource only, so an agent cannot widen `workspace.read` into a broader path by
- * asking once. External agents begin with nothing; Native is the only agent whose
- * isolation already includes memory and conversations.
+ * A request names one scope, one exact resource and (optionally) one action
+ * binding. Approval is for that exact tuple: an agent cannot widen
+ * `workspace.read` into a broader path by asking once, nor replay a grant for a
+ * different command.
  *
- * The store is process-local unless a collection is supplied. The collection is
- * the production default; the in-process map keeps the same semantics for a
- * single-process deployment and for tests.
+ * Authorization is single-use by default. `lookup({ consume: true })` consumes
+ * the grant in one atomic table operation, so two replicas racing on the same
+ * approval produce exactly one success. A grant may be created `standing` only
+ * when the caller explicitly asks for repeatable authorization; that decision is
+ * recorded on the row and is visible to the owner.
+ *
+ * Every row carries the owner. The table port scopes reads and writes by owner
+ * and task independently of the caller, so a guessed request id cannot reach
+ * another owner's grant.
  */
+export type PermissionRow = PermissionRequest & {
+  ownerId: string;
+  /** Exact action this grant authorizes; empty means the resource only. */
+  binding?: string;
+  /** Explicitly repeatable authorization. Defaults to single-use. */
+  standing?: boolean;
+  consumed?: boolean;
+  consumedAt?: string;
+  revokedAt?: string;
+};
+
+export type PermissionPageQuery = PermissionListQuery;
+
+export type PermissionTable = {
+  insert: (row: PermissionRow) => Promise<void>;
+  get: (requestId: string) => Promise<PermissionRow | null>;
+  listTask: (ownerId: string, taskId: string) => Promise<PermissionRow[]>;
+  listPending: (ownerId: string) => Promise<PermissionRow[]>;
+  /** Engine-internal checks; never a route read. */
+  listByTask: (taskId: string) => Promise<PermissionRow[]>;
+  updateDecision: (input: {
+    requestId: string;
+    ownerId: string;
+    taskId: string;
+    decision: 'approved' | 'denied';
+    decidedAt: string;
+    /** Which prior decision may be superseded. */
+    expected: 'pending' | 'approved';
+    /** True when an approved, unconsumed grant is being withdrawn. */
+    revoke: boolean;
+  }) => Promise<PermissionRow | null>;
+  /** Atomically marks one matching approved grant consumed. */
+  consume: (input: {
+    requestId: string;
+    ownerId: string;
+    taskId: string;
+    scope: PermissionScope;
+    resource: string;
+    binding: string;
+    at: string;
+  }) => Promise<PermissionRow | null>;
+  deleteByTaskIds: (taskIds: readonly string[]) => Promise<number>;
+  prune: (before: string, limit: number) => Promise<number>;
+};
+
+export type PermissionLookup = {
+  decision: 'granted' | 'denied' | 'pending';
+  requestId?: string;
+  /** True when the grant was standing, so nothing was consumed. */
+  standing?: boolean;
+};
+
 export type PermissionStore = {
   request: (input: {
     ownerId: string;
@@ -37,6 +89,10 @@ export type PermissionStore = {
     scope: PermissionScope;
     description: string;
     resource: string;
+    /** Exact action identity; omitted means the resource alone. */
+    binding?: string;
+    /** Explicitly repeatable authorization; never implicit. */
+    standing?: boolean;
     ttlMs?: number;
   }) => Promise<PermissionRequest>;
   list: (
@@ -44,6 +100,7 @@ export type PermissionStore = {
     taskId: string,
     query?: PermissionPageQuery,
   ) => Promise<PermissionList>;
+  listPending: (ownerId: string, query?: PermissionPageQuery) => Promise<PermissionList>;
   decide: (input: {
     ownerId: string;
     taskId: string;
@@ -51,6 +108,21 @@ export type PermissionStore = {
     decision: 'approved' | 'denied';
     reason?: string;
   }) => Promise<ServiceResult<PermissionList>>;
+  /**
+   * The authorization decision for one exact action.
+   *
+   * `consume: true` is the enforcing call: it either grants once or reports that
+   * the grant is absent, denied, pending, expired or already consumed.
+   */
+  lookup: (input: {
+    ownerId: string;
+    taskId: string;
+    scope: PermissionScope;
+    resource: string;
+    binding: string;
+    consume: boolean;
+  }) => Promise<PermissionLookup | null>;
+  /** Non-consuming compatibility check; never use it to authorize an action. */
   isApproved: (taskId: string, scope: PermissionScope, resource: string) => Promise<boolean>;
   hasPending: (taskId: string) => Promise<boolean>;
   /** Authorized cascade for deleting a task's owning conversation. */
@@ -59,253 +131,235 @@ export type PermissionStore = {
   prune: (before: string, limit: number) => Promise<number>;
 };
 
-type Row = PermissionRequest & { ownerId: string };
-
-export async function ensurePermissionIndexes(collection: MongoCollectionLike): Promise<void> {
-  await collection.createIndex(
-    { requestId: 1 },
-    { unique: true, name: 'permission_request' },
-  );
-  await collection.createIndex(
-    { ownerId: 1, taskId: 1, requestedAt: 1 },
-    { name: 'permission_owner_task' },
-  );
-  await collection.createIndex({ taskId: 1, decision: 1 }, { name: 'permission_task_decision' });
-  await collection.createIndex({ expiresAt: 1 }, { name: 'permission_expiry' });
-}
-
-function toRow(document: Record<string, unknown>): Row {
-  const copy = { ...document };
-  delete copy._id;
-  return copy as unknown as Row;
-}
-
-function publicRow(row: Row): PermissionRequest {
-  const { ownerId: _owner, ...contract } = row;
+function toContract(row: PermissionRow): PermissionRequest {
+  const {
+    ownerId: _owner,
+    binding: _binding,
+    standing: _standing,
+    consumed: _consumed,
+    consumedAt: _consumedAt,
+    revokedAt: _revokedAt,
+    ...contract
+  } = row;
   return contract;
+}
+
+function normalize(row: PermissionRow): PermissionRow {
+  return {
+    ...row,
+    binding: row.binding ?? '',
+    standing: row.standing === true,
+    consumed: row.consumed === true,
+  };
+}
+
+function isLive(row: PermissionRow, now: string): boolean {
+  return row.expiresAt > now;
+}
+
+function matchesBinding(row: PermissionRow, binding: string): boolean {
+  return (row.binding ?? '') === binding;
+}
+
+/**
+ * Sorts by the stable pagination key and applies one cursor. The key is
+ * `(requestedAt, requestId)`, so two requests made in the same millisecond still
+ * paginate without duplicating or skipping a row.
+ */
+function page(
+  rows: PermissionRow[],
+  query: PermissionPageQuery,
+): PermissionList {
+  const limit = clampLimit(query.limit);
+  const filtered = rows
+    .filter((row) => !query.decision || row.decision === query.decision)
+    .sort(
+      (left, right) =>
+        left.requestedAt.localeCompare(right.requestedAt) ||
+        left.requestId.localeCompare(right.requestId),
+    );
+  const cursor = query.cursor ? decodeCursor(query.cursor) : null;
+  const after = cursor
+    ? filtered.filter(
+        (row) =>
+          row.requestedAt > cursor.at ||
+          (row.requestedAt === cursor.at && row.requestId > cursor.id),
+      )
+    : filtered;
+  const slice = after.slice(0, limit);
+  const hasMore = after.length > limit;
+  const last = slice[slice.length - 1];
+  return {
+    requests: slice.map(toContract),
+    total: filtered.length,
+    ...(hasMore && last
+      ? { nextCursor: encodeCursor(last.requestedAt, last.requestId) }
+      : {}),
+  };
 }
 
 export function createPermissionStore(input: {
   clock: Clock;
   ids: IdGenerator;
+  table: PermissionTable;
   defaultTtlMs?: number;
-  collection?: MongoCollectionLike;
 }): PermissionStore {
-  const collection = input.collection;
-  const rows = new Map<string, Row>();
+  const { table, clock, ids } = input;
 
   async function listFor(
     ownerId: string,
     taskId: string,
     query: PermissionPageQuery = {},
   ): Promise<PermissionList> {
-    const limit = clampLimit(query.limit);
-    const cursor = query.cursor ? decodeCursor(query.cursor) : null;
-    if (collection) {
-      const base = {
-        ownerId,
-        taskId,
-        ...(query.decision ? { decision: query.decision } : {}),
-      };
-      const filter: Record<string, unknown> = {
-        ...base,
-        ...(cursor
-          ? {
-              $or: [
-                { requestedAt: { $gt: cursor.at } },
-                { requestedAt: cursor.at, requestId: { $gt: cursor.id } },
-              ],
-            }
-          : {}),
-      };
-      const [documents, total] = await Promise.all([
-        collection
-          .find(filter)
-          .sort({ requestedAt: 1, requestId: 1 })
-          .limit(limit + 1)
-          .toArray(),
-        collection.countDocuments(base),
-      ]);
-      const page = documents.slice(0, limit).map(toRow);
-      const hasMore = documents.length > limit;
-      return {
-        requests: page.map(publicRow),
-        total,
-        ...(hasMore && page.length > 0
-          ? {
-              nextCursor: encodeCursor(
-                page[page.length - 1]!.requestedAt,
-                page[page.length - 1]!.requestId,
-              ),
-            }
-          : {}),
-      };
-    }
-
-    const matching = [...rows.values()]
-      .filter(
-        (row) =>
-          row.ownerId === ownerId &&
-          row.taskId === taskId &&
-          (!query.decision || row.decision === query.decision),
-      )
-      .sort(
-        (left, right) =>
-          left.requestedAt.localeCompare(right.requestedAt) ||
-          left.requestId.localeCompare(right.requestId),
-      );
-    const after = cursor
-      ? matching.filter(
-          (row) =>
-            row.requestedAt > cursor.at ||
-            (row.requestedAt === cursor.at && row.requestId > cursor.id),
-        )
-      : matching;
-    const page = after.slice(0, limit);
-    const hasMore = after.length > limit;
-    return {
-      requests: page.map(publicRow),
-      total: matching.length,
-      ...(hasMore && page.length > 0
-        ? {
-            nextCursor: encodeCursor(
-              page[page.length - 1]!.requestedAt,
-              page[page.length - 1]!.requestId,
-            ),
-          }
-        : {}),
-    };
+    return page((await table.listTask(ownerId, taskId)).map(normalize), query);
   }
 
   return {
-    request: async ({ ownerId, taskId, agent, scope, description, resource, ttlMs }) => {
-      const now = input.clock.now();
-      const ttl = ttlMs ?? 15 * 60_000;
-      const row: Row = {
-        requestId: input.ids.requestId(),
+    request: async ({
+      ownerId,
+      taskId,
+      agent,
+      scope,
+      description,
+      resource,
+      binding,
+      standing,
+      ttlMs,
+    }) => {
+      const now = clock.now();
+      const ttl = ttlMs ?? input.defaultTtlMs ?? 15 * 60_000;
+      const row: PermissionRow = {
+        requestId: ids.requestId(),
         taskId,
         agent,
         scope,
         description,
         resource,
+        binding: binding ?? '',
+        standing: standing === true,
+        consumed: false,
         requestedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + ttl).toISOString(),
         decision: 'pending',
         ownerId,
       };
-      if (collection) await collection.insertOne({ ...row });
-      else rows.set(row.requestId, row);
-      return publicRow(row);
+      await table.insert(row);
+      return toContract(row);
     },
 
-    list: async (ownerId, taskId, query) => listFor(ownerId, taskId, query),
+    list: listFor,
+
+    listPending: async (ownerId, query = {}) =>
+      page((await table.listPending(ownerId)).map(normalize), {
+        ...query,
+        decision: 'pending',
+      }),
 
     decide: async ({ ownerId, taskId, requestId, decision }) => {
-      const now = input.clock.now().toISOString();
-      if (collection) {
-        const existing = await collection.findOne({ requestId, ownerId, taskId });
-        if (!existing) {
-          return fail('not_found', 'That permission request does not exist for this task.');
-        }
-        const updated = await collection.updateOne(
-          { requestId, ownerId, taskId, decision: 'pending', expiresAt: { $gt: now } },
-          { $set: { decision, decidedAt: now } },
-          { upsert: false },
-        );
-        if ((updated.matchedCount ?? 0) !== 1) {
-          return fail('conflict', 'That permission request has expired or was already decided.');
-        }
-        return ok(await listFor(ownerId, taskId));
-      }
-
-      const row = rows.get(requestId);
-      if (!row || row.ownerId !== ownerId || row.taskId !== taskId) {
+      const record = await table.get(requestId);
+      if (!record || record.ownerId !== ownerId || record.taskId !== taskId) {
         return fail('not_found', 'That permission request does not exist for this task.');
       }
-      if (new Date(row.expiresAt).getTime() <= input.clock.now().getTime()) {
+      const now = clock.now();
+      if (!isLive(record, now.toISOString())) {
         return fail('conflict', 'That permission request has expired.');
       }
-      if (row.decision !== 'pending') {
+      if (record.consumed === true) {
+        return fail('conflict', 'That permission grant was already used and cannot change.');
+      }
+      const expected = record.decision;
+      if (expected === 'denied') {
         return fail('conflict', 'That permission request was already decided.');
       }
-      row.decision = decision;
-      row.decidedAt = now;
+      const updated = await table.updateDecision({
+        requestId,
+        ownerId,
+        taskId,
+        decision,
+        decidedAt: now.toISOString(),
+        expected,
+        revoke: expected === 'approved',
+      });
+      if (!updated) {
+        return fail('conflict', 'That permission request changed before it was decided.');
+      }
       return ok(await listFor(ownerId, taskId));
     },
 
-    isApproved: async (taskId, scope, resource) => {
-      const now = input.clock.now().toISOString();
-      if (collection) {
-        const document = await collection.findOne({
+    lookup: async ({ ownerId, taskId, scope, resource, binding, consume }) => {
+      const now = clock.now().toISOString();
+      const rows = (await table.listByTask(taskId))
+        .map(normalize)
+        .filter(
+          (row) =>
+            row.ownerId === ownerId &&
+            row.scope === scope &&
+            row.resource === resource &&
+            matchesBinding(row, binding) &&
+            isLive(row, now),
+        )
+        .sort(
+          (left, right) =>
+            left.requestedAt.localeCompare(right.requestedAt) ||
+            left.requestId.localeCompare(right.requestId),
+        );
+
+      const approved = rows.find(
+        (row) => row.decision === 'approved' && row.consumed !== true,
+      );
+      if (approved) {
+        if (approved.standing === true) {
+          return { decision: 'granted', requestId: approved.requestId, standing: true };
+        }
+        if (!consume) {
+          return { decision: 'granted', requestId: approved.requestId };
+        }
+        const consumed = await table.consume({
+          requestId: approved.requestId,
+          ownerId,
           taskId,
           scope,
           resource,
-          decision: 'approved',
-          expiresAt: { $gt: now },
+          binding,
+          at: now,
         });
-        return document !== null;
+        // A concurrent replica consumed it first. The action is not authorized,
+        // and the caller must request a new grant rather than replay this one.
+        return consumed ? { decision: 'granted', requestId: consumed.requestId } : null;
       }
-      for (const row of rows.values()) {
-        if (
-          row.taskId === taskId &&
-          row.scope === scope &&
-          row.resource === resource &&
-          row.decision === 'approved' &&
-          new Date(row.expiresAt).getTime() > input.clock.now().getTime()
-        ) {
-          return true;
-        }
-      }
-      return false;
+
+      const decided = rows.find((row) => row.decision === 'denied');
+      if (decided) return { decision: 'denied', requestId: decided.requestId };
+      const pending = rows.find((row) => row.decision === 'pending');
+      if (pending) return { decision: 'pending', requestId: pending.requestId };
+      return null;
+    },
+
+    isApproved: async (taskId, scope, resource) => {
+      const now = clock.now().toISOString();
+      return (await table.listByTask(taskId))
+        .map(normalize)
+        .some(
+          (row) =>
+            row.scope === scope &&
+            row.resource === resource &&
+            row.decision === 'approved' &&
+            row.consumed !== true &&
+            isLive(row, now),
+        );
     },
 
     hasPending: async (taskId) => {
-      if (collection) {
-        return (await collection.findOne({ taskId, decision: 'pending' })) !== null;
-      }
-      for (const row of rows.values()) {
-        if (row.taskId === taskId && row.decision === 'pending') return true;
-      }
-      return false;
+      const now = clock.now().toISOString();
+      return (await table.listByTask(taskId))
+        .map(normalize)
+        .some((row) => row.decision === 'pending' && isLive(row, now));
     },
 
-    deleteByTaskIds: async (taskIds) => {
-      if (taskIds.length === 0) return 0;
-      if (collection) {
-        const result = await collection.deleteMany({ taskId: { $in: [...taskIds] } });
-        return result.deletedCount;
-      }
-      let deleted = 0;
-      for (const [requestId, row] of rows) {
-        if (taskIds.includes(row.taskId)) {
-          rows.delete(requestId);
-          deleted += 1;
-        }
-      }
-      return deleted;
-    },
+    deleteByTaskIds: async (taskIds) => table.deleteByTaskIds(taskIds),
 
-    prune: async (before, limit) => {
-      if (limit <= 0) return 0;
-      if (collection) {
-        const expired = await collection
-          .find({ expiresAt: { $lte: before } })
-          .limit(limit)
-          .toArray();
-        const ids = expired.map((document) => document.requestId).filter((id): id is string => typeof id === 'string');
-        if (ids.length === 0) return 0;
-        const result = await collection.deleteMany({ requestId: { $in: ids } });
-        return result.deletedCount;
-      }
-      let deleted = 0;
-      for (const [requestId, row] of rows) {
-        if (deleted >= limit) break;
-        if (row.expiresAt <= before) {
-          rows.delete(requestId);
-          deleted += 1;
-        }
-      }
-      return deleted;
-    },
+    prune: async (before, limit) => table.prune(before, limit),
   };
 }
+
+export { matchesBinding, normalize, page as paginatePermissions, toContract };
