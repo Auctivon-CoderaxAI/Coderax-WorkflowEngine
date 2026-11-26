@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
-import { startTestApp, waitFor } from '../helpers.js';
+import { workRunKey } from '../../src/execution/lease.js';
+import { startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -297,3 +298,45 @@ test('failed transcript and notification writes do not strand a settled run', as
     await started.close();
   }
 });
+
+for (const [operation, state] of [
+  ['resumeTask', 'awaiting_approval'],
+  ['retryTask', 'failed'],
+] as const) {
+  test(`${operation} releases its claim when reissue is rejected`, async (t) => {
+    const started = await startTestApp();
+    try {
+      const { service, dependencies: deps } = started.app;
+      const task = taskRecord({ state, runToken: 'previous-generation' });
+      assert.ok((await deps.tasks.create(task)).ok);
+      const key = workRunKey(task);
+      const reissue = deps.tasks.reissue;
+      const rejectReissue: typeof reissue = async (input) => {
+        assert.equal((await deps.lease.read({ key, now: deps.clock.now() }))?.token, input.token);
+        if (operation === 'resumeTask') {
+          const cancelled = await service.cancelTask(principal, task.taskId);
+          assert.ok(cancelled.ok && cancelled.value.state === 'cancelled');
+          return reissue(input);
+        }
+        return { applied: false, reason: 'superseded' };
+      };
+      const rejected = t.mock.method(deps.tasks, 'reissue', rejectReissue);
+
+      const result = await service[operation](principal, task.taskId, task.generation);
+      assert.ok(!result.ok && result.code === 'conflict');
+      assert.equal(await deps.lease.read({ key, now: deps.clock.now() }), null);
+
+      rejected.mock.restore();
+      const next = await service.submitWork(principal, {
+        conversationId: task.conversationId,
+        objective: 'Start new Work after the rejected reissue',
+        mode: 'cloud',
+        requireApproval: true,
+      });
+      assert.ok(next.ok);
+      await deps.scheduler.idle();
+    } finally {
+      await started.close();
+    }
+  });
+}

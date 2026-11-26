@@ -149,6 +149,76 @@ test('a scoped read suspends for owner approval, then resumes with the real gran
   }
 });
 
+test('approval suspension survives a failed lease release and becomes resumable after expiry', async (t) => {
+  const started = await startTestApp({
+    gateway: fakeGateway({ plan: READ_PLAN }),
+    config: {
+      ...configWithScopedRead(),
+      execution: { leaseTtlMs: 60_000, heartbeatIntervalMs: 500 },
+    },
+  });
+  try {
+    const { service, dependencies: deps } = started.app;
+    let checkpointAtRelease: { state: string; firstStep: string | undefined } | undefined;
+    const readBeforeFailedRelease: typeof deps.lease.release = async () => {
+      const [task] = await deps.tasks.listUnsettled();
+      if (task) {
+        checkpointAtRelease = {
+          state: task.state,
+          firstStep: task.checkpoint.plan?.steps[0]?.id,
+        };
+      }
+      throw new Error('lease store unavailable');
+    };
+    const release = t.mock.method(deps.lease, 'release', readBeforeFailedRelease);
+    writeFileSync(path.join(started.workspace.cloudRoot, 'notes.txt'), 'saved notes');
+    const submitted = await service.submitWork(principal, {
+      objective: 'Read the notes and answer from them',
+      mode: 'cloud',
+      requireApproval: true,
+      reasoning: 'complex',
+    });
+    assert.ok(submitted.ok);
+    const { taskId, generation } = submitted.value;
+
+    await deps.scheduler.idle();
+    assert.equal(release.mock.callCount(), 1);
+    assert.deepEqual(checkpointAtRelease, {
+      state: 'awaiting_approval',
+      firstStep: 'read-notes',
+    });
+
+    const held = await service.task(principal, taskId);
+    assert.ok(held.ok);
+    assert.equal(held.value.state, 'running');
+    const pending = await service.permissions(principal, taskId);
+    assert.ok(pending.ok && pending.value.requests[0]);
+    const approved = await service.decidePermission(principal, taskId, {
+      requestId: pending.value.requests[0].requestId,
+      decision: 'approved',
+    });
+    assert.ok(approved.ok);
+    const premature = await service.resumeTask(principal, taskId, generation);
+    assert.ok(!premature.ok && premature.code === 'busy');
+
+    release.mock.restore();
+    const afterExpiry = new Date(deps.clock.now().getTime() + 60_000);
+    t.mock.method(deps.clock, 'now', () => afterExpiry);
+    assert.deepEqual(await service.recoverInterrupted(), { interrupted: 0 });
+    const ready = await service.task(principal, taskId);
+    assert.ok(ready.ok);
+    assert.equal(ready.value.state, 'awaiting_approval');
+    const resumed = await service.resumeTask(principal, taskId, generation);
+    assert.ok(resumed.ok && resumed.value.outcome === 'accepted');
+    await deps.scheduler.idle();
+    const completed = await service.task(principal, taskId);
+    assert.ok(completed.ok && completed.value.state === 'completed');
+    assert.equal(completed.value.generation, generation + 1);
+  } finally {
+    await started.close();
+  }
+});
+
 test('a denied scoped action fails the run instead of re-asking on resume', async () => {
   const started = await startTestApp({
     gateway: fakeGateway({ plan: READ_PLAN }),

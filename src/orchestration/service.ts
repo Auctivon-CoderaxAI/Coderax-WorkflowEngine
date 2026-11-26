@@ -302,10 +302,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // where authorization stopped. No completion notification is emitted because
     // nothing completed.
     if (outcome.kind === 'failed' && outcome.code === 'approval_required') {
-      // Publish partial text while the old run still owns the task, then release
-      // the lease before exposing the suspended state. If the state were visible
-      // first, an immediate approved resume could see `awaiting_approval` and
-      // still be refused because the old lease had not been released yet.
+      // Save partial text before another generation can start.
       const partial = checkpoint?.text ?? '';
       if (partial.length > 0) {
         await deps.conversations
@@ -320,7 +317,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           })
           .catch(() => undefined);
       }
-      await releaseLease(task, token);
+      // Persist the suspension under the old fence before releasing ownership.
+      // A restart between these operations can resume from the saved checkpoint
+      // once the old lease expires.
       const applied = await deps.tasks.updateFenced({
         taskId: task.taskId,
         token,
@@ -339,21 +338,25 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           ...(mergedUsage ? { usage: mergedUsage } : {}),
         },
       });
-      if (applied.applied) {
-        // Suspension settles this generation's usage even though the task is not
-        // terminal. The resumed generation is charged separately, so the daily
-        // ledger matches the cumulative usage the owner sees.
-        if ('usage' in outcome && outcome.usage) {
-          deps.budget.consume(task.ownerId, outcome.usage, new Date(now));
+      try {
+        if (applied.applied) {
+          // Suspension settles this generation's usage even though the task is not
+          // terminal. The resumed generation is charged separately, so the daily
+          // ledger matches the cumulative usage the owner sees.
+          if ('usage' in outcome && outcome.usage) {
+            deps.budget.consume(task.ownerId, outcome.usage, new Date(now));
+          }
+          deps.audit.record({
+            actor: task.ownerId,
+            action: 'work.awaiting_approval',
+            taskId: task.taskId,
+            conversationId: task.conversationId,
+            outcome: 'accepted',
+            detail: outcome.code,
+          });
         }
-        deps.audit.record({
-          actor: task.ownerId,
-          action: 'work.awaiting_approval',
-          taskId: task.taskId,
-          conversationId: task.conversationId,
-          outcome: 'accepted',
-          detail: outcome.code,
-        });
+      } finally {
+        await releaseLease(task, token);
       }
       return;
     }
@@ -935,8 +938,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     task: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      const reconciled = await reconcile(found.value);
-      return ok(toStatus(reconciled));
+      const task = await reconcile(found.value);
+      if (task.state === 'awaiting_approval') {
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
+        // A durable suspension is ready to expose only after its run no longer
+        // holds the lease. An owner who sees it can immediately claim a resume.
+        if (lease?.live && lease.token === task.runToken) {
+          return ok(toStatus({
+            ...task,
+            state: 'running',
+            failure: null,
+            leaseExpiresAt: lease.expiresAt.toISOString(),
+          }));
+        }
+      }
+      return ok(toStatus(task));
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -952,8 +968,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
-      // A task waiting for the owner has already released its lease: there is no
-      // live run to cancel, but it is still cancellable through its own fence.
+      // The adapter has stopped once suspension is saved. Cancel through the
+      // task fence even if the old lease is still being released.
       if (task.state === 'awaiting_approval') {
         const applied = await deps.tasks.updateFenced({
           taskId: task.taskId,
@@ -1087,7 +1103,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         // cancelled.
         from: ['interrupted', 'awaiting_approval'],
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be resumed.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -1137,7 +1156,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
         from: ['failed', 'interrupted'],
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be retried.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
