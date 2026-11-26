@@ -1,3 +1,4 @@
+import { credentialEndpoint } from '../security/endpoint.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { scopedChildEnvironment } from '../security/environment.js';
 import { z } from 'zod';
@@ -133,6 +134,8 @@ function createRpc(input: {
 }
 
 async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' }>) {
+  const url = Object.keys(config.headersEnv ?? {}).length > 0
+    ? credentialEndpoint(config.url).href : config.url;
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
@@ -146,7 +149,7 @@ async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(config.url, {
+      const response = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),

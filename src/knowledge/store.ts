@@ -1,3 +1,4 @@
+import { credentialEndpoint } from '../security/endpoint.js';
 import type {
   DataMode,
   KnowledgeIngestResult,
@@ -248,17 +249,7 @@ export function createOpenAiEmbeddingProvider(input: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): EmbeddingProvider {
-  let endpoint: URL;
-  try {
-    endpoint = new URL(input.baseURL);
-  } catch {
-    throw new Error('Invalid embedding endpoint.');
-  }
-  const loopback = endpoint.hostname === 'localhost' || endpoint.hostname === '[::1]' ||
-    /^127(?:\.\d{1,3}){3}$/.test(endpoint.hostname);
-  if (endpoint.protocol !== 'https:' && !(loopback && endpoint.protocol === 'http:')) {
-    throw new Error('Remote embedding endpoints require HTTPS.');
-  }
+  const endpoint = credentialEndpoint(input.baseURL);
   endpoint.pathname = endpoint.pathname.replace(/\/+$/, '') + '/embeddings';
   const fetchImpl = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? 20_000;

@@ -1,3 +1,4 @@
+import { credentialEndpoint } from '../../security/endpoint.js';
 import type { ModelRef, Usage } from '@coderax/contracts';
 import type { ModelGateway } from './types.js';
 
@@ -15,20 +16,22 @@ export function createOpenAiCompatibleGateway(input: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): ModelGateway {
+  const endpoint = credentialEndpoint(input.baseURL);
+  endpoint.pathname = endpoint.pathname.replace(/\/+$/, '') + '/chat/completions';
   const fetchImpl = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? 60_000;
 
   return {
     id: 'openai-compatible',
     complete: async ({ model, system, prompt, signal, maxOutputTokens }) => {
-      const endpoint = `${input.baseURL.replace(/\/+$/, '')}/chat/completions`;
       const controller = new AbortController();
       const onAbort = () => controller.abort();
       signal.addEventListener('abort', onAbort, { once: true });
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetchImpl(endpoint, {
+        const response = await fetchImpl(endpoint.href, {
           method: 'POST',
+          redirect: 'error',
           headers: {
             'content-type': 'application/json',
             accept: 'application/json',

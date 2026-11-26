@@ -1,3 +1,4 @@
+import { credentialEndpoint } from '../../security/endpoint.js';
 import type { AgentReport, AgentRunOutcome, AgentRunRequest } from '../types.js';
 import type { ExternalAgentTransport } from './external.js';
 
@@ -44,14 +45,15 @@ export function createOpenCodeHttpTransport(input: {
   timeoutMs?: number;
 }): ExternalAgentTransport {
   const fetchImpl = input.fetchImpl ?? fetch;
-  const base = trimBase(input.baseURL);
+  const { password } = input;
+  const base = trimBase(password ? credentialEndpoint(input.baseURL).href : input.baseURL);
   const timeoutMs = input.timeoutMs ?? 120_000;
 
   function headers(extra?: Record<string, string>): Record<string, string> {
     return {
       accept: 'application/json, text/event-stream',
       'content-type': 'application/json',
-      ...(input.password ? { authorization: basicAuth(input.password) } : {}),
+      ...(password ? { authorization: basicAuth(password) } : {}),
       ...(extra ?? {}),
     };
   }
