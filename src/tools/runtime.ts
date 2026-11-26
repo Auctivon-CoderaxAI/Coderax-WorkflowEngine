@@ -7,6 +7,7 @@ import type {
   ToolRuntime,
   ToolSchema,
 } from './types.js';
+import { redactToolInput } from '../observability/redact.js';
 import { bounded, describeTool, failure, parametersToJsonSchema } from './types.js';
 
 /**
@@ -33,6 +34,26 @@ function validationDetail(error: unknown): string {
     }
   }
   return 'Invalid tool input.';
+}
+
+// Use the same secret scrubber as tool events. Describe bulk payloads by size
+// so approvals do not copy document bodies into the permission store.
+function approvalPreview(input: unknown): string {
+  const summary = JSON.stringify(redactToolInput(input), (key, value: unknown) => {
+    if (value === '[redacted]') return value;
+    if (/^(?:body|content|text|value|data|payload|headers)$/i.test(key)) return '[payload omitted]';
+    if (typeof value !== 'string') return value;
+    // An MCP schema can use arbitrary names for private content. Only show
+    // string values for fields that identify the operation or its target.
+    if (!/^(?:action|operation|method|destination|target|recipient|path|command|url)$/i.test(key)) {
+      return `[${value.length} characters]`;
+    }
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+      try { return new URL(value).origin; } catch { return '[invalid URL]'; }
+    }
+    return bounded(value, 160);
+  });
+  return bounded(summary ?? '{}', 1400);
 }
 
 function bindingOf(tool: Tool, policy: string, mode: string, input: unknown): string {
@@ -90,7 +111,7 @@ export function createToolRuntime(input: {
           decision = await request.gate.ensure({
             scope,
             resource,
-            description: tool.description,
+            description: `Arguments: ${approvalPreview(parsed.data)}. ${tool.description}`,
             tool: tool.name,
             binding,
             callId: request.context.callId,

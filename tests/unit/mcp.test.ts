@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { connectMcpServer, createMcpTools } from '../../src/mcp/client.js';
+import { createToolRuntime } from '../../src/tools/runtime.js';
 import type { ToolContext } from '../../src/tools/types.js';
 
 function context(): ToolContext {
@@ -88,6 +89,19 @@ test('an HTTP MCP server contributes namespaced tools that can be called', async
     assert.equal(tool.name, 'mcp__demo__echo');
     assert.deepEqual(tool.scopes, ['network.access']);
     assert.equal(tool.approval, 'once');
+
+    const pending = await createToolRuntime({ tools }).call({
+      name: tool.name, context: context(),
+      arguments: { destination: 'reports', operation: 'send', token: 'private-credential', body: 'private message' },
+      gate: { ensure: async ({ description }) => {
+        assert.match(description, /"destination":"reports"/);
+        assert.match(description, /"operation":"send"/);
+        assert.doesNotMatch(description, /private-credential|private message/);
+        return { decision: 'pending', requestId: 'review' };
+      } },
+    });
+    assert.equal(pending.approval, 'pending');
+    assert.ok(!seen.includes('tools/call'));
 
     const result = await tool.run({ text: 'hello' }, context());
     assert.equal(result.ok && result.output, 'echo:hello');
