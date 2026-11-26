@@ -140,6 +140,8 @@ export type ArtifactRecord = {
   filename: string;
   /** Metadata only; never a filesystem path. Basename equals `filename`. */
   relativePath?: string;
+  /** Normalized, case-folded path identity used only for collision checks. */
+  pathKey?: string;
   mediaType: ArtifactMediaType;
   bytes: number;
   sha256: string;

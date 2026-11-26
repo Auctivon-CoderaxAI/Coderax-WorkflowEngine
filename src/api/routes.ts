@@ -227,6 +227,16 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('artifactProjectManifest', async (context) => {
+    const query = context.query as { mode?: DataMode; projectId: string };
+    const result = await service.artifacts.manifest(context.principal, {
+      mode: modeFrom(query.mode),
+      projectId: query.projectId,
+    });
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('uploadArtifact', async (context) => {
     const result = await service.artifacts.upload(
       context.principal,
@@ -261,6 +271,21 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('restoreArtifactVersion', async (context) => {
+    const body = context.body as { mode?: DataMode; version: number; expectedVersion: number };
+    const result = await service.artifacts.restore(
+      context.principal,
+      context.params.artifactId ?? '',
+      {
+        mode: modeFrom(body.mode),
+        version: body.version,
+        expectedVersion: body.expectedVersion,
+      },
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
   });
 
   registry.register('listArtifactVersions', async (context) => {

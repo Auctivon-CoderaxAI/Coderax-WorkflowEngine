@@ -104,7 +104,12 @@ export type ArtifactHarness = {
 };
 
 export function artifactHarness(
-  options: { settings?: Record<string, unknown>; durable?: boolean } = {},
+  options: {
+    settings?: Record<string, unknown>;
+    durable?: boolean;
+    blobs?: BlobStore;
+    readLeaseTtlMs?: number;
+  } = {},
 ): ArtifactHarness {
   const clock = mutableClock();
   const ids = createIdGenerator();
@@ -112,7 +117,9 @@ export function artifactHarness(
   const tasks = createTaskRepository();
   const audit = createAuditLog({ clock, ids });
   const repository = createArtifactRepository();
-  const blobs = options.durable === false ? createInMemoryBlobStore() : testDurableBlobs();
+  const blobs =
+    options.blobs ??
+    (options.durable === false ? createInMemoryBlobStore() : testDurableBlobs());
   const capacity = createInMemoryCapacityStore();
   const settings = artifactSettings(options.settings);
   const service = createArtifactService({
@@ -126,6 +133,9 @@ export function artifactHarness(
     clock,
     ids,
     settings,
+    ...(options.readLeaseTtlMs !== undefined
+      ? { readLeaseTtlMs: options.readLeaseTtlMs }
+      : {}),
   });
   return {
     service,

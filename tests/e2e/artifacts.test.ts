@@ -216,9 +216,14 @@ test('a failed metadata write releases the reference, the admission and the rows
       assert.equal((await capacity())?.availableArtifacts, artifactSettings().maxArtifactsPerOwner);
     };
 
+    const definitive = (message: string): Error => {
+      const error = new Error(message) as Error & { definitive: boolean };
+      error.definitive = true;
+      return error;
+    };
     const artifactInsert = artifacts.insertOne;
     artifacts.insertOne = async () => {
-      throw new Error('injected artifact metadata failure');
+      throw definitive('injected artifact metadata failure');
     };
     await assert.rejects(upload, storageFailure);
     artifacts.insertOne = artifactInsert;
@@ -226,7 +231,7 @@ test('a failed metadata write releases the reference, the admission and the rows
 
     const versionInsert = versions.insertOne;
     versions.insertOne = async () => {
-      throw new Error('injected version metadata failure');
+      throw definitive('injected version metadata failure');
     };
     await assert.rejects(upload, storageFailure);
     versions.insertOne = versionInsert;
@@ -235,6 +240,187 @@ test('a failed metadata write releases the reference, the admission and the rows
     const retried = await upload();
     const downloaded = await api.downloadArtifact(retried.artifact.artifactId, { mode: 'cloud' });
     assert.equal(downloaded.contentBase64, base64(content));
+  } finally {
+    await started.close();
+  }
+});
+
+test('project paths are unique and a manifest pins every file to its version', async () => {
+  const database = createFakeDatabase();
+  const started = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database },
+  });
+  try {
+    const api = client(started.url);
+    const upload = (
+      relativePath: string,
+      filename: string,
+      body: string,
+      mediaType: 'text/plain' | 'text/markdown' | 'application/json' = 'text/plain',
+      kind: 'software' | 'document' = 'software',
+    ) =>
+      api.uploadArtifact({
+        filename,
+        relativePath,
+        mediaType,
+        kind,
+        contentBase64: base64(textBytes(body)),
+        mode: 'cloud',
+        projectId: 'proj_manifest',
+      });
+
+    await upload('package.json', 'package.json', '{"name":"demo"}', 'application/json');
+    await upload('README.md', 'README.md', '# demo', 'text/markdown', 'document');
+    await upload('src/index.ts', 'index.ts', 'export const answer = 42;');
+
+    const manifest = await api.artifactManifest('proj_manifest', 'cloud');
+    assert.equal(manifest.files.length, 3);
+    assert.deepEqual(
+      manifest.files.map((file) => file.relativePath).sort(),
+      ['README.md', 'package.json', 'src/index.ts'],
+    );
+    assert.match(manifest.digest, /^[0-9a-f]{64}$/);
+    for (const file of manifest.files) {
+      assert.match(file.sha256, /^[0-9a-f]{64}$/);
+      assert.equal(file.version, 1);
+    }
+
+    const conflict = (error: unknown) =>
+      error instanceof CoderaxApiError && error.code === 'conflict';
+    await assert.rejects(() => upload('src/index.ts', 'index.ts', 'duplicate'), conflict);
+    await assert.rejects(() => upload('SRC/INDEX.ts', 'INDEX.ts', 'case fold'), conflict);
+    await upload('café.md', 'café.md', 'nfc', 'text/markdown', 'document');
+    await assert.rejects(
+      () => upload('cafe\u0301.md', 'cafe\u0301.md', 'nfd', 'text/markdown', 'document'),
+      conflict,
+    );
+    await upload('src.txt', 'src.txt', 'a file', 'text/plain', 'document');
+    await assert.rejects(
+      () => upload('src.txt/nested.md', 'nested.md', 'under a file', 'text/markdown', 'document'),
+      conflict,
+    );
+    await assert.rejects(
+      () =>
+        api.uploadArtifact({
+          filename: 'CON.txt',
+          relativePath: 'CON.txt',
+          mediaType: 'text/plain',
+          contentBase64: base64(textBytes('reserved')),
+          mode: 'cloud',
+          projectId: 'proj_manifest',
+        }),
+      (error: unknown) =>
+        error instanceof CoderaxApiError && error.code === 'validation_failed',
+    );
+    const deep = Array.from({ length: 65 }, (_, index) => `d${index}`).join('/');
+    await assert.rejects(
+      () =>
+        api.uploadArtifact({
+          filename: 'index.ts',
+          relativePath: `${deep}/index.ts`,
+          mediaType: 'text/plain',
+          contentBase64: base64(textBytes('too deep')),
+          mode: 'cloud',
+          projectId: 'proj_manifest',
+        }),
+      (error: unknown) =>
+        error instanceof CoderaxApiError && error.code === 'validation_failed',
+    );
+  } finally {
+    await started.close();
+  }
+});
+
+test('a version can be restored without deleting newer versions', async () => {
+  const database = createFakeDatabase();
+  const started = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database },
+  });
+  try {
+    const api = client(started.url);
+    const first = await api.uploadArtifact({
+      filename: 'report.txt',
+      mediaType: 'text/plain',
+      contentBase64: base64(textBytes('first')),
+      mode: 'cloud',
+    });
+    await api.uploadArtifactVersion(first.artifact.artifactId, {
+      filename: 'report-v2.txt',
+      mediaType: 'text/plain',
+      contentBase64: base64(textBytes('second')),
+      mode: 'cloud',
+    });
+
+    const restored = await api.restoreArtifactVersion(first.artifact.artifactId, {
+      mode: 'cloud',
+      version: 1,
+      expectedVersion: 2,
+    });
+    assert.equal(restored.artifact.version, 1);
+    assert.equal(restored.artifact.filename, 'report.txt');
+    const bytes = await api.downloadArtifact(first.artifact.artifactId, {
+      mode: 'cloud',
+      version: 1,
+    });
+    assert.equal(bytes.contentBase64, base64(textBytes('first')));
+    assert.equal((await api.artifactVersions(first.artifact.artifactId, 'cloud')).versions.length, 2);
+
+    await assert.rejects(
+      () =>
+        api.restoreArtifactVersion(first.artifact.artifactId, {
+          mode: 'cloud',
+          version: 1,
+          expectedVersion: 2,
+        }),
+      (error: unknown) => error instanceof CoderaxApiError && error.code === 'conflict',
+    );
+  } finally {
+    await started.close();
+  }
+});
+
+test('an ambiguous metadata failure keeps its reference and admission for recovery', async () => {
+  const database = createFakeDatabase();
+  const started = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database },
+  });
+  try {
+    const api = client(started.url);
+    const artifacts = database.collection('artifacts');
+    artifacts.insertOne = async () => {
+      throw new Error('ambiguous driver failure after an unknown commit outcome');
+    };
+
+    await assert.rejects(
+      () =>
+        api.uploadArtifact({
+          filename: 'ambiguous.png',
+          mediaType: 'image/png',
+          contentBase64: base64(pngBytes('ambiguous')),
+          mode: 'cloud',
+        }),
+      (error: unknown) =>
+        error instanceof CoderaxApiError && error.code === 'storage_unavailable',
+    );
+    assert.equal((await artifacts.find({}).toArray()).length, 0);
+    assert.equal(
+      (await database.collection('artifact_versions').find({}).toArray()).length,
+      0,
+    );
+    // The write may have landed somewhere: neither the reference nor the
+    // admission is refunded. A reservation expiry settles the quota and leak
+    // reclamation settles the blob if no version row was ever committed.
+    assert.equal((await database.collection('artifact_blobs').find({}).toArray()).length, 1);
+    const capacity = await database
+      .collection('artifact_capacity')
+      .findOne({ mode: 'cloud' });
+    assert.ok(
+      typeof capacity?.availableBytes === 'number' &&
+        capacity.availableBytes < artifactSettings().maxBytesPerOwner,
+    );
   } finally {
     await started.close();
   }

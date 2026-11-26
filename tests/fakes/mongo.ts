@@ -9,7 +9,7 @@ import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 type Document = Record<string, unknown>;
 type Index = {
   keys: Record<string, 1 | -1>;
-  options?: { unique?: boolean; name?: string };
+  options?: { unique?: boolean; name?: string; partialFilterExpression?: MongoFilter };
 };
 
 /** Reads a dotted path; an array segment yields the values of its elements. */
@@ -41,6 +41,9 @@ function matches(document: Document, filter: MongoFilter): boolean {
       if ('$exists' in operators) {
         const shouldExist = operators.$exists === true;
         if ((value !== undefined) !== shouldExist) return false;
+      }
+      if ('$type' in operators && operators.$type === 'string' && typeof value !== 'string') {
+        return false;
       }
       if ('$lte' in operators) {
         const bound = operators.$lte;
@@ -161,9 +164,14 @@ export function createFakeCollection(): FakeCollection {
   function assertUnique(candidate: Document, skip: number): void {
     for (const index of indexes) {
       if (!index.options?.unique) continue;
+      const partial = index.options.partialFilterExpression;
+      if (partial && !matches(candidate, partial)) continue;
       const key = indexValue(candidate, index.keys);
       const clash = documents.some(
-        (document, position) => position !== skip && indexValue(document, index.keys) === key,
+        (document, position) =>
+          position !== skip &&
+          (!partial || matches(document, partial)) &&
+          indexValue(document, index.keys) === key,
       );
       if (clash) throw duplicateKey();
     }

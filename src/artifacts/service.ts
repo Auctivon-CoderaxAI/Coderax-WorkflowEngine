@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   ArtifactContent,
   ArtifactDeleteResult,
@@ -6,6 +7,7 @@ import type {
   ArtifactExport,
   ArtifactKind,
   ArtifactMediaType,
+  ArtifactProjectManifest,
   ArtifactPruneResult,
   ArtifactQuota,
   ArtifactUploadRequest,
@@ -17,8 +19,8 @@ import type {
 } from '@coderax/contracts';
 import type { ArtifactsSettings } from '../configuration/schema.js';
 import type { ArtifactRecord, ArtifactVersionRecord } from '../domain.js';
-import type { ArtifactKey, ArtifactRepository } from '../persistence/artifacts.js';
-import type { BlobStore } from '../persistence/blobs.js';
+import { artifactPathKey, type ArtifactKey, type ArtifactRepository } from '../persistence/artifacts.js';
+import type { BlobRef, BlobStore } from '../persistence/blobs.js';
 import { BlobIntegrityError, verifyContent } from '../persistence/blobs.js';
 import type { CapacityReservation, CapacityStore } from '../persistence/capacity.js';
 import { RESERVATION_TTL_MS } from '../persistence/capacity.js';
@@ -83,6 +85,15 @@ export type ArtifactService = {
     artifactId: string,
     mode: DataMode,
   ) => Promise<ServiceResult<ArtifactVersionList>>;
+  restore: (
+    principal: Principal,
+    artifactId: string,
+    request: { mode: DataMode; version: number; expectedVersion: number },
+  ) => Promise<ServiceResult<ArtifactUploadResult>>;
+  manifest: (
+    principal: Principal,
+    query: { mode: DataMode; projectId: string },
+  ) => Promise<ServiceResult<ArtifactProjectManifest>>;
   upload: (
     principal: Principal,
     request: ArtifactUploadRequest,
@@ -127,7 +138,24 @@ export type ArtifactServiceDeps = {
   clock: Clock;
   ids: IdGenerator;
   settings: ArtifactsSettings;
+  /** Test seam; production uses the 60-second default. */
+  readLeaseTtlMs?: number;
 };
+
+/**
+ * A store error may be marked definitive only when the store guarantees that no
+ * write landed. An ordinary thrown driver error is ambiguous: the write may have
+ * committed before the connection failed. Releasing a reference or refunding an
+ * admission on that error would corrupt a committed artifact, so the service
+ * leaves both for the expiring reservation and leak reclamation to settle.
+ */
+function isDefinitiveStoreError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { definitive?: unknown }).definitive === true
+  );
+}
 
 function storageFailure(error: unknown) {
   if (error instanceof BlobIntegrityError) {
@@ -259,6 +287,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
   }): Promise<ServiceResult<{
     filename: string;
     relativePath: string | null;
+    pathKey: string | null;
     mediaType: ArtifactMediaType;
     kind: ArtifactKind;
     bytes: Buffer;
@@ -277,6 +306,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     if (!validated.ok) return fail(validated.code, validated.detail);
 
     let relativePath: string | null = null;
+    let pathKey: string | null = null;
     if (input.relativePath !== undefined) {
       const relative = validateRelativePath({
         path: input.relativePath,
@@ -284,6 +314,13 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       });
       if (!relative.ok) return fail(relative.code, relative.detail);
       relativePath = relative.value;
+      pathKey = artifactPathKey(relative.value);
+      if (!input.projectId) {
+        return fail(
+          'validation_failed',
+          'A relativePath is only valid on a file that names its projectId.',
+        );
+      }
     }
 
     if (validated.value.bytes.length > settings.maxBytesPerArtifact) {
@@ -298,7 +335,39 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         'A project or game artifact must name the projectId it belongs to.',
       );
     }
-    return ok({ ...validated.value, relativePath });
+    return ok({ ...validated.value, relativePath, pathKey });
+  }
+
+  /**
+   * A project is a directory tree, not a bag of files. Reject a duplicate
+   * case-folded path or a path that is both a file and a directory. The unique
+   * index arbitrates the first race; this check also catches file/directory
+   * conflicts that a unique index cannot express.
+   */
+  async function projectPathConflict(input: {
+    principal: Principal;
+    mode: DataMode;
+    projectId: string | null;
+    pathKey: string | null;
+    excludeArtifactId?: string;
+  }): Promise<boolean> {
+    if (!input.projectId || !input.pathKey) return false;
+    const records = await deps.artifacts.list(input.principal.ownerId, {
+      mode: input.mode,
+      projectId: input.projectId,
+      limit: Math.max(1, settings.maxArtifactsPerOwner),
+    });
+    for (const record of records) {
+      if (input.excludeArtifactId && record.artifactId === input.excludeArtifactId) continue;
+      const existing =
+        record.pathKey ?? (record.relativePath ? artifactPathKey(record.relativePath) : null);
+      if (!existing) continue;
+      if (existing === input.pathKey) return true;
+      if (existing.startsWith(input.pathKey + '/') || input.pathKey.startsWith(existing + '/')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** One version owns one reference; releasing it can delete only at zero. */
@@ -326,6 +395,54 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     }
     await deps.blobs.deleteIfUnreferenced(ref).catch(() => undefined);
     return false;
+  }
+
+  /**
+   * Runs a read under a lease that renews itself. The initial 60 seconds is
+   * ample for a 10 MiB in-process read, but a slow deployment can exceed it; a
+   * renewal at one third of the TTL keeps an active authorized transfer alive.
+   * A failed renewal is not silently ignored: the read either finishes from
+   * bytes already verified or fails as unavailable, never as partial content.
+   */
+  async function withReadLease<T>(ref: BlobRef, read: () => Promise<T>): Promise<T | null> {
+    const ttlMs = Math.max(10, Math.floor(deps.readLeaseTtlMs ?? READ_LEASE_TTL_MS));
+    const acquired = await deps.blobs.lease({ ref, ttlMs });
+    if (!acquired) return null;
+    let leaseId: string = acquired;
+
+    let stopped = false;
+    let renewing = false;
+    const timer = setInterval(() => {
+      if (stopped || renewing) return;
+      renewing = true;
+      void (async () => {
+        try {
+          const next = await deps.blobs.lease({ ref, ttlMs });
+          if (!next) return;
+          if (stopped) {
+            await deps.blobs.releaseLease({ ref, leaseId: next }).catch(() => undefined);
+            return;
+          }
+          const previous = leaseId;
+          leaseId = next;
+          await deps.blobs.releaseLease({ ref, leaseId: previous }).catch(() => undefined);
+        } catch {
+          // The old lease may still be live; the next tick retries. If it has
+          // expired and a delete wins, the read fails closed below.
+        } finally {
+          renewing = false;
+        }
+      })();
+    }, Math.max(10, Math.floor(ttlMs / 3)));
+    timer.unref?.();
+
+    try {
+      return await read();
+    } finally {
+      stopped = true;
+      clearInterval(timer);
+      await deps.blobs.releaseLease({ ref, leaseId }).catch(() => undefined);
+    }
   }
 
   function quotaFailure(reason: 'bytes' | 'artifacts') {
@@ -512,6 +629,19 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           ...(request.projectId ? { projectId: request.projectId } : {}),
         });
         if (!prepared.ok) return prepared;
+        if (
+          await projectPathConflict({
+            principal,
+            mode: request.mode,
+            projectId: request.projectId ?? null,
+            pathKey: prepared.value.pathKey,
+          })
+        ) {
+          return fail(
+            'conflict',
+            'That relativePath already names a file or directory in this project.',
+          );
+        }
 
         const associations = await resolveAssociations({
           ownerId: principal.ownerId,
@@ -553,10 +683,9 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             );
           }
         } catch (error) {
-          // The bytes were never retained; the admission must not outlive the
-          // failure. The reservation would expire anyway, but returning it now
-          // keeps a failed upload from reducing another upload's headroom.
-          await deps.capacity.release(reservation.value).catch(() => undefined);
+          if (isDefinitiveStoreError(error)) {
+            await deps.capacity.release(reservation.value).catch(() => undefined);
+          }
           throw error;
         }
 
@@ -570,6 +699,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           ...(prepared.value.relativePath
             ? { relativePath: prepared.value.relativePath }
             : {}),
+          ...(prepared.value.pathKey ? { pathKey: prepared.value.pathKey } : {}),
           mediaType: prepared.value.mediaType,
           bytes,
           sha256,
@@ -601,11 +731,10 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
         const created = await deps.artifacts.create({ artifact, version }).catch(
           async (error: unknown) => {
-            // A thrown create is the crash-equivalent window: the reference was
-            // taken but no version row owns it. Return both now instead of
-            // waiting for a sweep that cannot know about this reference.
-            await releaseDigest(ref).catch(() => undefined);
-            await deps.capacity.release(reservation.value).catch(() => undefined);
+            if (isDefinitiveStoreError(error)) {
+              await releaseDigest(ref).catch(() => undefined);
+              await deps.capacity.release(reservation.value).catch(() => undefined);
+            }
             throw error;
           },
         );
@@ -649,6 +778,20 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             ...(current.projectId ? { projectId: current.projectId } : {}),
           });
           if (!prepared.ok) return prepared;
+          if (
+            await projectPathConflict({
+              principal,
+              mode: request.mode,
+              projectId: current.projectId,
+              pathKey: prepared.value.pathKey,
+              excludeArtifactId: artifactId,
+            })
+          ) {
+            return fail(
+              'conflict',
+              'That relativePath already names another file or directory in this project.',
+            );
+          }
 
           const now = deps.clock.now();
           const expires =
@@ -680,7 +823,9 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
               );
             }
           } catch (error) {
-            await deps.capacity.release(reservation.value).catch(() => undefined);
+            if (isDefinitiveStoreError(error)) {
+              await deps.capacity.release(reservation.value).catch(() => undefined);
+            }
             throw error;
           }
 
@@ -689,6 +834,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             ...(prepared.value.relativePath
               ? { relativePath: prepared.value.relativePath }
               : {}),
+            ...(prepared.value.pathKey ? { pathKey: prepared.value.pathKey } : {}),
             kind: prepared.value.kind,
             filename: prepared.value.filename,
             mediaType: prepared.value.mediaType,
@@ -723,8 +869,10 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
               version,
             })
             .catch(async (error: unknown) => {
-              await releaseDigest(ref).catch(() => undefined);
-              await deps.capacity.release(reservation.value).catch(() => undefined);
+              if (isDefinitiveStoreError(error)) {
+                await releaseDigest(ref).catch(() => undefined);
+                await deps.capacity.release(reservation.value).catch(() => undefined);
+              }
               throw error;
             });
           if (!appended.ok) {
@@ -772,33 +920,105 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const version = await deps.artifacts.version({ ...key, version: versionNumber });
         if (!version) return fail('not_found', 'That artifact version does not exist.');
         const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
-        const leaseId = await deps.blobs.lease({ ref, ttlMs: READ_LEASE_TTL_MS });
-        if (!leaseId) {
+        const result = await withReadLease(ref, async () => {
+          const content = await deps.blobs.get(ref);
+          if (!content) return null;
+          verifyContent({ content, sha256: version.sha256, bytes: version.bytes });
+          return {
+            artifact: toDescriptor(artifact),
+            version: toVersionDescriptor(version),
+            contentBase64: Buffer.from(content).toString('base64'),
+          };
+        });
+        if (!result) {
           return fail(
             'storage_unavailable',
             'The stored bytes are unavailable; the artifact was not reconstructed from memory.',
           );
         }
-        try {
-          const content = await deps.blobs.get(ref);
-          if (!content) {
-            return fail(
-              'storage_unavailable',
-              'The stored bytes are unavailable; the artifact was not reconstructed from memory.',
-            );
-          }
-          verifyContent({ content, sha256: version.sha256, bytes: version.bytes });
-          return ok({
-            artifact: toDescriptor(artifact),
-            version: toVersionDescriptor(version),
-            contentBase64: Buffer.from(content).toString('base64'),
-          });
-        } finally {
-          // The lease, not a permanent reference, keeps a concurrent delete from
-          // removing chunks mid-read. If this process dies the lease expires and
-          // the maintenance sweep reclaims it, so no blob is pinned forever.
-          await deps.blobs.releaseLease({ ref, leaseId }).catch(() => undefined);
+        return ok(result);
+      }),
+
+    restore: (principal, artifactId, request) =>
+      guard(async () => {
+        if (!deps.blobs.durable) return durabilityFailure();
+        const key = { ownerId: principal.ownerId, mode: request.mode, artifactId };
+        const current = await deps.artifacts.get(key);
+        if (!current) return fail('not_found', 'That artifact does not exist for this owner.');
+        const restored = await deps.artifacts.restoreVersion({
+          ...key,
+          version: request.version,
+          expectedVersion: request.expectedVersion,
+          now: deps.clock.iso(),
+        });
+        if (!restored.ok) {
+          return restored.reason === 'not_found'
+            ? fail('not_found', 'That artifact version does not exist.')
+            : fail('conflict', 'That artifact changed concurrently; retry the restore.');
         }
+        audit({
+          ownerId: principal.ownerId,
+          action: 'artifact.restored',
+          artifactId,
+          mode: request.mode,
+          detail: `version=${restored.version.version} sha256=${restored.version.sha256.slice(0, 12)}`,
+        });
+        return ok({
+          artifact: toDescriptor(restored.artifact),
+          version: toVersionDescriptor(restored.version),
+        });
+      }),
+
+    manifest: (principal, query) =>
+      guard(async () => {
+        const records = await deps.artifacts.list(principal.ownerId, {
+          mode: query.mode,
+          projectId: query.projectId,
+          limit: Math.max(1, settings.maxArtifactsPerOwner),
+        });
+        const files = records
+          .filter(
+            (record): record is ArtifactRecord & { relativePath: string } =>
+              typeof record.relativePath === 'string' && record.relativePath.length > 0,
+          )
+          .map((record) => ({
+            relativePath: record.relativePath,
+            artifactId: record.artifactId,
+            version: record.version,
+            sha256: record.sha256,
+            bytes: record.bytes,
+            mediaType: record.mediaType,
+            kind: record.kind,
+          }))
+          .sort((left, right) =>
+            artifactPathKey(left.relativePath).localeCompare(artifactPathKey(right.relativePath)),
+          );
+
+        const keys = new Set(files.map((file) => artifactPathKey(file.relativePath)));
+        if (keys.size !== files.length) {
+          return fail('conflict', 'The project manifest has two entries for the same path.');
+        }
+        for (const file of files) {
+          const key = artifactPathKey(file.relativePath);
+          let slash = key.indexOf('/');
+          while (slash !== -1) {
+            if (keys.has(key.slice(0, slash))) {
+              return fail('conflict', 'The project manifest has a file and a directory at one path.');
+            }
+            slash = key.indexOf('/', slash + 1);
+          }
+        }
+
+        const digest = createHash('sha256')
+          .update(JSON.stringify({ projectId: query.projectId, mode: query.mode, files }))
+          .digest('hex');
+        return ok({
+          projectId: query.projectId,
+          mode: query.mode,
+          files,
+          digest,
+          generatedAt: deps.clock.iso(),
+        });
       }),
 
     exportBundle: (principal, artifactId, query) =>
@@ -812,32 +1032,25 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const version = rows.find((row) => row.version === versionNumber);
         if (!version) return fail('not_found', 'That artifact version does not exist.');
         const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
-        const leaseId = await deps.blobs.lease({ ref, ttlMs: READ_LEASE_TTL_MS });
-        if (!leaseId) {
-          return fail(
-            'storage_unavailable',
-            'The stored bytes are unavailable; the export was not fabricated.',
-          );
-        }
-        try {
+        const result = await withReadLease(ref, async () => {
           const content = await deps.blobs.get(ref);
-          if (!content) {
-            return fail(
-              'storage_unavailable',
-              'The stored bytes are unavailable; the export was not fabricated.',
-            );
-          }
+          if (!content) return null;
           verifyContent({ content, sha256: version.sha256, bytes: version.bytes });
-          return ok({
+          return {
             artifact: toDescriptor(artifact),
             versions: rows.map(toVersionDescriptor),
             version: toVersionDescriptor(version),
             contentBase64: Buffer.from(content).toString('base64'),
             exportedAt: deps.clock.iso(),
-          });
-        } finally {
-          await deps.blobs.releaseLease({ ref, leaseId }).catch(() => undefined);
+          };
+        });
+        if (!result) {
+          return fail(
+            'storage_unavailable',
+            'The stored bytes are unavailable; the export was not fabricated.',
+          );
         }
+        return ok(result);
       }),
 
     remove: (principal, artifactId, mode) =>

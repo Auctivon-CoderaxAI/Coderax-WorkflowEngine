@@ -6,6 +6,7 @@ import {
   ArtifactDescriptor,
   ArtifactDescriptorList,
   ArtifactExport,
+  ArtifactProjectManifest,
   ArtifactPruneResult,
   ArtifactUploadResult,
   ArtifactVersionList,
@@ -353,6 +354,17 @@ export class CoderaxClient {
     });
   }
 
+  artifactManifest(
+    projectId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactProjectManifest> {
+    return this.request<ArtifactProjectManifest>(ArtifactProjectManifest, {
+      method: 'GET',
+      path: '/v1/artifacts/manifest',
+      query: { projectId, mode },
+    });
+  }
+
   uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
@@ -369,6 +381,21 @@ export class CoderaxClient {
       method: 'POST',
       path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
       body: request,
+    });
+  }
+
+  restoreArtifactVersion(
+    artifactId: string,
+    request: { mode?: DataMode; version: number; expectedVersion: number },
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/restore`,
+      body: {
+        mode: request.mode ?? 'private',
+        version: request.version,
+        expectedVersion: request.expectedVersion,
+      },
     });
   }
 

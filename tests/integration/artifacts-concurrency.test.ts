@@ -505,10 +505,157 @@ test('concurrent version creation is serialized and keeps byte accounting exact'
       assert.ok(body, entry.value.version.filename);
       assert.equal(downloaded.contentBase64, base64(Buffer.from(body)));
     }
+
+    // Restore is a pointer move, not a delete: every version remains readable.
+    const currentVersion = artifact?.version as number;
+    const restored = await (b as Replica).api.restoreArtifactVersion(
+      base.artifact.artifactId,
+      { mode: 'cloud', version: 1, expectedVersion: currentVersion },
+    );
+    assert.equal(restored.artifact.version, 1);
+    const initialAgain = await (a as Replica).api.downloadArtifact(
+      base.artifact.artifactId,
+      { mode: 'cloud' },
+    );
+    assert.equal(initialAgain.contentBase64, base64(Buffer.from('version one')));
+    assert.equal(
+      (await (b as Replica).api.artifactVersions(base.artifact.artifactId, 'cloud')).versions
+        .length,
+      versions.length,
+    );
   } finally {
     await a?.app.stop().catch(() => undefined);
     await b?.app.stop().catch(() => undefined);
     await observer?.close().catch(() => undefined);
+    workspaceA.cleanup();
+    workspaceB.cleanup();
+  }
+});
+
+test('maintenance reclaims a leaked reference and fences a concurrent acquire', { skip }, async () => {
+  const real = maybeMongo as RealMongo;
+  const databaseName = uniqueName('reclaim');
+  const workspace = createWorkspaces();
+  let a: Replica | undefined;
+  let observer: MongoDatabase | undefined;
+
+  try {
+    a = await boot({ real, databaseName, workspace });
+    observer = await observerFor(real, databaseName);
+    const blobs = createMongoBlobStore({
+      collections: {
+        blobs: observer.collection('artifact_blobs'),
+        chunks: observer.collection('artifact_chunks'),
+      },
+      clock: createClock(),
+      chunkBytes: 1_048_576,
+    });
+
+    const crashAfterRemoval = async (label: string) => {
+      const uploaded = await (a as Replica).api.uploadArtifact({
+        filename: `${label}.txt`,
+        mediaType: 'text/plain',
+        contentBase64: base64(Buffer.from(label)),
+        mode: 'cloud',
+      });
+      // Simulate a process dying after metadata removal but before release.
+      await observer
+        ?.collection('artifact_versions')
+        .deleteMany({ artifactId: uploaded.artifact.artifactId });
+      await observer
+        ?.collection('artifacts')
+        .deleteMany({ artifactId: uploaded.artifact.artifactId });
+      const ref = {
+        ownerId: OWNER_ID,
+        mode: 'cloud' as const,
+        sha256: uploaded.artifact.sha256,
+      };
+      await observer
+        ?.collection('artifact_blobs')
+        .updateOne({ key: blobKey(ref) }, { $set: { referencedAtMs: 0 } }, { upsert: false });
+      return ref;
+    };
+
+    const leaked = await crashAfterRemoval('leaked');
+    assert.equal(
+      await blobs.reclaimLeaked({ graceMs: 1, limit: 10, referenced: async () => false }),
+      1,
+    );
+    assert.equal(await blobs.get(leaked), null);
+    assert.equal(
+      (await observer.collection('artifact_chunks').find({}).toArray()).length,
+      0,
+    );
+
+    // An acquire between selection and deletion changes the exact count, so the
+    // conditional delete must lose. This is an upload in flight, not a leak.
+    const inFlight = await crashAfterRemoval('in-flight');
+    let acquired = false;
+    const removed = await blobs.reclaimLeaked({
+      graceMs: 1,
+      limit: 10,
+      referenced: async (candidate) => {
+        if (!acquired) {
+          acquired = true;
+          assert.equal(await blobs.acquire(candidate), true);
+        }
+        return false;
+      },
+    });
+    assert.equal(removed, 0);
+    assert.ok(await blobs.get(inFlight));
+  } finally {
+    await a?.app.stop().catch(() => undefined);
+    await observer?.close().catch(() => undefined);
+    workspace.cleanup();
+  }
+});
+
+test('two replicas cannot create the same case-folded project path', { skip }, async () => {
+  const real = maybeMongo as RealMongo;
+  const databaseName = uniqueName('project-path');
+  const workspaceA = createWorkspaces();
+  const workspaceB = createWorkspaces();
+  let a: Replica | undefined;
+  let b: Replica | undefined;
+
+  try {
+    a = await boot({ real, databaseName, workspace: workspaceA });
+    b = await boot({ real, databaseName, workspace: workspaceB });
+    const body = base64(Buffer.from('# same path'));
+    const results = await Promise.allSettled([
+      (a as Replica).api.uploadArtifact({
+        filename: 'README.md',
+        relativePath: 'README.md',
+        mediaType: 'text/markdown',
+        kind: 'document',
+        contentBase64: body,
+        mode: 'cloud',
+        projectId: 'proj_shared_path',
+      }),
+      (b as Replica).api.uploadArtifact({
+        filename: 'readme.md',
+        relativePath: 'readme.md',
+        mediaType: 'text/markdown',
+        kind: 'document',
+        contentBase64: body,
+        mode: 'cloud',
+        projectId: 'proj_shared_path',
+      }),
+    ]);
+    assert.equal(results.filter((entry) => entry.status === 'fulfilled').length, 1);
+    const rejected = results.find(
+      (entry): entry is PromiseRejectedResult => entry.status === 'rejected',
+    );
+    assert.ok(rejected);
+    assert.ok(
+      rejected.reason instanceof CoderaxApiError && rejected.reason.code === 'conflict',
+    );
+    const manifest = await (a as Replica).api.artifactManifest('proj_shared_path', 'cloud');
+    assert.equal(manifest.files.length, 1);
+  } finally {
+    await a?.app.stop().catch(() => undefined);
+    await b?.app.stop().catch(() => undefined);
     workspaceA.cleanup();
     workspaceB.cleanup();
   }

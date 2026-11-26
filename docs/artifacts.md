@@ -74,7 +74,15 @@ segment, empty segment, control or bidirectional character, reserved device
 name, leading or trailing dot/space, or more than 64 segments. Its final segment
 must equal `filename`. It is never opened; storage keys remain digests. Combined
 with `projectId`, it lets a generated source tree be listed and reconstructed by
-artifact ID without giving the server a workspace path.
+artifact ID without giving the server a workspace path. A case-folded `pathKey`
+is stored with the artifact so `README.md` and `readme.md` collide; the unique
+project-path index arbitrates concurrent writes. A path that is both a file and
+a directory is rejected.
+
+`ArtifactProjectManifest` pins every file to an immutable artifact version and
+carries a digest over the canonical entry list. Restoration (`restoreArtifactVersion`)
+moves the artifact's current pointer to an older version without deleting newer
+versions or moving bytes.
 
 ### Accepted media types
 
@@ -93,7 +101,9 @@ are not on the list.
 | `uploadArtifact` | `POST /v1/artifacts` | Store a new artifact from base64 bytes |
 | `listArtifacts` | `GET /v1/artifacts` | Owner-scoped list plus quota |
 | `getArtifact` | `GET /v1/artifacts/{artifactId}` | Metadata in one mode |
+| `artifactProjectManifest` | `GET /v1/artifacts/manifest` | Version-pinned project manifest with a digest |
 | `uploadArtifactVersion` | `POST /v1/artifacts/{artifactId}/versions` | Append an immutable version |
+| `restoreArtifactVersion` | `POST /v1/artifacts/{artifactId}/restore` | Point at an older version without deleting newer ones |
 | `listArtifactVersions` | `GET /v1/artifacts/{artifactId}/versions` | Retained history |
 | `downloadArtifact` | `GET /v1/artifacts/{artifactId}/content` | Exact bytes, verified on read |
 | `exportArtifact` | `GET /v1/artifacts/{artifactId}/export` | Descriptor, version manifest and bytes |
@@ -152,6 +162,15 @@ const manifest = await client.artifacts({
 Edits address the `artifactId`, never a workspace path. A new version is an
 immutable compare-and-set; two replicas cannot silently overwrite each other.
 
+```ts
+const manifest = await client.artifactManifest('proj_generated', 'cloud');
+const restored = await client.restoreArtifactVersion(artifactId, {
+  mode: 'cloud',
+  version: 1,
+  expectedVersion: 2,
+});
+```
+
 Every response is parsed with the contract schema. A task's `result.artifacts`
 is projected from the artifact service at read time, so a completed execution
 result is downloadable without a second metadata copy in the fenced task row.
@@ -171,7 +190,8 @@ result is downloadable without a second metadata copy in the fenced task row.
   dot, a trailing dot or space, a reserved device name, or no extension is
   refused. `relativePath` is validated separately: it must stay relative, use
   forward slashes, contain no dot or empty segment, and end in exactly the
-  descriptor's `filename`. Storage keys are digests.
+  descriptor's `filename`, and its case-folded identity must not collide with
+  another file or with a directory prefix. Storage keys are digests.
 - **Archives are never expanded.** A generic archive is rejected. Only an
   opaque OOXML/ODF container is accepted, and only when its internal marker
   matches the declared type. A zip bomb is therefore inert: no inflate, no
@@ -206,9 +226,12 @@ usage read followed by a write. The filter requires enough available bytes and
 artifacts and the increment spends them in the same server-side operation, so
 two replicas racing the last slot cannot both be admitted. A refusal is
 `507 quota_exceeded`, and a refusal never leaves a blob or a reservation behind.
-A thrown metadata write releases the blob reference and the admission before the
-error is returned; the failure-injection e2e test asserts that no artifact,
-version, blob or chunk row survives and the full quota remains.
+Only a **definitive** store rejection releases the blob reference and the
+admission before the error is returned. An ordinary thrown driver error is
+ambiguous: the write may have committed, so the reference and reservation are
+left in place. The reservation expires and the sweep checks whether its version
+row exists; a reference with no version row is reclaimed after the grace period.
+The e2e suite proves both the definitive cleanup and the ambiguous preservation.
 
 Every admission also writes an expiring reservation before the capacity moves.
 The sweep resolves an expired reservation against its claimed version: if the
@@ -264,10 +287,10 @@ container, so the real-database lane cannot silently disappear. Hosted execution
 is evidence only when the `verify` workflow has actually run at the exact head;
 a local green run does not imply a hosted run.
 
-At the artifact branch head, `npm run verify` passed **157/157 tests with zero
+At the artifact branch head, `npm run verify` passed **166/166 tests with zero
 skips** against a real mongod, and `openapi:check` passed. The durable restart
-test, the nine real-Mongo concurrency/recovery tests and the failure-injection
-test are the evidence for the claims above; no production database has been
+test, the eleven real-Mongo concurrency/recovery tests and the failure-injection
+tests are the evidence for the claims above; no production database has been
 exercised.
 
 ### Concurrency and recovery
@@ -294,8 +317,15 @@ against one real deployment and proves:
   read the artifact afterwards;
 - concurrent version creation across two replicas never loses or renumbers a
   committed version, and the capacity ledger equals the retained version bytes;
-- a thrown metadata write releases its blob reference and admission, as the
-  e2e failure-injection test proves.
+- restoring an older version moves the pointer without deleting the newer
+  versions, and every version remains downloadable;
+- a definitive metadata rejection releases its blob reference and admission,
+  while an ambiguous driver error preserves both for recovery (the e2e suite
+  proves both paths);
+- maintenance reclaims a reference leaked by a crash after metadata removal,
+  and an acquire racing the reclaim changes the exact reference count so the
+  conditional delete loses;
+- two replicas cannot create the same case-folded project path.
 
 Startup maintenance also removes chunk rows whose descriptor never committed
 and zero-reference descriptors older than a grace period. A crash between a
@@ -321,11 +351,39 @@ source trees into a workspace folder. The stable contract for that generator is:
 5. A task result projects `relativePath ?? filename`, so a completed generation
    reports the tree it produced without a second metadata copy.
 
+The repository now ships that adapter: `src/artifacts/tree.ts`
+(`createArtifactTreeWriter`). It validates the whole batch before writing,
+rejects duplicate, case-folded and file-directory path conflicts, maps an
+existing path to `uploadArtifactVersion` rather than a second file, uploads new
+files with project/conversation/task associations, and returns the version-pinned
+manifest. `tests/unit/artifacts-tree.test.ts` persists DOCX, PDF, XLSX, PPTX and
+a multi-file source tree, versions an edit and restores the earlier version.
+
 The branch's local `Artifact` type is a generation-time shape. It maps to this
 contract at the adapter boundary; it must not become a second store, a second
 descriptor or a second quota ledger. This repository does not modify another
-branch, and the generator still needs its files uploaded by a client or the
-engine.
+branch, and the generator still needs to call this adapter or the equivalent
+HTTP operations.
+
+## Canonical API status
+
+PR #7 at `9b4cb5c` is titled **1.1.0** and exposes three task-scoped operations
+(`listArtifacts`, `createArtifact`, `getArtifact`) under
+`/v1/work/{taskId}/artifacts`. It does not contain the 1.2.0 global catalogue
+described in the integration request. This branch therefore keeps its global
+artifact surface and adds the missing global `restoreArtifactVersion` and
+`artifactProjectManifest`; it does not invent a competing 1.2.0 catalogue.
+Reconciling PR #7's task-scoped compatibility projections with these global IDs
+requires the API owner's merge, not a second contract.
+
+## Production storage status
+
+Production readiness remains **blocked**: no authorized production MongoDB URI,
+plan, backup policy or spending boundary is available in this workspace. The real
+mongod used by the tests is an ephemeral test server; it proves engine behavior,
+not production hosting. No paid database or storage service was provisioned, and
+Oracle Always Free / DeploymentPlatformAI eligibility has not been independently
+verified.
 
 ## Limits that remain
 
@@ -341,15 +399,26 @@ engine.
 - The ledger and the metadata write are separate documents, not one transaction.
   A crash between them under-admits until the expiry sweep or startup reconcile;
   it never over-admits.
-- A read lease expires after 60 seconds. A download that exceeded that could lose
-  its protection from a concurrent delete; the 10 MiB cap and in-process read
-  make that unlikely, and the failure is a storage error, never partial bytes.
+- Read leases renew at one third of their TTL. A healthy slow download keeps its
+  protection; if renewal fails and a delete wins, the download fails closed,
+  never with partial bytes. A crashed process leaves a lease that expires and is
+  reclaimed.
+- A multi-file tree write is not one MongoDB transaction on a standalone
+  deployment. New artifacts from a failed batch are removed; already-written
+  versions remain. The manifest is coherent but may represent a partial edit.
+  All-or-nothing tree edits require a transactional replica-set deployment.
 - A crash between metadata removal and reference release leaves a blob and its
   quota until `reclaimLeaked` runs after a one-day grace. It is recovered, not
   corrupted, but it is not immediate.
-- Coderax Web and CoderaxCLI live in other repositories. They can use the shared
-  SDK's artifact methods, but no client change or cross-client test was made in
-  this repository.
+- Coderax Web and CoderaxCLI live in other repositories and were not accessible
+  here. They can use the shared SDK's artifact methods, but no client change or
+  cross-client test was made in this repository.
 - The Native agent returns text; artifacts are stored when a client or a task
   uploads them or associates them with a task. Nothing generates files on its
   own.
+- `npm audit --omit=dev` reports one high finding, `GHSA-mrhx-c7xc-m3w5` /
+  CVE-2023-54404, for the installed `zod 3.25.76` (patched only in 4.6.6). The
+  CVE was rejected by its CNA; exploitation needs an unbounded array schema and
+  no request-size limit, while this API is owner-only and capped at 1 MiB (16 MiB
+  on artifact routes). It is not suppressed. The Zod 4 migration is owned by the
+  quality-gate workstream and was not duplicated here.

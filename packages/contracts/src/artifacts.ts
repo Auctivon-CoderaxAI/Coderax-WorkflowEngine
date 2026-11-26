@@ -236,6 +236,56 @@ export type ArtifactExport = z.infer<typeof ArtifactExport>;
 export const ArtifactModeRequest = z.object({ mode: DataMode.default('private') }).strict();
 export type ArtifactModeRequest = z.infer<typeof ArtifactModeRequest>;
 
+/**
+ * Restoring points an artifact back at an existing immutable version. It does
+ * not delete the newer versions and it does not move bytes. `expectedVersion`
+ * is the current version the caller saw, so a concurrent edit fails the restore
+ * instead of silently overwriting it.
+ */
+export const ArtifactRestoreRequest = z
+  .object({
+    mode: DataMode.default('private'),
+    version: z.number().int().positive(),
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict();
+export type ArtifactRestoreRequest = z.infer<typeof ArtifactRestoreRequest>;
+
+export const ArtifactManifestEntry = z
+  .object({
+    relativePath: z.string().min(1).max(1024),
+    artifactId: ArtifactId,
+    version: z.number().int().positive(),
+    sha256: Sha256,
+    bytes: z.number().int().nonnegative(),
+    mediaType: ArtifactMediaType,
+    kind: ArtifactKind,
+  })
+  .strict();
+export type ArtifactManifestEntry = z.infer<typeof ArtifactManifestEntry>;
+
+/**
+ * A project manifest pins every file to one immutable artifact version and
+ * carries a digest over the canonical entry list. It is the restoration unit
+ * for a generated tree; the files are read by artifact id and version, never by
+ * a workspace path.
+ */
+export const ArtifactProjectManifest = z
+  .object({
+    projectId: ProjectId,
+    mode: DataMode,
+    files: z.array(ArtifactManifestEntry),
+    digest: Sha256,
+    generatedAt: IsoDateTime,
+  })
+  .strict();
+export type ArtifactProjectManifest = z.infer<typeof ArtifactProjectManifest>;
+
+export const ArtifactManifestQuery = z
+  .object({ mode: DataMode.default('private'), projectId: ProjectId })
+  .strict();
+export type ArtifactManifestQuery = z.infer<typeof ArtifactManifestQuery>;
+
 export const ArtifactDeleteResult = z
   .object({
     artifactId: ArtifactId,
