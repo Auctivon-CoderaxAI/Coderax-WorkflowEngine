@@ -50,6 +50,8 @@ export type TaskFailure = {
  * newer one.
  */
 export type TaskRecord = {
+  scheduleRetryClaimed?: boolean;
+  handoffPending?: boolean;
   scheduleAdmission?: { scheduleId: string; executionId: string; complete?: boolean };
   taskId: string;
   ownerId: string;
@@ -80,6 +82,7 @@ export type TaskPatch = Partial<
   Pick<
     TaskRecord,
     | 'state'
+    | 'handoffPending'
     | 'scheduleAdmission'
     | 'steps'
     | 'checkpoint'
@@ -161,7 +164,9 @@ export type ScheduleRecord = {
   lastRunAt: IsoDateTime | null;
   lastExecutionId: string | null;
   runsTotal: number;
+  acceptedDay?: { start: string; count: number };
   consecutiveFailures: number;
+  accountedFailures?: string[];
   /** Compare-and-swap generation: only one replica advances a schedule once. */
   version: number;
   pausedAt: IsoDateTime | null;
@@ -185,7 +190,9 @@ export type SchedulePatch = Partial<
     | 'lastRunAt'
     | 'lastExecutionId'
     | 'runsTotal'
+    | 'acceptedDay'
     | 'consecutiveFailures'
+    | 'accountedFailures'
     | 'updatedAt'
     | 'pausedAt'
     | 'cancelledAt'
@@ -201,6 +208,9 @@ export type SchedulePatch = Partial<
 export type ScheduleExecutionRecord = {
   executionId: string;
   executionKey: string;
+  claimGeneration?: number;
+  admissionStarted?: boolean;
+  failureAccountingPending?: boolean;
   noticePending?: boolean;
   selectedTimingRevision?: number;
   scheduleId: string;
@@ -226,6 +236,8 @@ export type ScheduleExecutionPatch = Partial<
   Pick<
     ScheduleExecutionRecord,
     | 'state'
+    | 'admissionStarted'
+    | 'failureAccountingPending'
     | 'noticePending'
     | 'attempt'
     | 'taskId'

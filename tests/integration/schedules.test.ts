@@ -573,3 +573,110 @@ test('interrupted scheduled Work without completed admission cannot resume or re
     assert.equal(started.app.service.budget(owner).used.requests, 0);
   } finally { await started.close(); }
 });
+
+for (const applied of [false, true]) {
+  test(`scheduled marker acknowledgement: write applied = ${applied}`, async () => {
+    const started = await startTestApp();
+    try {
+      const api = client(started.url);
+      const rule = await api.createSchedule({ name: 'Marker', objective: 'Check status', timing: { kind: 'event', event: 'marker' } });
+      const { tasks, scheduler } = started.app.dependencies;
+      const write = tasks.updateFenced;
+      tasks.updateFenced = async input => {
+        if (!input.patch.scheduleAdmission?.complete) return write(input);
+        tasks.updateFenced = write;
+        if (applied) await write(input);
+        throw new Error('marker acknowledgement unavailable');
+      };
+      const trigger = api.triggerSchedule(rule.scheduleId);
+      if (applied) await trigger;
+      else await assert.rejects(trigger);
+      await scheduler.idle();
+      const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
+      assert.ok(receipt?.taskId);
+      assert.equal((await api.task(receipt.taskId)).state, applied ? 'completed' : 'cancelled');
+      assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, Number(applied));
+    } finally { await started.close(); }
+  });
+}
+
+test('a replica delivers a marked task when its original queue handoff was lost', async () => {
+  const started = await startTestApp();
+  try {
+    const api = client(started.url);
+    const rule = await api.createSchedule({ name: 'Recovery', objective: 'Check status', timing: { kind: 'event', event: 'recover' } });
+    const { scheduler, lease, tasks } = started.app.dependencies;
+    const enqueue = scheduler.enqueue;
+    scheduler.enqueue = () => {};
+    const receipt = await api.triggerSchedule(rule.scheduleId);
+    scheduler.enqueue = enqueue;
+    assert.ok(receipt.taskId);
+    const task = await tasks.get(receipt.taskId);
+    assert.ok(task?.runToken);
+    await lease.release({ key: JSON.stringify(['', task.ownerId, task.conversationId]), token: task.runToken });
+    await started.app.service.tickSchedules();
+    await scheduler.idle();
+    await started.app.service.tickSchedules();
+    assert.equal((await api.task(task.taskId)).state, 'completed');
+    assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
+    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+  } finally { await started.close(); }
+});
+
+test('lowering the daily cap while Work is being accepted refuses the candidate', async () => {
+  const started = await startTestApp();
+  try {
+    const api = client(started.url);
+    const rule = await api.createSchedule({ name: 'Quota', objective: 'Check status',
+      timing: { kind: 'event', event: 'quota' }, limits: { maxRunsPerDay: 2 } });
+    const { schedules, scheduler } = started.app.dependencies;
+    await api.triggerSchedule(rule.scheduleId);
+    await scheduler.idle();
+    await started.app.service.tickSchedules();
+    const update = schedules.update;
+    schedules.update = async input => {
+      if (input.patch.runsTotal) {
+        schedules.update = update;
+        await api.updateSchedule(rule.scheduleId, { limits: { maxRunsPerDay: 1 } });
+      }
+      return update(input);
+    };
+    assert.equal((await api.triggerSchedule(rule.scheduleId)).state, 'refused');
+    assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
+  } finally { await started.close(); }
+});
+
+test('a replica finishes an accounted handoff before the old marker writer returns', async () => {
+  const started = await startTestApp();
+  let resume!: () => void;
+  const resumed = new Promise<void>(resolve => { resume = resolve; });
+  try {
+    const api = client(started.url);
+    const rule = await api.createSchedule({ name: 'Takeover', objective: 'Report', timing: { kind: 'event', event: 'recover' } });
+    const { tasks, scheduler, lease } = started.app.dependencies;
+    let reached!: (id: string) => void;
+    const marker = new Promise<string>(resolve => { reached = resolve; });
+    const write = tasks.updateFenced;
+    tasks.updateFenced = async input => {
+      if (input.patch.scheduleAdmission?.complete) {
+        tasks.updateFenced = write;
+        reached(input.taskId);
+        await resumed;
+      }
+      return write(input);
+    };
+    const dispatch = api.triggerSchedule(rule.scheduleId);
+    const task = await tasks.get(await marker);
+    assert.ok(task?.runToken);
+    await lease.release({ key: JSON.stringify(['', task.ownerId, task.conversationId]), token: task.runToken });
+    await started.app.service.tickSchedules();
+    resume();
+    await dispatch;
+    await scheduler.idle();
+    await started.app.service.tickSchedules();
+    assert.equal((await api.task(task.taskId)).state, 'completed');
+    assert.equal((await api.scheduleExecutions(rule.scheduleId)).executions[0]?.state, 'completed');
+    assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
+    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+  } finally { resume(); await started.close(); }
+});

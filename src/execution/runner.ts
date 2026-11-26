@@ -154,7 +154,15 @@ export function createTaskRunner(input: {
           : { outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) }, ownershipLost: false };
 
       try {
-        if (cancellationRequested && await cancellationRequested()) return cancelled(false);
+        if (controller.signal.aborted) return cancelled(false);
+        if (cancellationRequested) {
+          try {
+            if (await Promise.race([cancellationRequested(), grace]) || controller.signal.aborted) return cancelled(false);
+          } catch {
+            if (controller.signal.aborted) return cancelled(false);
+            return { ownershipLost: false, outcome: { kind: 'interrupted', detail: 'Work admission could not be verified.' } };
+          }
+        }
         const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
         const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
         if (settled === null) {

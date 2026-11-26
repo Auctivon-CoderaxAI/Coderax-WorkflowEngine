@@ -30,6 +30,8 @@ export type TaskRepository = {
    */
   abandon: (input: { taskId: string; patch: TaskPatch }) => Promise<boolean>;
   /** Claim a new generation for resume/retry; refuses a live task. */
+  takeHandoff: (taskId: string, generation: number, token: string, leaseExpiresAt: string) => Promise<TaskRecord | null>;
+  claimScheduledRetry: (taskId: string, generation: number) => Promise<boolean>;
   reissue: (input: {
     taskId: string;
     token: string;
@@ -99,10 +101,25 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(next.state)) settle(next);
       return true;
     },
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const task = tasks.get(taskId);
+      if (!task?.handoffPending || task.generation !== generation ||
+          (task.state !== 'queued' && task.state !== 'interrupted')) return null;
+      const next: TaskRecord = { ...task, state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt };
+      tasks.set(taskId, next);
+      activeByConversation.set(task.conversationId, taskId);
+      return { ...next };
+    },
+    claimScheduledRetry: async (taskId, generation) => {
+      const task = tasks.get(taskId);
+      if (!task || task.state !== 'failed' || task.generation !== generation) return false;
+      tasks.set(taskId, { ...task, scheduleRetryClaimed: true });
+      return true;
+    },
     reissue: async ({ taskId, token, now, leaseExpiresAt }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if (task.scheduleRetryClaimed || (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
       const next: TaskRecord = {

@@ -74,7 +74,8 @@ export type ScheduleRepository = {
   /** Applies a patch only while the receipt is still in one of `from`. */
   updateExecution: (input: {
     executionId: string;
-    observed?: Pick<ScheduleExecutionRecord, 'attempt' | 'taskId'>;
+    beforeAdmission?: boolean;
+    observed?: Pick<ScheduleExecutionRecord, 'attempt' | 'taskId' | 'claimGeneration'>;
     from: readonly ScheduleExecutionState[];
     patch: ScheduleExecutionPatch;
   }) => Promise<ScheduleExecutionRecord | null>;
@@ -222,9 +223,10 @@ export function createScheduleRepository(): ScheduleRepository {
       const existingId = byExecutionKey.get(record.executionKey);
       const existing = existingId && executions.get(existingId);
       if (existing && !retry) return { created: false, execution: clone(existing) };
-      if (retry && (!existing || existing.state !== 'retry_wait' || existing.attempt !== record.attempt)) return null;
+      if (retry && (!existing || existing.state !== 'retry_wait' || existing.attempt !== record.attempt || existing.claimGeneration !== record.claimGeneration)) return null;
       const active = [...executions.values()].filter(e => e.state === 'claimed' || e.state === 'dispatched');
       if (active.length >= cap || active.some(e => e.scheduleId === record.scheduleId)) return null;
+      if (retry) record = { ...record, claimGeneration: (record.claimGeneration ?? 0) + 1 };
       executions.set(record.executionId, clone(record));
       byExecutionKey.set(record.executionKey, record.executionId);
       return { created: true, execution: clone(record) };
@@ -248,9 +250,9 @@ export function createScheduleRepository(): ScheduleRepository {
       return found ? clone(found) : null;
     },
 
-    updateExecution: async ({ executionId, from, observed, patch }) => {
+    updateExecution: async ({ executionId, from, observed, beforeAdmission, patch }) => {
       const execution = executions.get(executionId);
-      if (!execution || !from.includes(execution.state) || (observed && (observed.attempt !== execution.attempt || observed.taskId !== execution.taskId))) return null;
+      if (!execution || !from.includes(execution.state) || (beforeAdmission && execution.admissionStarted) || (observed && (observed.claimGeneration !== execution.claimGeneration || observed.attempt !== execution.attempt || observed.taskId !== execution.taskId))) return null;
       const next: ScheduleExecutionRecord = { ...execution, ...clone(patch) };
       executions.set(executionId, next);
       return clone(next);

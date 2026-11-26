@@ -193,6 +193,16 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const updated = await collection.findOneAndUpdate(
+        { taskId, generation, state: { $in: ['queued', 'interrupted'] }, handoffPending: true },
+        { $set: { state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt } },
+        { returnDocument: 'after', includeResultMetadata: false });
+      return updated ? toTask(updated) : null;
+    },
+    claimScheduledRetry: async (taskId, generation) => !!await collection.findOneAndUpdate(
+      { taskId, state: 'failed', generation }, { $set: { scheduleRetryClaimed: true } },
+      { returnDocument: 'after', includeResultMetadata: false }),
     reissue: async ({ taskId, token, now, leaseExpiresAt }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
@@ -203,7 +213,7 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       // Generation and state are part of the filter: two replicas resuming the
       // same task cannot both issue a new generation.
       const updated = await collection.findOneAndUpdate(
-        { taskId, generation: task.generation, state: task.state, runToken: task.runToken },
+        { taskId, generation: task.generation, state: task.state, runToken: task.runToken, scheduleRetryClaimed: { $ne: true } },
         {
           $set: {
             state: 'queued',

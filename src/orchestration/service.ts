@@ -328,6 +328,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     checkpoint?: TaskRecord['checkpoint'],
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
+      const retired = await deps.tasks.updateFenced({ taskId: task.taskId, token,
+        patch: { state: 'interrupted', updatedAt: deps.clock.iso(),
+          failure: { code: 'server_unavailable', retryable: true, detail: outcome.detail } } });
+      try {
+        if (retired.applied) {
+          publish(retired.task, 'task.interrupted', { detail: outcome.detail });
+          await notifyTerminal(retired.task, 'interrupted');
+        }
+      } finally { await releaseLease(task, token); }
       return;
     }
     const now = deps.clock.iso();
@@ -448,7 +457,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       return;
     }
-    if (lease.cancelRequested || !(await canRunScheduled(task))) {
+    if (lease.token !== token) return;
+    if (task.cancelRequested || lease.cancelRequested) {
       await settle(task, token, { kind: 'cancelled' });
       return;
     }
@@ -496,6 +506,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       token,
       patch: {
         state: 'running',
+        ...(task.handoffPending && { handoffPending: false }),
         updatedAt: deps.clock.iso(),
         leaseExpiresAt: lease.expiresAt.toISOString(),
         model: model.value.ref,
@@ -731,7 +742,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!options.taskId) await appendObjective();
 
     const task: TaskRecord = {
-      ...(options.scheduleAdmission ? { scheduleAdmission: options.scheduleAdmission } : {}),
+      ...(options.scheduleAdmission ? { scheduleAdmission: options.scheduleAdmission, handoffPending: true } : {}),
       taskId: options.taskId ?? deps.ids.taskId(),
       ownerId: principal.ownerId,
       tenantId: null,
@@ -829,11 +840,28 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return fail('validation_failed', 'That occurrence is no longer eligible.');
       }
       if (options.scheduleAdmission) {
-        const marked = await deps.tasks.updateFenced({
-          taskId: task.taskId, token,
-          patch: { scheduleAdmission: { ...options.scheduleAdmission, complete: true } },
-        });
+        let marked;
+        try {
+          marked = await deps.tasks.updateFenced({
+            taskId: task.taskId, token,
+            patch: { scheduleAdmission: { ...options.scheduleAdmission, complete: true } },
+          });
+        } catch (error) {
+          // An acknowledgement can be lost after the write committed. Only the
+          // original owner may finish this delivery or roll back its reservation.
+          const durable = await deps.tasks.get(task.taskId);
+          if (!durable?.scheduleAdmission?.complete && durable?.runToken === token) {
+            await settle(created.task, token, { kind: 'cancelled' });
+            const cancelled = await deps.tasks.get(task.taskId);
+            if (cancelled?.runToken === token && cancelled.state === 'cancelled') reservation.release();
+            throw error;
+          }
+          if (durable?.runToken !== token || durable.state !== 'queued') throw error;
+          marked = { applied: true };
+        }
         if (!marked.applied) {
+          const durable = await deps.tasks.get(task.taskId);
+          if (durable && durable.runToken !== token) return fail('conflict', 'Another generation owns this handoff.');
           reservation.release();
           return fail('validation_failed', 'Scheduled Work lost ownership before enqueue.');
         }
@@ -927,6 +955,39 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return { ok: false, reason: 'refused', detail: accepted.detail };
     },
 
+    recoverHandoff: async (receipt, admit) => {
+      if (!receipt.taskId) return;
+      const task = await deps.tasks.get(receipt.taskId);
+      const admission = task?.scheduleAdmission;
+      if (!task?.handoffPending || !admission || admission.executionId !== receipt.executionId ||
+          (task.state !== 'queued' && task.state !== 'interrupted')) return;
+      const key = workRunKey(scopeOf(task));
+      const now = deps.clock.now();
+      const expiresAt = new Date(now.getTime() + deps.config.execution.leaseTtlMs);
+      const token = deps.ids.runToken();
+      if (!await deps.lease.claim({ key, owner: task.ownerId, token, now, expiresAt })) return;
+      const claim = await deps.schedules.getExecution(receipt.executionId);
+      if (!claim || (claim.state !== 'claimed' && claim.state !== 'dispatched') ||
+          claim.taskId !== task.taskId || claim.claimGeneration !== receipt.claimGeneration) {
+        await releaseLease(task, token);
+        return;
+      }
+      const owned = await deps.tasks.takeHandoff(task.taskId, task.generation, token, expiresAt.toISOString());
+      if (!owned) { await releaseLease(task, token); return; }
+      const current = await deps.schedules.get(receipt.scheduleId);
+      // admissionStarted proves the insert won and reserved its request. A stop
+      // before that point has no durable acceptance to deliver.
+      const admitted = owned.scheduleAdmission?.complete || (claim.admissionStarted &&
+        (current?.lastExecutionId === receipt.executionId || await admit()));
+      if (!admitted || owned.cancelRequested || !current || current.state === 'cancelled') {
+        await settle(owned, token, { kind: 'cancelled' });
+        return;
+      }
+      const marked = await deps.tasks.updateFenced({ taskId: task.taskId, token,
+        patch: { scheduleAdmission: { ...admission, complete: true } } });
+      if (marked.applied) deps.scheduler.enqueue(() => execute(task.taskId, token));
+    },
+    claimScheduledRetry: (taskId, generation) => deps.tasks.claimScheduledRetry(taskId, generation),
     taskSnapshot: async (taskId) => {
       const task = await deps.tasks.get(taskId);
       if (!task) return null;
@@ -935,6 +996,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(task.scheduleAdmission && { admissionPending:
           !(task.scheduleAdmission.complete ??
             ((await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId === task.scheduleAdmission.executionId || task.steps.length > 0)) }),
+        generation: reconciled.generation,
         state: reconciled.state,
         summary: reconciled.result?.summary ?? null,
         failure: reconciled.failure

@@ -34,6 +34,8 @@ function matches(document: Document, filter: MongoFilter): boolean {
           if (operator === '$lt' && order >= 0) return false;
           if (operator === '$gte' && order < 0) return false;
           if (operator === '$gt' && order <= 0) return false;
+        } else if (operator === '$exists') {
+          if (Object.hasOwn(document, field) !== operand) return false;
         } else if (operator === '$in') {
           if (!(operand as unknown[]).includes(value)) return false;
         } else if (operator === '$nin') {

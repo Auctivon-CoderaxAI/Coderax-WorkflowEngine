@@ -45,6 +45,7 @@ export type ScheduleEngineSettings = {
 };
 
 export type ScheduleTaskSnapshot = {
+  generation: number;
   admissionPending?: boolean;
   state: TaskState;
   summary: string | null;
@@ -70,6 +71,8 @@ export type SchedulePort = {
     selectedTimingRevision: number;
     occurrenceKey: string;
   }) => Promise<ScheduleDispatchOutcome>;
+  claimScheduledRetry: (taskId: string, generation: number) => Promise<boolean>;
+  recoverHandoff: (execution: ScheduleExecutionRecord, admit: () => Promise<boolean>) => Promise<void>;
   taskSnapshot: (taskId: string) => Promise<ScheduleTaskSnapshot | null>;
 };
 
@@ -241,13 +244,27 @@ export function createScheduleEngine(input: {
       const schedule = await store.get(execution.scheduleId);
       if (!schedule || (eligible && !eligible(schedule))) return false;
       if (schedule.lastExecutionId === execution.executionId && !eligible) return true;
-      const receipt = await store.getExecution(execution.executionId);
-      if (!receipt || receipt.state !== 'claimed' || receipt.taskId !== execution.taskId || receipt.attempt !== execution.attempt) return false;
+      // Work calls accept only after its deterministic task insert. This CAS
+      // and expiry compete on the same claim before any admission effect.
+      const receipt = eligible
+        ? await store.updateExecution({ executionId: execution.executionId, observed: execution,
+            from: ['claimed'], patch: { admissionStarted: true } })
+        : await store.getExecution(execution.executionId);
+      if (!receipt || receipt.claimGeneration !== execution.claimGeneration || receipt.state !== 'claimed' || receipt.taskId !== execution.taskId || receipt.attempt !== execution.attempt) return false;
       if (execution.attempt > 1 || schedule.lastExecutionId === execution.executionId) return true;
       if (eligible && schedule.limits.maxRunsTotal !== undefined && schedule.runsTotal >= schedule.limits.maxRunsTotal) return false;
-      const at = iso();
+      const now = clock.now();
+      const day = utcDayStart(now).toISOString();
+      // Seed older schedules from their existing submission receipts. From the
+      // first admission onward the UTC counter and total share a single CAS.
+      const count = schedule.acceptedDay
+        ? (schedule.acceptedDay.start === day ? schedule.acceptedDay.count : 0)
+        : await store.countExecutionsSince(schedule.scheduleId, day,
+            RUN_EXECUTION_STATES.filter(state => state !== 'claimed' && state !== 'refused'));
+      if (eligible && count >= schedule.limits.maxRunsPerDay) return false;
+      const at = now.toISOString();
       const write = await store.update({ scheduleId: schedule.scheduleId, expectedVersion: schedule.version,
-        patch: { runsTotal: schedule.runsTotal + 1, lastExecutionId: execution.executionId, lastRunAt: at, updatedAt: at } });
+        patch: { acceptedDay: { start: day, count: count + 1 }, runsTotal: schedule.runsTotal + 1, lastExecutionId: execution.executionId, lastRunAt: at, updatedAt: at } });
       if (write.applied) return true;
     }
   }
@@ -276,6 +293,7 @@ export function createScheduleEngine(input: {
       state: fields.state,
       ...(fields.state === 'refused' || fields.state === 'missed' ? { noticePending: true } : {}),
       attempt: fields.attempt,
+      ...(fields.state === 'claimed' && { claimGeneration: 1 }),
       maxAttempts: plan.schedule.retry.maxAttempts,
       taskId: fields.taskId,
       conversationId: fields.conversationId,
@@ -542,9 +560,6 @@ trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0
       };
     }
 
-    // A refusal or busy result created no Work task, so its slot is reusable now.
-    await store.releaseCapacity(executionId);
-
     if (outcome.reason === 'duplicate') {
       // The deterministic task id already exists (a previous dispatch landed).
       // Reconciliation will link the receipt to that task; never submit twice.
@@ -567,6 +582,7 @@ trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0
         finishedAt: iso(),
       },
     });
+    if (moved) await store.releaseCapacity(executionId);
     if (moved && state === 'refused') {
       await recordNotice({
         noticeId: `ntc_${executionId}_refused`,
@@ -681,6 +697,10 @@ trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0
       leaseUntil: capacityLeaseUntil(now),
     });
 
+    await port.recoverHandoff(execution, () => account(execution, schedule =>
+      schedule.state !== 'cancelled' && (execution.trigger === 'manual' || execution.attempt > 1 ||
+        (schedule.state === 'active' && (schedule.timingRevision ?? 0) === (execution.selectedTimingRevision ?? 0) &&
+          (execution.trigger !== 'schedule' || schedule.nextRunAt === execution.occurrenceKey)))));
     const snapshot = await port.taskSnapshot(taskId);
     if (!snapshot) {
       if (execution.state !== 'claimed') return;
@@ -690,6 +710,7 @@ trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0
       if (age > settings.dispatchTimeoutMs * 5) {
         const schedule = await store.get(execution.scheduleId);
         const missed = await store.updateExecution({
+          beforeAdmission: true,
           executionId: execution.executionId, observed: execution,
           from: ['claimed'],
           patch: {
@@ -709,7 +730,7 @@ trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0
           });
           report.missed += 1;
         }
-        await store.releaseCapacity(execution.executionId);
+        if (missed) await store.releaseCapacity(execution.executionId);
         return;
       }
       // Recovery is safe: the task id is deterministic, so a submit that lands
@@ -717,7 +738,7 @@ trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0
       const schedule = await store.get(execution.scheduleId);
       if (!schedule) return;
       if (schedule.state === 'cancelled') {
-        await store.updateExecution({
+        const cancelled = await store.updateExecution({
           executionId: execution.executionId, observed: execution,
           from: ['claimed'],
           patch: {
@@ -727,7 +748,7 @@ trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0
             finishedAt: iso(),
           },
         });
-        await store.releaseCapacity(execution.executionId);
+        if (cancelled) await store.releaseCapacity(execution.executionId);
         return;
       }
       // A quarantined reservation may have been released after the crash that
@@ -793,11 +814,12 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
     if (!schedule) return;
 
     if (snapshot.state === 'cancelled') {
-      await store.updateExecution({
+      const moved = await store.updateExecution({
         executionId: execution.executionId, observed: execution,
         from: ONGOING_EXECUTION_STATES,
         patch: { state: 'cancelled', detail: 'The Work task was cancelled.', updatedAt: iso(), finishedAt: iso() },
       });
+      if (!moved) return;
       await store.releaseCapacity(execution.executionId);
       report.reconciled += 1;
       return;
@@ -833,8 +855,8 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
           current.consecutiveFailures === 0 ? null : { consecutiveFailures: 0, updatedAt: iso() },
         );
         report.reconciled += 1;
+        await store.releaseCapacity(execution.executionId);
       }
-      await store.releaseCapacity(execution.executionId);
       return;
     }
 
@@ -846,6 +868,7 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
     const interrupted = snapshot.state === 'interrupted';
     const retryable = !interrupted && snapshot.failure?.retryable === true;
     if (retryable && execution.attempt < execution.maxAttempts) {
+      if (!await port.claimScheduledRetry(taskId, snapshot.generation)) return;
       const delayMs = schedule.retry.delaySeconds * 1_000;
       const moved = await store.updateExecution({
         executionId: execution.executionId, observed: execution,
@@ -871,7 +894,7 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
       executionId: execution.executionId, observed: execution,
       from: ONGOING_EXECUTION_STATES,
       patch: {
-        state: 'failed', noticePending: true,
+        state: 'failed', noticePending: true, failureAccountingPending: true,
         detail: truncate(
           interrupted
             ? `Attempt ${execution.attempt} was interrupted and is resumable; it was not replayed as a new task.`
@@ -884,18 +907,7 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
     });
     if (!moved) return;
     await store.releaseCapacity(execution.executionId);
-    const updated = await patchSchedule(schedule.scheduleId, (current) => {
-      const failures = current.consecutiveFailures + 1;
-      const shouldPause =
-        current.state === 'active' && failures >= settings.pauseAfterFailures;
-      return {
-        consecutiveFailures: failures,
-        ...(shouldPause
-          ? { state: 'paused' as const, pausedAt: iso(), nextRunAt: null }
-          : {}),
-        updatedAt: iso(),
-      };
-    });
+    const updated = await accountFailure(moved);
     const pausedForFailures = updated?.state === 'paused';
     await recordNotice({
       noticeId: `ntc_${execution.executionId}_failed`,
@@ -909,6 +921,30 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
           : `Scheduled run "${schedule.name}" failed with ${failureCode} after ${execution.attempt} attempt(s).`,
     });
     report.reconciled += 1;
+  }
+
+  async function accountFailure(receipt: ScheduleExecutionRecord): Promise<ScheduleRecord | null> {
+    for (;;) {
+      const schedule = await store.get(receipt.scheduleId);
+      if (!schedule || !(await store.getExecution(receipt.executionId))?.failureAccountingPending) return schedule;
+      const accounted = schedule.accountedFailures ?? [];
+      if (!accounted.includes(receipt.executionId)) {
+        // Keep deduplication keys only while their receipt still needs acknowledgement.
+        const outstanding: string[] = [];
+        for (const id of accounted) {
+          if ((await store.getExecution(id))?.failureAccountingPending) outstanding.push(id);
+        }
+        const failures = schedule.consecutiveFailures + 1;
+        const write = await store.update({ scheduleId: schedule.scheduleId, expectedVersion: schedule.version,
+          patch: { consecutiveFailures: failures, accountedFailures: [...outstanding, receipt.executionId],
+            ...(schedule.state === 'active' && failures >= settings.pauseAfterFailures
+              ? { state: 'paused', pausedAt: iso(), nextRunAt: null } : {}), updatedAt: iso() } });
+        if (!write.applied) continue;
+      }
+      await store.updateExecution({ executionId: receipt.executionId, observed: receipt, from: ['failed'],
+        patch: { failureAccountingPending: false } });
+      return store.get(receipt.scheduleId);
+    }
   }
 
   async function refuseClaim(execution: ScheduleExecutionRecord, schedule: ScheduleRecord, detail: string, report: ScheduleTickReport): Promise<void> {
@@ -933,12 +969,12 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
       const schedule = await store.get(execution.scheduleId);
       if (!schedule) continue;
       if (schedule.state === 'cancelled') {
-        await store.updateExecution({
+        const cancelled = await store.updateExecution({
           executionId: execution.executionId, observed: execution,
           from: ['retry_wait'],
           patch: { state: 'cancelled', detail: 'The schedule was cancelled.', updatedAt: iso(), finishedAt: iso() },
         });
-        await store.releaseCapacity(execution.executionId);
+        if (cancelled) await store.releaseCapacity(execution.executionId);
         continue;
       }
       if ((await store.countActiveExecutions(schedule.scheduleId)) > 0) continue;
@@ -952,13 +988,13 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
       if (!capacity.ok && capacity.reason === 'full') break;
 
       const claim = await store.claim({
-        ...execution, state: 'claimed', nextAttemptAt: null, updatedAt: iso(),
+        ...execution, state: 'claimed', admissionStarted: false, nextAttemptAt: null, updatedAt: iso(),
       }, settings.maxConcurrentRuns, true);
       const claimed = claim?.execution;
       if (!claimed || !claimed.taskId) continue;
 
       const outcome = await port.dispatch({
-        executionId: execution.executionId, accept: eligible => account(execution, eligible),
+        executionId: execution.executionId, accept: eligible => account(claimed, eligible),
         schedule,
 trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurrenceKey: execution.occurrenceKey, scheduleVersion: schedule.version,
         taskId: claimed.taskId,
@@ -967,7 +1003,7 @@ trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurren
       });
       if (outcome.ok) {
         await store.updateExecution({
-          executionId: execution.executionId, observed: execution,
+          executionId: execution.executionId, observed: claimed,
           from: ['claimed'],
           patch: { state: 'dispatched', updatedAt: iso() },
         });
@@ -981,7 +1017,7 @@ trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurren
       }
       const delayMs = Math.max(schedule.retry.delaySeconds * 1_000, 5_000);
       await store.updateExecution({
-        executionId: execution.executionId, observed: execution,
+        executionId: execution.executionId, observed: claimed,
         from: ['claimed'],
         patch: {
           state: 'retry_wait',
@@ -1028,7 +1064,7 @@ trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurren
     for (const receipt of await store.pendingNotices(settings.batchSize)) {
       const kind = receipt.state;
       if (kind !== 'failed' && kind !== 'refused' && kind !== 'missed') continue;
-      const schedule = await store.get(receipt.scheduleId);
+      const schedule = receipt.failureAccountingPending ? await accountFailure(receipt) : await store.get(receipt.scheduleId);
       if (schedule) await recordNotice({
         noticeId: `ntc_${receipt.executionId}_${kind}`, executionId: receipt.executionId, schedule, kind,
         summary: `Scheduled run "${schedule.name}" ${kind}: ${receipt.detail ?? ''}`,

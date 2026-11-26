@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createMongoTaskRepository } from '../../src/persistence/mongo-tables.js';
+import { createFakeCollection } from '../fakes/mongo.js';
 import { createTaskRepository } from '../../src/persistence/tasks.js';
 import { taskRecord } from '../helpers.js';
 
@@ -88,4 +90,23 @@ test('one active task per conversation is enforced', async () => {
   });
   const third = await tasks.create(taskRecord({ taskId: 'task-3', runToken: 'token-3' }));
   assert.equal(third.ok, true);
+});
+
+test('a failed generation can be reissued or claimed for scheduled retry, never both', async () => {
+  for (const tasks of [createTaskRepository(), createMongoTaskRepository(createFakeCollection())]) {
+    for (const schedulerFirst of [false, true]) {
+      const task = taskRecord({ taskId: String(schedulerFirst), conversationId: String(schedulerFirst), generation: 1, state: 'failed' });
+      await tasks.create(task);
+      const claim = () => tasks.claimScheduledRetry(task.taskId, 1);
+      const reissue = () => tasks.reissue({ taskId: task.taskId, now: task.updatedAt, leaseExpiresAt: task.updatedAt, token: 'new' });
+      if (schedulerFirst) {
+        assert.equal(await claim(), true);
+        assert.equal((await reissue()).applied, false);
+        assert.equal(await claim(), true);
+      } else {
+        assert.equal((await reissue()).applied, true);
+        assert.equal(await claim(), false);
+      }
+    }
+  }
 });

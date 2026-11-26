@@ -273,17 +273,18 @@ export function createMongoScheduleRepository(input: {
       if (outside.length) return null;
       for (let slot = 0; slot < cap; slot++) {
         try {
-          const fields = { ...record, occupiesSlot: true, slot };
+          const claimed = retry ? { ...record, claimGeneration: (record.claimGeneration ?? 0) + 1 } : record;
+          const fields = { ...claimed, occupiesSlot: true, slot };
           if (retry) {
             const updated = await executions.findOneAndUpdate(
-              { executionId: record.executionId, state: 'retry_wait', attempt: record.attempt },
+              { executionId: record.executionId, state: 'retry_wait', attempt: record.attempt, claimGeneration: record.claimGeneration ?? { $exists: false } },
               { $set: fields }, { returnDocument: 'after', includeResultMetadata: false },
             );
             if (!updated) return null;
           } else {
             await executions.insertOne(fields);
           }
-          return { created: true, execution: record };
+          return { created: true, execution: claimed };
         } catch (error) {
           if (!isDuplicateKey(error)) throw error;
           if (!retry) {
@@ -312,9 +313,9 @@ export function createMongoScheduleRepository(input: {
       return document ? toExecution(document) : null;
     },
 
-    updateExecution: async ({ executionId, from, observed, patch }) => {
+    updateExecution: async ({ executionId, from, observed, beforeAdmission, patch }) => {
       const updated = await executions.findOneAndUpdate(
-        { executionId, state: { $in: [...from] }, ...(observed && { attempt: observed.attempt, taskId: observed.taskId }) },
+        { executionId, state: { $in: [...from] }, ...(beforeAdmission && { admissionStarted: { $ne: true } }), ...(observed && { claimGeneration: observed.claimGeneration ?? { $exists: false }, attempt: observed.attempt, taskId: observed.taskId }) },
         { $set: { ...defined(patch as ScheduleExecutionPatch),
           ...(patch.state && !['claimed', 'dispatched'].includes(patch.state) ? { occupiesSlot: false } : {}),
         } },

@@ -167,6 +167,8 @@ function testPort(): {
         calls.push({ scheduleId: schedule.scheduleId, taskId, attempt });
         return { ok: true };
       },
+      recoverHandoff: async () => {},
+      claimScheduledRetry: async (id, gen) => snapshots.get(id)?.generation === gen,
       taskSnapshot: async (taskId) => snapshots.get(taskId) ?? null,
     },
   };
@@ -517,7 +519,7 @@ test('a retryable failure waits for its policy and re-runs with a new task id', 
   assert.equal(port.calls.length, 1);
   let execution = (await store.listExecutions(schedule.scheduleId, 10))[0];
   assert.equal(execution?.attempt, 1);
-  port.snapshots.set(execution?.taskId as string, {
+  port.snapshots.set(execution?.taskId as string, { generation: 1,
     state: 'failed',
     summary: null,
     failure: { code: 'server_unavailable', retryable: true },
@@ -531,7 +533,7 @@ test('a retryable failure waits for its policy and re-runs with a new task id', 
   execution = (await store.listExecutions(schedule.scheduleId, 10))[0];
   assert.equal(execution?.state, 'dispatched');
 
-  port.snapshots.set(retried?.taskId as string, {
+  port.snapshots.set(retried?.taskId as string, { generation: 1,
     state: 'completed',
     summary: 'Recovered on the retry.',
     failure: null,
@@ -560,7 +562,7 @@ test('a failure that the adapter marked non-retryable is final and notifies once
 
   await engine.tick();
   const taskId = port.calls[0]?.taskId as string;
-  port.snapshots.set(taskId, {
+  port.snapshots.set(taskId, { generation: 1,
     state: 'failed',
     summary: null,
     failure: { code: 'provider_error', retryable: false },
@@ -628,7 +630,7 @@ test('consecutive failures pause a schedule to prevent a runaway loop', async ()
 
   await engine.tick();
   const taskId = port.calls[0]?.taskId as string;
-  port.snapshots.set(taskId, {
+  port.snapshots.set(taskId, { generation: 1,
     state: 'failed',
     summary: null,
     failure: { code: 'provider_error', retryable: false },
@@ -727,7 +729,7 @@ test('a monitor whose condition is unmet completes without notifying', async () 
 
   await engine.tick();
   const taskId = port.calls[0]?.taskId as string;
-  port.snapshots.set(taskId, {
+  port.snapshots.set(taskId, { generation: 1,
     state: 'completed',
     summary: 'Everything is within range.',
     failure: null,
@@ -914,7 +916,7 @@ test('an interrupted attempt is resumable, not replayed as a new task', async ()
 
   await engine.tick();
   const taskId = port.calls[0]?.taskId as string;
-  port.snapshots.set(taskId, {
+  port.snapshots.set(taskId, { generation: 1,
     state: 'interrupted',
     summary: null,
     // Orchestration marks an interrupted run retryable so Work resume is
@@ -1083,7 +1085,7 @@ test('reconciliation accounts landed Work once and refuses stale attempt writes'
     const receipt = executionRecord(schedule, { state: 'claimed', taskId: 'first' });
     await store.claim(receipt, 1, false);
     const port = testPort();
-    port.snapshots.set('first', { state: 'running', summary: null, failure: null });
+    port.snapshots.set('first', { generation: 1, state: 'running', summary: null, failure: null });
     const engine = engineFor({ store, port: port.port, clock: testClock().clock });
     await engine.tick();
     await engine.tick();
@@ -1107,5 +1109,41 @@ test('future backoffs cannot crowd a due retry out of the batch', async () => {
       }));
     }
     assert.deepEqual((await store.dueRetries(NOW, 1)).map(record => record.executionId), ['due']);
+  }
+});
+
+test('admission and expiry exclude one another, even when a retry reuses its task id', async () => {
+  const collections = { schedules: createFakeCollection(), executions: createFakeCollection(), notices: createFakeCollection() };
+  await ensureScheduleIndexes(collections);
+  for (const store of [createScheduleRepository(), createMongoScheduleRepository(collections)]) {
+    const old = executionRecord(scheduleRecord(), { state: 'claimed', attempt: 2, taskId: 'same', claimGeneration: 1 });
+    await store.claim(old, 1, false);
+    const wait = await store.updateExecution({ executionId: old.executionId, from: ['claimed'], observed: old,
+      patch: { state: 'retry_wait' } });
+    assert.ok(wait);
+    const claim = await store.claim({ ...wait, state: 'claimed' }, 1, true);
+    assert.ok(claim);
+    const expire = (observed: ScheduleExecutionRecord) => store.updateExecution({ executionId: old.executionId,
+      beforeAdmission: true, observed, from: ['claimed'], patch: { state: 'missed' } });
+    assert.equal(await expire(old), null);
+    assert.ok(await store.updateExecution({ executionId: old.executionId, from: ['claimed'],
+      observed: claim.execution, patch: { admissionStarted: true } }));
+    assert.equal(await expire(claim.execution), null);
+  }
+});
+
+test('a recovered failure pauses once even when accounting committed before acknowledgement', async () => {
+  for (const committed of [false, true]) {
+    const store = createScheduleRepository();
+    const schedule = scheduleRecord({ nextRunAt: null });
+    const receipt = executionRecord(schedule, { state: 'failed', noticePending: true, failureAccountingPending: true });
+    await store.create(committed ? { ...schedule, state: 'paused', consecutiveFailures: 1, accountedFailures: [receipt.executionId] } : schedule);
+    await store.createExecution(receipt);
+    const engine = engineFor({ store, port: testPort().port, clock: testClock().clock, settings: { pauseAfterFailures: 1 } });
+    await engine.tick();
+    await engine.tick();
+    assert.equal((await store.get(schedule.scheduleId))?.consecutiveFailures, 1);
+    assert.equal((await store.get(schedule.scheduleId))?.state, 'paused');
+    assert.equal((await store.getExecution(receipt.executionId))?.noticePending, false);
   }
 });
