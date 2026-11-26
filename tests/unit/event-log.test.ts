@@ -192,6 +192,8 @@ test('a restart over a fake MongoDB store resumes the sequence and serves the re
   const replayed = await restarted.read('t1', 1);
   assert.deepEqual(replayed.events.map((event) => event.seq), [2, 3]);
   assert.equal(replayed.truncated, false);
+  // A terminal check reads the end of the stream, not its first page.
+  assert.deepEqual((await restarted.tail('t1', 1)).map((event) => event.seq), [3]);
 });
 
 test('a fake-Mongo append from a superseded generation is refused and leaves no row', async () => {
@@ -233,4 +235,84 @@ test('an in-memory log survives only the process that owns it, and says so', asy
   const fresh = createInMemoryEventLog({ bufferSize: 100 });
   assert.deepEqual(await fresh.watermark('t1'), { seq: 0, generation: 0 });
   assert.deepEqual((await fresh.read({ taskId: 't1', after: 0, limit: 10 })).events, []);
+});
+
+test('a later generation refreshes a watermark another replica advanced', async () => {
+  const log = createInMemoryEventLog({ bufferSize: 100 });
+  const replicaA = inMemoryBus(log);
+  const replicaB = inMemoryBus(log);
+
+  await replicaA.hydrate('t_gen', 1);
+  const first = replicaA.publish({ taskId: 't_gen', agent: 'coderax', generation: 1, type: 'task.queued' });
+  assert.equal(first?.seq, 1);
+  await replicaA.flush('t_gen');
+
+  // Replica B takes generation 2 and moves the durable sequence forward.
+  await replicaB.hydrate('t_gen', 2);
+  const second = replicaB.publish({ taskId: 't_gen', agent: 'coderax', generation: 2, type: 'task.queued' });
+  assert.equal(second?.seq, 2);
+  await replicaB.flush('t_gen');
+
+  // A is assigned generation 3. Its cached watermark is now stale; reusing it
+  // would make the store refuse every event while a cached flush still resolved.
+  await replicaA.hydrate('t_gen', 3);
+  const third = replicaA.publish({ taskId: 't_gen', agent: 'coderax', generation: 3, type: 'task.completed' });
+  assert.equal(third?.seq, 3);
+  await replicaA.flush('t_gen');
+
+  const stored = await log.read({ taskId: 't_gen', after: 0, limit: 10 });
+  assert.deepEqual(stored.events.map((event) => event.seq), [1, 2, 3]);
+});
+
+test('a refused append is reported by flush and resynchronizes the sequence', async () => {
+  let durableSeq = 9;
+  let calls = 0;
+  const log: EventLog = {
+    append: async () => {
+      calls += 1;
+      if (calls === 1) {
+        // Another replica advanced the stream between hydration and this write.
+        durableSeq = 25;
+        return { appended: false, reason: 'out_of_order' };
+      }
+      return { appended: true };
+    },
+    read: async () => ({ events: [], truncated: false }),
+    watermark: async () => ({ seq: durableSeq, generation: 1 }),
+    latest: async () => [],
+    prune: async () => 0,
+    close: async () => undefined,
+  };
+  const bus = createEventBus({ bufferSize: 10, eventId: ids, iso, log });
+  await bus.hydrate('t_refused', 1);
+  const refused = bus.publish({ taskId: 't_refused', agent: 'coderax', generation: 1, type: 'task.started' });
+  assert.equal(refused?.seq, 10);
+  await assert.rejects(() => bus.flush('t_refused'), /not persisted \(out_of_order\)/);
+
+  const next = bus.publish({ taskId: 't_refused', agent: 'coderax', generation: 1, type: 'task.completed' });
+  assert.equal(next?.seq, 26);
+});
+
+test('a replay longer than one page still reaches the terminal event', async () => {
+  const log = createInMemoryEventLog({ bufferSize: 100 });
+  const writer = createEventBus({ bufferSize: 10, eventId: ids, iso, log });
+  await writer.hydrate('t_page');
+  for (let index = 0; index < 35; index += 1) {
+    writer.publish({
+      taskId: 't_page',
+      agent: 'coderax',
+      generation: 1,
+      type: index === 34 ? 'task.completed' : 'text.delta',
+      payload: index === 34 ? {} : { text: '.' },
+    });
+  }
+  await writer.flush('t_page');
+
+  // A fresh process has no local window, so the whole backlog must come from the
+  // log. Reading one page and then tailing from the watermark skipped the middle.
+  const reader = createEventBus({ bufferSize: 10, eventId: ids, iso, log });
+  const opened = await reader.open('t_page', 0, 10);
+  assert.equal(opened.replay.events.length, 35);
+  assert.equal(opened.replay.events.at(-1)?.type, 'task.completed');
+  assert.deepEqual(opened.replay.events.map((event) => event.seq), Array.from({ length: 35 }, (_, index) => index + 1));
 });

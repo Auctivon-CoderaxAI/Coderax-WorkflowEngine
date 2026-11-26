@@ -744,3 +744,99 @@ test(
     }
   },
 );
+
+test('a graceful stop leaves a run owned by another replica alone', async () => {
+  const database = createFakeDatabase();
+  const workspace = createWorkspaces();
+  const taskId = 'task_remote';
+  const conversationId = 'conv_remote';
+  const leaseKey = workRunKey({ ownerId: OWNER_ID, tenantId: null, conversationId });
+  const now = new Date().toISOString();
+
+  // A task another replica is executing: its token is not one this process was
+  // ever given, and its lease is live.
+  await collection(database, 'tasks').insertOne({
+    ...taskRecord({
+      taskId,
+      conversationId,
+      state: 'running',
+      runToken: 'run_remote',
+      updatedAt: now,
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+  });
+  await collection(database, 'work_runs').insertOne({
+    key: leaseKey,
+    owner: OWNER_ID,
+    token: 'run_remote',
+    cancelRequested: false,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  const app = await mongoApp({ database, workspace });
+  try {
+    // Startup reconcile sees a live lease and does not interfere either.
+    assert.equal((await app.dependencies.tasks.get(taskId))?.state, 'running');
+  } finally {
+    await app.stop();
+  }
+
+  // A stopping replica must not enumerate the shared database and retire work it
+  // does not own: that would interrupt a healthy run and free its live lease.
+  const task = await collection(database, 'tasks').findOne({ taskId });
+  assert.equal(task?.state, 'running');
+  assert.notEqual(await collection(database, 'work_runs').findOne({ key: leaseKey }), null);
+  workspace.cleanup();
+});
+
+test('a backlog larger than one page replays through the ending without duplicating it', async () => {
+  const database = createFakeDatabase();
+  const workspace = createWorkspaces();
+  const taskId = 'task_long_stream';
+  const conversationId = 'conv_long_stream';
+  const now = new Date().toISOString();
+  await seedConversation(database, conversationId);
+  await collection(database, 'tasks').insertOne({
+    ...taskRecord({
+      taskId,
+      conversationId,
+      state: 'completed',
+      runToken: 'run_long',
+      updatedAt: now,
+      result: { summary: 'done', artifacts: [] },
+      checkpoint: { completedSteps: [], text: '' },
+    }),
+  });
+
+  // Forty events with a sixteen-event page: the ending is beyond the first page.
+  for (let index = 0; index < 40; index += 1) {
+    const terminal = index === 39;
+    await collection(database, 'events').insertOne({
+      v: 1,
+      taskId,
+      seq: index + 1,
+      eventId: `long_${index + 1}`,
+      at: now,
+      agent: 'coderax',
+      generation: 1,
+      type: terminal ? 'task.completed' : 'text.delta',
+      payload: terminal ? { summary: 'done' } : { text: '.' },
+    });
+  }
+  await collection(database, 'event_heads').insertOne({ taskId, seq: 40, generation: 1 });
+
+  const app = await mongoApp({ database, workspace, execution: { eventBufferSize: 16 } });
+  try {
+    const opened = await app.dependencies.events.open(taskId, 0, 16);
+    assert.equal(opened.replay.events.length, 40);
+    assert.equal(opened.replay.events.at(-1)?.type, 'task.completed');
+
+    // Repair reads the end of the stream, so a long backlog cannot make it
+    // append a second terminal event.
+    const stored = await app.dependencies.events.read(taskId, 0, 100);
+    assert.equal(stored.events.filter((event) => event.type === 'task.completed').length, 1);
+  } finally {
+    await app.stop();
+    workspace.cleanup();
+  }
+});

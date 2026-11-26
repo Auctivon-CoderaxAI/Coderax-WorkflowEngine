@@ -32,6 +32,12 @@ export type EventLog = {
   read: (input: { taskId: string; after: number; limit: number }) => Promise<StoredReplay>;
   /** The highest durable sequence and generation written for a task. */
   watermark: (taskId: string) => Promise<EventWatermark>;
+  /**
+   * The newest retained events in ascending order. A caller that only needs to
+   * know how a stream ends (a repair checking for a terminal event, for example)
+   * must not page from the beginning: a long stream would hide its ending.
+   */
+  latest: (taskId: string, limit: number) => Promise<ExecutionEvent[]>;
   /** Bounded retention sweep; never removes the newest event of a task. */
   prune: (input: { before: string; limit: number }) => Promise<number>;
   close: () => Promise<void>;
@@ -91,15 +97,24 @@ export function createInMemoryEventLog(input: { bufferSize: number }): EventLog 
     read: async ({ taskId, after, limit }) => {
       const state = streams.get(taskId);
       if (!state) return { events: [], truncated: false };
+      const bounded = Math.max(1, limit);
       const retained = state.events.filter((event) => event.seq > after);
       const oldest = state.events[0]?.seq ?? 0;
-      const truncated = state.events.length > 0 && oldest > after + 1;
-      return { events: retained.slice(-Math.max(1, limit)), truncated };
+      // Same page shape as the database: the earliest events after the cursor,
+      // and a flag when more remain or the head was already pruned.
+      const truncated = retained.length > bounded || (state.events.length > 0 && oldest > after + 1);
+      return { events: retained.slice(0, bounded), truncated };
     },
 
     watermark: async (taskId) => {
       const state = streams.get(taskId);
       return { seq: state?.seq ?? 0, generation: state?.generation ?? 0 };
+    },
+
+    latest: async (taskId, limit) => {
+      const state = streams.get(taskId);
+      if (!state) return [];
+      return state.events.slice(-Math.max(1, limit));
     },
 
     prune: async ({ before, limit }) => {

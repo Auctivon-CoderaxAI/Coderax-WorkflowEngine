@@ -66,6 +66,20 @@ duplicate generation`).
 - The bus never reports an event as durable before `flush` resolves. Settlement
   awaits that barrier before announcing the terminal state and before releasing
   the lease.
+- A refusal is not silent: `duplicate` is the only non-append that is not a
+  failure, so a stale-generation or out-of-order write makes `flush` reject. An
+  out-of-order write also resynchronizes the local sequence from the durable
+  watermark instead of letting the rest of the run fail one event at a time.
+- `hydrate(taskId, generation)` re-reads the watermark when the requested
+  generation is newer than the cached load. A replica that hydrated before
+  another replica advanced the stream therefore cannot reuse a sequence number.
+- Replay drains the whole backlog in pages before it tails, so a stream longer
+  than one page still reaches its terminal event instead of skipping the
+  interval under the watermark. A terminal check reads the *newest* event
+  (`latest`/`tail`), never the first page.
+- Shutdown reclaims only runs this process accepted (a local token map). A
+  stopping replica never enumerates the shared database: a rolling restart must
+  not interrupt a run another replica is executing or release its live lease.
 
 ## Verification tiers
 
@@ -92,9 +106,11 @@ These are deliberately separate and are not interchangeable.
 
 - No live MongoDB was contacted, so no claim is made about a real server storing
   a row, index build timing, or replica behaviour.
-- No multi-replica race was executed. The fencing and watermark rules are
-  enforced by the store contract and tested against the fake, not across two
-  processes.
+- No multi-replica race was executed. The fencing, watermark and
+  stop-scoping rules are enforced by the store contract and tested against the
+  fake, not across two live processes. `a graceful stop leaves a run owned by
+  another replica alone` seeds a foreign token and proves the stopping process
+  leaves it running, but it is not a rolling restart of two servers.
 - Hosted CI is reported only after this branch is pushed, at the exact head.
 - No deployment was performed.
 

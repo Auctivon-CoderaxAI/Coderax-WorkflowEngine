@@ -118,9 +118,17 @@ export function createFakeCollection(): FakeCollection {
         result = [...result].sort((left, right) => {
           const a = left[field];
           const b = right[field];
-          const leftValue = a instanceof Date ? a.getTime() : String(a);
-          const rightValue = b instanceof Date ? b.getTime() : String(b);
-          return leftValue < rightValue ? -direction : leftValue > rightValue ? direction : 0;
+          // Numeric fields sort numerically. Coercing to string made `seq` order
+          // lexicographic (1, 10, 11, 2), which silently broke any paging or
+          // newest-first query a store ran against this fake.
+          const leftValue = a instanceof Date ? a.getTime() : a;
+          const rightValue = b instanceof Date ? b.getTime() : b;
+          if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+            return (leftValue - rightValue) * direction;
+          }
+          const leftText = String(leftValue);
+          const rightText = String(rightValue);
+          return leftText < rightText ? -direction : leftText > rightText ? direction : 0;
         });
         return self;
       },
