@@ -4,10 +4,31 @@ import { z } from 'zod';
  * The contract version is part of the wire, not a comment. A client sends the
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
+ *
+ * `1.0.0` was the first published surface. `1.1.0` and `1.2.0` were strictly
+ * additive on the operations they touched. `1.3.0` adds the capability
+ * handshake, media intake and image attachments on a chat turn. A route removed
+ * or moved is a breaking change and needs a new `/vN` prefix.
  */
-export const CONTRACT_VERSION = '1.0.0' as const;
+export const CONTRACT_VERSION = '1.3.0' as const;
+export const CONTRACT_MAJOR = 1 as const;
+export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
+/** Chat streaming frames are versioned separately from both HTTP and events. */
+export const CHAT_STREAM_VERSION = 1 as const;
+
+export type SemanticVersion = { major: number; minor: number; patch: number };
+
+export function parseSemanticVersion(value: string): SemanticVersion | null {
+  const match = /^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$/.exec(value.trim());
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
 
 function identifier(label: string, max = 128) {
   return z.string().trim().min(1).max(max).describe(label);

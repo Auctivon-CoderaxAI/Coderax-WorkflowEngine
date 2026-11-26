@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createNativeAgent } from '../../src/agents/native/agent.js';
 import { intakeMedia } from '../../src/media/intake.js';
 
 function chunk(type: string, data: Buffer): Buffer {
@@ -164,4 +165,61 @@ test('a truncated JPEG without a frame header is refused', () => {
   ]);
   const result = intakeMedia([attachment(truncated, 'image/jpeg')]);
   assert.equal(result.ok, false);
+});
+
+test('Native sends a validated image as a content part on the first model call', async () => {
+  const model = { providerId: 'fixture', modelId: 'fixture' };
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+  let captured: { messages?: Array<{ text: string; images?: string[] }> } | undefined;
+  const native = createNativeAgent({
+    enabled: true,
+    gateway: {
+      id: 'fixture',
+      complete: async (request) => {
+        captured = request;
+        return {
+          model,
+          attempts: [model],
+          latencyMs: 0,
+          text: 'seen',
+          toolCalls: [],
+          usage: {},
+        };
+      },
+    },
+  });
+  const outcome = await native.run(
+    {
+      ownerId: 'owner',
+      tenantId: null,
+      conversationId: 'conv',
+      objective: 'describe the attached image',
+      model,
+      routing: 'auto',
+      allowFallback: false,
+      mode: 'cloud',
+      operation: 'chat',
+      workspaceRoot: '/fixture',
+      maxSteps: 1,
+      budget: null,
+      signal: new AbortController().signal,
+      media: [
+        {
+          reference: {
+            mediaId: 'media_1',
+            kind: 'image',
+            mediaType: 'image/png',
+            bytes: 8,
+            width: 1,
+            height: 1,
+            sha256: '0'.repeat(64),
+          },
+          dataUrl,
+        },
+      ],
+    },
+    () => undefined,
+  );
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(captured?.messages?.[0]?.images, [dataUrl]);
 });

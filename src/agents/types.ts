@@ -8,6 +8,7 @@ import type {
   EngineCapabilities,
   EngineFailureCode,
   EngineId,
+  MediaReference,
   ModelRef,
   Usage,
 } from '@coderax/contracts';
@@ -43,6 +44,12 @@ export type AgentRunRequest = {
    * is passed separately so an agent never answers the same message twice.
    */
   history?: AgentHistoryTurn[];
+  /**
+   * Validated images for this turn. The engine hands the adapter a data URL and
+   * the stored reference; an adapter that cannot carry images fails rather than
+   * silently dropping them.
+   */
+  media?: Array<{ reference: MediaReference; dataUrl: string }>;
   /** Already resolved by the model catalogue; never a raw provider override. */
   model: ModelRef;
   /** Automatic, Fast or Complex ranking, chosen by the engine from the task. */

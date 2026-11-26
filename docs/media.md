@@ -27,3 +27,12 @@ a `requestId`.
 
 Validation is not sanitization. It refuses active or malformed content rather
 than rewriting it, and it does not claim to sandbox a renderer.
+
+## Chat turns
+
+`submitChat` accepts the same `attachments` array. The engine validates the whole
+set before it resolves a model or writes a turn, then requires a route whose model
+declares image input; if none does, the turn fails instead of dropping the image.
+The user message in the transcript stores `MediaReference` metadata only, and the
+bytes travel inline to the selected provider as a content part on the first model
+call. An external agent is refused image input rather than sent a stripped prompt.

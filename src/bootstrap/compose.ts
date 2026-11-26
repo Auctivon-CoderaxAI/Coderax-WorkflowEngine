@@ -40,8 +40,9 @@ import type { ApplicationService } from '../orchestration/service.js';
 import { createArtifactService } from '../artifacts/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
-import { registerRoutes } from '../api/routes.js';
-import { createHttpServer } from '../api/server.js';
+import { registerRoutes, type HandshakeInfo } from '../api/routes.js';
+import { ENGINE_NAME, ENGINE_VERSION } from '../version.js';
+import { createHttpServer, MAX_BODY_BYTES } from '../api/server.js';
 import type { HttpServer } from '../api/server.js';
 import { validateWorkspaceRoots, workspaceRoots } from '../execution/workspace.js';
 import {
@@ -50,7 +51,7 @@ import {
   type ApplicationDependencies,
   type InfrastructureDependencies,
 } from './container.js';
-import { buildPersistence } from './persistence.js';
+import { buildPersistence, MEMORY_VALUE_LIMIT } from './persistence.js';
 import { StartupError } from './startup-error.js';
 
 export { StartupError } from './startup-error.js';
@@ -299,6 +300,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const env = input.env ?? process.env;
   const { config } = input;
   const clock = createClock();
+  const startedAt = clock.iso();
   const ids = createIdGenerator();
 
   let auth;
@@ -717,7 +719,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
 
   const registry = createRouteRegistry();
-  registerRoutes(registry, service);
+  const handshakeInfo: HandshakeInfo = {
+    server: { name: ENGINE_NAME, version: ENGINE_VERSION, startedAt },
+    limits: {
+      maxBodyBytes: MAX_BODY_BYTES,
+      eventBufferSize: config.execution.eventBufferSize,
+      maxConcurrentTasks: config.execution.maxConcurrentTasks,
+      // Advertised floor; scheduling itself is unpublished and reported false.
+      scheduleMinIntervalMs: 60_000,
+      artifactMaxBytes: config.artifacts.maxBytesPerArtifact,
+      memoryMaxValueLength: MEMORY_VALUE_LIMIT,
+    },
+  };
+  registerRoutes(registry, service, handshakeInfo);
   const missingRoutes = registry.missing();
   if (missingRoutes.length > 0) {
     throw new StartupError(

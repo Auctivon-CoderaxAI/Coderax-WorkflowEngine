@@ -36,6 +36,7 @@ import {
 } from './artifacts.js';
 import { z as zod } from 'zod';
 import { MediaIntakeRequest, MediaIntakeResult } from './media.js';
+import { CapabilityHandshake, HandshakeQuery } from './handshake.js';
 import { ArtifactId, ConversationId, DataMode, ProjectId, TaskId } from './primitives.js';
 
 /**
@@ -115,6 +116,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['health'],
     auth: 'public',
     response: { status: 200, description: 'Readiness report', schema: ReadinessReport },
+  },
+  {
+    operationId: 'getHandshake',
+    method: 'GET',
+    path: '/v1/handshake',
+    summary: 'Contract version, negotiated version and the operations this build serves.',
+    tags: ['handshake'],
+    auth: 'owner',
+    query: HandshakeQuery,
+    response: { status: 200, description: 'Capability handshake', schema: CapabilityHandshake },
   },
   {
     operationId: 'listAgents',

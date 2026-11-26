@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Router } from './router.js';
 
 /** Six MiB covers one base64 media upload within the decoded 4 MiB bound. */
-const MAX_BODY_BYTES = 6 * 1024 * 1024;
+export const MAX_BODY_BYTES = 6 * 1024 * 1024;
 
 function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {

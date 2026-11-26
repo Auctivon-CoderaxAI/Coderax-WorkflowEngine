@@ -30,6 +30,7 @@ function toMessage(message: StoredMessage): Message {
     createdAt: message.createdAt,
     ...(message.unfinished !== undefined ? { unfinished: message.unfinished } : {}),
     ...(message.agent ? { agent: message.agent } : {}),
+    ...(message.media ? { media: message.media } : {}),
   };
 }
 

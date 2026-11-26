@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { sdkMetadata } from './version.js';
 import {
   AgentList,
   MediaIntakeRequest,
@@ -11,6 +12,7 @@ import {
   ArtifactPruneResult,
   ArtifactUploadResult,
   ArtifactVersionList,
+  CapabilityHandshake,
   CapabilityReport,
   ChatReply,
   Conversation,
@@ -34,6 +36,7 @@ import type {
   ArtifactVersionRequest,
   ChatRequest,
   DataMode,
+  HandshakeQuery,
   DeliverableRequestInput,
   PermissionDecisionRequest,
   WorkSubmitRequest,
@@ -141,6 +144,9 @@ export class CoderaxClient {
     timeoutMs: number;
   };
 
+  /** The versions this client was built against; see `./version`. */
+  static readonly metadata = sdkMetadata();
+
   constructor(options: CoderaxClientOptions) {
     this.options = {
       baseUrl: options.baseUrl,
@@ -212,6 +218,17 @@ export class CoderaxClient {
     input: RequestInput,
   ): Promise<T> {
     return this.parse<T>(schema, await this.send(input), input.path);
+  }
+
+  handshake(options: HandshakeQuery = {}): Promise<CapabilityHandshake> {
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+      query: {
+        ...(options.contract === undefined ? {} : { contract: options.contract }),
+        ...(options.fingerprint === undefined ? {} : { fingerprint: options.fingerprint }),
+      },
+    });
   }
 
   health(): Promise<HealthReport> {
@@ -471,6 +488,46 @@ export class CoderaxClient {
   }
 }
 
+/**
+ * The one-to-one map between published operations and client methods.
+ *
+ * `tests/contract/sdk-coverage.test.ts` asserts this covers the route catalogue
+ * exactly, so a route cannot be published without a client method and a method
+ * cannot exist for an unpublished route.
+ */
+export const SDK_OPERATION_COVERAGE = {
+  getHealth: 'health',
+  getReadiness: 'readiness',
+  getHandshake: 'handshake',
+  listAgents: 'agents',
+  listModels: 'models',
+  listCapabilities: 'capabilities',
+  intakeMedia: 'intakeMedia',
+  generateDeliverable: 'deliver',
+  submitChat: 'chat',
+  submitWork: 'submitWork',
+  getTask: 'task',
+  cancelTask: 'cancel',
+  resumeTask: 'resume',
+  retryTask: 'retry',
+  streamTaskEvents: 'events',
+  listConversations: 'conversations',
+  getConversation: 'conversation',
+  listMemory: 'memory',
+  listPermissions: 'permissions',
+  decidePermission: 'decidePermission',
+  listArtifacts: 'artifacts',
+  uploadArtifact: 'uploadArtifact',
+  pruneArtifacts: 'pruneArtifacts',
+  getArtifact: 'artifact',
+  uploadArtifactVersion: 'uploadArtifactVersion',
+  listArtifactVersions: 'artifactVersions',
+  downloadArtifact: 'downloadArtifact',
+  exportArtifact: 'exportArtifact',
+  deleteArtifact: 'deleteArtifact',
+  listNotifications: 'notifications',
+} as const;
+
 export type {
   ArtifactKind,
   ArtifactUploadRequest,
@@ -480,3 +537,6 @@ export type {
   PermissionDecisionRequest,
   WorkSubmitRequest,
 };
+
+export * from './version.js';
+export * from './compat.js';

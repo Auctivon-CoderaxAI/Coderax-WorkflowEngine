@@ -1,4 +1,5 @@
 import type {
+  MediaReference,
   AgentId,
   ArtifactKind,
   ArtifactMediaType,
@@ -109,6 +110,8 @@ export type StoredMessage = {
   createdAt: IsoDateTime;
   unfinished?: boolean;
   agent?: AgentId;
+  /** Metadata for images accepted on this turn; never the bytes. */
+  media?: MediaReference[];
 };
 
 export type MemoryRecord = {

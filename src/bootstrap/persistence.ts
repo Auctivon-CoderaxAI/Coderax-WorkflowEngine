@@ -72,7 +72,7 @@ export type PersistenceInput = {
 
 const NO_CLOSE = async (): Promise<void> => undefined;
 
-const MEMORY_VALUE_LIMIT = 20_000;
+export const MEMORY_VALUE_LIMIT = 20_000;
 
 function collectionName(config: EngineConfig, base: string): string {
   return `${config.persistence.collectionPrefix}${base}`;

@@ -121,6 +121,7 @@ export function createNativeAgent(input: {
       const steps = planner.plan({ objective, maxSteps: request.maxSteps });
       const history = request.history ?? [];
       const completed: string[] = [];
+      const images = (request.media ?? []).map((entry) => entry.dataUrl);
       const sections: string[] = [];
       let usageIn: number | undefined;
       let usageOut: number | undefined;
@@ -138,6 +139,12 @@ export function createNativeAgent(input: {
           completed,
           history,
         });
+        // Images accompany the objective on the first model call only; later
+        // steps continue from the plan and the text already produced.
+        const messages =
+          images.length > 0 && completed.length === 0
+            ? [{ role: 'user' as const, text: stepPrompt, images }]
+            : undefined;
         const promptTokens = estimateTokens([NATIVE_SYSTEM, stepPrompt]);
         if (request.budget) {
           const inputLeft = request.budget.maxInputTokens - budgetedInput;
@@ -170,6 +177,7 @@ export function createNativeAgent(input: {
               allowFallback: request.allowFallback,
               system: NATIVE_SYSTEM,
               prompt: stepPrompt,
+              ...(messages === undefined ? {} : { messages }),
               signal: request.signal,
               ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
             })) {
@@ -197,6 +205,7 @@ export function createNativeAgent(input: {
               allowFallback: request.allowFallback,
               system: NATIVE_SYSTEM,
               prompt: stepPrompt,
+              ...(messages === undefined ? {} : { messages }),
               signal: request.signal,
               ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
             });

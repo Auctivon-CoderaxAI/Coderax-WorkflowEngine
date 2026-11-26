@@ -59,7 +59,10 @@ import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.j
 import { buildTranscript } from './transcript.js';
 import type { ArtifactToolkit } from '../artifacts/types.js';
 import { ArtifactPersistError } from '../artifacts/types.js';
-import { intakeMedia as validateMediaAttachments } from '../media/intake.js';
+import {
+  intakeMedia as validateMediaAttachments,
+  mediaDataUrl,
+} from '../media/intake.js';
 import type { CapabilityRegistry } from '../capabilities/registry.js';
 
 export type ApplicationServiceDeps = {
@@ -1096,11 +1099,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!adapter.ok) return adapter;
       const external = checkExternal(adapter.value.engine, request.mode);
       if (!external.ok) return external;
+      const validatedMedia = validateMediaAttachments(request.attachments);
+      if (!validatedMedia.ok) return validatedMedia;
+      const media = validatedMedia.value;
+      if (media.length > 0 && adapter.value.engine !== 'native') {
+        return fail(
+          'unsupported_media_type',
+          'Image attachments are supported only by Coderax Native; the external engine receives text.',
+        );
+      }
       const routing = inferRoutingMode({ objective: request.message });
       const model = deps.models.resolve(request.model, request.mode, {
         operation: 'chat',
         routing,
         estimatedInputTokens: estimateTokens([request.message]),
+        ...(media.length > 0 ? { requireVision: true } : {}),
       });
       if (!model.ok) return model;
 
@@ -1132,6 +1145,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         role: 'user',
         text: request.message,
         createdAt: now,
+        ...(media.length > 0 ? { media: media.map((entry) => entry.reference) } : {}),
       });
 
       const history = adapter.value.isolation.conversations === 'granted'
@@ -1163,6 +1177,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             conversationId,
             objective: request.message,
             ...(history === undefined ? {} : { history }),
+            ...(media.length > 0
+              ? {
+                  media: media.map((entry) => ({
+                    reference: entry.reference,
+                    dataUrl: mediaDataUrl(entry),
+                  })),
+                }
+              : {}),
             model: model.value.ref,
             routing,
             allowFallback: request.model === undefined,
