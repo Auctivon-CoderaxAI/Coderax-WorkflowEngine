@@ -173,8 +173,8 @@ jobs:
 
       # High and critical advisories fail the gate. A documented exception is
       # not used: an advisory is fixed by upgrading, not by ignoring it. The
-      # machine-readable gate retries a transient registry read and refuses to
-      # pass when it cannot obtain audit metadata. One call audits the complete
-      # tree, including runtime dependencies.
+      # machine-readable gate refuses to pass when it cannot obtain audit
+      # metadata, and one call audits the complete tree including runtime
+      # dependencies.
       - name: Audit the complete installed tree
         run: npm run gate:audit
