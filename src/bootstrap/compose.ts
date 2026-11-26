@@ -9,18 +9,10 @@ import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
+import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
-import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
-import type { WorkRunTable } from '../persistence/work-runs.js';
-import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
-import type { MongoCollectionLike } from '../persistence/mongo.js';
-import { createMongoConnector, MongoUnavailableError } from '../persistence/mongo-connect.js';
-import type { MongoConnection, MongoConnector } from '../persistence/mongo-connect.js';
-import { createTaskRepository } from '../persistence/tasks.js';
-import { createConversationRepository } from '../persistence/conversations.js';
-import { createNotificationStore } from '../persistence/notifications.js';
-import { createMemoryStore } from '../memory/store.js';
+import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionStore } from '../permissions/store.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
@@ -41,16 +33,10 @@ import {
   type ApplicationDependencies,
   type InfrastructureDependencies,
 } from './container.js';
+import { buildPersistence } from './persistence.js';
+import { StartupError } from './startup-error.js';
 
-export class StartupError extends Error {
-  readonly issues: string[];
-
-  constructor(issues: string[]) {
-    super(`The engine cannot start (${issues.length} blocking issue${issues.length === 1 ? '' : 's'})`);
-    this.name = 'StartupError';
-    this.issues = issues;
-  }
-}
+export { StartupError } from './startup-error.js';
 
 export type Application = {
   dependencies: ApplicationDependencies;
@@ -77,7 +63,7 @@ export type ComposeInput = {
    * a reachable connection string; nothing here weakens the startup gate.
    */
   persistence?: {
-    workRuns?: MongoCollectionLike;
+    database?: MongoDatabase;
     connect?: MongoConnector;
   };
 };
@@ -129,77 +115,6 @@ function modelDescriptors(input: {
           detail: 'No zero-cost inference endpoint is configured.',
         },
   }));
-}
-
-type PersistenceRuntime = {
-  driver: 'memory' | 'mongo';
-  table: WorkRunTable;
-  close: () => Promise<void>;
-};
-
-const NO_CLOSE = async (): Promise<void> => undefined;
-
-/**
- * Opens the Work run collection named by the validated persistence setting.
- * Every failure here is a startup failure: a deployment that asked for durable
- * leases must not come up on process-local ones.
- */
-async function resolveWorkRunCollection(
-  input: ComposeInput,
-  env: NodeJS.ProcessEnv,
-): Promise<MongoConnection> {
-  const settings = input.config.persistence;
-  const injected = input.persistence?.workRuns;
-  if (injected) {
-    return { collection: injected, close: NO_CLOSE };
-  }
-
-  const uri = env[settings.uriEnv]?.trim();
-  if (!uri) {
-    throw new StartupError([
-      `persistence.driver is mongo but ${settings.uriEnv} is not set; set it or select persistence.driver=memory`,
-    ]);
-  }
-
-  const connect = input.persistence?.connect ?? createMongoConnector();
-  try {
-    return await connect({
-      uri,
-      database: settings.database,
-      collection: settings.workRunsCollection,
-    });
-  } catch (error) {
-    throw new StartupError([
-      error instanceof MongoUnavailableError
-        ? error.message
-        : `persistence.driver is mongo but ${settings.database}.${settings.workRunsCollection} could not be opened: ${(error as Error).message}`,
-    ]);
-  }
-}
-
-async function buildPersistence(
-  input: ComposeInput,
-  env: NodeJS.ProcessEnv,
-): Promise<PersistenceRuntime> {
-  const settings = input.config.persistence;
-  if (settings.driver === 'memory') {
-    return { driver: 'memory', table: createInMemoryWorkRunTable(), close: NO_CLOSE };
-  }
-
-  const connection = await resolveWorkRunCollection(input, env);
-  try {
-    await ensureWorkRunIndexes(connection.collection);
-  } catch (error) {
-    await connection.close().catch(() => undefined);
-    throw new StartupError([
-      `persistence.driver is mongo but the ${settings.workRunsCollection} collection is unusable: ${(error as Error).message}`,
-    ]);
-  }
-  return {
-    driver: 'mongo',
-    table: createMongoWorkRunTable(connection.collection),
-    close: connection.close,
-  };
 }
 
 /**
@@ -273,13 +188,18 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     maxTokensPerDay: config.models.dailyTokenBudget,
   });
 
-  const persistence = await buildPersistence(input, env);
-  const lease = createLeaseStore(persistence.table);
-  const tasks = createTaskRepository();
-  const conversations = createConversationRepository();
-  const memory = createMemoryStore({ clock, maxValueLength: 20_000 });
+  const persistence = await buildPersistence({
+    config,
+    env,
+    clock,
+    ...(input.persistence ?? {}),
+  });
+  const lease = persistence.lease;
+  const tasks = persistence.tasks;
+  const conversations = persistence.conversations;
+  const memory = persistence.memory;
   const permissions = createPermissionStore({ clock, ids });
-  const notifications = createNotificationStore();
+  const notifications = persistence.notifications;
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
@@ -291,6 +211,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     clock,
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
+    cleanupGraceMs: config.execution.cancelGraceMs,
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -333,9 +254,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
           status: 'ok' as const,
           detail:
             persistence.driver === 'mongo'
-              ? 'Work run leases are stored in MongoDB. Task records are process-local and lost on restart; ' +
-                'a surviving lease can block new work for its conversation until it expires.'
-              : 'Work run leases are process-local; a restart loses them.',
+              ? `Tasks, conversations, memory and leases are stored in MongoDB (${config.persistence.database}).`
+              : 'Tasks, conversations, memory and leases are process-local; a restart loses them.',
         }),
       },
       {
@@ -356,6 +276,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
                   'No agent is available: configure a zero-cost inference endpoint or an injected external transport.',
               };
         },
+      },
+      {
+        // Optional on purpose: an enabled external agent being down degrades the
+        // report without stopping an engine that still has Native.
+        name: 'agents',
+        required: false,
+        check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
     ],
   });

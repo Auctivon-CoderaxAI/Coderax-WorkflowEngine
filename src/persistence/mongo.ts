@@ -19,17 +19,25 @@ import type { WorkRunRow, WorkRunTable } from './work-runs.js';
 
 export type MongoFilter = Record<string, unknown>;
 
-/** The subset of the MongoDB collection API this table needs. */
+/** A lazily executed query; the subset of the driver cursor these stores use. */
+export type MongoCursor = {
+  sort: (spec: Record<string, 1 | -1>) => MongoCursor;
+  limit: (value: number) => MongoCursor;
+  toArray: () => Promise<Record<string, unknown>[]>;
+};
+
+/** The subset of the MongoDB collection API these tables need. */
 export type MongoCollectionLike = {
   createIndex: (
     keys: Record<string, 1 | -1>,
     options?: { unique?: boolean; name?: string },
   ) => Promise<unknown>;
+  insertOne: (document: Record<string, unknown>) => Promise<unknown>;
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;
   findOneAndUpdate: (
     filter: MongoFilter,
     update: { $set: Record<string, unknown> },
-    options: { returnDocument: 'after'; includeResultMetadata: false },
+    options: { returnDocument: 'after' },
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
     filter: MongoFilter,
@@ -38,16 +46,12 @@ export type MongoCollectionLike = {
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
   deleteMany: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
-  find: (filter: MongoFilter) => {
-    sort: (spec: Record<string, 1 | -1>) => {
-      limit: (value: number) => { toArray: () => Promise<Record<string, unknown>[]> };
-    };
-  };
+  find: (filter: MongoFilter) => MongoCursor;
 };
 
 const DUPLICATE_KEY = 11000;
 
-function isDuplicateKey(error: unknown): boolean {
+export function isDuplicateKey(error: unknown): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&
@@ -125,7 +129,7 @@ export function createMongoWorkRunTable(collection: MongoCollectionLike): WorkRu
       const document = await collection.findOneAndUpdate(
         { key, token, expiresAt: { $gt: now } },
         { $set: { expiresAt } },
-        { returnDocument: 'after', includeResultMetadata: false },
+        { returnDocument: 'after' },
       );
       return document ? toRow(document) : null;
     },
@@ -139,7 +143,7 @@ export function createMongoWorkRunTable(collection: MongoCollectionLike): WorkRu
       const document = await collection.findOneAndUpdate(
         { key, expiresAt: { $gt: now } },
         { $set: { cancelRequested: true } },
-        { returnDocument: 'after', includeResultMetadata: false },
+        { returnDocument: 'after' },
       );
       return document ? toRow(document) : null;
     },

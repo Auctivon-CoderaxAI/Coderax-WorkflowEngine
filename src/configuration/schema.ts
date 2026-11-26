@@ -95,6 +95,8 @@ export const ExecutionConfig = z
     eventBufferSize: z.number().int().min(16).max(100_000).default(2_000),
     /** A crashed run's row is readable for this long before a sweep reclaims it. */
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
+    /** How long a cancelled adapter may take to stop before the run is settled. */
+    cancelGraceMs: z.number().int().min(100).max(30_000).default(5_000),
   })
   .strict();
 
@@ -109,7 +111,15 @@ export const PersistenceConfig = z
     /** Name of the variable holding the connection string; never the string. */
     uriEnv: z.string().trim().min(1).default('CODERAX_MONGODB_URI'),
     database: z.string().trim().min(1).default('coderax'),
-    workRunsCollection: z.string().trim().min(1).default('work_runs'),
+    /**
+     * Prepended to every collection name. One prefix keeps a deployment's
+     * collections together without six separate name settings that can drift.
+     */
+    collectionPrefix: z
+      .string()
+      .max(40)
+      .regex(/^[a-z0-9_]*$/, 'collectionPrefix may contain only a-z, 0-9 and _')
+      .default(''),
   })
   .strict();
 

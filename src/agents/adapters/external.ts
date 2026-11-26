@@ -73,6 +73,30 @@ export function createExternalAgentAdapter(options: ExternalAdapterOptions): Age
       conversations: 'none',
     },
     availability,
+    probe: async () => {
+      if (!options.enabled) {
+        return { ok: false, detail: `${options.label} is optional and disabled.` };
+      }
+      if (!options.transport) {
+        return { ok: false, detail: options.missingDetail };
+      }
+      try {
+        await options.transport.probe();
+        probed = {
+          available: true,
+          reason: 'ready',
+          detail: `${options.label} answered its readiness probe.`,
+        };
+        return { ok: true, detail: probed.detail };
+      } catch {
+        probed = {
+          available: false,
+          reason: 'server_unavailable',
+          detail: `${options.label} did not answer its readiness probe.`,
+        };
+        return { ok: false, detail: probed.detail };
+      }
+    },
     run: async (request, report) => {
       if (!options.enabled) {
         return {

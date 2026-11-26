@@ -61,6 +61,13 @@ export function createNativeAgent(input: {
       conversations: 'granted',
     },
     availability,
+    probe: async () => {
+      // Native's readiness is its configuration: there is no remote endpoint to
+      // ask, and calling the model to prove it works would spend the budget on
+      // every health check.
+      const status = availability();
+      return { ok: status.available, detail: status.detail };
+    },
     run: async (request: AgentRunRequest, report: AgentReport): Promise<AgentRunOutcome> => {
       const status = availability();
       if (!status.available) {

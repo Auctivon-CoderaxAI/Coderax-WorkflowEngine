@@ -42,6 +42,12 @@ export function createTaskRunner(input: {
   clock: Clock;
   leaseTtlMs: number;
   heartbeatIntervalMs: number;
+  /**
+   * How long a cancelled adapter may take to stop before the engine stops
+   * waiting. Without a bound, a provider that ignores its abort signal holds the
+   * conversation's only run slot forever.
+   */
+  cleanupGraceMs: number;
 }): TaskRunner {
   return {
     run: async ({ scope, token, adapter, request, report }) => {
@@ -50,17 +56,7 @@ export function createTaskRunner(input: {
       let ownershipLost = false;
       let cancelRequested = false;
 
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<never>((_, reject) => {
-        controller.signal.addEventListener('abort', () => {
-          timeout = setTimeout(() => reject(new Error('Cleanup deadline exceeded')), 5000);
-        }, { once: true });
-      });
-      const onExternalAbort = (): void => {
-        cancelRequested = true;
-        controller.abort();
-      };
-      if (request.signal.aborted) onExternalAbort();
+      const onExternalAbort = (): void => controller.abort();
       request.signal.addEventListener('abort', onExternalAbort, { once: true });
 
       const heartbeat = async (): Promise<void> => {
@@ -90,13 +86,38 @@ export function createTaskRunner(input: {
       }, input.heartbeatIntervalMs);
       timer.unref();
 
+      // The grace clock starts when the run is aborted, not when it starts, so a
+      // long legitimate run is never cut short.
+      let graceTimer: NodeJS.Timeout | null = null;
+      const grace = new Promise<null>((resolve) => {
+        const start = (): void => {
+          if (graceTimer) return;
+          graceTimer = setTimeout(() => resolve(null), input.cleanupGraceMs);
+          graceTimer.unref();
+        };
+        if (controller.signal.aborted) start();
+        else controller.signal.addEventListener('abort', start, { once: true });
+      });
+
       try {
-        const outcome = await Promise.race([
-          adapter.run({ ...request, signal: controller.signal }, event => {
-            if (!controller.signal.aborted) report(event);
-          }),
-          deadline,
-        ]);
+        const running = adapter.run({ ...request, signal: controller.signal }, report);
+        const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
+        if (settled === null) {
+          // The adapter ignored the abort. Its eventual rejection must not become
+          // an unhandled one, and its result must never be applied: the lease and
+          // the task record already say this run is over.
+          void running.catch(() => undefined);
+          return ownershipLost
+            ? {
+                outcome: {
+                  kind: 'interrupted',
+                  detail: 'Execution ownership was superseded by another run.',
+                },
+                ownershipLost: true,
+              }
+            : { outcome: { kind: 'cancelled' }, ownershipLost: false };
+        }
+        const outcome = settled.outcome;
         if (ownershipLost) {
           return {
             outcome: {
@@ -138,7 +159,6 @@ export function createTaskRunner(input: {
             ownershipLost: true,
           };
         }
-        if (cancelRequested) return { outcome: { kind: 'cancelled' }, ownershipLost: false };
         return {
           outcome: {
             kind: 'failed',
@@ -150,7 +170,7 @@ export function createTaskRunner(input: {
         };
       } finally {
         clearInterval(timer);
-        clearTimeout(timeout);
+        if (graceTimer) clearTimeout(graceTimer);
         request.signal.removeEventListener('abort', onExternalAbort);
       }
     },
