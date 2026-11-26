@@ -18,10 +18,11 @@ before the remaining branches can be closed or retargeted.
 | `feat/artifact-intelligence` | `c9bac16` | Not merged. Generators depend on the durable-artifacts schema. |
 | `ci/permanent-quality-gate` | `21015a7` | Not merged. Its suites assume the pre-merge contract and router. |
 
-The 189-test figure on `feat/multimodal-intelligence-core` covers the whole
-Intelligence Core stack, including a second router, MCP, tools and knowledge
-retrieval. It is not 189 media tests. Its media-specific work is
-`src/media/intake.ts`, `src/media/creative.ts` and the associated contract
+The 189-test figure on `feat/multimodal-intelligence-core` was independently
+reproduced in an isolated worktree at `5dd5e66`: `189 tests, 189 pass, 0 fail`.
+That count covers the whole Intelligence Core stack, including a second router,
+MCP, tools and knowledge retrieval; it is not 189 media tests. Its media-specific
+work is `src/media/intake.ts`, `src/media/creative.ts` and the associated contract
 schemas.
 
 ## What this branch adopted
@@ -156,6 +157,15 @@ not mean hosted inference was exercised.
 - No live provider inference, pricing check, eligibility check or privacy-terms
   fetch was performed: no provider credential exists in this environment. The
   router's discovery and policy fixtures are not a substitute for that evidence.
+- Dependency audit: `npm audit --omit=dev --audit-level=high` reports one high
+  advisory in `zod` 3.25.76 (GHSA-mrhx-c7xc-m3w5). The published fix is zod 4.6.7,
+  a major upgrade from the pinned `^3.25.67`; it was not applied silently. Request
+  bodies are bounded by `server.maxBodyBytes`, and collection schemas carry
+  explicit maxima, but the advisory remains until the contract packages move to
+  zod 4.
+- Real MongoDB: `mongod` is not installed in this environment, so only the
+  repository port and the in-memory fake were exercised. Distributed durability,
+  replica behavior and real concurrent quota admission are not claimed.
 
 ## Decisions requested from the owners
 
