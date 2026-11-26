@@ -187,6 +187,12 @@ export const ArtifactVersionRequest = z
     mode: DataMode.default('private'),
     retentionDays: z.number().int().min(0).max(3650).optional(),
     note: z.string().max(500).optional(),
+    /**
+     * Optimistic concurrency. When a caller read version N and sends N here, the
+     * append happens only while the artifact is still at N; otherwise the write
+     * is refused with `conflict` instead of silently replacing a concurrent edit.
+     */
+    expectedVersion: z.number().int().positive().optional(),
   })
   .strict();
 export type ArtifactVersionRequest = z.infer<typeof ArtifactVersionRequest>;
