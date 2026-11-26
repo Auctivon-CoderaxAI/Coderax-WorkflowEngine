@@ -23,7 +23,7 @@ import type {
   StagedArtifact,
   ToolkitContext,
 } from './types.js';
-import { checksPass, flatFilename } from './types.js';
+import { checksPass } from './types.js';
 import { ArtifactPathError, digestOf, readArtifact, writeArtifact } from './file.js';
 import {
   analyzeDocx,
@@ -546,7 +546,7 @@ async function produceDataset(
     folder,
     filename: `${request.filename}.recipe.json`,
     data: recipeText,
-    kind: 'data',
+    kind: 'dataset',
     mediaType: 'application/json',
     title: `${request.filename} reproducible recipe`,
     role: 'part',
@@ -571,7 +571,7 @@ async function produceDataset(
         folder,
         filename: `${request.filename}.analysis.json`,
         data: body,
-        kind: 'data',
+        kind: 'dataset',
         mediaType: 'application/json',
         title: `${request.filename} analysis`,
         role: 'output',
@@ -736,9 +736,11 @@ async function produceSoftware(
       await emit({
         context,
         folder,
-        filename: flatFilename({ base: request.name, path: projectPath, extension }),
+        // The store requires the artifact's file name to be the basename of its
+        // tree path, so the tree is carried by `relativePath`, not by the name.
+        filename: path.posix.basename(projectPath),
         data,
-        kind: 'source',
+        kind: 'software',
         mediaType: sourceMediaType(extension),
         title: projectPath,
         role: 'part',

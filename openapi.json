@@ -5444,13 +5444,21 @@
                               "game",
                               "visualization",
                               "execution",
-                              "data"
+                              "data",
+                              "software",
+                              "dataset",
+                              "other"
                             ]
                           },
                           "filename": {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 200
+                          },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
                           },
                           "mediaType": {
                             "type": "string",

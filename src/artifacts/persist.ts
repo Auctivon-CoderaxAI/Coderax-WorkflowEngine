@@ -50,12 +50,14 @@ type Stored = {
   created: boolean;
 };
 
-function duplicateFilenames(files: StagedArtifact[]): string | null {
+function duplicatePaths(files: StagedArtifact[]): string | null {
   const seen = new Set<string>();
   for (const file of files) {
-    const name = file.filename.normalize('NFC').toLowerCase();
-    if (seen.has(name)) return file.filename;
-    seen.add(name);
+    // A tree path identifies a file inside a project; a flat deliverable has
+    // only its name. Both are compared after Unicode normalisation.
+    const key = (file.projectPath ?? file.filename).normalize('NFC').toLowerCase();
+    if (seen.has(key)) return file.projectPath ?? file.filename;
+    seen.add(key);
   }
   return null;
 }
@@ -63,11 +65,11 @@ function duplicateFilenames(files: StagedArtifact[]): string | null {
 export async function persistProduced(
   input: PersistInput,
 ): Promise<ServiceResult<PersistedDeliverable>> {
-  const duplicate = duplicateFilenames(input.produced.files);
+  const duplicate = duplicatePaths(input.produced.files);
   if (duplicate) {
     return fail(
       'validation_failed',
-      `Two produced files normalize to the same artifact name (${duplicate}).`,
+      `Two produced files normalize to the same path (${duplicate}).`,
     );
   }
   for (const file of input.produced.files) {
@@ -112,6 +114,7 @@ export async function persistProduced(
       kind: file.kind,
       mode: input.mode,
       note: input.note.slice(0, 500),
+      ...(file.projectPath ? { relativePath: file.projectPath } : {}),
       ...(input.projectId ? { projectId: input.projectId } : {}),
     };
     if (file.versionOf) {
