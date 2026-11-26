@@ -219,6 +219,58 @@ test('approval suspension survives a failed lease release and becomes resumable 
   }
 });
 
+for (const cancelFirst of [true, false]) {
+  test(`cancellation wins when ${cancelFirst ? 'flagging first' : 'suspending first'}`, async (t) => {
+    const started = await startTestApp({
+      gateway: fakeGateway({ plan: READ_PLAN }),
+      config: configWithScopedRead(),
+    });
+    try {
+      const { service, dependencies: deps } = started.app;
+      const update = deps.tasks.updateFenced;
+      let cancellation: Awaited<ReturnType<typeof service.cancelTask>> | undefined;
+      const get = deps.tasks.get;
+      t.mock.method(deps.tasks, 'updateFenced', async (input: Parameters<typeof update>[0]) => {
+        if (input.patch.state !== 'awaiting_approval') return update(input);
+        if (cancelFirst) {
+          cancellation = await service.cancelTask(principal, input.taskId);
+          return update(input);
+        }
+
+        // Give cancelTask an active snapshot even though suspension has already
+        // won the task write. The old lease remains live at this point.
+        const active = await get(input.taskId);
+        const applied = await update(input);
+        const stale = t.mock.method(deps.tasks, 'get', async (id: string) => {
+          stale.mock.restore();
+          return id === input.taskId ? active : get(id);
+        });
+        cancellation = await service.cancelTask(principal, input.taskId);
+        return applied;
+      });
+
+      const submitted = await service.submitWork(principal, {
+        objective: 'Read the notes and answer from them',
+        mode: 'cloud',
+        requireApproval: true,
+        reasoning: 'complex',
+      });
+      assert.ok(submitted.ok);
+      const { taskId, generation } = submitted.value;
+      await deps.scheduler.idle();
+
+      assert.ok(cancellation?.ok && cancellation.value.outcome === 'accepted');
+      const final = await service.task(principal, taskId);
+      assert.ok(final.ok && final.value.state === 'cancelled');
+      const resumed = await service.resumeTask(principal, taskId, generation);
+      assert.ok(resumed.ok && resumed.value.outcome === 'already_terminal');
+      assert.equal(resumed.value.generation, generation);
+    } finally {
+      await started.close();
+    }
+  });
+}
+
 test('a denied scoped action fails the run instead of re-asking on resume', async () => {
   const started = await startTestApp({
     gateway: fakeGateway({ plan: READ_PLAN }),

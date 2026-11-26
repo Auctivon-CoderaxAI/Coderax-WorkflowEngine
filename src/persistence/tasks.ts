@@ -8,7 +8,7 @@ export type CreateTaskResult =
 
 export type FencedWriteResult =
   | { applied: true; task: TaskRecord }
-  | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' };
+  | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' | 'guard_rejected' };
 
 /**
  * The only writer of task state.
@@ -22,7 +22,13 @@ export type TaskRepository = {
   create: (task: TaskRecord) => Promise<CreateTaskResult>;
   get: (taskId: string) => Promise<TaskRecord | null>;
   updateFenced: (
-    input: { taskId: string; token: string; patch: TaskPatch },
+    input: {
+      taskId: string;
+      token: string;
+      patch: TaskPatch;
+      /** Optional atomic guard for the cancellation/suspension handoff. */
+      guard?: 'not_cancel_requested' | 'not_awaiting_approval';
+    },
   ) => Promise<FencedWriteResult>;
   /**
    * Settles a task that was never claimed (no run token). It refuses anything a
@@ -77,7 +83,7 @@ export function createTaskRepository(): TaskRepository {
       const task = tasks.get(taskId);
       return task ? { ...task } : null;
     },
-    updateFenced: async ({ taskId, token, patch }) => {
+    updateFenced: async ({ taskId, token, patch, guard }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
       if (!isAuthorizedGeneration(task.runToken, token)) {
@@ -85,6 +91,10 @@ export function createTaskRepository(): TaskRepository {
       }
       if (isTerminalState(task.state)) {
         return { applied: false, reason: 'terminal' };
+      }
+      if ((guard === 'not_cancel_requested' && task.cancelRequested) ||
+          (guard === 'not_awaiting_approval' && task.state === 'awaiting_approval')) {
+        return { applied: false, reason: 'guard_rejected' };
       }
       const next: TaskRecord = { ...task, ...patch, runToken: task.runToken };
       tasks.set(taskId, next);

@@ -292,10 +292,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const now = deps.clock.iso();
-    const mergedUsage = mergeUsage(
-      task.usage,
-      'usage' in outcome ? outcome.usage : undefined,
-    );
+    const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
+    const mergedUsage = mergeUsage(task.usage, generationUsage);
+    let partialSaved = false;
 
     // Escalation is a suspended state, not a failure: the plan, its checkpoint
     // and any partial text stay durable so an approved resume continues exactly
@@ -305,7 +304,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // Save partial text before another generation can start.
       const partial = checkpoint?.text ?? '';
       if (partial.length > 0) {
-        await deps.conversations
+        partialSaved = await deps.conversations
           .appendMessage({
             messageId: deps.ids.messageId(),
             conversationId: task.conversationId,
@@ -315,7 +314,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             unfinished: true,
             agent: task.agent,
           })
-          .catch(() => undefined);
+          .then(() => true, () => false);
       }
       // Persist the suspension under the old fence before releasing ownership.
       // A restart between these operations can resume from the saved checkpoint
@@ -323,6 +322,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const applied = await deps.tasks.updateFenced({
         taskId: task.taskId,
         token,
+        guard: 'not_cancel_requested',
         patch: {
           state: 'awaiting_approval',
           updatedAt: now,
@@ -338,27 +338,32 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           ...(mergedUsage ? { usage: mergedUsage } : {}),
         },
       });
-      try {
-        if (applied.applied) {
-          // Suspension settles this generation's usage even though the task is not
-          // terminal. The resumed generation is charged separately, so the daily
-          // ledger matches the cumulative usage the owner sees.
-          if ('usage' in outcome && outcome.usage) {
-            deps.budget.consume(task.ownerId, outcome.usage, new Date(now));
+      if (!applied.applied && applied.reason === 'guard_rejected') {
+        // The cancellation flag won the task write after the runner stopped.
+        outcome = { kind: 'cancelled' };
+      } else {
+        try {
+          if (applied.applied) {
+            // Suspension settles this generation's usage even though the task is not
+            // terminal. The resumed generation is charged separately, so the daily
+            // ledger matches the cumulative usage the owner sees.
+            if (generationUsage) {
+              deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+            }
+            deps.audit.record({
+              actor: task.ownerId,
+              action: 'work.awaiting_approval',
+              taskId: task.taskId,
+              conversationId: task.conversationId,
+              outcome: 'accepted',
+              detail: outcome.code,
+            });
           }
-          deps.audit.record({
-            actor: task.ownerId,
-            action: 'work.awaiting_approval',
-            taskId: task.taskId,
-            conversationId: task.conversationId,
-            outcome: 'accepted',
-            detail: outcome.code,
-          });
+        } finally {
+          await releaseLease(task, token);
         }
-      } finally {
-        await releaseLease(task, token);
+        return;
       }
-      return;
     }
 
     const patch =
@@ -417,8 +422,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const settled = applied.task;
     // Charge the usage produced by this generation, not the merged task total:
     // the previous generation was already charged when it settled.
-    if ('usage' in outcome && outcome.usage) {
-      deps.budget.consume(task.ownerId, outcome.usage, new Date(now));
+    if (generationUsage) {
+      deps.budget.consume(task.ownerId, generationUsage, new Date(now));
     }
     try {
       if (outcome.kind === 'completed') {
@@ -436,7 +441,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
 
       const text = checkpoint?.text ?? '';
-      if (text.length > 0) {
+      if (text.length > 0 && !partialSaved) {
         await deps.conversations.appendMessage({
           messageId: deps.ids.messageId(),
           conversationId: task.conversationId,
@@ -799,6 +804,47 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
+  async function cancelSuspended(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const applied = await deps.tasks.updateFenced({
+      taskId: task.taskId,
+      token: task.runToken ?? '',
+      patch: {
+        state: 'cancelled',
+        updatedAt: deps.clock.iso(),
+        cancelRequested: true,
+      },
+    });
+    if (applied.applied) {
+      publish(applied.task, 'task.cancelled', {});
+      await notifyTerminal(applied.task, 'cancelled');
+      deps.audit.record({
+        actor: task.ownerId,
+        action: 'work.cancelled',
+        taskId: task.taskId,
+        conversationId: task.conversationId,
+        outcome: 'cancelled',
+      });
+      return ok({
+        taskId: task.taskId,
+        state: 'cancelled',
+        generation: task.generation,
+        outcome: 'accepted',
+      });
+    }
+    return lostCancellation(task);
+  }
+
+  async function lostCancellation(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const current = await deps.tasks.get(task.taskId);
+    const cancelled = current?.runToken === task.runToken && current?.state === 'cancelled';
+    return ok({
+      taskId: task.taskId,
+      state: current?.state ?? task.state,
+      generation: current?.generation ?? task.generation,
+      outcome: cancelled ? 'accepted' : 'superseded',
+    });
+  }
+
   const service: ApplicationService = {
     health: () => deps.health.report(),
     readiness: () => deps.health.readiness(),
@@ -968,57 +1014,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
-      // The adapter has stopped once suspension is saved. Cancel through the
-      // task fence even if the old lease is still being released.
-      if (task.state === 'awaiting_approval') {
-        const applied = await deps.tasks.updateFenced({
-          taskId: task.taskId,
-          token: task.runToken ?? '',
-          patch: {
-            state: 'cancelled',
-            updatedAt: deps.clock.iso(),
-            cancelRequested: true,
-          },
-        });
-        if (applied.applied) {
-          publish(applied.task, 'task.cancelled', {});
-          await notifyTerminal(applied.task, 'cancelled');
-          deps.audit.record({
-            actor: task.ownerId,
-            action: 'work.cancelled',
-            taskId: task.taskId,
-            conversationId: task.conversationId,
-            outcome: 'cancelled',
-          });
-          return ok({
-            taskId: task.taskId,
-            state: 'cancelled',
-            generation: task.generation,
-            outcome: 'accepted',
-          });
-        }
-        return ok({
-          taskId: task.taskId,
-          state: (await deps.tasks.get(task.taskId))?.state ?? task.state,
-          generation: task.generation,
-          outcome: 'superseded',
-        });
-      }
+      // Once suspended, the task can be cancelled even without a live lease.
+      if (task.state === 'awaiting_approval') return cancelSuspended(task);
 
       const outcome = await deps.lease.cancel({
         key: workRunKey(scopeOf(task)),
         now: deps.clock.now(),
       });
       if (outcome === 'none') {
+        const current = await deps.tasks.get(taskId);
+        if (current?.runToken === task.runToken && current?.state === 'awaiting_approval') {
+          return cancelSuspended(current);
+        }
         return fail('not_found', 'No live run exists for that task.');
       }
 
       if (outcome === 'requested') {
-        await deps.tasks.updateFenced({
+        const applied = await deps.tasks.updateFenced({
           taskId: task.taskId,
           token: task.runToken ?? '',
+          guard: 'not_awaiting_approval',
           patch: { cancelRequested: true, updatedAt: deps.clock.iso() },
         });
+        if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+        if (!applied.applied) return lostCancellation(task);
         controllers.get(task.taskId)?.abort();
         return ok({
           taskId: task.taskId,
@@ -1031,6 +1050,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const applied = await deps.tasks.updateFenced({
         taskId: task.taskId,
         token: task.runToken ?? '',
+        guard: 'not_awaiting_approval',
         patch: {
           state: 'interrupted',
           updatedAt: deps.clock.iso(),
@@ -1042,14 +1062,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           },
         },
       });
-      if (!applied.applied) {
-        return ok({
-          taskId: task.taskId,
-          state: (await deps.tasks.get(task.taskId))?.state ?? task.state,
-          generation: task.generation,
-          outcome: 'superseded',
-        });
-      }
+      if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+      if (!applied.applied) return lostCancellation(task);
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });

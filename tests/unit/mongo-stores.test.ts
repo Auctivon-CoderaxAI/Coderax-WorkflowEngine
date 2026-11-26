@@ -121,6 +121,26 @@ test('a fenced write is refused for a superseded generation and after a terminal
   );
 });
 
+test('Mongo guards the cancellation and suspension writes against each other', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'flagged', runToken: 'run-1', state: 'running',
+    cancelRequested: true }));
+  await tasks.create(taskRecord({ taskId: 'suspended', conversationId: 'conv_2',
+    runToken: 'run-2', state: 'awaiting_approval' }));
+
+  assert.deepEqual(await tasks.updateFenced({
+    taskId: 'flagged', token: 'run-1', guard: 'not_cancel_requested',
+    patch: { state: 'awaiting_approval' },
+  }), { applied: false, reason: 'guard_rejected' });
+  assert.equal((await tasks.get('flagged'))?.state, 'running');
+
+  assert.deepEqual(await tasks.updateFenced({
+    taskId: 'suspended', token: 'run-2', guard: 'not_awaiting_approval',
+    patch: { cancelRequested: true },
+  }), { applied: false, reason: 'guard_rejected' });
+  assert.equal((await tasks.get('suspended'))?.cancelRequested, false);
+});
+
 test('a task is never settled through the unclaimed path', async () => {
   const tasks = createMongoTaskRepository(createFakeCollection());
   await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1' }));
