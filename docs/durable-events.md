@@ -85,7 +85,11 @@ root is held.
 
 PR #2 adds the native tool loop, model router, MCP, retrieval and durable
 approvals. The merge was **exercised**, not estimated: `git merge-tree` against
-PR #2's current head `7a1036b` produces a merged tree and five conflicted files.
+PR #2's head produces a merged tree and five conflicted files.
+
+PR #2's head is not stable — it advanced from `2072df8` to `7a1036b` to `c8f9a34`
+while this branch was being reconciled. Re-measure against its head at merge
+time; the table below was measured at `c8f9a34`.
 
 | File | This branch | PR #2 | Measured result |
 | --- | --- | --- | --- |
@@ -102,6 +106,27 @@ PR #2's current head `7a1036b` produces a merged tree and five conflicted files.
 All five are the same kind of conflict: both sides append or extend one
 structure. None is a disagreement about behaviour, and none requires dropping a
 change from either side.
+
+### The other branches in flight
+
+Two more feature branches exist off `main` and were measured the same way. This
+branch was written without knowledge of them, so the result is a useful
+independence check:
+
+| Branch | Head | Files it changes | Conflicts with this branch |
+| --- | --- | --- | --- |
+| `feat/native-reasoning-planner` | `37b5292` | `src/agents/native/**`, `src/domain.ts`, `src/execution/runner.ts`, `service.ts`, `compose.ts`, `configuration/schema.ts`, `permissions/gate.ts` | `docs/parity-matrix.md` only — every source file auto-merges |
+| `feat/zero-cost-model-router` | `7ae5cbc` | `src/models/**`, `service.ts`, tests | `docs/parity-matrix.md` only — every source file auto-merges |
+
+Both merge cleanly apart from the capability table. That is deliberate: this
+branch adds no agent reasoning, no model routing and no provider transport, so it
+has nothing to duplicate. `src/models/**`, `src/agents/**`, `src/tools/**` and
+`src/mcp/**` are untouched here.
+
+The capability table is the one universal conflict, because every change that
+closes a row edits it. Resolve it by keeping every branch's row edits and
+recounting the summary. Do not drop it from any branch: a matrix that still says
+`Missing` for a shipped capability is a false record.
 
 **Untouched by this branch:** `src/execution/runner.ts`, all of `src/agents/**`,
 `src/models/**`, `src/tools/**`, `src/mcp/**`, `src/knowledge/**`,
