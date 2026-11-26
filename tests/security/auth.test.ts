@@ -8,7 +8,7 @@ test('health is public, owner operations are not', async () => {
     const health = await fetch(`${started.url}/v1/health`);
     assert.equal(health.status, 200);
     const body = (await health.json()) as { contractVersion: string };
-    assert.equal(body.contractVersion, '1.2.0');
+    assert.equal(body.contractVersion, '1.1.0');
 
     const anonymous = await fetch(`${started.url}/v1/agents`);
     assert.equal(anonymous.status, 401);

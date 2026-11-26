@@ -5,7 +5,9 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-export const CONTRACT_VERSION = '1.2.0' as const;
+// API 1.2.0 is owned by the unified-contract PR. Until that lands, this branch
+// keeps the published 1.1.0 version rather than defining a competing 1.2.0.
+export const CONTRACT_VERSION = '1.1.0' as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
 

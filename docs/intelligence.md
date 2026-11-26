@@ -185,7 +185,10 @@ A terminal task carries an `ExecutionReceipt` built from the engine's plan,
 completed steps and dispatched tool ledger, never from model text. It records
 the generation, model, terminal state, usage, request count, per-step state and a
 digest of the plan; tool arguments are represented by a digest. The receipt is
-exposed on task status and covered by the published contract.
+exposed additively on task status. Canonical API 1.2.0 operation identifiers,
+OpenAPI and SDK packaging are owned by the unified-contract PR; this branch keeps
+the published `1.1.0` version until that surface lands and does not define a
+competing 1.2.0 contract.
 
 ## External agents
 
