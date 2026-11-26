@@ -35,7 +35,7 @@ Status vocabulary:
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/log.ts` + `src/persistence/mongo-events.ts`: durable per-task stream, sequence and generation fencing, hydration, bounded retention | Preserved (fake-verified; no live DB) |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/log.ts` + `src/persistence/mongo-events.ts`: durable per-task stream, sequence and generation fencing, hydration, bounded retention | Preserved (event stream live-verified against `mongo:8.0` in CI; other tables fake-verified) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
@@ -102,15 +102,19 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` on this branch (the `feat/intelligence-core` head plus this
-  work): 301 tests, 301 passed, 0 failed, 0 skipped, OpenAPI drift clean. The
-  live-MongoDB tier ran against a local `mongod` 8.0.4 and runs in CI against a
-  `mongo:8.0` service container. See
-  [`durable-recovery.md`](durable-recovery.md) for the per-defect evidence.
+- `npm run verify` on this stack (the `feat/intelligence-core` head at `c851c34`
+  plus this work): 314 tests, 314 passed, 0 failed, 0 skipped, OpenAPI drift
+  clean. The hosted run at `eeff068` executed the live-MongoDB tier against a
+  `mongo:8.0` service container:
+  [`verify` #45902462884](https://github.com/Auctivon-CoderaxAI/Coderax-WorkflowEngine/actions/runs/45902462884).
+  See [`durable-recovery.md`](durable-recovery.md) for the per-defect evidence.
 - Durable stores are verified three ways, and the tiers are not interchangeable:
   an in-memory log, a semantics-faithful collection fake that enforces unique
-  indexes and cursor operators, and a real server. The real server is a single
-  standalone `mongod`; no replica set, failover or secondary-read behaviour is
-  claimed.
-- Hosted CI is reported at the exact pushed head in the pull request; a local run
-  is the only evidence until that run exists.
+  indexes and cursor operators, and a real server. The live tier exercises the
+  event log's indexes, duplicate refusal, watermark and restart sequence; the
+  lease, task, conversation, memory and notification tables remain fake-verified.
+  The real server is a single standalone `mongod`; no replica set, failover or
+  secondary-read behaviour is claimed.
+- The hosted run above is the evidence for this stack. This matrix is updated by
+  a documentation-only commit on the same branch, which changes no code and no
+  test; the pull request reports the run for that final head separately.
