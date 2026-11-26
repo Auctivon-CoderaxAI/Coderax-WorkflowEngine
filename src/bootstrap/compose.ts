@@ -14,6 +14,8 @@ import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createHealthService } from '../observability/health.js';
+import { createMetricsRegistry } from '../observability/metrics.js';
+import { createJsonLogger } from '../observability/logger.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
 import { createQuarantineRegistry } from '../execution/quarantine.js';
@@ -131,6 +133,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const { config } = input;
   const clock = createClock();
   const ids = createIdGenerator();
+  const metrics = createMetricsRegistry({ clock });
+  const logger = config.observability.requestLogs
+    ? createJsonLogger({ clock, write: (line) => process.stdout.write(line) })
+    : undefined;
 
   let auth;
   try {
@@ -229,6 +235,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
+    onLeaseFailure: (kind) => metrics.recordLeaseFailure(kind),
     onAbandoned: ({ scope, generation, workspaceRoot }) => {
       // The adapter ignored its abort and may still be running. Nothing can kill
       // it in-process, so the root it can still write is taken out of service
@@ -355,6 +362,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     idempotency,
     retention,
     persistencePing: persistence.ping,
+    metrics,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -408,6 +416,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     router,
     host: config.server.host,
     port: config.server.port,
+    requestId: ids.requestId,
+    metrics,
+    ...(logger ? { logger } : {}),
   });
 
   return {
@@ -418,6 +429,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     persistence: { driver: persistence.driver, durable: persistence.driver === 'mongo' },
     start: async () => {
       const { url } = await server.listen();
+      logger?.info('engine.started', {
+        driver: persistence.driver,
+        durable: persistence.driver === 'mongo',
+        url,
+      });
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
@@ -428,6 +444,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       return { url };
     },
     stop: async () => {
+      logger?.info('engine.stopping', {});
       retention.stop();
       await service.shutdown();
       await server.close();

@@ -12,7 +12,7 @@ authoritative engine.
 | 1 | Repository creation, architecture audit, dependency map, migration plan | **Done** | This document, `docs/architecture-audit.md`, private repository |
 | 2 | Shared contracts, configuration standard, SDK | **Done in this repo** | `packages/contracts`, `packages/sdk`, `openapi.json`, drift gate |
 | 3 | Centralized routing, dependency injection, initialization | **Done in this repo** | `src/api/router.ts`, `src/bootstrap`, contract tests |
-| 4 | Extract durable execution and Native agent | **Partially done** | Lease store, fencing, heartbeat runner, recovery, Native agent, zero-cost routing are implemented here; the real provider adapters and Mongo lease table are wired at deployment time |
+| 4 | Extract durable execution and Native agent | **Partially done** | Durable Mongo lease/task/event/memory/notification/permission/receipt/checkpoint/idempotency stores, fencing, heartbeat runner, recovery, Native agent and zero-cost routing are implemented and restart-tested here; real provider adapters remain |
 | 5 | Integrate Coderax UI through the new API | **Not started** | Requires PRs #308/#309 to settle |
 | 6 | Integrate CoderaxCLI through the same SDK | **Not started** | CLI consumes OpenAPI today; switching it is a small, separate PR |
 | 7 | Migrate remaining capabilities, verify parity | **Not started** | Needs the parity matrix below |
@@ -47,7 +47,7 @@ Deliberately **not** extracted yet:
 | --- | --- | --- |
 | LibreChat native agent internals (tools, MCP, skills, subagents, RAG, code execution) | Large, working, and coupled to `packages/api` state; moving it wholesale would be a rewrite | Phase 7 |
 | Real model provider adapters | Needs the verified provider list and secrets at deploy time; the port and a real OpenAI-compatible client exist | Phase 4/8 |
-| Mongo lease table | The adapter exists (`adaptMongoWorkRunMethods`); the default here is the in-process table, which is honest but single-process | Phase 8 |
+| Mongo lease table | Implemented and selected with `persistence.driver=mongo`; startup fails closed without a reachable collection, and the live restart suite covers it. The in-process table remains the default for a single-process developer run. | Done |
 | OpenCode server transport | Needs the pinned `@opencode-ai/sdk` and an operator-run server | Phase 4 |
 | FreeBuff SDK transport | Needs a trusted source-built SDK | Phase 4 |
 | Cloud browser orchestration, DeploymentPlatformAI integration, plugins | Not implemented anywhere yet | Phase 7 |
@@ -61,7 +61,9 @@ Deliberately **not** extracted yet:
    version; the SDK version tracks `CONTRACT_VERSION`.
 3. Route Work submission and task status for **new** tasks to the engine. Old tasks
    stay readable through their existing route until Phase 9.
-4. Add the blue-dot indicator over the notifications endpoint.
+4. Add the blue-dot indicator over the durable notifications endpoint
+   (`GET /v1/notifications`, `POST /v1/notifications/read`); both clients read
+   the same unread count.
 5. Keep Chat on the current path until Phase 7 parity; do not run two engines for
    the same conversation.
 

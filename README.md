@@ -55,7 +55,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 126 tests: unit, contract, integration, security, e2e
+npm test                          # 129 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -102,6 +102,22 @@ Coderax Web and CoderaxCLI consume the same authoritative endpoints through
 | Permission decision | `POST /v1/work/{taskId}/permissions` | single decision, conflict after expiry or a second decision |
 | Budget and quota | `GET /v1/budget` | used, remaining, exhausted, UTC reset instant |
 | Idempotent submission | `POST /v1/work` with `idempotencyKey` | replay returns the original task; a different body conflicts |
+
+## Operability
+
+- Every response carries `x-request-id`. A bounded client-supplied value is
+  accepted and echoed; anything unsafe is replaced. The same id appears in a
+  Problem body and in the matching structured log line.
+- Request logs are JSON lines (`ts`, `level`, `event`, `requestId`, `method`,
+  `status`, `durationMs`) with no path, body or header. Strings pass through the
+  same redaction as provider output. Set `observability.requestLogs` to `false`
+  in `engine.json` to silence them.
+- `GET /v1/metrics` reports active/total requests, queue active and pending,
+  execution-state counts, dropped events, lease renewal/fencing failures,
+  receipt count and the live persistence ping. Counters are process-local and
+  reset on restart; durable facts stay in their stores.
+- `npm run evidence` runs the suite and the OpenAPI drift check, then writes
+  `docs/capability-evidence.md` from the actual result and route catalogue.
 
 ## Architecture
 

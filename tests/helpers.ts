@@ -37,6 +37,7 @@ export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, 
     workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
     models: { route: [{ providerId: 'free', modelId: 'coderax-small' }] },
     execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
+    observability: { requestLogs: false },
     ...(overrides ?? {}),
   });
 }

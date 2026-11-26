@@ -156,6 +156,16 @@ export const PersistenceConfig = z
   })
   .strict();
 
+export const ObservabilityConfig = z
+  .object({
+    /**
+     * Emit one structured JSON line per completed request. It contains method,
+     * status, duration and the request id, never the path, body or a header.
+     */
+    requestLogs: z.boolean().default(true),
+  })
+  .strict();
+
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
@@ -167,6 +177,7 @@ export const EngineConfigSchema = z
     execution: ExecutionConfig.default({}),
     persistence: PersistenceConfig.default({}),
     retention: RetentionConfig.default({}),
+    observability: ObservabilityConfig.default({}),
   })
   .strict();
 

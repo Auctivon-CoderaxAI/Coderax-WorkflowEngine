@@ -12,6 +12,7 @@ import {
   PermissionListQuery,
 } from './permissions.js';
 import { ReceiptList, ReceiptListQuery } from './receipts.js';
+import { MetricsReport } from './metrics.js';
 import {
   CancelRequest,
   ChatReply,
@@ -285,6 +286,15 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['models'],
     auth: 'owner',
     response: { status: 200, description: 'Budget and quota status', schema: BudgetState },
+  },
+  {
+    operationId: 'getMetrics',
+    method: 'GET',
+    path: '/v1/metrics',
+    summary: 'Process-local queue, execution, lease and persistence counters.',
+    tags: ['health'],
+    auth: 'owner',
+    response: { status: 200, description: 'Metrics snapshot', schema: MetricsReport },
   },
   {
     operationId: 'listReceipts',

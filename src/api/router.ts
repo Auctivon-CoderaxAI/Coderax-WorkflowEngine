@@ -28,6 +28,8 @@ export type RawRequest = {
   authorization: string | undefined;
   bodyText: string;
   lastEventId?: string;
+  /** A validated correlation id supplied by the transport, or generated here. */
+  requestId?: string;
 };
 
 export type RouterResult =
@@ -162,7 +164,7 @@ export function createRouter(input: {
   return {
     registry: input.registry,
     handle: async (raw) => {
-      const requestId = input.requestId();
+      const requestId = raw.requestId ?? input.requestId();
       const [pathname, search = ''] = raw.path.split('?');
       const rawQuery = Object.fromEntries(new URLSearchParams(search).entries());
       const method = raw.method.toUpperCase();

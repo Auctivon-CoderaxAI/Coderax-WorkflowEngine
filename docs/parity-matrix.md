@@ -55,7 +55,7 @@ Status vocabulary:
 | 39 | Checkpoints | none | `checkpoint.completedSteps` + accumulated text + append-only durable history | Strengthened |
 | 40 | Approval records bound to an exact resource | approvals store | permission store; adapter does not create the record | Simplified (review F5) |
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
-| 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
+| 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + `/v1/health`, `/v1/ready`, `/v1/metrics` | Strengthened (queue, execution and lease counters) |
 | 43 | Audit trail of execution receipts | none | durable, owner/task-scoped `audit_receipts` with bounded retention | Strengthened |
 | 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
 | 45 | Cloud browser orchestration | none | none | Not started (both) |
@@ -69,8 +69,8 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 22 |
-| Strengthened | 11 |
+| Preserved | 21 |
+| Strengthened | 12 |
 | Simplified | 5 |
 | Missing | 9 |
 | Changed (deliberate) | 2 |

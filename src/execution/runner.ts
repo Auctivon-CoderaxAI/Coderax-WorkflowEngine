@@ -67,6 +67,8 @@ export function createTaskRunner(input: {
     generation: number;
     workspaceRoot: string;
   }) => void;
+  /** Process counter hook; a metrics failure must never affect execution. */
+  onLeaseFailure?: (kind: 'renewFailed' | 'renewError') => void;
 }): TaskRunner {
   return {
     run: async ({
@@ -102,6 +104,7 @@ export function createTaskRunner(input: {
         });
         if (!result.renewed) {
           ownershipLost = true;
+          input.onLeaseFailure?.('renewFailed');
           controller.abort();
           return;
         }
@@ -113,6 +116,7 @@ export function createTaskRunner(input: {
 
       const timer = setInterval(() => {
         void heartbeat().catch(() => {
+          input.onLeaseFailure?.('renewError');
           ownershipLost = true;
           controller.abort();
         });

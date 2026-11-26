@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Router } from './router.js';
+import type { Logger } from '../observability/logger.js';
+import type { MetricsRegistry } from '../observability/metrics.js';
 
 const MAX_BODY_BYTES = 1_048_576;
 
@@ -21,14 +23,30 @@ function readBody(request: IncomingMessage): Promise<string> {
   });
 }
 
-function sendJson(response: ServerResponse, status: number, body: unknown): void {
+function sendJson(
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+  requestId: string,
+): void {
   const payload = JSON.stringify(body);
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'content-length': Buffer.byteLength(payload),
+    'x-request-id': requestId,
   });
   response.end(payload);
+}
+
+/**
+ * An untrusted inbound correlation id is accepted only when it is a bounded,
+ * header-safe token. Anything else is replaced rather than reflected into a log
+ * or a response header.
+ */
+function acceptedRequestId(value: string | string[] | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  return /^[A-Za-z0-9._:-]{8,128}$/.test(value) ? value : null;
 }
 
 export type HttpServer = {
@@ -40,8 +58,16 @@ export function createHttpServer(input: {
   router: Router;
   host: string;
   port: number;
+  requestId: () => string;
+  metrics?: MetricsRegistry;
+  logger?: Logger;
 }): HttpServer {
   const server: Server = createServer((request, response) => {
+    const requestId = acceptedRequestId(request.headers['x-request-id']) ?? input.requestId();
+    const startedMs = Date.now();
+    let status = 500;
+    input.metrics?.requestStarted();
+
     void (async () => {
       let bodyText = '';
       try {
@@ -49,14 +75,21 @@ export function createHttpServer(input: {
           bodyText = await readBody(request);
         }
       } catch {
-        sendJson(response, 413, {
-          type: 'https://coderax.dev/problems/validation_failed',
-          title: 'validation failed',
-          status: 413,
-          code: 'validation_failed',
-          detail: 'The request body is too large.',
-          retryable: false,
-        });
+        status = 413;
+        sendJson(
+          response,
+          413,
+          {
+            type: 'https://coderax.dev/problems/validation_failed',
+            title: 'validation failed',
+            status: 413,
+            code: 'validation_failed',
+            detail: 'The request body is too large.',
+            requestId,
+            retryable: false,
+          },
+          requestId,
+        );
         return;
       }
 
@@ -66,13 +99,15 @@ export function createHttpServer(input: {
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
+          requestId,
           ...(typeof request.headers['last-event-id'] === 'string'
             ? { lastEventId: request.headers['last-event-id'] }
             : {}),
         });
+        status = result.status;
 
         if (result.kind === 'json') {
-          sendJson(response, result.status, result.body);
+          sendJson(response, result.status, result.body, requestId);
           return;
         }
 
@@ -80,6 +115,7 @@ export function createHttpServer(input: {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',
           connection: 'keep-alive',
+          'x-request-id': requestId,
         });
         for await (const event of result.events) {
           if (response.destroyed || response.writableEnded) break;
@@ -87,20 +123,40 @@ export function createHttpServer(input: {
         }
         response.end();
       } catch {
+        status = 500;
+        input.logger?.error('http.request_failed', {
+          requestId,
+          method: request.method ?? 'GET',
+          durationMs: Date.now() - startedMs,
+        });
         if (!response.headersSent) {
-          sendJson(response, 500, {
-            type: 'https://coderax.dev/problems/internal_error',
-            title: 'internal error',
-            status: 500,
-            code: 'internal_error',
-            detail: 'The request could not be completed.',
-            retryable: false,
-          });
+          sendJson(
+            response,
+            500,
+            {
+              type: 'https://coderax.dev/problems/internal_error',
+              title: 'internal error',
+              status: 500,
+              code: 'internal_error',
+              detail: 'The request could not be completed.',
+              requestId,
+              retryable: false,
+            },
+            requestId,
+          );
         } else {
           response.end();
         }
       }
-    })();
+    })().finally(() => {
+      input.metrics?.requestFinished(status);
+      input.logger?.info('http.request', {
+        requestId,
+        method: request.method ?? 'GET',
+        status,
+        durationMs: Date.now() - startedMs,
+      });
+    });
   });
 
   return {

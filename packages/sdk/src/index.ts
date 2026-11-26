@@ -12,6 +12,7 @@ import {
   MemoryEntry,
   MemoryList,
   ModelList,
+  MetricsReport,
   NotificationList,
   PermissionList,
   Problem,
@@ -269,6 +270,14 @@ export class CoderaxClient {
       method: 'GET',
       path: `/v1/work/${encodeURIComponent(taskId)}/receipts`,
       query: { limit: query.limit, cursor: query.cursor },
+    });
+  }
+
+  /** Process-local queue, execution, lease and persistence counters. */
+  metrics(): Promise<MetricsReport> {
+    return this.request<MetricsReport>(MetricsReport, {
+      method: 'GET',
+      path: '/v1/metrics',
     });
   }
 

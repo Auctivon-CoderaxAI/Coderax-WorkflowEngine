@@ -260,6 +260,12 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     body: service.budget(context.principal),
   }));
 
+  registry.register('getMetrics', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.metrics(context.principal),
+  }));
+
   registry.register('listReceipts', async (context) => {
     const result = await service.receipts(
       context.principal,

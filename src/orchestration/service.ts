@@ -13,6 +13,7 @@ import type {
   MemoryEntry,
   MemoryList,
   MemoryWriteRequest,
+  MetricsReport,
   ModelList,
   NotificationList,
   NotificationListQuery,
@@ -52,6 +53,7 @@ import type { CheckpointStore } from '../persistence/checkpoints.js';
 import type { IdempotencyStore } from '../persistence/idempotency.js';
 import type { RetentionService } from '../persistence/retention.js';
 import type { PersistenceHealth } from '../bootstrap/persistence.js';
+import type { MetricsRegistry } from '../observability/metrics.js';
 import { createHash } from 'node:crypto';
 import { decodeCursor } from '../persistence/pagination.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
@@ -86,6 +88,7 @@ export type ApplicationServiceDeps = {
   idempotency: IdempotencyStore;
   retention: RetentionService;
   persistencePing: () => Promise<PersistenceHealth>;
+  metrics: MetricsRegistry;
 };
 
 export type EventStream = {
@@ -174,6 +177,7 @@ export type ApplicationService = {
     taskId: string,
     query: ReceiptListQuery,
   ) => Promise<ServiceResult<ReceiptList>>;
+  metrics: (principal: Principal) => Promise<MetricsReport>;
   events: (
     principal: Principal,
     taskId: string,
@@ -428,6 +432,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
+        deps.metrics.recordLeaseFailure('fencingFailed');
         await releaseLease(task, token);
       }
       return;
@@ -1464,6 +1469,44 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           ...(query.cursor ? { cursor: query.cursor } : {}),
         }),
       );
+    },
+
+    metrics: async (principal) => {
+      const [byState, auditPage, persistence] = await Promise.all([
+        deps.tasks.countByState(),
+        deps.audit.list({ actor: principal.ownerId, limit: 1 }),
+        deps.persistencePing().catch(() => ({
+          driver: deps.config.persistence.driver,
+          durable: deps.config.persistence.driver === 'mongo',
+          ok: false,
+          latencyMs: 0,
+          detail: 'The persistence ping did not complete.',
+        })),
+      ]);
+      const counters = deps.metrics.counters();
+      const total = Object.values(byState).reduce((sum, count) => sum + count, 0);
+      return {
+        startedAt: deps.metrics.startedAt,
+        uptimeMs: deps.metrics.uptimeMs(),
+        requests: counters.requests,
+        queue: {
+          active: deps.scheduler.active(),
+          pending: deps.scheduler.pending(),
+          maxConcurrent: deps.config.execution.maxConcurrentTasks,
+        },
+        tasks: { total, byState },
+        events: { dropped: deps.events.dropped() },
+        leases: counters.leases,
+        audit: { receipts: auditPage.total },
+        persistence: {
+          driver: persistence.driver === 'mongo' ? 'mongo' : 'in_memory',
+          durable: persistence.durable,
+          ok: persistence.ok,
+          latencyMs: persistence.latencyMs,
+          checkedAt: deps.clock.iso(),
+          detail: persistence.detail,
+        },
+      };
     },
 
     events: async (principal, taskId, after) => {

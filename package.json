@@ -23,7 +23,8 @@
     "test:mongo": "npm run build && node --test \"dist/tests/integration/mongo-restart.test.js\"",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
-    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
+    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js",
+    "evidence": "npm run build && node dist/scripts/capability-evidence.js"
   },
   "dependencies": {
     "@coderax/contracts": "*",

@@ -3173,6 +3173,275 @@
         }
       }
     },
+    "/v1/metrics": {
+      "get": {
+        "operationId": "getMetrics",
+        "summary": "Process-local queue, execution, lease and persistence counters.",
+        "tags": [
+          "health"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metrics snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "startedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "uptimeMs": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "requests": {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "active": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "succeeded": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "rejected": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "failed": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "total",
+                        "active",
+                        "succeeded",
+                        "rejected",
+                        "failed"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "queue": {
+                      "type": "object",
+                      "properties": {
+                        "active": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "pending": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "maxConcurrent": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "active",
+                        "pending",
+                        "maxConcurrent"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "tasks": {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "byState": {
+                          "type": "object",
+                          "properties": {
+                            "queued": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "running": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "awaiting_approval": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "completed": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "failed": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "cancelled": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "interrupted": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          },
+                          "required": [
+                            "queued",
+                            "running",
+                            "awaiting_approval",
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "interrupted"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "total",
+                        "byState"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "events": {
+                      "type": "object",
+                      "properties": {
+                        "dropped": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "dropped"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "leases": {
+                      "type": "object",
+                      "properties": {
+                        "renewFailed": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "renewError": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "fencingFailed": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "renewFailed",
+                        "renewError",
+                        "fencingFailed"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "audit": {
+                      "type": "object",
+                      "properties": {
+                        "receipts": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "receipts"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "persistence": {
+                      "type": "object",
+                      "properties": {
+                        "driver": {
+                          "type": "string",
+                          "enum": [
+                            "in_memory",
+                            "mongo"
+                          ]
+                        },
+                        "durable": {
+                          "type": "boolean"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "latencyMs": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "checkedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "detail": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "driver",
+                        "durable",
+                        "ok",
+                        "latencyMs",
+                        "checkedAt",
+                        "detail"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "startedAt",
+                    "uptimeMs",
+                    "requests",
+                    "queue",
+                    "tasks",
+                    "events",
+                    "leases",
+                    "audit",
+                    "persistence"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/work/{taskId}/receipts": {
       "get": {
         "operationId": "listReceipts",

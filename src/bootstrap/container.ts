@@ -20,6 +20,7 @@ import type { CheckpointStore } from '../persistence/checkpoints.js';
 import type { IdempotencyStore } from '../persistence/idempotency.js';
 import type { RetentionService } from '../persistence/retention.js';
 import type { PersistenceHealth } from './persistence.js';
+import type { MetricsRegistry } from '../observability/metrics.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { Router } from '../api/router.js';
 
@@ -55,6 +56,7 @@ export type InfrastructureDependencies = {
   idempotency: IdempotencyStore;
   retention: RetentionService;
   persistencePing: () => Promise<PersistenceHealth>;
+  metrics: MetricsRegistry;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -81,6 +83,7 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'idempotency',
   'retention',
   'persistencePing',
+  'metrics',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {
