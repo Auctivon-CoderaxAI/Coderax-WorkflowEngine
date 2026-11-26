@@ -27,7 +27,9 @@ fixes that this branch still needed. Two were genuine gaps and are adopted:
   resolve to a metadata service or a private port, and a second DNS answer can
   move the connection after validation. The module resolves every address,
   refuses non-public ranges, pins the validated address into the request and
-  never follows a redirect. `http.fetch` now uses it instead of `fetch`.
+  never follows a redirect. `http.fetch` now uses it instead of `fetch`; a test
+  proves an approved call dispatches through that pinned transport with the
+  validated address list and that global `fetch` is never invoked.
 - `src/security/shell.ts` — command validation for `shell.run`. An allowlisted
   name is not enough (`node -e`, `sh -c`, `git -c`, `xargs` and a workspace-bin
   `PATH` shadow all escape it), so the module resolves an absolute executable,
@@ -319,13 +321,13 @@ the live gate is the distributed evidence.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full compiled suite | `node --test "dist/tests/**/*.test.js"` with `CODERAX_REQUIRE_MONGO=1` | **349 passed, 0 failed, 0 skipped** |
+| Full compiled suite | `node --test "dist/tests/**/*.test.js"` with `CODERAX_REQUIRE_MONGO=1` | **350 passed, 0 failed, 0 skipped** |
 | Every permanent gate | `node dist/scripts/run-gates.js all` | **11/11 passed** |
 | Gate manifest coverage | `node dist/scripts/run-gates.js coverage` | 52 test files assigned, none unclaimed |
 | Dependency audit | `node dist/scripts/run-gates.js audit` | critical 0, high 0, moderate 0 |
 | OpenAPI drift | `node dist/scripts/run-gates.js openapi` | no drift |
 | Baseline reproduction | clean worktree at `808dfd3`, `npm ci && npm run build && node repro.mjs` | all six defects `true` |
-| Live quota window | `tests/live/mongo.test.ts` | deterministic: unique budget index, second replica refused, replayed settlement charged once; three consecutive live-suite runs green |
+| Live quota race | `tests/live/mongo.test.ts` | two replicas race for the last request in one durable window: exactly one wins, the loser is refused with `requests`, the settlement replay is a no-op; three consecutive live-suite runs green |
 
 ### Simplification pass
 
@@ -345,15 +347,21 @@ A fresh-eyes review removed state and writes that no invariant needed:
   a 162-test run, a process-local budget and an uncontacted MongoDB, none of
   which is true at this head.
 
-### Deterministic live quota evidence
+### Concurrent live quota evidence
 
-The live quota test no longer races two inserts to produce its result. It owns a
-database of its own, asserts the unique `budget_window` index,
-takes the only request slot with one ledger, refuses a second ledger against the
-same durable window, replays the settlement through a fresh store and verifies a
-fresh process reads the same totals. Every step has one possible outcome, so the
-test does not depend on scheduling. It was run three times consecutively with a
-real MongoDB 7.0.14 server: 7 passed, 0 failed, 0 skipped each time.
+The live quota test owns a database of its own and asserts the unique
+`budget_window` index. It then races two independent replicas for the only
+request slot of the day: both ledgers call `reserve` in the same tick against the
+same durable window. Which replica wins depends on scheduling, so the test
+asserts the invariant instead of the winner: exactly one outcome is `allowed`, the
+loser is refused with reason `requests` at `requests: 1`, and the durable window
+holds one reservation, not two. That is the production path — conditional update,
+first-row insert, duplicate-key retry — not a sequential stand-in.
+
+The winning reservation is then settled once; replaying that settlement through a
+fresh store returns `false`, and a fresh ledger process reads the same totals. The
+suite was run three times consecutively with a real MongoDB 7.0.14 server: 7
+passed, 0 failed, 0 skipped each time.
 
 ### Authority consolidation
 

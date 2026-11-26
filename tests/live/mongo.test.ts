@@ -456,7 +456,7 @@ test(
 );
 
 test(
-  'a real database shares one quota window and settles a reservation once',
+  'two racing replicas in a real database produce exactly one quota winner',
   { skip: uri ? false : required ? false : 'CODERAX_TEST_MONGO_URI is not set' },
   async () => {
     requiresDatabase();
@@ -477,22 +477,46 @@ test(
 
       const now = new Date('2026-11-26T10:00:00.000Z');
       const limits = { maxRequestsPerDay: 1, maxTokensPerDay: 1_000 };
-      const first = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
+      const replicas = [0, 1].map(() =>
+        createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) }),
+      );
 
-      // The first replica takes the only request slot of the day.
-      const winner = await first.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 });
-      assert.equal(winner.allowed, true);
-      if (!winner.allowed) return;
+      // Both replicas share one durable window and reserve in the same tick.
+      // Which replica wins is a scheduling detail; that exactly one wins is the
+      // constraint the unique index and the conditional update enforce.
+      const outcomes = await Promise.all(
+        replicas.map((replica) =>
+          replica.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
+        ),
+      );
+      assert.equal(
+        outcomes.filter((outcome) => outcome.allowed).length,
+        1,
+        JSON.stringify(outcomes),
+      );
+      const winnerIndex = outcomes.findIndex((outcome) => outcome.allowed);
+      const winner = outcomes[winnerIndex];
+      const winnerLedger = replicas[winnerIndex];
+      assert.ok(winner && winnerLedger && winner.allowed);
+      if (!winner || !winnerLedger || !winner.allowed) return;
+      const loser = outcomes.find((outcome) => !outcome.allowed);
+      assert.ok(loser && loser.allowed === false);
+      if (!loser || loser.allowed !== false) return;
+      assert.equal(loser.reason, 'requests');
+      assert.equal(loser.requests, 1);
 
-      // A second replica shares the durable window and is refused.
-      const second = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
-      const refused = await second.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 });
-      assert.equal(refused.allowed, false);
-      assert.equal(refused.allowed === false && refused.reason, 'requests');
+      // The durable window holds the winner's reservation, not two.
+      const shared = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
+      assert.deepEqual(await shared.snapshot('owner', now), {
+        requests: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      assert.equal(await shared.available('owner', now), false);
 
       // Settlement is applied once. Replaying the same reservation through a
       // fresh store (as another replica would) is a no-op, not a second charge.
-      await first.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 });
+      await winnerLedger.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 });
       const replay = await createMongoBudgetStore(collection).settle({
         key: budgetKey('owner', now),
         reservationId: winner.reservation.id,

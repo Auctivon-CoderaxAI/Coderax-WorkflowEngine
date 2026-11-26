@@ -9,6 +9,11 @@ import { bounded, failure, success } from './types.js';
 import { confinePath } from './paths.js';
 import { scopedChildEnvironment } from '../security/environment.js';
 import { authorizeUrl, pinnedRequest } from '../security/network.js';
+import type {
+  DestinationPolicy,
+  NetworkResponse,
+  ParsedTarget,
+} from '../security/network.js';
 import { validateCommand } from '../security/shell.js';
 
 /**
@@ -38,11 +43,29 @@ export type ToolKnowledge = {
   }) => Promise<KnowledgeSearchResult>;
 };
 
+/**
+ * The pinned transport `http.fetch` dispatches through. The default is
+ * `pinnedRequest`; it is injectable only so a test can prove the approved path
+ * dispatches through this client, because the policy above it forbids reaching
+ * a server on this machine.
+ */
+export type NetworkDispatch = (
+  input: {
+    target: ParsedTarget;
+    method: string;
+    headers?: Record<string, string>;
+    body?: string;
+    signal?: AbortSignal;
+  },
+  policy: DestinationPolicy,
+) => Promise<NetworkResponse>;
+
 export type BuiltinToolOptions = {
   shellEnabled: boolean;
   allowedCommands: string[];
   networkEnabled: boolean;
   allowedHosts: string[];
+  networkFetch?: NetworkDispatch;
   maxOutputBytes: number;
   commandTimeoutMs: number;
   maxSearchFiles: number;
@@ -77,6 +100,7 @@ async function directoryEntries(root: string, relative: string, depth: number): 
 
 export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
   const limit = options.maxOutputBytes;
+  const dispatch = options.networkFetch ?? pinnedRequest;
   const tools: Tool[] = [
     {
       name: 'fs.read',
@@ -317,7 +341,7 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
           return failure(code, authorized.detail);
         }
         try {
-          const response = await pinnedRequest(
+          const response = await dispatch(
             {
               target: authorized.target,
               method: typed.method,

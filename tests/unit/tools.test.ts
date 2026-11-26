@@ -149,6 +149,66 @@ test('cancellation during approval prevents an approved write', async () => {
   }
 });
 
+test('an approved http.fetch dispatches through the pinned client, never global fetch', async () => {
+  const space = workspace();
+  const original = globalThis.fetch;
+  let globalFetchCalls = 0;
+  globalThis.fetch = (async () => {
+    globalFetchCalls += 1;
+    throw new Error('http.fetch must not use global fetch');
+  }) as typeof fetch;
+  try {
+    const dispatched: Array<{ url: string; method: string; addresses: string[]; body?: string }> = [];
+    const tools = createToolRuntime({
+      tools: createBuiltinTools({
+        shellEnabled: false,
+        allowedCommands: [],
+        networkEnabled: true,
+        allowedHosts: ['1.1.1.1'],
+        maxOutputBytes: 10_000,
+        commandTimeoutMs: 1_000,
+        maxSearchFiles: 100,
+        memory: null,
+        knowledge: null,
+        // The real policy refuses a non-public destination, so no local server
+        // can stand in for the network. Only the transport is injected;
+        // authorization above it is the production code path.
+        networkFetch: async (input) => {
+          dispatched.push({
+            url: input.target.url.href,
+            method: input.method,
+            addresses: input.target.addresses,
+            ...(input.body === undefined ? {} : { body: input.body }),
+          });
+          return { status: 200, headers: {}, text: 'pinned response', truncated: false };
+        },
+      }),
+    });
+    let approvals = 0;
+    const outcome = await tools.call({
+      name: 'http.fetch',
+      arguments: { url: 'https://1.1.1.1/status', method: 'POST', body: 'payload' },
+      context: context(space.root),
+      gate: {
+        ensure: async () => {
+          approvals += 1;
+          return { decision: 'granted' };
+        },
+      },
+    });
+    assert.equal(outcome.approval, 'granted');
+    assert.equal(outcome.result.ok && outcome.result.output, 'HTTP 200\npinned response');
+    assert.equal(approvals, 1);
+    assert.deepEqual(dispatched, [
+      { url: 'https://1.1.1.1/status', method: 'POST', addresses: ['1.1.1.1'], body: 'payload' },
+    ]);
+    assert.equal(globalFetchCalls, 0);
+  } finally {
+    globalThis.fetch = original;
+    space.cleanup();
+  }
+});
+
 test('the HTTP tool refuses plaintext before approval and private destinations before dispatch', async () => {
   const space = workspace();
   try {
