@@ -316,6 +316,70 @@ test('an unacknowledged committed create remains pending until scheduled', async
   }
 });
 
+test('a confirmed failed create releases the key and lease and removes its user message', async () => {
+  const started = await startTestApp();
+  const deps = started.app.dependencies;
+  const create = deps.tasks.create;
+  const request = {
+    objective: 'retry a failed insert', mode: 'cloud' as const, requireApproval: false,
+    conversationId: 'conv_retry_create', idempotencyKey: 'retry-create',
+  };
+  deps.tasks.create = async () => { throw new Error('insert refused'); };
+  try {
+    const first = await started.app.service.submitWork(principal, request);
+    assert.ok(!first.ok && first.retryable);
+    assert.deepEqual(await deps.conversations.messages(request.conversationId), []);
+
+    deps.tasks.create = create;
+    const retry = await started.app.service.submitWork(principal, request);
+    assert.ok(retry.ok, 'the same key and conversation can be used immediately');
+    await deps.scheduler.idle();
+    const messages = await deps.conversations.messages(request.conversationId);
+    assert.deepEqual(messages.filter((message) => message.role === 'user').map((message) => message.text), [request.objective]);
+  } finally {
+    await started.close();
+  }
+});
+
+test('a retry reconciles an unknown create outcome against the original task', async () => {
+  const started = await startTestApp();
+  const deps = started.app.dependencies;
+  const { create, get } = deps.tasks;
+  let taskId: string | undefined;
+  let canRead = false;
+  let inserts = 0;
+  deps.tasks.create = async (task) => {
+    inserts += 1;
+    taskId = task.taskId;
+    assert.ok((await create(task)).ok);
+    throw new Error('lost acknowledgement');
+  };
+  deps.tasks.get = async (id) => {
+    if (!canRead) throw new Error('read unavailable');
+    return get(id);
+  };
+  const request = { objective: 'reconcile one run', mode: 'cloud' as const, requireApproval: false, idempotencyKey: 'retry-unknown' };
+  try {
+    const first = await started.app.service.submitWork(principal, request);
+    assert.ok(!first.ok && first.retryable);
+    const unknown = await started.app.service.submitWork(principal, request);
+    assert.ok(!unknown.ok && unknown.retryable);
+    assert.equal(inserts, 1);
+
+    canRead = true;
+    const retry = await started.app.service.submitWork(principal, request);
+    assert.ok(retry.ok);
+    assert.equal(retry.value.replayed, true);
+    assert.equal(retry.value.taskId, taskId);
+    await deps.scheduler.idle();
+    assert.equal((await get(retry.value.taskId))?.state, 'completed');
+    assert.equal(inserts, 1);
+    assert.equal((await deps.conversations.messages(retry.value.conversationId)).filter((message) => message.role === 'user').length, 1);
+  } finally {
+    await started.close();
+  }
+});
+
 test('a rejected completion fence never publishes a transcript', async () => {
   const started = await startTestApp();
   const deps = started.app.dependencies;

@@ -92,9 +92,9 @@ function acceptsEventStream(accept: string | undefined): boolean {
  * terminal event so a client never waits for a task that already finished; a
  * disconnected client stops consuming without stopping the run.
  */
-async function* toEventStream(stream: EventStream): AsyncIterable<unknown> {
+async function* toEventStream(stream: EventStream, signalTruncation: boolean): AsyncIterable<unknown> {
   const seen = new Set<string>();
-  if (stream.truncatedEvent) {
+  if (signalTruncation && stream.truncatedEvent) {
     seen.add(stream.truncatedEvent.eventId);
     yield stream.truncatedEvent;
   }
@@ -330,7 +330,11 @@ export function registerRoutes(
     const cursor = typeof after === 'number' ? after : 0;
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'sse', status: 200, events: toEventStream(result.value) };
+    const signalTruncation = context.accept?.split(',').some((entry) => {
+      const [mediaType, ...params] = entry.toLowerCase().split(';').map((part) => part.trim());
+      return mediaType === 'text/event-stream' && params.includes('truncation=signal');
+    }) ?? false;
+    return { kind: 'sse', status: 200, events: toEventStream(result.value, signalTruncation) };
   });
 
   registry.register('listArtifacts', async (context) => {

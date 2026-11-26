@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CONTRACT_VERSION } from '@coderax/contracts';
 import { OWNER_TOKEN, startTestApp } from '../helpers.js';
 
 test('health is public, owner operations are not', async () => {
@@ -9,7 +8,7 @@ test('health is public, owner operations are not', async () => {
     const health = await fetch(`${started.url}/v1/health`);
     assert.equal(health.status, 200);
     const body = (await health.json()) as { contractVersion: string };
-    assert.equal(body.contractVersion, CONTRACT_VERSION);
+    assert.equal(body.contractVersion, '1.0.0');
 
     const anonymous = await fetch(`${started.url}/v1/agents`);
     assert.equal(anonymous.status, 401);

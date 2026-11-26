@@ -281,6 +281,7 @@ function toSchedule(record: ScheduleRecord): Schedule {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  const pendingSubmissions = new Map<string, () => Promise<ServiceResult<TaskAccepted>>>();
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -1063,6 +1064,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (!reservation.ok) {
           const prior = reservation.completedTaskId ? await deps.tasks.get(reservation.completedTaskId) : null;
           if (prior?.ownerId === principal.ownerId) return ok(acceptedFor(prior, true));
+          const recover = reservation.pendingTaskId && pendingSubmissions.get(reservation.pendingTaskId);
+          if (recover) return recover();
           return fail('busy', 'The submission has not yet been confirmed.', true);
         }
       }
@@ -1092,13 +1095,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           agent: agentId,
           createdAt: now,
           updatedAt: now,
-        });
-        await deps.conversations.appendMessage({
-          messageId: deps.ids.messageId(),
-          conversationId,
-          role: 'user',
-          text: request.objective,
-          createdAt: now,
         });
       } catch (error) {
         await releaseKey();
@@ -1156,44 +1152,92 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return fail('busy', 'This conversation already has a live Work run.');
       }
 
-      const created = await deps.tasks.create({
-        ...task,
-        runToken: token,
-        leaseExpiresAt: new Date(
-          claimedAt.getTime() + deps.config.execution.leaseTtlMs,
-        ).toISOString(),
-      }).catch(async (error: unknown) => {
-        // An insert can commit before its acknowledgement is lost.
-        const stored = await deps.tasks.get(taskId);
-        if (stored?.runToken === token) return { ok: true as const, task: stored };
-        // The write may still be in flight. Keep the reservation pending.
-        throw error;
-      });
-      if (!created.ok) {
-        await deps.lease.release({ key, token }).catch(() => false);
+      const accept = (stored: TaskRecord, replayed = false): ServiceResult<TaskAccepted> => {
+        publish(stored, 'task.queued');
+        deps.audit.record({
+          actor: principal.ownerId,
+          action: 'work.accepted',
+          taskId,
+          conversationId,
+          outcome: 'accepted',
+          detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
+        });
+        deps.scheduler.enqueue(() => execute(taskId, token));
+        if (intent) deps.idempotency.complete(intent);
+        return ok(acceptedFor(stored, replayed));
+      };
+
+      const messageId = deps.ids.messageId();
+      const discard = async (): Promise<void> => {
+        await deps.conversations.removeMessage(conversationId, messageId);
+        await deps.lease.release({ key, token });
         await releaseKey();
+      };
+
+      // Only the original submitter can reconcile an in-flight insert. Once it
+      // fails, let retries check that same task ID without creating another run.
+      const notSaved = () => fail('internal_error', 'The submission could not be saved. Retry the request.', true);
+      const retryableRecovery = (recover: (replayed: boolean) => Promise<ServiceResult<TaskAccepted> | null>) => {
+        let running = false;
+        const attempt = async (replayed: boolean): Promise<ServiceResult<TaskAccepted>> => {
+          if (running) return fail('busy', 'The submission has not yet been confirmed.', true);
+          running = true;
+          try {
+            const result = await recover(replayed);
+            if (result === null) return fail('busy', 'The submission has not yet been confirmed.', true);
+            pendingSubmissions.delete(taskId);
+            return result;
+          } finally {
+            running = false;
+          }
+        };
+        if (intent) pendingSubmissions.set(taskId, () => attempt(true));
+        return attempt(false);
+      };
+
+      try {
+        await deps.conversations.appendMessage({
+          messageId,
+          conversationId,
+          role: 'user',
+          text: request.objective,
+          createdAt: now,
+        });
+      } catch {
+        return retryableRecovery(async () => {
+          await discard();
+          return notSaved();
+        });
+      }
+
+      let created;
+      try {
+        created = await deps.tasks.create({
+          ...task,
+          runToken: token,
+          leaseExpiresAt: new Date(
+            claimedAt.getTime() + deps.config.execution.leaseTtlMs,
+          ).toISOString(),
+        });
+      } catch {
+        return retryableRecovery(async (replayed) => {
+          const stored = await deps.tasks.get(taskId).catch(() => undefined);
+          if (stored?.runToken === token && stored.ownerId === task.ownerId) return accept(stored, replayed);
+          if (stored !== null) return null;
+          await discard();
+          return notSaved();
+        });
+      }
+      if (created.ok) return accept(created.task);
+      return retryableRecovery(async () => {
+        await discard();
         return fail(
           'busy',
           created.reason === 'conversation_busy'
             ? 'This conversation already has an active Work task.'
             : 'That task identity is already in use.',
         );
-      }
-
-      publish(created.task, 'task.queued');
-      deps.audit.record({
-        actor: principal.ownerId,
-        action: 'work.accepted',
-        taskId: task.taskId,
-        conversationId,
-        outcome: 'accepted',
-        detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
       });
-
-      deps.scheduler.enqueue(() => execute(task.taskId, token));
-
-      if (intent) deps.idempotency.complete(intent);
-      return ok(acceptedFor(created.task));
     },
 
     tasks: async (principal, query) => {

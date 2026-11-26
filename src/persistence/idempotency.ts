@@ -1,7 +1,7 @@
 import type { Clock } from '../support/clock.js';
 
 type Reservation = { ownerId: string; key: string; taskId: string };
-type ReserveResult = { ok: true } | { ok: false; completedTaskId?: string };
+type ReserveResult = { ok: true } | { ok: false; completedTaskId?: string; pendingTaskId?: string };
 export type IdempotencyStore = {
   reserve: (input: Reservation) => Promise<ReserveResult>;
   complete: (input: Reservation) => void;
@@ -24,7 +24,7 @@ export function createIdempotencyStore(input: {
       const key = partition(request);
       const existing = entries.get(key);
       const now = input.clock.now().getTime();
-      if (existing?.expiresAt === null) return { ok: false };
+      if (existing?.expiresAt === null) return { ok: false, pendingTaskId: existing.taskId };
       if (existing && existing.expiresAt > now) {
         return { ok: false, completedTaskId: existing.taskId };
       }

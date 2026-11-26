@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import type { ChatStreamEvent, ExecutionEvent } from '@coderax/contracts';
 import { CoderaxApiError, CoderaxClient, CoderaxContractError } from '@coderax/sdk';
-import { clientFor, startTestApp, waitFor } from '../helpers.js';
+import { clientFor, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
 
 test('Chat streams typed frames that end at a terminal frame', async () => {
   const started = await startTestApp();
@@ -141,6 +141,18 @@ test('a cursor older than the retained window starts with stream.truncated', asy
     assert.equal(frames[16]?.type, 'task.completed');
     assert.equal(frames.at(-1)?.generation, 1);
     assert.equal(frames.at(-1)?.type, 'task.completed');
+
+    const legacy = await fetch(`${started.url}${accepted.eventsPath}?after=0`, {
+      headers: { authorization: `Bearer ${OWNER_TOKEN}`, accept: 'text/event-stream' },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(legacy.status, 200);
+    const retained = (await legacy.text()).split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as ExecutionEvent);
+    assert.ok(retained[0] && retained[0].seq >= truncated.payload.oldestSeq);
+    assert.ok(retained.every((event) => event.type !== 'stream.truncated'));
+    assert.equal(retained.at(-1)?.eventId, frames.at(-1)?.eventId);
   } finally {
     await started.close();
   }

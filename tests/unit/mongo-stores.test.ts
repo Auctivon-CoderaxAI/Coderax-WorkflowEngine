@@ -239,6 +239,12 @@ test('messages are appended once, ordered, and reflected in the conversation', a
     (await conversations.list('owner-test')).conversations.map((entry) => entry.conversationId),
     ['conv_1'],
   );
+
+  await conversations.removeMessage('wrong_conversation', 'msg_1');
+  assert.equal((await conversations.messages('conv_1')).length, 2);
+  await conversations.removeMessage('conv_1', 'msg_1');
+  await conversations.removeMessage('conv_1', 'msg_1');
+  assert.deepEqual((await conversations.messages('conv_1')).map((entry) => entry.messageId), ['msg_2']);
 });
 
 test('memory is partitioned by mode and replaced on write', async () => {

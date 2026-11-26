@@ -113,7 +113,7 @@
                       ]
                     },
                     "contractVersion": {
-                      "const": "1.2.0"
+                      "const": "1.0.0"
                     },
                     "startedAt": {
                       "type": "string",
@@ -2463,7 +2463,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Server-sent execution events",
+            "description": "Server-sent execution events. Send Accept: text/event-stream; truncation=signal to receive a stream.truncated frame before a shortened replay.",
             "content": {
               "text/event-stream": {
                 "schema": {

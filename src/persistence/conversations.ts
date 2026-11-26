@@ -7,6 +7,7 @@ export type ConversationRepository = {
   get: (ownerId: string, conversationId: string) => Promise<ConversationRecord | null>;
   list: (ownerId: string) => Promise<ConversationList>;
   appendMessage: (message: StoredMessage) => Promise<boolean>;
+  removeMessage: (conversationId: string, messageId: string) => Promise<void>;
   messages: (conversationId: string) => Promise<StoredMessage[]>;
   /** Projected into the wire contract; the only place a message shape is chosen. */
   toContract: (record: ConversationRecord) => Promise<Conversation>;
@@ -70,6 +71,11 @@ export function createConversationRepository(): ConversationRepository {
       messages.set(message.conversationId, list);
       existing.updatedAt = message.createdAt;
       return true;
+    },
+    removeMessage: async (conversationId, messageId) => {
+      const list = messages.get(conversationId);
+      const index = list?.findIndex((entry) => entry.messageId === messageId) ?? -1;
+      if (index >= 0) list?.splice(index, 1);
     },
     messages: async (conversationId) => [...(messages.get(conversationId) ?? [])],
     toContract: async (record) => ({

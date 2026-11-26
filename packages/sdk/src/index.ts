@@ -701,7 +701,7 @@ export class CoderaxClient {
       joinUrl(this.options.baseUrl, path, { after: options.after }),
       {
         method: 'GET',
-        headers: this.headers('text/event-stream'),
+        headers: this.headers('text/event-stream; truncation=signal'),
         redirect: 'error',
         ...(options.signal ? { signal: options.signal } : {}),
       },

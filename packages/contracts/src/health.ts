@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { EngineStatus } from './models.js';
-import { CONTRACT_VERSION, IsoDateTime } from './primitives.js';
+import { IsoDateTime } from './primitives.js';
+
+// Strict /v1 health readers expect this literal. The handshake reports the
+// currently served HTTP contract version.
+export const HEALTH_REPORT_VERSION = '1.0.0' as const;
 
 export const CheckStatus = z.enum(['ok', 'degraded', 'failed']);
 export type CheckStatus = z.infer<typeof CheckStatus>;
@@ -18,7 +22,7 @@ export type HealthCheck = z.infer<typeof HealthCheck>;
 export const HealthReport = z
   .object({
     status: CheckStatus,
-    contractVersion: z.literal(CONTRACT_VERSION),
+    contractVersion: z.literal(HEALTH_REPORT_VERSION),
     startedAt: IsoDateTime,
     uptimeMs: z.number().int().nonnegative(),
     checks: z.array(HealthCheck),

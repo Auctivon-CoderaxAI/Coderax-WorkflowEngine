@@ -6,8 +6,8 @@
   "eventSchemaVersion": 1,
   "chatStreamVersion": 1,
   "path": "artifacts/coderax-sdk-1.2.0.tgz",
-  "sha256": "5d4b196d560117cdaa5541424ef7c2c5c21a008c379191b426ca3caaa8a15350",
-  "bytes": 39975,
+  "sha256": "223ce865ae0ccea8caf6246e35e1e3e0f486bbca3930e02ccaf6fe1f7a187a8c",
+  "bytes": 40144,
   "reproducible": true,
   "files": [
     {
@@ -27,8 +27,8 @@
     },
     {
       "path": "package/dist/index.js",
-      "sha256": "11f5e32acacd6a739a6768f32f50bac861a6c6915fcaefa73a94527320110af1",
-      "bytes": 20928
+      "sha256": "3940b412086aabbd89a34eff16074245847bdf92b798f9fcad4c3d1209dadc1e",
+      "bytes": 20947
     },
     {
       "path": "package/dist/version.d.ts",
@@ -102,13 +102,13 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/health.d.ts",
-      "sha256": "3431627d90a4507cb23ecd5aa5377b5ea943f5213fb4f02602282e509e862ad1",
-      "bytes": 6951
+      "sha256": "6f96b6d5c7295079d8d5ca1682d48e56c54cfb7b16848fb2edc840fb9d4436c7",
+      "bytes": 7004
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/health.js",
-      "sha256": "6a5560538ba2a2be0724f4f2af7b4022e93c567347047b2216b86eeb8e9766e9",
-      "bytes": 1038
+      "sha256": "4eed3353acfeeaf3ccc810239313e1a5574386a0823899712170c4405739bb47",
+      "bytes": 1190
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/index.d.ts",
@@ -177,8 +177,8 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/routes.js",
-      "sha256": "f59614ab027890eb795842d41bbba41b7e7e086083c5baad03c3f172574e0635",
-      "bytes": 17596
+      "sha256": "6b6f2e77c54727a7cd8599ccd2ced31c3528e5747e6260c430f22521e4d36528",
+      "bytes": 17710
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/schedules.d.ts",

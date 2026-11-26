@@ -266,7 +266,7 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     params: TaskParams,
     query: z.object({ after: z.coerce.number().int().nonnegative().optional() }).strict(),
     stream: true,
-    response: { status: 200, description: 'Server-sent execution events', schema: z.any() },
+    response: { status: 200, description: 'Server-sent execution events. Send Accept: text/event-stream; truncation=signal to receive a stream.truncated frame before a shortened replay.', schema: z.any() },
   },
   {
     operationId: 'listArtifacts',

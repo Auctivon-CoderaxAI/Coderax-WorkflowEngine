@@ -5,7 +5,7 @@ import type {
   HealthReport,
   ReadinessReport,
 } from '@coderax/contracts';
-import { CONTRACT_VERSION } from '@coderax/contracts';
+import { HEALTH_REPORT_VERSION } from '@coderax/contracts';
 import type { Clock } from '../support/clock.js';
 
 export type HealthProbe = {
@@ -80,7 +80,7 @@ export function createHealthService(input: {
       const checks = await check();
       return {
         status: overall(checks),
-        contractVersion: CONTRACT_VERSION,
+        contractVersion: HEALTH_REPORT_VERSION,
         startedAt,
         uptimeMs: Math.max(0, input.clock.now().getTime() - startedMs),
         checks,

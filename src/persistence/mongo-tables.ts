@@ -313,6 +313,9 @@ export function createMongoConversationRepository(input: {
       return true;
     },
 
+    removeMessage: async (conversationId, messageId) => {
+      await messages.deleteOne({ conversationId, messageId });
+    },
     messages: async (conversationId) => {
       const documents = await messages
         .find({ conversationId })

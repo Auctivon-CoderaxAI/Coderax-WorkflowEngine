@@ -101,7 +101,9 @@ rather than accepting bytes it cannot keep.
 const accepted = await client.submitWork({ objective: 'Summarize the repo' });
 for await (const event of client.events(accepted.taskId, { after: 0 })) {
   if (event.type === 'stream.truncated') {
-    throw new Error(`history before seq ${event.payload.oldestSeq} is gone`);
+    const current = await client.task(accepted.taskId);
+    console.log(`Reloaded task state after a replay gap: ${current.state}`);
+    continue;
   }
   if (event.type === 'task.completed') break;
 }

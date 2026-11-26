@@ -52,6 +52,11 @@ catalogue that shares the number but not the wire is refused with
 still accepted (`client_supported`), a newer one is `client_ahead`, and a new
 major is `unsupported_major`.
 
+The unversioned response field `contractVersion` in `GET /v1/health` keeps
+the original `1.0.0` literal. Builds that changed that field to the release
+version require updated health readers; use the handshake for the release
+version going forward.
+
 ## Handshake and negotiation
 
 `GET /v1/handshake?contract=<version>` is the only source a client should trust
@@ -101,8 +106,11 @@ Every event is an envelope plus a payload:
 - A consumer that has already seen an `eventId` must ignore it.
 - A consumer that receives `seq <= lastSeen` must ignore it and resync from
   `GET /v1/work/{taskId}/events?after=<lastSeen>`.
-- A bounded per-task buffer means an old cursor can be truncated; the replay
-  response says so, and the client must re-read task state.
+- A bounded per-task buffer means an old cursor can be truncated. By default
+  the stream starts at the oldest retained event so strict 1.0.0 readers can
+  still process it. Clients that send `Accept: text/event-stream; truncation=signal` (including the SDK)
+  receive a `stream.truncated` frame before those events. On a signal or a
+  sequence gap, re-read task state and continue consuming retained events.
 
 ## Chat streaming
 
