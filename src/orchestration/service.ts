@@ -328,8 +328,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const text = checkpoint?.text ?? '';
       if (text.length > 0) {
         // Second fence. The terminal write proves this generation owned the task
-        // at that instant; a resume can reissue a generation immediately after, so
-        // the transcript append re-checks the token instead of trusting the
+        // at that instant; a resume can reissue a generation immediately after,
+        // so the transcript append re-checks the token instead of trusting the
         // earlier read. A superseded run adds nothing to a newer run's history.
         const current = await deps.tasks.get(task.taskId);
         if (!current || current.runToken !== token) {
@@ -355,10 +355,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         outcome: outcome.kind,
         ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
-    } finally {
-      // The terminal event is durable before the lease can be reissued, so a new
-      // generation never starts behind an unfinished stream.
+      // The terminal event must be durable before the lease can be reissued.
       await deps.events.flush(settled.taskId).catch(() => undefined);
+    } finally {
       await releaseLease(task, token);
     }
   }
@@ -586,7 +585,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    */
   async function ensureTerminalEvent(task: TaskRecord): Promise<void> {
     if (!isTerminalState(task.state)) return;
-    const last = deps.events.lastSeq(task.taskId);
+    // The durable watermark, not this process's window, decides whether a
+    // terminal event already exists. After a restart the in-memory cursor is
+    // zero even though the stream is complete.
+    const last = await deps.events.hydrate(task.taskId).catch(() => deps.events.lastSeq(task.taskId));
     const tail = await deps.events.read(task.taskId, Math.max(0, last - 1));
     if (tail.events.some((event) => TERMINAL_EVENT.has(event.type))) return;
     if (task.state === 'completed') {
@@ -632,6 +634,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
+        await deps.events.hydrate(applied.task.taskId).catch(() => 0);
         publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
@@ -844,6 +847,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'superseded',
         });
       }
+      await deps.events.hydrate(applied.task.taskId).catch(() => 0);
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
@@ -895,6 +899,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      await deps.events.hydrate(taskId).catch(() => 0);
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -944,6 +949,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
       if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
+      await deps.events.hydrate(taskId).catch(() => 0);
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
