@@ -295,15 +295,19 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     return fail(code, capabilities.detail, capabilities.reason === 'unreachable');
   }
 
-  async function closeProvider(record: StoredBrowserSession): Promise<boolean> {
+  async function closeProviderHandle(providerSessionId: string): Promise<boolean> {
     try {
-      const result = await deps.provider.close(record.providerSessionId);
+      const result = await deps.provider.close(providerSessionId);
       return result.ok;
     } catch {
       // An unreachable provider cannot confirm termination. The caller records
       // the session as quarantined rather than inventing a clean close.
       return false;
     }
+  }
+
+  async function closeProvider(record: StoredBrowserSession): Promise<boolean> {
+    return closeProviderHandle(record.providerSessionId);
   }
 
   async function expireIfNeeded(record: StoredBrowserSession): Promise<void> {
@@ -586,10 +590,46 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           return providerFailure(created);
         }
         if (closing) {
-          try {
-            await deps.provider.close(created.value.providerSessionId);
-          } catch {
-            // Shutdown is already in progress; never store a session now.
+          const released = await closeProviderHandle(created.value.providerSessionId);
+          if (!released) {
+            // The allocation exists but shutdown could not confirm termination.
+            // Keep its handle as a quarantined record instead of losing it.
+            const now = deps.clock.iso();
+            const session: BrowserSession = {
+              sessionId: deps.ids.browserSessionId(),
+              label: request.label,
+              purpose: request.purpose,
+              state: 'quarantined',
+              environment: 'cloud',
+              provider: deps.provider.kind,
+              url: 'about:blank',
+              title: '',
+              tabs: [],
+              allowedOrigins: origins,
+              createdAt: now,
+              updatedAt: now,
+              expiresAt: new Date(started + ttlSeconds * 1000).toISOString(),
+              failure: {
+                code: 'browser_unavailable',
+                detail:
+                  'The session was created during shutdown and remote termination was not confirmed; it is quarantined.',
+              },
+            };
+            const record: StoredBrowserSession = {
+              ownerId,
+              providerSessionId: created.value.providerSessionId,
+              session,
+              lastElements: [],
+            };
+            store.putSession(record);
+            addReceipt({
+              record,
+              action: 'session.create',
+              outcome: 'failed',
+              started,
+              detail: session.failure?.detail,
+            });
+            audit(ownerId, 'browser.session.create', 'failed', 'shutdown quarantine');
           }
           audit(ownerId, 'browser.session.create', 'refused', 'shutdown');
           return fail('conflict', 'The browser service is shutting down.');

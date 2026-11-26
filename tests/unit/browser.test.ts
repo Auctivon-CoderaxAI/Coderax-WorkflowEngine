@@ -833,6 +833,49 @@ test('an unknown create outcome stays counted against the session limit', async 
   }
 });
 
+test('a session created during shutdown is quarantined when termination is unconfirmed', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({
+    browser: fake,
+    config: { browsers: { enabled: true } },
+  });
+  try {
+    let entered!: () => void;
+    const enteredCreate = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const allocate = fake.create;
+    fake.create = async (input) => {
+      entered();
+      await gate;
+      return allocate(input);
+    };
+
+    const pending = started.app.service.createBrowserSession(principal, {
+      label: 'Late session',
+      purpose: 'testing',
+      origins: ['https://example.test'],
+    });
+    await enteredCreate;
+    const closing = started.close();
+    await new Promise((resolve) => setImmediate(resolve));
+    fake.failNextClose();
+    release();
+
+    const created = await pending;
+    assert.equal(created.ok, false);
+    assert.equal(created.ok === false && created.code, 'conflict');
+    await closing;
+
+    const sessions = (await started.app.service.browserSessions(principal)).sessions;
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0]?.state, 'quarantined');
+    assert.match(sessions[0]?.failure?.detail ?? '', /quarantined/i);
+  } finally {
+    await started.close();
+  }
+});
+
 test('concurrent creations cannot exceed the configured live-session limit', async () => {
   const fake = fakeBrowserProvider();
   const started = await startTestApp({
