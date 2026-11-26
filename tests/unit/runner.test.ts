@@ -84,7 +84,10 @@ test('a cancelled run stops waiting when the adapter ignores its abort', async (
   setTimeout(() => external.abort(), 5);
 
   const result = await running;
-  assert.deepEqual(result, { outcome: { kind: 'cancelled' }, ownershipLost: false });
+  assert.deepEqual(result, {
+    outcome: { kind: 'cancelled', abandoned: true },
+    ownershipLost: false,
+  });
   assert.ok(Date.now() - started < 1_000, 'the grace bound must end the wait');
 });
 

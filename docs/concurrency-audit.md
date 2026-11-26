@@ -21,6 +21,7 @@ overwritten, and what was recovered.
 | `7ee083b` | this agent | durable-store tests and matrix |
 | `af8f487` | this agent | parity matrix |
 | `5b5083e` | CodeRabbit | enforce MongoDB TLS from driver-parsed options; direct connection without TLS |
+| this commit | this agent | restore the three runner behaviours the whole-file write replaced |
 
 ## Overlap and outcome
 
@@ -33,7 +34,7 @@ overwritten, and what was recovered.
 | `tests/fakes/mongo.ts` | reject `findOneAndUpdate` without the metadata flag | **Replaced** by `7ee083b`; re-applied by `5b5083e`. Present at HEAD. |
 | `tests/unit/persistence-wiring.test.ts` | TLS matrix test | **Replaced** by `7ee083b`; re-applied by `5b5083e`. Present at HEAD. |
 | `src/bootstrap/compose.ts` | persistence health detail said "leases only" | Replaced deliberately: after `5692abe` the statement was no longer true. Superseded, not lost. |
-| `src/execution/runner.ts` | pre-aborted signal check; post-abort report gate; cancellation settles on throw | **Replaced and not re-applied.** Recovery verified locally; not yet on this branch. |
+| `src/execution/runner.ts` | pre-aborted signal check; post-abort report gate; cancellation settles on throw | **Replaced and not re-applied by the bot.** Restored in this commit with two tests. |
 
 Unaffected because this agent never wrote them: `src/orchestration/service.ts`,
 `src/orchestration/transcript.ts`, `src/observability/redact.ts`,
@@ -41,11 +42,9 @@ Unaffected because this agent never wrote them: `src/orchestration/service.ts`,
 account for the difference between the 98 tests of `5692abe` and the 103 at
 `5b5083e`.
 
-## Recovery (verified locally; pending upload)
+## Recovery
 
-`src/execution/runner.ts` restores the three lost behaviours. The recovery builds
-and passes its tests locally; it is not part of this commit because the change
-set it belongs to is uploaded separately.
+`src/execution/runner.ts` restores the three lost behaviours:
 
 1. `if (request.signal.aborted) onExternalAbort()` — a cancellation that races
    the start is honored instead of ignored.
@@ -54,7 +53,8 @@ set it belongs to is uploaded separately.
 3. A throw from an adapter that was aborted settles as `cancelled`, not
    `provider_error`. Retrying something the owner deliberately stopped is wrong.
 
-`tests/unit/runner-abort.test.ts` covers (2) and (3) directly.
+`tests/unit/runner-abort.test.ts` covers (2) and (3) directly; the cancellation
+and lost-lease cases in `tests/unit/runner.test.ts` still pass.
 
 ## Write protocol from here
 
