@@ -130,6 +130,7 @@ export function createHttpBrowserProvider(input: {
           return {
             ok: false,
             code: 'unavailable',
+            ...(response.status >= 500 ? { outcomeUnknown: true as const } : {}),
             detail: `The browser provider is unavailable (HTTP ${response.status}).`,
           };
         }
@@ -146,6 +147,7 @@ export function createHttpBrowserProvider(input: {
         return {
           ok: false,
           code: 'protocol_error',
+          outcomeUnknown: true,
           detail: 'The browser provider response exceeded the protocol limit.',
         };
       }
@@ -165,6 +167,7 @@ export function createHttpBrowserProvider(input: {
               return {
                 ok: false,
                 code: 'protocol_error',
+                outcomeUnknown: true,
                 detail: 'The browser provider response exceeded the protocol limit.',
               };
             }
@@ -182,6 +185,7 @@ export function createHttpBrowserProvider(input: {
         return {
           ok: false,
           code: 'protocol_error',
+          outcomeUnknown: true,
           detail: 'The browser provider response was not valid JSON.',
         };
       }
@@ -190,6 +194,7 @@ export function createHttpBrowserProvider(input: {
         return {
           ok: false,
           code: 'protocol_error',
+          outcomeUnknown: true,
           detail: 'The browser provider response did not match protocol v1.',
         };
       }
@@ -199,12 +204,14 @@ export function createHttpBrowserProvider(input: {
         return {
           ok: false,
           code: 'timeout',
+          outcomeUnknown: true,
           detail: 'The browser provider did not answer before the timeout.',
         };
       }
       return {
         ok: false,
         code: 'unavailable',
+        outcomeUnknown: true,
         detail: 'The browser provider could not be reached.',
       };
     } finally {
@@ -441,6 +448,7 @@ export function createHttpBrowserProvider(input: {
           return {
             ok: false,
             code: 'protocol_error',
+            outcomeUnknown: true,
             detail: 'The browser provider returned malformed artifact base64.',
           };
         }

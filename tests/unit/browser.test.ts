@@ -338,6 +338,16 @@ test('filling a password field requires an authentication approval', async () =>
     assert.equal(password.ok, false);
     assert.equal(password.ok === false && password.code, 'permission_required');
 
+    const wrongApproval = await approve(started, session.sessionId, 'purchase');
+    const mismatched = await act(started, session.sessionId, {
+      type: 'fill',
+      target: { elementId: 'el-password' },
+      value: 'not-a-real-password',
+      intent: { category: 'purchase', description: 'Test a mismatched approval' },
+      approvalId: wrongApproval,
+    });
+    assert.equal(mismatched.ok === false && mismatched.code, 'permission_required');
+
     const approval = await approve(started, session.sessionId, 'authentication');
     const approved = await must(
       act(started, session.sessionId, {
@@ -843,12 +853,14 @@ test('creation refuses a provider page outside the allowlist', async () => {
     const sessions = (await started.app.service.browserSessions(principal)).sessions;
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0]?.state, 'failed');
+    assert.equal(sessions[0]?.url, 'about:blank');
+    assert.deepEqual(sessions[0]?.tabs, []);
   } finally {
     await started.close();
   }
 });
 
-test('a lifecycle response cannot revive a session closed while it was in flight', async () => {
+test('close waits for a pending pause before dispatching', async () => {
   const fake = fakeBrowserProvider();
   const started = await startTestApp({
     browser: fake,
@@ -864,15 +876,13 @@ test('a lifecycle response cannot revive a session closed while it was in flight
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(fake.paused.length, 1);
 
-    const closed = await must(
-      started.app.service.closeBrowserSession(principal, session.sessionId, {}),
-    );
-    assert.equal(closed.state, 'closed');
-
+    const pendingClose = started.app.service.closeBrowserSession(principal, session.sessionId, {});
+    await new Promise((resolve) => setImmediate(resolve));
+    const dispatchedEarly = fake.closed.length;
     fake.releasePause();
-    const stale = await pendingPause;
-    assert.equal(stale.ok, false);
-    assert.equal(stale.ok === false && stale.code, 'conflict');
+    assert.equal((await must(pendingPause)).state, 'paused');
+    assert.equal((await must(pendingClose)).state, 'closed');
+    assert.equal(dispatchedEarly, 0);
     const current = await must(
       started.app.service.browserSession(principal, session.sessionId),
     );
@@ -1032,6 +1042,26 @@ test('terminal history eviction preserves live and unconfirmed sessions', async 
     assert.ok(!listed.some(s => s.sessionId === oldest.sessionId));
     assert.equal((await started.app.service.browserReceipts(principal, oldest.sessionId)).ok, false);
     assert.equal((await close(quarantined.sessionId)).state, 'closed');
+  } finally {
+    await started.close();
+  }
+});
+
+test('takeover rejects cleartext remote live views but allows loopback', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({ browser: fake, config: { browsers: { enabled: true } } });
+  try {
+    const remote = await open(started);
+    fake.takeoverUrl = 'http://live.example.test/view';
+    const takeover = (sessionId: string) =>
+      started.app.service.takeoverBrowserSession(principal, sessionId, { active: true });
+    const refused = await takeover(remote.sessionId);
+    assert.equal(refused.ok === false && refused.code, 'protocol_error');
+    assert.equal((await must(started.app.service.browserSession(principal, remote.sessionId))).state, 'failed');
+
+    const local = await open(started);
+    fake.takeoverUrl = 'http://127.0.0.1:8090/view';
+    assert.equal((await must(takeover(local.sessionId))).interactiveUrl, fake.takeoverUrl);
   } finally {
     await started.close();
   }

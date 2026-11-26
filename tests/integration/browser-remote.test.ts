@@ -15,7 +15,7 @@ import { fakeBrowserProvider, PNG_1X1 } from '../fakes/browser.js';
 
 const TOKEN = 'provider-token-0123456789abcdef';
 
-type Behavior = 'ready' | 'paid' | 'missing' | 'malformed' | 'redirect' | 'unauthorized';
+type Behavior = 'malformed-action' | 'rejected-action' | 'ready' | 'paid' | 'missing' | 'malformed' | 'redirect' | 'unauthorized';
 
 type RecordedRequest = {
   method: string;
@@ -116,6 +116,15 @@ async function startProvider(behavior: Behavior): Promise<{
       }
 
       if (recorded.url === '/v1/sessions/ps_remote_1/actions') {
+        if (behavior === 'malformed-action') {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end('{not json');
+          return;
+        }
+        if (behavior === 'rejected-action') {
+          send(response, 400, { error: 'rejected' });
+          return;
+        }
         const action = (recorded.body as { action?: BrowserAction }).action;
         if (action?.type === 'screenshot') {
           send(response, 200, {
@@ -457,4 +466,38 @@ test('oversized streamed responses are cancelled before EOF', async () => {
   const result = await provider.describe();
   assert.equal(result.reason, 'protocol_error');
   assert.equal(cancelled, true);
+});
+
+test('an unknown remote action outcome takes the session out of service', async () => {
+  for (const [behavior, state] of [['malformed-action', 'failed'], ['rejected-action', 'ready']] as const) {
+    const provider = await startProvider(behavior);
+    const started = await startTestApp({
+      config: browserConfig(provider.url),
+      env: { CODERAX_TEST_BROWSER_TOKEN: TOKEN },
+    });
+    try {
+      const service = started.app.service;
+      const created = await service.createBrowserSession(principal, {
+        label: 'Remote result handling', purpose: 'testing', origins: ['https://example.test'],
+      });
+      assert.ok(created.ok);
+      const id = created.value.sessionId;
+      const acted = await service.browserAction(principal, id, { type: 'inspect', maxTextChars: 100, includeElements: true });
+      assert.equal(acted.ok === false && acted.code, 'protocol_error');
+      const session = await service.browserSession(principal, id);
+      assert.ok(session.ok);
+      assert.equal(session.value.state, state);
+      assert.equal(provider.requests.some(({ url }) => url.endsWith('/close')), state === 'failed');
+      if (state === 'failed') {
+        const receipts = await service.browserReceipts(principal, id);
+        assert.ok(receipts.ok);
+        assert.match(receipts.value.receipts.at(-1)?.detail ?? '', /outcome is unknown/);
+        assert.equal((await service.browserAction(principal, id, { type: 'inspect', maxTextChars: 100, includeElements: true })).ok, false);
+        assert.equal(provider.requests.filter(({ url }) => url.endsWith('/actions')).length, 1);
+      }
+    } finally {
+      await started.close();
+      await provider.close();
+    }
+  }
 });

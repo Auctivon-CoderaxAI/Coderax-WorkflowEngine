@@ -145,7 +145,9 @@ Fail-closed defaults:
   element the provider identified as a password field is upgraded to
   `authentication`, even if the caller declared `form_input`.
 - CAPTCHAs, access controls and provider restrictions are never bypassed. A
-  session that encounters one must pause and escalate to the owner.
+  caller that observes one must stop issuing actions, request a session pause,
+  and notify the owner. Provider protocol v1 does not report challenge events;
+  the engine does not automatically detect challenges, pause, or notify the owner.
 - The owner sees the declared category and description on the receipt; an agent
   cannot use page text to relabel an action.
 

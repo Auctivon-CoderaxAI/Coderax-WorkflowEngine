@@ -29,6 +29,8 @@ export type ProviderFailureCode =
 export type ProviderFailure = {
   ok: false;
   code: ProviderFailureCode;
+  /** The request may have taken effect, but its outcome could not be verified. */
+  outcomeUnknown?: true;
   /** User-safe text: no credential, upstream body, stack or owner path. */
   detail: string;
 };

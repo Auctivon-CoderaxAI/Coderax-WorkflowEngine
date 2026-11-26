@@ -152,7 +152,27 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
   const store = deps.store;
   const consumedApprovals = new Set<string>();
   const pendingCreates = new Map<string, number>();
+  const sessionQueues = new Map<string, Promise<void>>();
   let closing = false;
+
+  async function serialize<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const previous = sessionQueues.get(sessionId) ?? Promise.resolve();
+    const result = previous.then(work);
+    const tail = result.then(() => {}, () => {});
+    sessionQueues.set(sessionId, tail);
+    try {
+      return await result;
+    } finally {
+      if (sessionQueues.get(sessionId) === tail) sessionQueues.delete(sessionId);
+    }
+  }
+
+  function serialized<Args extends unknown[], T>(
+    operation: (ownerId: string, sessionId: string, ...args: Args) => Promise<T>,
+  ): typeof operation {
+    return (ownerId, sessionId, ...args) =>
+      serialize(sessionId, () => operation(ownerId, sessionId, ...args));
+  }
 
   function reserveCreate(ownerId: string): void {
     pendingCreates.set(ownerId, (pendingCreates.get(ownerId) ?? 0) + 1);
@@ -299,7 +319,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
 
   async function sweep(ownerId: string): Promise<void> {
     for (const record of store.sessions(ownerId)) {
-      await expireIfNeeded(record);
+      await serialize(record.session.sessionId, () => expireIfNeeded(record));
     }
   }
 
@@ -337,6 +357,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     action: BrowserReceiptAction,
     detail: string,
     started: number,
+    approvalId?: string,
   ): Promise<ServiceFailure> {
     const released = await closeProvider(record);
     record.session = {
@@ -351,7 +372,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       },
     };
     store.updateSession(record);
-    addReceipt({ record, action, outcome: 'failed', started, detail });
+    addReceipt({ record, action, outcome: 'failed', started, detail, ...(approvalId ? { approvalId } : {}) });
     audit(record.ownerId, 'browser.action.failed', 'failed', `action=${action}`);
     return fail('protocol_error', detail);
   }
@@ -542,8 +563,8 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           state: usable ? 'ready' : 'quarantined',
           environment: 'cloud',
           provider: deps.provider.kind,
-          url: url ?? 'about:blank',
-          title: sanitizeLabel(created.value.title, 300),
+          url: usable ? url : 'about:blank',
+          title: usable ? sanitizeLabel(created.value.title, 300) : '',
           tabs: usable && tabs ? tabs : [],
           allowedOrigins: origins,
           createdAt: now,
@@ -560,11 +581,13 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         };
         store.putSession(record);
         if (!usable) {
-          return protocolViolation(
-            record,
-            'session.create',
-            'The browser provider returned an unusable page or tab outside the allowlist.',
-            started,
+          return await serialize(session.sessionId, () =>
+            protocolViolation(
+              record,
+              'session.create',
+              'The browser provider returned an unusable page or tab outside the allowlist.',
+              started,
+            ),
           );
         }
         addReceipt({ record, action: 'session.create', outcome: 'succeeded', started });
@@ -731,21 +754,17 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         action: normalizedAction,
         allowedOrigins: record.session.allowedOrigins,
       });
-      if (record.session.state !== 'ready') {
-        addReceipt({
-          record,
-          action: actionName,
-          outcome: 'failed',
-          started,
-          ...(approvalId ? { approvalId } : {}),
-          detail: 'The session changed while the action was in flight; its result was discarded.',
-        });
-        return fail(
-          'conflict',
-          'The session changed while the action was in flight; its result was discarded.',
-        );
-      }
       if (!outcome.ok) {
+        if (outcome.outcomeUnknown) {
+          record.lastElements = [];
+          return protocolViolation(
+            record,
+            actionName,
+            'The browser action outcome is unknown; the provider did not confirm its result.',
+            started,
+            approvalId,
+          );
+        }
         addReceipt({
           record,
           action: actionName,
@@ -946,15 +965,6 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         addReceipt({ record, action: 'pause', outcome: 'failed', started, detail: result.detail });
         return providerFailure(result);
       }
-      if (record.session.state !== 'ready') {
-        return refusal(
-          record,
-          'pause',
-          'conflict',
-          'The session changed while pause was in flight.',
-          started,
-        );
-      }
       record.session = { ...record.session, state: 'paused', updatedAt: deps.clock.iso() };
       store.updateSession(record);
       addReceipt({ record, action: 'pause', outcome: 'succeeded', started });
@@ -980,15 +990,6 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       if (!result.ok) {
         addReceipt({ record, action: 'resume', outcome: 'failed', started, detail: result.detail });
         return providerFailure(result);
-      }
-      if (record.session.state !== 'paused') {
-        return refusal(
-          record,
-          'resume',
-          'conflict',
-          'The session changed while resume was in flight.',
-          started,
-        );
       }
       record.session = { ...record.session, state: 'ready', updatedAt: deps.clock.iso() };
       store.updateSession(record);
@@ -1018,19 +1019,14 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
           addReceipt({ record, action: 'takeover', outcome: 'failed', started, detail: result.detail });
           return providerFailure(result);
         }
-        if (record.session.state !== 'ready') {
-          return refusal(
-            record,
-            'takeover',
-            'conflict',
-            'The session changed while takeover was in flight.',
-            started,
-          );
-        }
         const interactiveUrl = sanitizePageUrl(result.value.interactiveUrl, {
           allowAboutBlank: false,
         });
-        if (!interactiveUrl) {
+        const liveView = interactiveUrl ? new URL(interactiveUrl) : null;
+        if (!liveView || (
+          liveView.protocol !== 'https:' &&
+          !['localhost', '127.0.0.1', '[::1]'].includes(liveView.hostname)
+        )) {
           return protocolViolation(
             record,
             'takeover',
@@ -1047,7 +1043,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         addReceipt({ record, action: 'takeover', outcome: 'succeeded', started });
         audit(ownerId, 'browser.session.takeover', 'accepted');
         // The live-view URL is returned once; it is never persisted or audited.
-        return ok({ session: toContract(record), interactiveUrl });
+        return ok({ session: toContract(record), interactiveUrl: liveView.href });
       }
 
       if (record.session.state !== 'owner_controlled') {
@@ -1063,15 +1059,6 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       if (!result.ok) {
         addReceipt({ record, action: 'release', outcome: 'failed', started, detail: result.detail });
         return providerFailure(result);
-      }
-      if (record.session.state !== 'owner_controlled') {
-        return refusal(
-          record,
-          'release',
-          'conflict',
-          'The session changed while release was in flight.',
-          started,
-        );
       }
       record.session = { ...record.session, state: 'ready', updatedAt: deps.clock.iso() };
       store.updateSession(record);
@@ -1179,36 +1166,50 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
     shutdown: async () => {
       closing = true;
       for (const record of store.liveSessions()) {
-        const released = await closeProvider(record);
-        const now = deps.clock.iso();
-        record.session = {
-          ...record.session,
-          state: released ? 'closed' : 'quarantined',
-          updatedAt: now,
-          closedAt: now,
-          ...(released
-            ? {}
-            : {
-                failure: {
-                  code: 'browser_unavailable',
-                  detail:
-                    'Shutdown could not confirm remote termination; the session is quarantined.',
-                },
-              }),
-        };
-        store.updateSession(record);
-        addReceipt({
-          record,
-          action: 'close',
-          outcome: released ? 'succeeded' : 'failed',
-          started: nowMs(),
-          detail: released
-            ? 'Shutdown released the cloud browser.'
-            : 'Shutdown could not confirm remote termination; the session is quarantined.',
+        await serialize(record.session.sessionId, async () => {
+          if (!isLive(record.session)) return;
+          const released = await closeProvider(record);
+          const now = deps.clock.iso();
+          record.session = {
+            ...record.session,
+            state: released ? 'closed' : 'quarantined',
+            updatedAt: now,
+            closedAt: now,
+            ...(released
+              ? {}
+              : {
+                  failure: {
+                    code: 'browser_unavailable',
+                    detail:
+                      'Shutdown could not confirm remote termination; the session is quarantined.',
+                  },
+                }),
+          };
+          store.updateSession(record);
+          addReceipt({
+            record,
+            action: 'close',
+            outcome: released ? 'succeeded' : 'failed',
+            started: nowMs(),
+            detail: released
+              ? 'Shutdown released the cloud browser.'
+              : 'Shutdown could not confirm remote termination; the session is quarantined.',
+          });
         });
       }
     },
   };
 
-  return service;
+  return {
+    ...service,
+    get: serialized(service.get),
+    act: serialized(service.act),
+    pause: serialized(service.pause),
+    resume: serialized(service.resume),
+    takeover: serialized(service.takeover),
+    close: serialized(service.close),
+    authorize: serialized(service.authorize),
+    decide: serialized(service.decide),
+    receipts: serialized(service.receipts),
+  };
 }

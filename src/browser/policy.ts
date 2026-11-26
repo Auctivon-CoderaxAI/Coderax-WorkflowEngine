@@ -218,7 +218,8 @@ export function tabsWithinOrigins(
 export function sanitizeTabs(tabs: readonly BrowserTab[]): BrowserTab[] | null {
   const out: BrowserTab[] = [];
   const seen = new Set<string>();
-  for (const tab of tabs.slice(0, 20)) {
+  if (tabs.length > 20) return null;
+  for (const tab of tabs) {
     const tabId = cleanIdentifier(tab.tabId, 200);
     const url = sanitizePageUrl(tab.url);
     if (!tabId || !url || seen.has(tabId)) return null;
