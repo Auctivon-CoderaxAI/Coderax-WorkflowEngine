@@ -19,16 +19,16 @@
   implementation remains; the other branch is a moving owner artifact and must
   be closed by its owner, not force-overwritten here.
 
-Verified code head: `3c7c0446026691bf34a67628d038b1fa7e549332`. The final
-remote SHA is the branch head at publication and is restated in the handoff.
-A later docs-only record commit changes the review head but not the code tree;
-hosted exact-head CI is a separate, still-unavailable evidence item (see below).
+Verified integration head: `a8956cb68b0e6583b8398169fb5404ff61420405`. The
+final remote SHA is the branch head at publication and is restated in the
+handoff. A later docs-only record commit changes the review head but not the
+code tree; hosted exact-head CI is a separate evidence item (see below).
 
 ## Exact-tree acceptance
 
 Command: `npm run verify` with `CODERAX_TEST_MONGO_URI` pointing at a disposable
-real MongoDB started for this run. Exit status: 0 at code head
-`3c7c0446026691bf34a67628d038b1fa7e549332`.
+real MongoDB started for this run. Exit status: 0 at integration head
+`a8956cb68b0e6583b8398169fb5404ff61420405`.
 
 | Gate | Tests | Result |
 | --- | --- | --- |
@@ -37,14 +37,14 @@ real MongoDB started for this run. Exit status: 0 at code head
 | security | 25 | 25 passed |
 | adversarial | 19 | 19 passed |
 | contract | 14 | 14 passed |
-| architecture | 41 | 41 passed |
+| architecture | 42 | 42 passed |
 | artifacts | 10 | 10 passed |
 | e2e | 3 | 3 passed |
 | audit | command | 0 critical, 0 high, 0 moderate, 0 low, 0 info |
 | openapi | command | `openapi.json` matches contracts |
 | mongo-live (real database) | 8 | 8 passed, 0 skipped |
 
-Total: 220 tests across 11 gates. Gate manifest: 37 compiled test files
+Total: 221 tests across 11 gates. Gate manifest: 37 compiled test files
 assigned, none unclaimed. The live gate forces `CODERAX_REQUIRE_MONGO=1`; with no
 URI it exits 1 with eight explicit failures and zero skips.
 
@@ -141,10 +141,13 @@ no shell-execution path is admitted outside the declared tool seam.
   `mongo-live` step, so the protected check cannot pass without real-database
   evidence. Actions are pinned to full commit SHAs and install lifecycle scripts
   are disabled.
-- There is no pull request for this branch. The read-only API found zero
-  workflow runs at the checked heads. The workflow now also triggers on pushes
-  to `ci/**` so the gate branch can obtain exact-head hosted evidence; this does
-  not create a second pipeline.
+- There is no pull request for this branch. The workflow now also triggers on
+  pushes to `ci/**` so the gate branch can obtain exact-head hosted evidence;
+  this does not create a second pipeline. A run was created at
+  `a8956cb68b0e6583b8398169fb5404ff61420405` (run `45888302201`, context `verify`)
+  but remained queued with zero executed steps because the account's
+  hosted-Actions capacity is unavailable. The exact-head hosted check therefore
+  exists but has not passed; it is not reported as green.
 - Creating the PR requires an authorized GitHub write integration. This host has
   no `gh` binary and no GitHub write credential; the unauthenticated API cannot
   create a pull request. No PR, self-approval or independent review was
