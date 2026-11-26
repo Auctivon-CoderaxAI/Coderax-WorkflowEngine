@@ -27,7 +27,7 @@ import type {
 import { isTerminalEvent, isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineFailureCode, ExecutionEvent } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskPatch, TaskRecord } from '../domain.js';
+import type { ConversationRecord, TaskPatch, TaskRecord } from '../domain.js';
 import type { EngineRunArbiter } from '../execution/arbiter.js';
 import {
   canRetryWithin,
@@ -37,7 +37,7 @@ import {
   type RetryPolicy,
 } from '../execution/retry.js';
 import type { TaskRepository } from '../persistence/tasks.js';
-import type { ConversationRepository } from '../persistence/conversations.js';
+import { ConversationModeConflict, type ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
@@ -48,6 +48,7 @@ import type {
   AgentContext,
   AgentHistoryTurn,
   AgentReportEvent,
+  AgentRunOutcome,
 } from '../agents/types.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
@@ -55,6 +56,7 @@ import type { ModelRouter } from '../models/router.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
+import type { PolicyDecision } from '../models/policy.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -80,6 +82,15 @@ export type ApplicationServiceDeps = {
   agents: AgentRegistry;
   models: ModelCatalog;
   budget: BudgetLedger;
+  /**
+   * The provider policy registry, asked about the external engine itself. A
+   * native run is authorized by the router; an external one is a separate
+   * processing authority and needs its own grant.
+   */
+  externalPolicy: (
+    engine: Exclude<AgentAdapter['engine'], 'native'>,
+    mode: DataMode,
+  ) => PolicyDecision;
   lease: LeaseStore;
   tasks: TaskRepository;
   conversations: ConversationRepository;
@@ -197,6 +208,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    */
   let stopping = false;
 
+  function checkExternal(engine: AgentAdapter['engine'], mode: DataMode): ServiceResult<void> {
+    if (engine === 'native') return ok(undefined);
+    const decision = deps.externalPolicy(engine, mode);
+    return decision.allowed ? ok(undefined) : fail('model_missing', decision.detail);
+  }
+
+  async function ensureConversation(
+    record: ConversationRecord,
+  ): Promise<ServiceResult<ConversationRecord>> {
+    try {
+      return ok(await deps.conversations.ensure(record));
+    } catch (error) {
+      if (error instanceof ConversationModeConflict) return fail('conflict', error.message);
+      throw error;
+    }
+  }
+
   /**
    * Earlier turns for this conversation, read from the store rather than from
    * process memory, so a resume on another replica sees the same exchange.
@@ -206,11 +234,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    */
   async function historyFor(
     conversationId: string,
-    currentText: string,
+    currentText?: string,
   ): Promise<AgentHistoryTurn[]> {
     try {
       const messages = await deps.conversations.messages(conversationId);
-      return buildTranscript({ messages, currentText });
+      return buildTranscript(
+        currentText === undefined ? { messages } : { messages, currentText },
+      );
     } catch {
       return [];
     }
@@ -812,6 +842,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
+    const external = checkExternal(adapter.value.engine, task.mode);
+    if (!external.ok) {
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'not_configured',
+        detail: external.detail,
+        retryable: false,
+      });
+      return;
+    }
+
     // One execution per generation in this process. The lease is the authority
     // across replicas; this is the local admission that refuses a double start of
     // the same generation (a scheduler retry, for example). A newer generation
@@ -824,10 +865,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // release the in-process admission.
     const controller = new AbortController();
     controllers.set(taskId, controller);
+    // The reservation and its dispatch state outlive the guarded region: the
+    // `finally` settles a dispatched request or releases an unused reservation.
+    let held: { id: string } | null = null;
+    let dispatched = false;
+    let lastOutcome: RunOutcome | undefined;
     try {
-    const model = task.model
-      ? deps.models.resolve(task.model, task.mode, 'work')
-      : deps.models.resolve(null, task.mode, 'work');
+    // An automatic route may fall back within the verified-free set; an owner's
+    // explicit model is pinned. Either way the router decides, never this file.
+    const pinned = task.modelPinned === true && task.model !== null;
+    const model = deps.models.resolve(pinned ? task.model : null, task.mode, 'work');
     if (!model.ok) {
       await settle(task, token, {
         kind: 'failed',
@@ -1005,7 +1052,37 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     };
 
-    const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
+    const history =
+      adapter.value.isolation.conversations === 'granted'
+        ? await historyFor(task.conversationId, task.objective)
+        : [];
+    // An external engine bypasses the router, so its request slot is reserved
+    // here and settled only once the transport may actually have dispatched.
+    const externalReservation =
+      started.task.engine === 'native'
+        ? null
+        : await deps.budget.reserve({
+            ownerId: task.ownerId,
+            at: deps.clock.now(),
+            inputTokens: estimateTokens([task.objective]),
+            // Without a usage report the reservation is the charge, so the output
+            // ceiling is the task's own limit or the engine default.
+            outputTokens: task.budget?.maxOutputTokens ?? 1_024,
+            taskId: task.taskId,
+          });
+    if (externalReservation && !externalReservation.allowed) {
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'budget_exhausted',
+        detail: externalReservation.detail,
+        retryable: false,
+      });
+      return;
+    }
+    // A dispatch admits the transport; a reservation with no dispatch is released
+    // uncharged, so a refused start never consumes the owner's day.
+    held = externalReservation?.allowed ? externalReservation.reservation : null;
+
     const policy = normalizeRetryPolicy({
       maxAttempts: deps.config.execution.maxAttempts,
       delayMs: deps.config.execution.retryDelayMs,
@@ -1026,7 +1103,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       acceptingReports = false;
       emitText(redactContent(text));
       await checkpointChain;
-      await chargeExternal(started.task, outcome);
       if (controllers.get(taskId) !== controller) return;
       await settle(
         started.task,
@@ -1121,6 +1197,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             : {}),
         },
         report,
+        admitDispatch: () => {
+          dispatched =
+            !controller.signal.aborted &&
+            checkExternal(adapter.value.engine, task.mode).ok;
+          return dispatched;
+        },
         settle: async (current) => {
           const { outcome, ownershipLost } = current();
           // A retry owns the next write; settling here would make the retried
@@ -1132,6 +1214,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     let attempt = 1;
     let result = await runOnce(attempt);
+    lastOutcome = result.outcome;
       while (willRetry(result.outcome, attempt)) {
         attempt += 1;
         // The failed attempt may have streamed text; clear it so the replay does
@@ -1143,6 +1226,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await wait(policy.delayMs);
         if (controller.signal.aborted) break;
         result = await runOnce(attempt);
+        lastOutcome = result.outcome;
       }
       if (!terminalWrite && !stopping && !controller.signal.aborted && !result.ownershipLost) {
         // The final attempt was retryable but the lease had no room for another
@@ -1150,6 +1234,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await persistSettlement(result.outcome, result.ownershipLost);
       }
     } finally {
+      if (held) {
+        if (dispatched) {
+          await deps.budget.settle(
+            held.id,
+            lastOutcome?.kind === 'completed' ? (lastOutcome.usage ?? {}) : {},
+          );
+        } else {
+          await deps.budget.release(held.id);
+        }
+      }
       if (controllers.get(taskId) === controller) controllers.delete(taskId);
       deps.arbiter.release(arbitrationKey, adapter.value.engine);
     }
@@ -1201,23 +1295,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return applied.task;
   }
 
-  /**
-   * Charge an external engine. Native passes through the router, which reserves
-   * and settles atomically; an external engine bypasses it, so the service
-   * charges the owner day here. A failed dispatch is still charged one request
-   * and its prompt estimate because the engine may already have consumed it.
-   */
-  const chargeExternal = async (
-    task: TaskRecord,
-    outcome: RunOutcome,
-  ): Promise<void> => {
-    if (task.engine === 'native') return;
-    const usage =
-      outcome.kind === 'completed' && outcome.usage
-        ? outcome.usage
-        : { inputTokens: estimateTokens([task.objective]) };
-    await deps.budget.charge(task.ownerId, usage, deps.clock.now());
-  };
   const admissions = new Set<Promise<unknown>>();
   function admit<T>(work: () => Promise<ServiceResult<T>>): Promise<ServiceResult<T>> {
     if (stopping) return Promise.resolve(fail('not_ready', 'The engine is stopping.', true));
@@ -1248,6 +1325,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
+      const external = checkExternal(adapter.value.engine, request.mode);
+      if (!external.ok) return external;
 
       const model = deps.models.resolve(request.model, request.mode, 'work');
       if (!model.ok) return model;
@@ -1264,7 +1343,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
-      await deps.conversations.ensure({
+      const conversation = await ensureConversation({
         conversationId,
         ownerId: principal.ownerId,
         tenantId: null,
@@ -1275,6 +1354,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
         updatedAt: now,
       });
+      if (!conversation.ok) return conversation;
 
       const task: TaskRecord = {
         taskId: deps.ids.taskId(),
@@ -1626,6 +1706,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
+      const external = checkExternal(adapter.value.engine, request.mode);
+      if (!external.ok) return external;
       const model = deps.models.resolve(request.model, request.mode, 'chat');
       if (!model.ok) return model;
 
@@ -1640,7 +1722,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
-      const conversation = await deps.conversations.ensure({
+      const conversation = await ensureConversation({
         conversationId,
         ownerId: principal.ownerId,
         tenantId: null,
@@ -1650,6 +1732,75 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
         updatedAt: now,
       });
+      if (!conversation.ok) return conversation;
+
+      // The turn is appended only after the run is admitted, so a refused turn
+      // never becomes history the next prompt would replay.
+      const history =
+        adapter.value.isolation.conversations === 'granted'
+          ? await historyFor(conversationId)
+          : undefined;
+      const controller = new AbortController();
+      // Native reserves inside the router; an external engine bypasses it, so
+      // hold one slot here and settle it only after a real dispatch.
+      const reservation =
+        adapter.value.engine === 'native'
+          ? null
+          : await deps.budget.reserve({
+              ownerId: principal.ownerId,
+              at: deps.clock.now(),
+              inputTokens: estimateTokens([request.message]),
+              outputTokens: 1_024,
+            });
+      if (reservation && !reservation.allowed) {
+        return fail('budget_exhausted', reservation.detail);
+      }
+      const held = reservation?.allowed ? reservation.reservation : null;
+      let dispatched = false;
+      let outcome: AgentRunOutcome | undefined;
+      try {
+        outcome = await adapter.value.run(
+          {
+            ownerId: principal.ownerId,
+            tenantId: conversation.value.tenantId,
+            conversationId,
+            objective: request.message,
+            ...(history === undefined ? {} : { history }),
+            model: model.value.ref,
+            routing: inferRoutingMode({ objective: request.message }),
+            allowFallback: request.model === undefined,
+            mode: request.mode,
+            operation: 'chat',
+            workspaceRoot: workspace.value.root,
+            maxSteps: 1,
+            budget: null,
+            signal: controller.signal,
+            ...(request.agent === 'coderax'
+              ? { context: await nativeContext({ ownerId: principal.ownerId, mode: request.mode }) }
+              : {}),
+          },
+          () => undefined,
+          () => {
+            dispatched = checkExternal(adapter.value.engine, request.mode).ok;
+            return dispatched;
+          },
+        );
+      } finally {
+        if (held) {
+          if (dispatched) {
+            await deps.budget.settle(held.id, outcome?.ok ? (outcome.usage ?? {}) : {});
+          } else {
+            await deps.budget.release(held.id);
+          }
+        }
+      }
+      if (outcome === undefined) {
+        return fail('engine_unavailable', 'The engine produced no outcome.');
+      }
+      // A budget-refused turn is not an exchange: leave the transcript untouched.
+      if (!outcome.ok && outcome.code === 'budget_exhausted') {
+        return fail('budget_exhausted', outcome.detail, outcome.retryable);
+      }
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1657,31 +1808,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         text: request.message,
         createdAt: now,
       });
-
-      const history = request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
-      const controller = new AbortController();
-      const outcome = await adapter.value.run(
-        {
-          ownerId: principal.ownerId,
-          tenantId: conversation.tenantId,
-          conversationId,
-          objective: request.message,
-          history,
-          model: model.value.ref,
-          routing: inferRoutingMode({ objective: request.message }),
-          allowFallback: request.model === undefined,
-          mode: request.mode,
-          operation: 'chat',
-          workspaceRoot: workspace.value.root,
-          maxSteps: 1,
-          budget: null,
-          signal: controller.signal,
-          ...(request.agent === 'coderax'
-            ? { context: await nativeContext({ ownerId: principal.ownerId, mode: request.mode }) }
-            : {}),
-        },
-        () => undefined,
-      );
       if (!outcome.ok) {
         return fail(
           outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
@@ -1689,17 +1815,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome.retryable,
         );
       }
-      // Native was already reserved and settled by the router; an external
-      // engine bypasses it, so its usage is charged here against the owner day.
-      if (adapter.value.engine !== 'native') {
-        await deps.budget.charge(
-          principal.ownerId,
-          (outcome.ok ? outcome.usage : undefined) ?? {
-            inputTokens: estimateTokens([request.message]),
-          },
-          deps.clock.now(),
-        );
-      }
+      const usedModel = outcome.model ?? model.value.ref;
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
@@ -1714,7 +1830,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         messageId,
         text: outcome.summary,
         agent: request.agent,
-        model: model.value.ref,
+        model: usedModel,
         ...(outcome.usage ? { usage: outcome.usage } : {}),
         createdAt: deps.clock.iso(),
       });

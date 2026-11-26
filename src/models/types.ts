@@ -334,8 +334,11 @@ export type ProviderHealth = {
   circuit: CircuitState;
   /** Configured local ceiling, reported so a client sees the real limit. */
   requestsPerMinute: number;
-  /** Attempts dispatched by this replica in the current minute. */
-  requestsThisMinute: number;
+  /**
+   * Attempts dispatched by this replica in the current minute, when the router
+   * tracks them. The per-minute ceiling is enforced by the limiter either way.
+   */
+  requestsThisMinute?: number;
 };
 
 export type RouterHealth = {

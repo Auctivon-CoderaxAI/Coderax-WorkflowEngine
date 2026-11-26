@@ -6,7 +6,7 @@
  * because free tiers are metered per provider and per model.
  */
 export type LimiterOutcome =
-  | { allowed: true; release: () => void }
+  | { allowed: true; release: (options?: { dispatched?: boolean }) => void }
   | { allowed: false; reason: 'requests' | 'tokens' | 'concurrency'; retryAfterMs: number };
 
 export type ProviderLimiter = {
@@ -78,10 +78,14 @@ export function createProviderLimiter(input: {
       let released = false;
       return {
         allowed: true,
-        release: () => {
+        release: (options) => {
           if (released) return;
           released = true;
           inFlight = Math.max(0, inFlight - 1);
+          if (options?.dispatched === false) {
+            requestTokens = Math.min(requestCapacity, requestTokens + 1);
+            tokenTokens = Math.min(tokenCapacity, tokenTokens + wanted);
+          }
         },
       };
     },

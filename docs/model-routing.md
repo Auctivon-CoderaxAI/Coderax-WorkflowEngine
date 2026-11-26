@@ -177,25 +177,46 @@ part of the request body; because an unauthorized provider is refused before
 dispatch, none of them cross the boundary. The gateway never receives a credential
 value. Cloud mode also requires an explicit policy record for the operation.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:933a3888214defb0f865ab1a27510a3b5dd3b1de6dd83a4a5ffda0453b4365c0 -->
+
+The template below grants no traffic. Replace the provider ID and evidence URL
+with the ones for your configured endpoint, and verify retention, training use,
+processing location and credentials before adding modes and exact grants. Do
+not assign a regional location to the global OpenRouter endpoint without
+independent evidence that your endpoint and account enforce that region.
+
 ```json
-"policy": [
-  {
-    "providerId": "openrouter",
-    "retention": "transient",
-    "training": "prohibited",
-    "location": "eu",
-    "credentials": "deployment-managed",
-    "modes": ["cloud"],
-    "grants": [
-      { "operation": "chat", "mode": "cloud", "location": "eu" },
-      { "operation": "work", "mode": "cloud", "location": "eu" }
-    ],
-    "evidenceUrl": "https://openrouter.ai/docs/terms",
-    "verifiedAt": "2026-11-26T00:00:00.000Z",
-    "expiresAt": "2027-02-24T00:00:00.000Z"
-  }
-]
+{
+  "providerId": "your-provider-id",
+  "retention": "unknown",
+  "training": "unknown",
+  "location": "unknown",
+  "credentials": "none",
+  "modes": ["cloud"],
+  "grants": [],
+  "evidenceUrl": "https://provider.example/verified-terms",
+  "verifiedAt": "2026-11-26T00:00:00.000Z",
+  "expiresAt": "2027-02-24T00:00:00.000Z"
+}
 ```
+
+The dates are illustrative. A configured record with an expiry is valid only
+until `expiresAt`. After expiry, the provider is denied for every mode it
+granted; routing returns `model_missing` if no other eligible route remains.
+To renew it, the owner reviews `evidenceUrl` and confirms that retention,
+training use, processing location and credentials still match the configuration.
+Then update `verifiedAt` and `expiresAt` and apply the revised record to the
+router configuration.
+
+For the optional OpenCode and FreeBuff engines, add a separate policy record
+under `opencode` or `freebuff` for the external transport and grant
+`external_agent` for the requested mode. This grant is checked again before
+the engine receives the request. The run also needs a verified zero-cost model
+authorized for Chat or Work, as appropriate.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Budgets and provider limits
 
@@ -298,8 +319,16 @@ detected automatically:
 | Cerebras | `CEREBRAS_API_KEY` | `https://api.cerebras.ai/v1` |
 | Custom OpenAI-compatible | `CODERAX_INFERENCE_KEY` plus `CODERAX_INFERENCE_BASE_URL` | operator supplied |
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:eb327db11b119233e31d532b4054d3b333c39d34bae64c57a472b0eec4f607d4 -->
+
 Explicit provider configuration can name a different URL and variable, including
-an operator-run OpenCode server's OpenAI-compatible endpoint:
+an operator-run OpenCode server's OpenAI-compatible endpoint.
+
+The example leaves policy empty and fails closed until the owner adds a verified
+record as described above. The example dates do not renew a real record; update
+the dates only after rechecking the evidence and applying the revised configuration.
 
 ```json
 {
@@ -317,23 +346,7 @@ an operator-run OpenCode server's OpenAI-compatible endpoint:
       }
     ],
     "attestations": [],
-    "policy": [
-      {
-        "providerId": "openrouter",
-        "retention": "transient",
-        "training": "prohibited",
-        "location": "eu",
-        "credentials": "deployment-managed",
-        "modes": ["cloud"],
-        "grants": [
-          { "operation": "chat", "mode": "cloud", "location": "eu" },
-          { "operation": "work", "mode": "cloud", "location": "eu" }
-        ],
-        "evidenceUrl": "https://openrouter.ai/docs/terms",
-        "verifiedAt": "2026-11-26T00:00:00.000Z",
-        "expiresAt": "2027-02-24T00:00:00.000Z"
-      }
-    ],
+    "policy": [],
     "routing": {
       "maxCandidates": 4,
       "maxFallbacks": 2,
@@ -348,6 +361,8 @@ an operator-run OpenCode server's OpenAI-compatible endpoint:
   }
 }
 ```
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 OpenCode is an agent shell, not a free inference provider. Pointing `providers` at
 an OpenCode server only works if that endpoint exposes models whose price is zero

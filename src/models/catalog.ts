@@ -90,7 +90,7 @@ export function createRouterCatalog(input: {
               tokensPerDay,
             },
             used: {
-              requestsThisMinute: provider.requestsThisMinute,
+              requestsThisMinute: provider.requestsThisMinute ?? 0,
               requestsToday: used.requests,
               tokensToday: used.tokens,
             },
