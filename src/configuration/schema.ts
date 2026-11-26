@@ -100,6 +100,26 @@ export const ExecutionConfig = z
   })
   .strict();
 
+export const SchedulesConfig = z
+  .object({
+    /** The loop is process-owned; disabling it leaves stored schedules dormant. */
+    enabled: z.boolean().default(true),
+    tickMs: z.number().int().min(50).max(60_000).default(5_000),
+    /** Schedules and receipts examined per pass; bounds one tick's work. */
+    batchSize: z.number().int().min(1).max(200).default(50),
+    /** Engine-wide ceiling on concurrently dispatched scheduled runs. */
+    maxConcurrentRuns: z.number().int().min(1).max(16).default(2),
+    /** Lateness beyond this is a missed occurrence, never a fired backlog. */
+    missedGraceMs: z.number().int().min(1_000).max(86_400_000).default(300_000),
+    /** A receipt with no task younger than this may still be dispatching. */
+    dispatchTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000),
+    /** Consecutive failures that pause a schedule to stop a runaway loop. */
+    pauseAfterFailures: z.number().int().min(1).max(100).default(5),
+    /** Execution receipts returned by the history operation by default. */
+    historyLimit: z.number().int().min(1).max(500).default(100),
+  })
+  .strict();
+
 export const PersistenceConfig = z
   .object({
     /**
@@ -132,6 +152,7 @@ export const EngineConfigSchema = z
     engines: EnginesConfig.default({}),
     models: ModelsConfig,
     execution: ExecutionConfig.default({}),
+    schedules: SchedulesConfig.default({}),
     persistence: PersistenceConfig.default({}),
   })
   .strict();

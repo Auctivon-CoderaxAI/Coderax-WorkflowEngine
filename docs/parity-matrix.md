@@ -57,7 +57,7 @@ Status vocabulary:
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
-| 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
+| 44 | Schedules (cron) | `croner` + Mongo, in-process | `src/scheduling` (once, interval, calendar in an IANA zone, named events) + durable receipts and Mongo store | Strengthened — cross-replica idempotency, missed-run policy, pause/resume/cancel, priorities, run and inference budgets, durable notices |
 | 45 | Cloud browser orchestration | none | none | Not started (both) |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
 | 47 | Tool/plugin execution | Coderax tools | none | Missing |
@@ -70,9 +70,9 @@ Status vocabulary:
 | Status | Count |
 | --- | --- |
 | Preserved | 22 |
-| Strengthened | 10 |
+| Strengthened | 11 |
 | Simplified | 5 |
-| Missing | 10 |
+| Missing | 9 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 1 |
 
@@ -83,9 +83,9 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
-are closed, migrating a client would remove functionality, which the brief
-forbids.
+capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 46 and 47 are
+closed, migrating a client would remove functionality, which the brief forbids.
+Scheduling (row 44) is implemented here and no longer blocks a client cut-over.
 
 Dependency order for closing them:
 
@@ -97,12 +97,12 @@ Dependency order for closing them:
    agent stack.
 4. Approvals bound to a resource (40), provider mode denial (36), caller-supplied
    workspace confinement (13).
-5. Schedules (44) and DeploymentPlatformAI (46).
+5. DeploymentPlatformAI (46).
 6. Only then Phase 5/6 client migration, Phase 8 deployment, Phase 9 removal.
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head: 133/133 tests, OpenAPI drift clean.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a

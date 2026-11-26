@@ -7,26 +7,43 @@ type Index = {
   options?: { unique?: boolean; name?: string };
 };
 
+/**
+ * Comparison operators follow MongoDB's type bracketing: a range comparison
+ * matches only when both sides are Dates or both are strings. ISO-8601 UTC
+ * strings therefore compare chronologically, and a null field never matches a
+ * string range.
+ */
+function compare(left: unknown, right: unknown): number | null {
+  if (left instanceof Date && right instanceof Date) return left.getTime() - right.getTime();
+  if (typeof left === 'string' && typeof right === 'string') {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  return null;
+}
+
 function matches(document: Document, filter: MongoFilter): boolean {
   return Object.entries(filter).every(([field, condition]) => {
     const value = document[field];
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
-      if ('$lte' in operators) {
-        const bound = operators.$lte as Date;
-        if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
-      }
-      if ('$gt' in operators) {
-        const bound = operators.$gt as Date;
-        if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
-      }
-      if ('$in' in operators) {
-        const list = operators.$in as unknown[];
-        if (!list.includes(value)) return false;
-      }
-      if ('$nin' in operators) {
-        const list = operators.$nin as unknown[];
-        if (list.includes(value)) return false;
+      for (const [operator, operand] of Object.entries(operators)) {
+        if (operator === '$lte' || operator === '$lt' || operator === '$gte' || operator === '$gt') {
+          const order = compare(value, operand);
+          if (order === null) return false;
+          if (operator === '$lte' && order > 0) return false;
+          if (operator === '$lt' && order >= 0) return false;
+          if (operator === '$gte' && order < 0) return false;
+          if (operator === '$gt' && order <= 0) return false;
+        } else if (operator === '$in') {
+          if (!(operand as unknown[]).includes(value)) return false;
+        } else if (operator === '$nin') {
+          if ((operand as unknown[]).includes(value)) return false;
+        } else if (operator === '$ne') {
+          if (value === operand) return false;
+        } else {
+          // An operator the fake does not model must fail loudly, not match.
+          return false;
+        }
       }
       return true;
     }

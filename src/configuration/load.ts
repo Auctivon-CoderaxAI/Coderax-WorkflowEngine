@@ -79,11 +79,21 @@ function fromEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
  */
 export function validateInvariants(config: EngineConfig): string[] {
   const issues: string[] = [];
-  const { engines, execution, models, workspaces } = config;
+  const { engines, execution, models, schedules, workspaces } = config;
 
   if (execution.heartbeatIntervalMs * 3 > execution.leaseTtlMs) {
     issues.push(
       `execution.heartbeatIntervalMs (${execution.heartbeatIntervalMs}) must be at most one third of execution.leaseTtlMs (${execution.leaseTtlMs})`,
+    );
+  }
+  if (schedules.missedGraceMs < schedules.tickMs) {
+    issues.push(
+      `schedules.missedGraceMs (${schedules.missedGraceMs}) must be at least schedules.tickMs (${schedules.tickMs}); otherwise a healthy occurrence can be classified missed`,
+    );
+  }
+  if (schedules.dispatchTimeoutMs < schedules.tickMs * 2) {
+    issues.push(
+      `schedules.dispatchTimeoutMs (${schedules.dispatchTimeoutMs}) must be at least twice schedules.tickMs (${schedules.tickMs}); otherwise recovery can preempt a live dispatch`,
     );
   }
   if (workspaces.privateRoot === workspaces.cloudRoot) {

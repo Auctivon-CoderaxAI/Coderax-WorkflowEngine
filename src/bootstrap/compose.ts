@@ -200,6 +200,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const memory = persistence.memory;
   const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
+  const schedules = persistence.schedules;
+  const scheduleNotices = persistence.scheduleNotices;
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
@@ -301,6 +303,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    schedules,
+    scheduleNotices,
     audit,
     events,
     runner,
@@ -372,6 +376,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // The schedule loop belongs to the engine process, not to a request. Both
+      // Coderax and CoderaxCLI can disconnect and a due occurrence still runs.
+      service.startSchedules();
       return { url };
     },
     stop: async () => {

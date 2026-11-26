@@ -40,6 +40,8 @@ Extracted and reimplemented against explicit ports:
 - Cancellation, resume from checkpoint, and a retry that stays on the same engine.
 - Sequenced events with dedupe, out-of-order rejection and bounded replay.
 - Workspace confinement by data mode with real-path resolution.
+- Durable schedules (once, interval, calendar in an IANA zone, named events)
+  with cross-replica idempotency, pause/resume/cancel and execution receipts.
 
 Deliberately **not** extracted yet:
 
@@ -51,7 +53,6 @@ Deliberately **not** extracted yet:
 | OpenCode server transport | Needs the pinned `@opencode-ai/sdk` and an operator-run server | Phase 4 |
 | FreeBuff SDK transport | Needs a trusted source-built SDK | Phase 4 |
 | Cloud browser orchestration, DeploymentPlatformAI integration, plugins | Not implemented anywhere yet | Phase 7 |
-| Scheduling (cron/schedules) | Still in Coderax and bound to Mongo | Phase 7 |
 
 ## Phase 5–6: client integration
 

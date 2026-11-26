@@ -4,7 +4,17 @@ import type {
   DataMode,
   EngineId,
   IsoDateTime,
+  MissedRunPolicy,
   ModelRef,
+  ScheduleCondition,
+  ScheduleConditionState,
+  ScheduleExecutionState,
+  ScheduleLimits,
+  ScheduleNoticeKind,
+  ScheduleRetry,
+  ScheduleState,
+  ScheduleTiming,
+  ScheduleTrigger,
   TaskState,
   Usage,
 } from '@coderax/contracts';
@@ -121,6 +131,105 @@ export type NotificationRecord = {
   mode: DataMode;
   state: 'completed' | 'failed' | 'cancelled' | 'interrupted';
   summary?: string;
+  createdAt: IsoDateTime;
+  read: boolean;
+};
+
+export type ScheduleRecord = {
+  scheduleId: string;
+  ownerId: string;
+  name: string;
+  objective: string;
+  agent: AgentId;
+  model: ModelRef | null;
+  mode: DataMode;
+  timing: ScheduleTiming;
+  condition: ScheduleCondition;
+  retry: ScheduleRetry;
+  priority: number;
+  limits: ScheduleLimits;
+  /** Literal: a scheduled run always routes side effects through permissions. */
+  requireApproval: true;
+  missedRunPolicy: MissedRunPolicy;
+  state: ScheduleState;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  nextRunAt: IsoDateTime | null;
+  lastRunAt: IsoDateTime | null;
+  lastExecutionId: string | null;
+  runsTotal: number;
+  consecutiveFailures: number;
+  /** Compare-and-swap generation: only one replica advances a schedule once. */
+  version: number;
+  pausedAt: IsoDateTime | null;
+  cancelledAt: IsoDateTime | null;
+  cancelReason: string | null;
+};
+
+export type SchedulePatch = Partial<
+  Pick<
+    ScheduleRecord,
+    | 'state'
+    | 'nextRunAt'
+    | 'lastRunAt'
+    | 'lastExecutionId'
+    | 'runsTotal'
+    | 'consecutiveFailures'
+    | 'updatedAt'
+    | 'pausedAt'
+    | 'cancelledAt'
+    | 'cancelReason'
+  >
+>;
+
+/**
+ * One durable execution receipt. `executionKey` is unique across replicas and
+ * occurrences, and `taskId` is deterministic, so a retried dispatch of the same
+ * occurrence cannot create a second Work task.
+ */
+export type ScheduleExecutionRecord = {
+  executionId: string;
+  executionKey: string;
+  scheduleId: string;
+  ownerId: string;
+  occurrenceKey: string;
+  trigger: ScheduleTrigger;
+  scheduledFor: IsoDateTime;
+  state: ScheduleExecutionState;
+  attempt: number;
+  maxAttempts: number;
+  taskId: string | null;
+  conversationId: string;
+  priority: number;
+  detail: string | null;
+  nextAttemptAt: IsoDateTime | null;
+  condition: ScheduleConditionState;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  finishedAt: IsoDateTime | null;
+};
+
+export type ScheduleExecutionPatch = Partial<
+  Pick<
+    ScheduleExecutionRecord,
+    | 'state'
+    | 'attempt'
+    | 'taskId'
+    | 'detail'
+    | 'nextAttemptAt'
+    | 'condition'
+    | 'updatedAt'
+    | 'finishedAt'
+  >
+>;
+
+export type ScheduleNoticeRecord = {
+  noticeId: string;
+  scheduleId: string;
+  executionId: string;
+  ownerId: string;
+  kind: ScheduleNoticeKind;
+  summary: string;
   createdAt: IsoDateTime;
   read: boolean;
 };

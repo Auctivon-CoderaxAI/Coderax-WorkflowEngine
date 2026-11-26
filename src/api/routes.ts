@@ -207,4 +207,82 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     status: 200,
     body: await service.notifications(context.principal),
   }));
+
+  registry.register('createSchedule', async (context) => {
+    const result = await service.createSchedule(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('listSchedules', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.schedules(context.principal),
+  }));
+
+  // Static paths are registered before `/v1/schedules/{scheduleId}` so a
+  // parameterised route can never swallow a named operation.
+  registry.register('listScheduleNotifications', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.scheduleNotifications(context.principal),
+  }));
+
+  registry.register('markScheduleNotificationsRead', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.markScheduleNotificationsRead(context.principal),
+  }));
+
+  registry.register('dispatchScheduleEvent', async (context) => {
+    const result = await service.scheduleEvent(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('getSchedule', async (context) => {
+    const result = await service.schedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('pauseSchedule', async (context) => {
+    const result = await service.pauseSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('resumeSchedule', async (context) => {
+    const result = await service.resumeSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('cancelSchedule', async (context) => {
+    const result = await service.cancelSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('triggerSchedule', async (context) => {
+    const body = (context.body ?? {}) as { idempotencyKey?: string };
+    const result = await service.triggerSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+      body,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('listScheduleExecutions', async (context) => {
+    const limit = typeof context.query.limit === 'number' ? context.query.limit : undefined;
+    const result = await service.scheduleExecutions(
+      context.principal,
+      context.params.scheduleId ?? '',
+      limit,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
 }

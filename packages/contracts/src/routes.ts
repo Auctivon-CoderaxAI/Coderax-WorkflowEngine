@@ -19,7 +19,19 @@ import {
   WorkSubmitRequest,
 } from './tasks.js';
 import { z as zod } from 'zod';
-import { ConversationId, TaskId } from './primitives.js';
+import {
+  Schedule,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleDispatch,
+  ScheduleEventRequest,
+  ScheduleEventResult,
+  ScheduleExecutionList,
+  ScheduleList,
+  ScheduleNoticeList,
+  ScheduleTriggerRequest,
+} from './schedules.js';
+import { ConversationId, ScheduleId, TaskId } from './primitives.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -52,6 +64,10 @@ export type RouteSpec = {
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
+const ScheduleParams = zod.object({ scheduleId: ScheduleId }).strict();
+const ExecutionHistoryQuery = zod
+  .object({ limit: zod.coerce.number().int().positive().max(500).optional() })
+  .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
@@ -224,6 +240,115 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['notifications'],
     auth: 'owner',
     response: { status: 200, description: 'Notification list', schema: NotificationList },
+  },
+  {
+    operationId: 'createSchedule',
+    method: 'POST',
+    path: '/v1/schedules',
+    summary: 'Create a durable, owner-controlled schedule executed by the engine.',
+    tags: ['schedules'],
+    auth: 'owner',
+    body: ScheduleCreateRequest,
+    response: { status: 201, description: 'Created schedule', schema: Schedule },
+  },
+  {
+    operationId: 'listSchedules',
+    method: 'GET',
+    path: '/v1/schedules',
+    summary: 'List this owner\'s schedules with their next run and state.',
+    tags: ['schedules'],
+    auth: 'owner',
+    response: { status: 200, description: 'Schedule list', schema: ScheduleList },
+  },
+  {
+    operationId: 'listScheduleNotifications',
+    method: 'GET',
+    path: '/v1/schedules/notifications',
+    summary: 'Durable schedule completion, failure, missed-run and refusal notices.',
+    tags: ['schedules'],
+    auth: 'owner',
+    response: { status: 200, description: 'Schedule notice list', schema: ScheduleNoticeList },
+  },
+  {
+    operationId: 'markScheduleNotificationsRead',
+    method: 'POST',
+    path: '/v1/schedules/notifications/read',
+    summary: 'Mark every schedule notice for this owner as read.',
+    tags: ['schedules'],
+    auth: 'owner',
+    response: { status: 200, description: 'Schedule notice list', schema: ScheduleNoticeList },
+  },
+  {
+    operationId: 'dispatchScheduleEvent',
+    method: 'POST',
+    path: '/v1/schedule-events',
+    summary: 'Fire a named event; each matching event-triggered schedule runs at most once.',
+    tags: ['schedules'],
+    auth: 'owner',
+    body: ScheduleEventRequest,
+    response: { status: 202, description: 'Dispatched occurrences', schema: ScheduleEventResult },
+  },
+  {
+    operationId: 'getSchedule',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'One schedule with its authoritative state and next run.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Schedule', schema: Schedule },
+  },
+  {
+    operationId: 'pauseSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/pause',
+    summary: 'Pause future occurrences; a run already in flight is not stopped.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Pause outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'resumeSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/resume',
+    summary: 'Resume a paused schedule from the next occurrence; missed runs are not stormed.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Resume outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'cancelSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/cancel',
+    summary: 'Cancel a schedule permanently and cancel its current Work task.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Cancellation outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'triggerSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/trigger',
+    summary: 'Run one occurrence now, deduplicated by the supplied idempotency key.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleTriggerRequest,
+    response: { status: 202, description: 'Dispatched occurrence', schema: ScheduleDispatch },
+  },
+  {
+    operationId: 'listScheduleExecutions',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}/executions',
+    summary: 'Durable execution receipts for one schedule, newest first.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    query: ExecutionHistoryQuery,
+    response: { status: 200, description: 'Execution history', schema: ScheduleExecutionList },
   },
 ]);
 

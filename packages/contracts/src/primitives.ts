@@ -28,6 +28,12 @@ export type TaskId = z.infer<typeof TaskId>;
 export const MessageId = identifier('message identifier');
 export type MessageId = z.infer<typeof MessageId>;
 
+export const ScheduleId = identifier('schedule identifier');
+export type ScheduleId = z.infer<typeof ScheduleId>;
+
+export const ExecutionId = identifier('schedule execution identifier');
+export type ExecutionId = z.infer<typeof ExecutionId>;
+
 export const RequestId = identifier('request correlation identifier');
 export type RequestId = z.infer<typeof RequestId>;
 

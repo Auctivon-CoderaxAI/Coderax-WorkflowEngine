@@ -2490,6 +2490,2646 @@
           }
         }
       }
+    },
+    "/v1/schedules": {
+      "post": {
+        "operationId": "createSchedule",
+        "summary": "Create a durable, owner-controlled schedule executed by the engine.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "scheduleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "objective": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200000
+                    },
+                    "agent": {
+                      "type": "string",
+                      "enum": [
+                        "coderax",
+                        "opencode",
+                        "freebuff"
+                      ]
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "cloud"
+                      ]
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "providerId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 64
+                            },
+                            "modelId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 160
+                            }
+                          },
+                          "required": [
+                            "providerId",
+                            "modelId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timing": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "once"
+                            },
+                            "at": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "interval"
+                            },
+                            "everySeconds": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 2592000
+                            },
+                            "anchor": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "everySeconds"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "calendar"
+                            },
+                            "timeZone": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 64
+                            },
+                            "hour": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 23
+                            },
+                            "minute": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 59
+                            },
+                            "daysOfWeek": {
+                              "type": "array",
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 6
+                              }
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "timeZone",
+                            "hour",
+                            "minute"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "event"
+                            },
+                            "event": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 120
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "event"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "condition": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "always"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "result_contains"
+                            },
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "text"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "result_absent"
+                            },
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "text"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "retry": {
+                      "type": "object",
+                      "properties": {
+                        "maxAttempts": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 5
+                        },
+                        "delaySeconds": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 3600
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "priority": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9
+                    },
+                    "limits": {
+                      "type": "object",
+                      "properties": {
+                        "maxRunsPerDay": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 500
+                        },
+                        "maxRunsTotal": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000
+                        },
+                        "budget": {
+                          "type": "object",
+                          "properties": {
+                            "maxRequests": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 10000
+                            },
+                            "maxInputTokens": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 50000000
+                            },
+                            "maxOutputTokens": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 50000000
+                            }
+                          },
+                          "required": [
+                            "maxRequests",
+                            "maxInputTokens",
+                            "maxOutputTokens"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "requireApproval": {
+                      "const": true
+                    },
+                    "missedRunPolicy": {
+                      "type": "string",
+                      "enum": [
+                        "skip",
+                        "run_once"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "paused",
+                        "cancelled",
+                        "exhausted"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "nextRunAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "lastRunAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "lastExecutionId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "runsTotal": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "consecutiveFailures": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "pausedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "cancelledAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "cancelReason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 500
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "scheduleId",
+                    "name",
+                    "objective",
+                    "agent",
+                    "mode",
+                    "model",
+                    "timing",
+                    "condition",
+                    "retry",
+                    "priority",
+                    "limits",
+                    "requireApproval",
+                    "missedRunPolicy",
+                    "state",
+                    "createdAt",
+                    "updatedAt",
+                    "nextRunAt",
+                    "lastRunAt",
+                    "lastExecutionId",
+                    "runsTotal",
+                    "consecutiveFailures",
+                    "version",
+                    "pausedAt",
+                    "cancelledAt",
+                    "cancelReason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "objective": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200000
+                  },
+                  "timing": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "once"
+                          },
+                          "at": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "at"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "interval"
+                          },
+                          "everySeconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 2592000
+                          },
+                          "anchor": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "everySeconds"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "calendar"
+                          },
+                          "timeZone": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "hour": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 23
+                          },
+                          "minute": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 59
+                          },
+                          "daysOfWeek": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 6
+                            }
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "timeZone",
+                          "hour",
+                          "minute"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "event"
+                          },
+                          "event": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "event"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "agent": {
+                    "type": "string",
+                    "enum": [
+                      "coderax",
+                      "opencode",
+                      "freebuff"
+                    ]
+                  },
+                  "model": {
+                    "type": "object",
+                    "properties": {
+                      "providerId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "modelId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 160
+                      }
+                    },
+                    "required": [
+                      "providerId",
+                      "modelId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ]
+                  },
+                  "condition": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "always"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "result_contains"
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "result_absent"
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "maxAttempts": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5
+                      },
+                      "delaySeconds": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 3600
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "priority": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9
+                  },
+                  "limits": {
+                    "type": "object",
+                    "properties": {
+                      "maxRunsPerDay": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500
+                      },
+                      "maxRunsTotal": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000000
+                      },
+                      "budget": {
+                        "type": "object",
+                        "properties": {
+                          "maxRequests": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 10000
+                          },
+                          "maxInputTokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 50000000
+                          },
+                          "maxOutputTokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 50000000
+                          }
+                        },
+                        "required": [
+                          "maxRequests",
+                          "maxInputTokens",
+                          "maxOutputTokens"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "missedRunPolicy": {
+                    "type": "string",
+                    "enum": [
+                      "skip",
+                      "run_once"
+                    ]
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "objective",
+                  "timing"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listSchedules",
+        "summary": "List this owner's schedules with their next run and state.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schedules": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "scheduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "objective": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200000
+                          },
+                          "agent": {
+                            "type": "string",
+                            "enum": [
+                              "coderax",
+                              "opencode",
+                              "freebuff"
+                            ]
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "cloud"
+                            ]
+                          },
+                          "model": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "providerId": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 64
+                                  },
+                                  "modelId": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 160
+                                  }
+                                },
+                                "required": [
+                                  "providerId",
+                                  "modelId"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "timing": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "const": "once"
+                                  },
+                                  "at": {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "at"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "const": "interval"
+                                  },
+                                  "everySeconds": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 2592000
+                                  },
+                                  "anchor": {
+                                    "type": "string",
+                                    "format": "date-time"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "everySeconds"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "const": "calendar"
+                                  },
+                                  "timeZone": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 64
+                                  },
+                                  "hour": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 23
+                                  },
+                                  "minute": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 59
+                                  },
+                                  "daysOfWeek": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "integer",
+                                      "minimum": 0,
+                                      "maximum": 6
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "timeZone",
+                                  "hour",
+                                  "minute"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "const": "event"
+                                  },
+                                  "event": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 120
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "event"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "condition": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "const": "always"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "const": "result_contains"
+                                  },
+                                  "text": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "text"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "const": "result_absent"
+                                  },
+                                  "text": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "text"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "retry": {
+                            "type": "object",
+                            "properties": {
+                              "maxAttempts": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 5
+                              },
+                              "delaySeconds": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 3600
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "priority": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9
+                          },
+                          "limits": {
+                            "type": "object",
+                            "properties": {
+                              "maxRunsPerDay": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 500
+                              },
+                              "maxRunsTotal": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000000
+                              },
+                              "budget": {
+                                "type": "object",
+                                "properties": {
+                                  "maxRequests": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 10000
+                                  },
+                                  "maxInputTokens": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 50000000
+                                  },
+                                  "maxOutputTokens": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 50000000
+                                  }
+                                },
+                                "required": [
+                                  "maxRequests",
+                                  "maxInputTokens",
+                                  "maxOutputTokens"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "requireApproval": {
+                            "const": true
+                          },
+                          "missedRunPolicy": {
+                            "type": "string",
+                            "enum": [
+                              "skip",
+                              "run_once"
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "active",
+                              "paused",
+                              "cancelled",
+                              "exhausted"
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "nextRunAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "lastRunAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "lastExecutionId": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "runsTotal": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "consecutiveFailures": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "version": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "pausedAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "cancelledAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "cancelReason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "scheduleId",
+                          "name",
+                          "objective",
+                          "agent",
+                          "mode",
+                          "model",
+                          "timing",
+                          "condition",
+                          "retry",
+                          "priority",
+                          "limits",
+                          "requireApproval",
+                          "missedRunPolicy",
+                          "state",
+                          "createdAt",
+                          "updatedAt",
+                          "nextRunAt",
+                          "lastRunAt",
+                          "lastExecutionId",
+                          "runsTotal",
+                          "consecutiveFailures",
+                          "version",
+                          "pausedAt",
+                          "cancelledAt",
+                          "cancelReason"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "schedules"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/notifications": {
+      "get": {
+        "operationId": "listScheduleNotifications",
+        "summary": "Durable schedule completion, failure, missed-run and refusal notices.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule notice list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "notifications": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "noticeId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "scheduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "executionId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "completed",
+                              "failed",
+                              "missed",
+                              "refused"
+                            ]
+                          },
+                          "summary": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "read": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "noticeId",
+                          "scheduleId",
+                          "executionId",
+                          "kind",
+                          "summary",
+                          "createdAt",
+                          "read"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "unread": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "notifications",
+                    "unread"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/notifications/read": {
+      "post": {
+        "operationId": "markScheduleNotificationsRead",
+        "summary": "Mark every schedule notice for this owner as read.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule notice list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "notifications": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "noticeId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "scheduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "executionId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "completed",
+                              "failed",
+                              "missed",
+                              "refused"
+                            ]
+                          },
+                          "summary": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "read": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "noticeId",
+                          "scheduleId",
+                          "executionId",
+                          "kind",
+                          "summary",
+                          "createdAt",
+                          "read"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "unread": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "notifications",
+                    "unread"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedule-events": {
+      "post": {
+        "operationId": "dispatchScheduleEvent",
+        "summary": "Fire a named event; each matching event-triggered schedule runs at most once.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Dispatched occurrences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "dispatched": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "scheduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "executionId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "duplicate": {
+                            "type": "boolean"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "claimed",
+                              "dispatched",
+                              "retry_wait",
+                              "completed",
+                              "failed",
+                              "cancelled",
+                              "missed",
+                              "refused",
+                              "skipped"
+                            ]
+                          },
+                          "taskId": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "scheduleId",
+                          "executionId",
+                          "duplicate",
+                          "state",
+                          "taskId"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "dispatched"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "event": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "idempotencyKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "event",
+                  "idempotencyKey"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/{scheduleId}": {
+      "get": {
+        "operationId": "getSchedule",
+        "summary": "One schedule with its authoritative state and next run.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "scheduleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "objective": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200000
+                    },
+                    "agent": {
+                      "type": "string",
+                      "enum": [
+                        "coderax",
+                        "opencode",
+                        "freebuff"
+                      ]
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "cloud"
+                      ]
+                    },
+                    "model": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "providerId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 64
+                            },
+                            "modelId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 160
+                            }
+                          },
+                          "required": [
+                            "providerId",
+                            "modelId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timing": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "once"
+                            },
+                            "at": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "interval"
+                            },
+                            "everySeconds": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 2592000
+                            },
+                            "anchor": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "everySeconds"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "calendar"
+                            },
+                            "timeZone": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 64
+                            },
+                            "hour": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 23
+                            },
+                            "minute": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 59
+                            },
+                            "daysOfWeek": {
+                              "type": "array",
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 6
+                              }
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "timeZone",
+                            "hour",
+                            "minute"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "event"
+                            },
+                            "event": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 120
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "event"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "condition": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "always"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "result_contains"
+                            },
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "text"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "result_absent"
+                            },
+                            "text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "text"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "retry": {
+                      "type": "object",
+                      "properties": {
+                        "maxAttempts": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 5
+                        },
+                        "delaySeconds": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 3600
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "priority": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9
+                    },
+                    "limits": {
+                      "type": "object",
+                      "properties": {
+                        "maxRunsPerDay": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 500
+                        },
+                        "maxRunsTotal": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000
+                        },
+                        "budget": {
+                          "type": "object",
+                          "properties": {
+                            "maxRequests": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 10000
+                            },
+                            "maxInputTokens": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 50000000
+                            },
+                            "maxOutputTokens": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 50000000
+                            }
+                          },
+                          "required": [
+                            "maxRequests",
+                            "maxInputTokens",
+                            "maxOutputTokens"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "requireApproval": {
+                      "const": true
+                    },
+                    "missedRunPolicy": {
+                      "type": "string",
+                      "enum": [
+                        "skip",
+                        "run_once"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "paused",
+                        "cancelled",
+                        "exhausted"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "nextRunAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "lastRunAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "lastExecutionId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "runsTotal": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "consecutiveFailures": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "pausedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "cancelledAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "cancelReason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 500
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "scheduleId",
+                    "name",
+                    "objective",
+                    "agent",
+                    "mode",
+                    "model",
+                    "timing",
+                    "condition",
+                    "retry",
+                    "priority",
+                    "limits",
+                    "requireApproval",
+                    "missedRunPolicy",
+                    "state",
+                    "createdAt",
+                    "updatedAt",
+                    "nextRunAt",
+                    "lastRunAt",
+                    "lastExecutionId",
+                    "runsTotal",
+                    "consecutiveFailures",
+                    "version",
+                    "pausedAt",
+                    "cancelledAt",
+                    "cancelReason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "scheduleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/schedules/{scheduleId}/pause": {
+      "post": {
+        "operationId": "pauseSchedule",
+        "summary": "Pause future occurrences; a run already in flight is not stopped.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pause outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "scheduleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "paused",
+                        "cancelled",
+                        "exhausted"
+                      ]
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "already_terminal",
+                        "unchanged"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "scheduleId",
+                    "state",
+                    "outcome"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "scheduleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/schedules/{scheduleId}/resume": {
+      "post": {
+        "operationId": "resumeSchedule",
+        "summary": "Resume a paused schedule from the next occurrence; missed runs are not stormed.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resume outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "scheduleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "paused",
+                        "cancelled",
+                        "exhausted"
+                      ]
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "already_terminal",
+                        "unchanged"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "scheduleId",
+                    "state",
+                    "outcome"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "scheduleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/schedules/{scheduleId}/cancel": {
+      "post": {
+        "operationId": "cancelSchedule",
+        "summary": "Cancel a schedule permanently and cancel its current Work task.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancellation outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "scheduleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "paused",
+                        "cancelled",
+                        "exhausted"
+                      ]
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "already_terminal",
+                        "unchanged"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "scheduleId",
+                    "state",
+                    "outcome"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "scheduleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/schedules/{scheduleId}/trigger": {
+      "post": {
+        "operationId": "triggerSchedule",
+        "summary": "Run one occurrence now, deduplicated by the supplied idempotency key.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Dispatched occurrence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "scheduleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "executionId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "duplicate": {
+                      "type": "boolean"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "claimed",
+                        "dispatched",
+                        "retry_wait",
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "missed",
+                        "refused",
+                        "skipped"
+                      ]
+                    },
+                    "taskId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "scheduleId",
+                    "executionId",
+                    "duplicate",
+                    "state",
+                    "taskId"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "scheduleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "idempotencyKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/{scheduleId}/executions": {
+      "get": {
+        "operationId": "listScheduleExecutions",
+        "summary": "Durable execution receipts for one schedule, newest first.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Execution history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "executions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "executionId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "scheduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "occurrenceKey": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 600
+                          },
+                          "trigger": {
+                            "type": "string",
+                            "enum": [
+                              "schedule",
+                              "manual",
+                              "event",
+                              "retry"
+                            ]
+                          },
+                          "scheduledFor": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "claimed",
+                              "dispatched",
+                              "retry_wait",
+                              "completed",
+                              "failed",
+                              "cancelled",
+                              "missed",
+                              "refused",
+                              "skipped"
+                            ]
+                          },
+                          "attempt": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "maxAttempts": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "taskId": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "conversationId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "priority": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9
+                          },
+                          "detail": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "nextAttemptAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "condition": {
+                            "type": "string",
+                            "enum": [
+                              "not_evaluated",
+                              "met",
+                              "unmet"
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "finishedAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "executionId",
+                          "scheduleId",
+                          "occurrenceKey",
+                          "trigger",
+                          "scheduledFor",
+                          "state",
+                          "attempt",
+                          "maxAttempts",
+                          "taskId",
+                          "conversationId",
+                          "priority",
+                          "detail",
+                          "nextAttemptAt",
+                          "condition",
+                          "createdAt",
+                          "updatedAt",
+                          "finishedAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "executions"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "scheduleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 500
+            }
+          }
+        ]
+      }
     }
   }
 }

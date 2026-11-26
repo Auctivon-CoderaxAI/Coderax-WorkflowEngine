@@ -4,6 +4,7 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
@@ -13,6 +14,15 @@ import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect
 import { createTaskRepository } from '../persistence/tasks.js';
 import { createConversationRepository } from '../persistence/conversations.js';
 import { createNotificationStore } from '../persistence/notifications.js';
+import {
+  createScheduleNoticeStore,
+  createScheduleRepository,
+} from '../persistence/schedules.js';
+import {
+  createMongoScheduleNoticeStore,
+  createMongoScheduleRepository,
+  ensureScheduleIndexes,
+} from '../persistence/mongo-schedules.js';
 import { createMemoryStore } from '../memory/store.js';
 import {
   createMongoConversationRepository,
@@ -33,6 +43,8 @@ export type PersistenceStores = {
   conversations: ConversationRepository;
   memory: MemoryStore;
   notifications: NotificationStore;
+  schedules: ScheduleRepository;
+  scheduleNotices: ScheduleNoticeStore;
   close: () => Promise<void>;
 };
 
@@ -99,6 +111,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       notifications: createNotificationStore(),
+      schedules: createScheduleRepository(),
+      scheduleNotices: createScheduleNoticeStore(),
       close: NO_CLOSE,
     };
   }
@@ -110,6 +124,9 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
   const notifications = database.collection(collectionName(config, 'notifications'));
+  const schedules = database.collection(collectionName(config, 'schedules'));
+  const scheduleExecutions = database.collection(collectionName(config, 'schedule_executions'));
+  const scheduleNotices = database.collection(collectionName(config, 'schedule_notices'));
 
   try {
     await ensureWorkRunIndexes(workRuns);
@@ -117,6 +134,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
+    await ensureScheduleIndexes({
+      schedules,
+      executions: scheduleExecutions,
+      notices: scheduleNotices,
+    });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -135,6 +157,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       maxValueLength: MEMORY_VALUE_LIMIT,
     }),
     notifications: createMongoNotificationStore(notifications),
+    schedules: createMongoScheduleRepository({
+      schedules,
+      executions: scheduleExecutions,
+    }),
+    scheduleNotices: createMongoScheduleNoticeStore(scheduleNotices),
     close: database.close,
   };
 }

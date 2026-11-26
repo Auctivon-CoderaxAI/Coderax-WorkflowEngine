@@ -31,6 +31,10 @@ are clients of the same versioned API.
 | Heartbeat, crash detection, interrupted-task recovery | Implemented | `src/execution/runner.ts`, `src/orchestration/service.ts` |
 | Cancellation, resume, bounded same-engine retry | Implemented | `src/orchestration/service.ts`, e2e tests |
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
+| Durable schedules: one-time, interval, calendar (IANA zone) and named events | Implemented | `src/scheduling`, `src/persistence/schedules.ts` |
+| Cross-replica schedule idempotency: unique receipt key, deterministic task id, Work lease | Implemented; Mongo adapter fake-verified, not live-verified | `src/scheduling/identity.ts`, `src/persistence/mongo-schedules.ts`, two-replica test |
+| Schedule retry, missed-run recovery, pause/resume/cancel, priority, run and inference budgets | Implemented | `src/scheduling/engine.ts`, schedule tests |
+| Schedule completion, failure, missed-run and refusal notices | Implemented | `/v1/schedules/notifications`, schedule notice stores |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
@@ -54,7 +58,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 48 tests: unit, contract, integration, security, e2e
+npm test                          # 133 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -92,6 +96,7 @@ src/bootstrap        composition root, named dependency container, startup gate
 src/api              transport-agnostic router, route handlers, Node HTTP server
 src/routing          dispatch through the registry (no fallback, no UI logic)
 src/orchestration    Work lifecycle: submit, execute, cancel, resume, retry, recover
+src/scheduling       zone-aware recurrence, durable schedule engine, occurrence identity
 src/execution        leases, arbitration, heartbeat runner, retry, workspace confinement
 src/persistence      task repository (fenced writes), lease tables, conversations
 src/agents           registry, Coderax Native, isolated external adapters
@@ -117,6 +122,36 @@ its own collaborators.
 - **No private/cloud bleed**: memory and workspaces are partitioned by data mode.
 - **Durable Work**: closing the browser or the CLI never ends an authorized task.
 - **Fenced state**: an expired generation can never overwrite a newer one.
+
+## Scheduling
+
+A schedule is a durable owner record, not a client timer. `POST /v1/schedules`
+accepts a one-time instant, an interval, a calendar rule in an IANA time zone, or
+a named event. The engine's own loop discharges due occurrences even when no web
+or CLI client is connected.
+
+- **One occurrence, one receipt, one task.** An occurrence is written as a receipt
+  whose `executionKey` is unique before any Work is submitted. The task id is
+  derived from the schedule, the occurrence and the attempt, so a recovered
+  dispatch cannot create a second task. The existing conversation lease is the
+  third guard.
+- **Bounded by default.** `maxRunsPerDay`, `maxRunsTotal`, a per-run inference
+  `budget`, the engine's `maxConcurrentRuns`, bounded retries and
+  `pauseAfterFailures` refuse or park work instead of letting a schedule run away.
+- **Missed runs are decisions, not storms.** A late occurrence is recorded once and
+  the schedule advances beyond the outage; `missedRunPolicy: run_once` opts into a
+  single catch-up run.
+- **No widened autonomy.** A scheduled Work submission is always created with
+  `requireApproval: true`. Purchases, outbound messages, account changes and
+  infrastructure changes still require a scoped, single-use owner grant from the
+  permission store.
+- **Time zones are resolved, not offset.** Calendar rules use `Intl` in the named
+  zone, including the spring-forward gap.
+
+The engine exposes pause, resume, permanent cancel, a deduplicated manual trigger,
+an event ingress, durable execution history and durable notices. `src/scheduling`
+never writes task state itself: orchestration reconciles its receipts against the
+authoritative task repository.
 
 ## Contributing
 

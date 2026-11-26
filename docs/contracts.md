@@ -67,6 +67,18 @@ Every event is an envelope plus a payload:
 - A bounded per-task buffer means an old cursor can be truncated; the replay
   response says so, and the client must re-read task state.
 
+## Schedule occurrences
+
+A schedule is a durable authorization to submit Work, so its identity is part of
+the contract, not an implementation detail. Every occurrence carries an
+`occurrenceKey`; the engine stores one receipt per occurrence in the schedule
+store, and the receipt's task id is derived from the schedule, the occurrence and
+the attempt. Re-sending a manual trigger or an event with the same
+`idempotencyKey` returns the existing receipt (`duplicate: true`) instead of
+starting a second run. A `trigger` or `scheduleEvent` response therefore reports
+the authoritative execution state, including `refused` or `skipped`, rather than
+pretending every request was accepted for execution.
+
 ## SDK rules
 
 `@coderax/sdk` is the only client. It:

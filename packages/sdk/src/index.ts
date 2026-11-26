@@ -12,6 +12,13 @@ import {
   PermissionList,
   Problem,
   ReadinessReport,
+  Schedule,
+  ScheduleControlResult,
+  ScheduleDispatch,
+  ScheduleEventResult,
+  ScheduleExecutionList,
+  ScheduleList,
+  ScheduleNoticeList,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
@@ -20,6 +27,9 @@ import type {
   ChatRequest,
   DataMode,
   PermissionDecisionRequest,
+  ScheduleCreateInput,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 
@@ -308,6 +318,87 @@ export class CoderaxClient {
     });
   }
 
+  createSchedule(request: ScheduleCreateInput): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'POST',
+      path: '/v1/schedules',
+      body: request,
+    });
+  }
+
+  schedules(): Promise<ScheduleList> {
+    return this.request<ScheduleList>(ScheduleList, { method: 'GET', path: '/v1/schedules' });
+  }
+
+  schedule(scheduleId: string): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+    });
+  }
+
+  pauseSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/pause`,
+    });
+  }
+
+  resumeSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/resume`,
+    });
+  }
+
+  cancelSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+    });
+  }
+
+  triggerSchedule(
+    scheduleId: string,
+    request: ScheduleTriggerRequest = {},
+  ): Promise<ScheduleDispatch> {
+    return this.request<ScheduleDispatch>(ScheduleDispatch, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/trigger`,
+      body: request,
+    });
+  }
+
+  scheduleExecutions(scheduleId: string, limit?: number): Promise<ScheduleExecutionList> {
+    return this.request<ScheduleExecutionList>(ScheduleExecutionList, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/executions`,
+      query: { limit },
+    });
+  }
+
+  scheduleEvent(request: ScheduleEventRequest): Promise<ScheduleEventResult> {
+    return this.request<ScheduleEventResult>(ScheduleEventResult, {
+      method: 'POST',
+      path: '/v1/schedule-events',
+      body: request,
+    });
+  }
+
+  scheduleNotifications(): Promise<ScheduleNoticeList> {
+    return this.request<ScheduleNoticeList>(ScheduleNoticeList, {
+      method: 'GET',
+      path: '/v1/schedules/notifications',
+    });
+  }
+
+  markScheduleNotificationsRead(): Promise<ScheduleNoticeList> {
+    return this.request<ScheduleNoticeList>(ScheduleNoticeList, {
+      method: 'POST',
+      path: '/v1/schedules/notifications/read',
+    });
+  }
+
   /** Replays and tails execution events from a sequence cursor. */
   async *events(
     taskId: string,
@@ -337,4 +428,12 @@ export class CoderaxClient {
   }
 }
 
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };
+export type {
+  ChatRequest,
+  DataMode,
+  PermissionDecisionRequest,
+  ScheduleCreateInput,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
+  WorkSubmitRequest,
+};
