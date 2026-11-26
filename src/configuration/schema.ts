@@ -71,6 +71,22 @@ export const EnginesConfig = z
   })
   .strict();
 
+function isSecureProviderURL(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  const loopback =
+    url.hostname === 'localhost' ||
+    url.hostname === '127.0.0.1' ||
+    url.hostname === '[::1]' ||
+    url.hostname === '::1';
+  return url.protocol === 'http:' && loopback;
+}
+
 /**
  * A provider is configured by URL and the *name* of its credential variable.
  * The key is resolved from the environment at startup; no secret belongs in the
@@ -83,7 +99,20 @@ export const ModelProviderConfig = z
       .trim()
       .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'provider id must be lower-case letters, digits, - or _'),
     kind: z.enum(['openai', 'gemini']).default('openai'),
-    baseURL: z.string().url(),
+    baseURL: z
+      .string()
+      .url()
+      .refine(
+        (value) => isSecureProviderURL(value),
+        'baseURL must use HTTPS; cleartext HTTP is allowed only for loopback servers',
+      )
+      .refine(
+        (value) => {
+          const url = new URL(value);
+          return url.search === '' && url.hash === '';
+        },
+        'baseURL must not contain a query string or fragment',
+      ),
     apiKeyEnv: z
       .string()
       .trim()

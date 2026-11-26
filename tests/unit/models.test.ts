@@ -138,3 +138,41 @@ test('an external engine is charged once after its run, not reserved twice', () 
   ledger.charge('owner', { inputTokens: 40, outputTokens: 20 }, now);
   assert.equal(ledger.available('owner', now), false);
 });
+
+test('partial provider usage is settled against the reservation, not zero', () => {
+  const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 1_000 });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+  const reservation = ledger.reserve({
+    ownerId: 'owner',
+    at: now,
+    inputTokens: 80,
+    outputTokens: 20,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+  ledger.settle(reservation.reservation.id, { outputTokens: 5 });
+  assert.deepEqual(ledger.snapshot('owner', now), {
+    requests: 1,
+    inputTokens: 80,
+    outputTokens: 5,
+  });
+});
+
+test('a dispatched reservation keeps its request charge when it is released', () => {
+  const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 1_000 });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+  const reservation = ledger.reserve({
+    ownerId: 'owner',
+    at: now,
+    inputTokens: 40,
+    outputTokens: 10,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+  ledger.release(reservation.reservation.id, { dispatched: true });
+  assert.deepEqual(ledger.snapshot('owner', now), {
+    requests: 1,
+    inputTokens: 0,
+    outputTokens: 0,
+  });
+});

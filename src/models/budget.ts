@@ -40,7 +40,12 @@ export type BudgetLedger = {
     outputTokens: number;
   }) => ReserveOutcome;
   settle: (reservationId: string, usage: Usage) => void;
-  release: (reservationId: string) => void;
+  /**
+   * Release an unspent reservation. `dispatched` charges the request slot for an
+   * attempt that may already have reached the provider while returning its
+   * unused token allowance.
+   */
+  release: (reservationId: string, options?: { dispatched?: boolean }) => void;
   /** Charge an external engine that did not go through the router. */
   charge: (ownerId: string, usage: Usage, at: Date) => void;
   snapshot: (ownerId: string, at: Date) => BudgetSnapshot;
@@ -139,11 +144,14 @@ export function createBudgetLedger(input: {
       state.reservedInput = Math.max(0, state.reservedInput - held.reservation.inputTokens);
       state.reservedOutput = Math.max(0, state.reservedOutput - held.reservation.outputTokens);
       state.requests += 1;
-      state.inputTokens += Math.max(0, usage.inputTokens ?? 0);
-      state.outputTokens += Math.max(0, usage.outputTokens ?? 0);
+      // A provider can omit one side of its usage report. Charging zero for the
+      // omitted side would refund tokens that were already reserved and could
+      // have been consumed, so the reservation is the conservative fallback.
+      state.inputTokens += Math.max(0, usage.inputTokens ?? held.reservation.inputTokens);
+      state.outputTokens += Math.max(0, usage.outputTokens ?? held.reservation.outputTokens);
     },
 
-    release: (reservationId) => {
+    release: (reservationId, options = {}) => {
       const held = reservations.get(reservationId);
       if (!held) return;
       reservations.delete(reservationId);
@@ -152,6 +160,9 @@ export function createBudgetLedger(input: {
       state.reservedRequests = Math.max(0, state.reservedRequests - 1);
       state.reservedInput = Math.max(0, state.reservedInput - held.reservation.inputTokens);
       state.reservedOutput = Math.max(0, state.reservedOutput - held.reservation.outputTokens);
+      // A dispatched attempt consumes one request even when it produced no
+      // usage; it must not become free just because the provider failed.
+      if (options.dispatched === true) state.requests += 1;
     },
 
     charge: (ownerId, usage, at) => {

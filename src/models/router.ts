@@ -149,6 +149,7 @@ const DEFAULT_COOLDOWN_MS = 30_000;
 const DEFAULT_MAX_OUTPUT = 1024;
 const DEFAULT_CONTEXT_MARGIN = 64;
 const DEFAULT_BENCHMARK_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+const MAX_PROVIDER_COOLDOWN_MS = 24 * 60 * 60 * 1_000;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -518,6 +519,22 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           retryable: false,
         };
       }
+      if (resolveOptions.requireVision && !runtime.state.capabilities.vision) {
+        return {
+          ok: false,
+          code: 'model_missing',
+          detail: 'That model does not declare image input support.',
+          retryable: false,
+        };
+      }
+      if (resolveOptions.requireTools && !runtime.state.capabilities.toolCalling) {
+        return {
+          ok: false,
+          code: 'model_missing',
+          detail: 'That model does not declare tool-calling support.',
+          retryable: false,
+        };
+      }
       if (
         !contextFits({
           state: runtime.state,
@@ -610,12 +627,18 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     runtime.circuit.failure(at);
     provider.circuit.failure(at);
     provider.lastError = sanitizeDetail(error.message);
+    const boundedDelay = (delay: number): number =>
+      Math.min(MAX_PROVIDER_COOLDOWN_MS, Math.max(1_000, delay));
     if (error.kind === 'quota') {
       // Daily free allowances reset at UTC midnight; a header reset is more precise
       // when the provider publishes one.
       const delay = error.retryAfterMs ?? msUntilUtcMidnight(at);
-      provider.quotaUntil = new Date(at.getTime() + Math.max(1_000, delay));
+      provider.quotaUntil = new Date(at.getTime() + boundedDelay(delay));
       provider.lastError = 'The provider reports its free allowance is exhausted.';
+    } else if (error.kind === 'rate_limit' && error.retryAfterMs !== undefined) {
+      // A provider that publishes a retry window should not be called again
+      // immediately just because the local token bucket has capacity.
+      provider.quotaUntil = new Date(at.getTime() + boundedDelay(error.retryAfterMs));
     }
     if (error.kind === 'auth') {
       provider.lastError = 'The provider rejected the configured credential.';
@@ -629,10 +652,16 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
   }
 
   function estimateRequest(request: GatewayRequest): number {
-    if (request.messages && request.messages.length > 0) {
-      return estimateMessageTokens(request.messages) + estimateTokens([request.system]);
-    }
-    return estimateTokens([request.system, request.prompt]);
+    const messages =
+      request.messages && request.messages.length > 0
+        ? estimateMessageTokens(request.messages) + estimateTokens([request.system])
+        : estimateTokens([request.system, request.prompt]);
+    // Tool declarations are part of the prompt the provider receives. Omitting
+    // them would under-reserve both context and daily token budget.
+    const tools = request.tools?.length
+      ? estimateTokens(request.tools.map((tool) => JSON.stringify(tool)))
+      : 0;
+    return messages + tools;
   }
 
   async function executeComplete(
@@ -641,6 +670,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
   ): Promise<GatewayCompletion> {
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
+    let budgetRefusal: string | null = null;
     const executed = planned.fallbackAllowed
       ? planned.candidates.slice(0, 1 + maxFallbacks)
       : planned.candidates.slice(0, 1);
@@ -664,8 +694,29 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         });
         continue;
       }
-      if (!runtime.circuit.allow(at)) continue;
+      // Reserve the daily budget before consuming provider rate-limit capacity.
+      // A request the owner cannot afford must not make the provider unusable.
+      const reserved = budget.reserve({
+        ownerId: request.ownerId,
+        at,
+        inputTokens: estimated,
+        outputTokens: output,
+      });
+      if (!reserved.allowed) {
+        if (reserved.reason === 'tokens' && planned.fallbackAllowed) {
+          // Another free candidate may have a smaller output cap and fit the
+          // remaining daily allowance. Try it before declaring exhaustion.
+          budgetRefusal = reserved.detail;
+          continue;
+        }
+        throw new ModelRoutingError('budget_exhausted', reserved.detail, false);
+      }
+      if (!runtime.circuit.allow(at)) {
+        budget.release(reserved.reservation.id);
+        continue;
+      }
       if (!provider.circuit.allow(at)) {
+        budget.release(reserved.reservation.id);
         runtime.circuit.abandon();
         continue;
       }
@@ -674,6 +725,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         now: at,
       });
       if (!acquired.allowed) {
+        budget.release(reserved.reservation.id);
         runtime.circuit.abandon();
         provider.circuit.abandon();
         lastFailure = new ProviderError(
@@ -684,30 +736,15 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         continue;
       }
 
-      const reserved = budget.reserve({
-        ownerId: request.ownerId,
-        at,
-        inputTokens: estimated,
-        outputTokens: output,
-      });
-      if (!reserved.allowed) {
-        acquired.release();
-        runtime.circuit.abandon();
-        provider.circuit.abandon();
-        throw new ModelRoutingError(
-          'budget_exhausted',
-          'The daily zero-cost token or request budget is exhausted; the request was refused rather than sent.',
-          false,
-        );
-      }
-
       attempts.push(runtime.state.ref);
       const started = performance.now();
+      let dispatched = false;
       const signal = AbortSignal.any([
         request.signal,
         AbortSignal.timeout(provider.settings.requestTimeoutMs),
       ]);
       try {
+        dispatched = true;
         const completion = await provider.adapter.complete({
           model: runtime.state.ref,
           system: request.system,
@@ -735,7 +772,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         };
       } catch (error) {
         acquired.release();
-        budget.release(reserved.reservation.id);
+        // The provider may already have received this request. Charge the
+        // request slot, but return the token allowance that was not reported.
+        budget.release(reserved.reservation.id, { dispatched });
         const providerError =
           error instanceof ProviderError
             ? error
@@ -752,6 +791,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
     }
 
+    if (budgetRefusal !== null) {
+      throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
+    }
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null
@@ -770,6 +812,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       : planned.candidates.slice(0, 1);
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
+    let budgetRefusal: string | null = null;
 
     for (const candidate of executed) {
       if (request.signal.aborted) {
@@ -790,21 +833,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         });
         continue;
       }
-      if (!runtime.circuit.allow(at)) continue;
-      if (!provider.circuit.allow(at)) {
-        runtime.circuit.abandon();
-        continue;
-      }
-      const acquired = provider.limiter.acquire({ tokens: estimated + output, now: at });
-      if (!acquired.allowed) {
-        runtime.circuit.abandon();
-        provider.circuit.abandon();
-        lastFailure = new ProviderError('rate_limit', 'The local provider ceiling is already in use.', {
-          retryAfterMs: acquired.retryAfterMs,
-          retryable: true,
-        });
-        continue;
-      }
+      // Daily budget admission comes first so a denied request cannot consume a
+      // provider request token or claim a half-open probe.
       const reserved = budget.reserve({
         ownerId: request.ownerId,
         at,
@@ -812,14 +842,31 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         outputTokens: output,
       });
       if (!reserved.allowed) {
-        acquired.release();
+        if (reserved.reason === 'tokens' && planned.fallbackAllowed) {
+          budgetRefusal = reserved.detail;
+          continue;
+        }
+        throw new ModelRoutingError('budget_exhausted', reserved.detail, false);
+      }
+      if (!runtime.circuit.allow(at)) {
+        budget.release(reserved.reservation.id);
+        continue;
+      }
+      if (!provider.circuit.allow(at)) {
+        budget.release(reserved.reservation.id);
+        runtime.circuit.abandon();
+        continue;
+      }
+      const acquired = provider.limiter.acquire({ tokens: estimated + output, now: at });
+      if (!acquired.allowed) {
+        budget.release(reserved.reservation.id);
         runtime.circuit.abandon();
         provider.circuit.abandon();
-        throw new ModelRoutingError(
-          'budget_exhausted',
-          'The daily zero-cost token or request budget is exhausted; the request was refused rather than sent.',
-          false,
-        );
+        lastFailure = new ProviderError('rate_limit', 'The local provider ceiling is already in use.', {
+          retryAfterMs: acquired.retryAfterMs,
+          retryable: true,
+        });
+        continue;
       }
 
       let settled = false;
@@ -845,6 +892,22 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
 
       try {
         yield { type: 'model', model: runtime.state.ref, attempts: [...attempts], latencyMs: 0 };
+        // The metadata yield suspends the generator; a discovery refresh can run
+        // before the provider call. Revalidate eligibility at the last moment.
+        const revalidated = models.get(modelKey(runtime.state.ref));
+        if (!revalidated || !modelAvailability(revalidated, now()).available) {
+          acquired.release();
+          budget.release(reserved.reservation.id);
+          runtime.circuit.abandon();
+          provider.circuit.abandon();
+          settled = true;
+          lastFailure = new ProviderError(
+            'invalid',
+            'The verified-free route changed before the stream was dispatched.',
+            { retryable: false },
+          );
+          continue;
+        }
         providerStarted = true;
         const events = provider.adapter.stream
           ? provider.adapter.stream(providerRequest)
@@ -874,7 +937,16 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
                 retryable: true,
               });
         if (providerError.kind === 'cancelled' || request.signal.aborted) {
-          budget.release(reserved.reservation.id);
+          if (emitted) {
+            budget.settle(
+              reserved.reservation.id,
+              usage ?? { inputTokens: estimated, outputTokens: output },
+            );
+          } else {
+            // The attempt may have reached the provider, so retain the request
+            // charge while returning the unused token allowance.
+            budget.release(reserved.reservation.id, { dispatched: providerStarted });
+          }
           settled = true;
           runtime.circuit.abandon();
           provider.circuit.abandon();
@@ -894,7 +966,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             false,
           );
         }
-        budget.release(reserved.reservation.id);
+        budget.release(reserved.reservation.id, { dispatched: providerStarted });
         settled = true;
         lastFailure = providerError;
       } finally {
@@ -917,6 +989,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
     }
 
+    if (budgetRefusal !== null) {
+      throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
+    }
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null
@@ -950,7 +1025,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           provider.lastDiscoveryAt = at;
           provider.discoveryOk = true;
           provider.lastError = null;
-          provider.circuit.success();
+          // Discovery proves the model list is readable, not that inference has
+          // recovered. Only a successful inference probe closes that circuit.
           discoveredByProvider.set(providerId, discovered);
           report.providers.push({
             providerId,
@@ -1113,10 +1189,9 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
   }
 
   function hasVerifiedFreeRoute(): boolean {
-    const at = now();
-    return [...models.values()].some(
-      (runtime) => runtime.state.supported && modelAvailability(runtime, at).available,
-    );
+    // Readiness must use the same default context/output admission as route().
+    // A tiny-context model is not a usable route merely because it is free.
+    return route('auto').length > 0;
   }
 
   return {

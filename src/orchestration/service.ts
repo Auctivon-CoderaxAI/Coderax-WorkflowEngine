@@ -557,10 +557,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
     if (held) {
-      deps.budget.settle(
-        held.id,
-        result.outcome.kind === 'completed' ? (result.outcome.usage ?? {}) : {},
-      );
+      if (result.outcome.kind === 'completed') {
+        deps.budget.settle(held.id, result.outcome.usage ?? {});
+      } else {
+        // The external engine may have dispatched before failing; retain the
+        // request charge while returning its unused token allowance.
+        deps.budget.release(held.id, { dispatched: true });
+      }
     }
 
     if (result.ownershipLost) {
@@ -1003,11 +1006,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           () => undefined,
         );
       } catch (error) {
-        if (held) deps.budget.settle(held.id, {});
+        if (held) deps.budget.release(held.id, { dispatched: true });
         throw error;
       }
       if (!outcome.ok) {
-        if (held) deps.budget.settle(held.id, {});
+        if (held) deps.budget.release(held.id, { dispatched: true });
         return fail(
           outcome.code === 'cancelled'
             ? 'cancelled'

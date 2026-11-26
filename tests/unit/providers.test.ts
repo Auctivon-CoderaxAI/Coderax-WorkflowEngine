@@ -283,6 +283,10 @@ test('Gemini SSE accepts CRLF frames and emits normalized usage', async () => {
 
 test('provider reset headers are parsed, including composite Groq windows', () => {
   assert.equal(parseRetryAfter(new Headers({ 'retry-after': '7' })), 7_000);
+  assert.equal(
+    parseRetryAfter(new Headers({ 'retry-after': '999999999' })),
+    24 * 60 * 60 * 1_000,
+  );
   const facts = parseRateLimit(
     new Headers({
       'x-ratelimit-remaining-requests': '0',
@@ -295,6 +299,166 @@ test('provider reset headers are parsed, including composite Groq windows', () =
   assert.equal(facts.remainingTokens, 100);
   assert.equal(facts.resetRequestsMs, 179_560);
   assert.equal(facts.resetTokensMs, 7_660);
+});
+
+test('OpenAI-compatible SSE accepts lone-CR framing', async () => {
+  const provider = createOpenAiProvider({
+    id: 'openrouter',
+    baseURL: 'https://openrouter.example/api/v1',
+    apiKey: 'key',
+    fetchImpl: (async () =>
+      sse([
+        'data: {"choices":[{"delta":{"content":"CR"}}]}\r\r',
+        'data: {"usage":{"prompt_tokens":2,"completion_tokens":1}}\r\r',
+        'data: [DONE]\r\r',
+      ])) as typeof fetch,
+  });
+  const events = [];
+  for await (const event of provider.stream?.(openAiRequest) ?? []) events.push(event);
+  assert.equal(
+    events.filter((event) => event.type === 'text').map((event) => (event.type === 'text' ? event.text : '')).join(''),
+    'CR',
+  );
+  assert.equal(events.filter((event) => event.type === 'usage').length, 1);
+});
+
+test('an explicit provider stream error is not reported as a successful completion', async () => {
+  const provider = createOpenAiProvider({
+    id: 'openrouter',
+    baseURL: 'https://openrouter.example/api/v1',
+    apiKey: 'key',
+    fetchImpl: (async () => sse(['data: {"error":{"message":"upstream failed"}}\n\n'])) as typeof fetch,
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _event of provider.stream?.(openAiRequest) ?? []) {
+        // consume the failed stream
+      }
+    },
+    (error: unknown) =>
+      error instanceof ProviderError &&
+      error.kind === 'server' &&
+      !error.message.includes('upstream failed'),
+  );
+});
+
+test('malformed published pricing is rejected instead of falling through to an attestation', () => {
+  const models = parseModelList('openrouter', {
+    data: [
+      { id: 'malformed', pricing: '0.01', context_length: 8_000 },
+      { id: 'absent', pricing: null, context_length: 8_000 },
+    ],
+  });
+  assert.deepEqual(models.map((model) => model.ref.modelId), ['absent']);
+  assert.equal(models[0]?.pricing, null);
+});
+
+test('credential-bearing provider requests reject redirects and insecure origins', async () => {
+  assert.throws(
+    () =>
+      createOpenAiProvider({
+        id: 'unsafe',
+        baseURL: 'http://api.example.com/v1',
+        apiKey: 'key',
+      }),
+    (error: unknown) => error instanceof ProviderError && error.kind === 'invalid',
+  );
+  assert.doesNotThrow(() =>
+    createOpenAiProvider({
+      id: 'local',
+      baseURL: 'http://127.0.0.1:4096/v1',
+      apiKey: 'key',
+    }),
+  );
+  let redirect: string | undefined;
+  const provider = createOpenAiProvider({
+    id: 'safe',
+    baseURL: 'https://provider.example/v1',
+    apiKey: 'key',
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+      redirect = init?.redirect;
+      return sse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n']);
+    }) as typeof fetch,
+  });
+  for await (const _event of provider.stream?.(openAiRequest) ?? []) {
+    // consume
+  }
+  assert.equal(redirect, 'error');
+});
+
+test('Gemini counts thinking tokens and encodes data URLs as inline data', async () => {
+  let body: Record<string, unknown> | undefined;
+  const provider = createGeminiProvider({
+    id: 'gemini',
+    baseURL: 'https://generativelanguage.example/v1beta',
+    apiKey: 'key',
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({
+        candidates: [{ content: { parts: [{ text: 'seen' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, thoughtsTokenCount: 100 },
+      });
+    }) as typeof fetch,
+  });
+  const completion = await provider.complete({
+    ...openAiRequest,
+    model: { providerId: 'gemini', modelId: 'gemini-2.5-flash' },
+    messages: [
+      { role: 'user', text: 'look', images: ['data:image/png;base64,AAAA'] },
+    ],
+  });
+  assert.deepEqual(completion.usage, { inputTokens: 5, outputTokens: 103 });
+  const contents = body?.contents as Array<{ parts: Array<Record<string, unknown>> }>;
+  assert.deepEqual(contents[0]?.parts[1], {
+    inlineData: { mimeType: 'image/png', data: 'AAAA' },
+  });
+});
+
+test('Gemini reports a blocked prompt on the streaming path', async () => {
+  const provider = createGeminiProvider({
+    id: 'gemini',
+    baseURL: 'https://generativelanguage.example/v1beta',
+    apiKey: 'key',
+    fetchImpl: (async () =>
+      sse(['data: {"promptFeedback":{"blockReason":"SAFETY"}}\n\n'])) as typeof fetch,
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _event of provider.stream?.({
+        ...openAiRequest,
+        model: { providerId: 'gemini', modelId: 'gemini-2.5-flash' },
+      }) ?? []) {
+        // consume
+      }
+    },
+    (error: unknown) => error instanceof ProviderError && error.kind === 'invalid',
+  );
+});
+
+test('a bare per-minute RESOURCE_EXHAUSTED stays a rate limit', async () => {
+  const provider = createGeminiProvider({
+    id: 'gemini',
+    baseURL: 'https://generativelanguage.example/v1beta',
+    apiKey: 'key',
+    fetchImpl: (async () =>
+      json(
+        {
+          error: {
+            status: 'RESOURCE_EXHAUSTED',
+            message: 'Resource has been exhausted (e.g. check quota).',
+          },
+        },
+        429,
+      )) as typeof fetch,
+  });
+  await assert.rejects(
+    () =>
+      provider.complete({
+        ...openAiRequest,
+        model: { providerId: 'gemini', modelId: 'gemini-2.5-flash' },
+      }),
+    (error: unknown) => error instanceof ProviderError && error.kind === 'rate_limit',
+  );
 });
 
 test('Gemini RESOURCE_EXHAUSTED becomes a quota failure', async () => {

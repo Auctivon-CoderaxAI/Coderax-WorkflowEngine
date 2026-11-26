@@ -8,7 +8,11 @@ import type {
 import type { ModelGateway, Planner } from './types.js';
 import { createDeterministicPlanner } from './planner.js';
 import { buildStepPrompt } from './prompt.js';
+import { estimateTokens } from '../../models/verify.js';
 import { routingFailure } from '../../models/types.js';
+
+const NATIVE_SYSTEM =
+  'You are Coderax Native, the owner’s private execution agent. Answer with the concrete result for the requested step only.';
 
 /**
  * Coderax Native is the default and the only engine with no external dependency.
@@ -116,10 +120,17 @@ export function createNativeAgent(input: {
         if (request.signal.aborted) {
           return { ok: false, code: 'cancelled', detail: 'The run was cancelled.', retryable: false };
         }
+        const stepPrompt = buildStepPrompt({
+          objective: request.objective,
+          step,
+          completed,
+          history,
+        });
         if (request.budget) {
           const inputLeft = request.budget.maxInputTokens - (usageIn ?? 0);
           const outputLeft = request.budget.maxOutputTokens - (usageOut ?? 0);
-          if (inputLeft <= 0 || outputLeft <= 0) {
+          const promptTokens = estimateTokens([NATIVE_SYSTEM, stepPrompt]);
+          if (inputLeft <= 0 || outputLeft <= 0 || promptTokens > inputLeft) {
             return {
               ok: false,
               code: 'budget_exhausted',
@@ -148,14 +159,8 @@ export function createNativeAgent(input: {
               mode: request.mode,
               routing: request.routing,
               allowFallback: request.allowFallback,
-              system:
-                'You are Coderax Native, the owner’s private execution agent. Answer with the concrete result for the requested step only.',
-              prompt: buildStepPrompt({
-                objective: request.objective,
-                step,
-                completed,
-                history,
-              }),
+              system: NATIVE_SYSTEM,
+              prompt: stepPrompt,
               signal: request.signal,
               ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
             })) {
@@ -180,14 +185,8 @@ export function createNativeAgent(input: {
               mode: request.mode,
               routing: request.routing,
               allowFallback: request.allowFallback,
-              system:
-                'You are Coderax Native, the owner’s private execution agent. Answer with the concrete result for the requested step only.',
-              prompt: buildStepPrompt({
-                objective: request.objective,
-                step,
-                completed,
-                history,
-              }),
+              system: NATIVE_SYSTEM,
+              prompt: stepPrompt,
               signal: request.signal,
               ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
             });

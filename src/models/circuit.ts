@@ -39,6 +39,9 @@ export function createCircuit(input: {
       return true;
     },
     success: () => {
+      // A success from a request admitted before the circuit opened must not
+      // close it. Only a closed circuit or a half-open probe can recover it.
+      if (openedAt !== null && !halfOpenProbe) return;
       failures = 0;
       openedAt = null;
       halfOpenProbe = false;
