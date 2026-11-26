@@ -127,6 +127,7 @@ test('opening a stream does not drop an event published during the durable read'
   await gate.entered;
   const published = bus.publish({ taskId: 't1', agent: 'coderax', generation: 1, type: 'task.queued' });
   assert.ok(published);
+  await bus.flush('t1');
   gate.release();
 
   const opened = await opening;
@@ -136,6 +137,33 @@ test('opening a stream does not drop an event published during the durable read'
 
   const all = [...opened.replay.events.map((event) => event.seq), ...delivered].sort((a, b) => a - b);
   assert.deepEqual(all, [1]);
+});
+
+test('subscribe skips replay overlap and keeps later backlog entries', async () => {
+  const log = createInMemoryEventLog({ bufferSize: 8 });
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const bus = inMemoryBus({ ...log, read: async input => {
+    enter();
+    await gate;
+    return log.read(input);
+  } });
+  const opening = bus.open('t', 0);
+  await entered;
+  const publish = () => bus.publish({ taskId: 't', generation: 1, agent: 'coderax', type: 'task.started' });
+  publish();
+  await bus.flush('t');
+  release();
+  const opened = await opening;
+  publish();
+  await bus.flush('t');
+  const live: number[] = [];
+  opened.subscribe(event => live.push(event.seq));
+  assert.deepEqual(opened.replay.events.map(event => event.seq), [1]);
+  assert.deepEqual(live, [2]);
+  opened.close();
 });
 
 test('a flush barrier surfaces a storage failure instead of losing it', async () => {
@@ -322,6 +350,13 @@ test('a replay longer than one page still reaches the terminal event', async () 
   }
   await writer.flush('t_page');
 
+  const firstPage = await writer.read('t_page', 0, 2);
+  assert.deepEqual(firstPage.events.map((event) => event.seq), [1, 2]);
+  assert.equal(firstPage.truncated, false);
+  const warm = await writer.open('t_page', 0, 2);
+  assert.deepEqual(warm.replay.events.map((event) => event.seq), Array.from({ length: 35 }, (_, i) => i + 1));
+  warm.close();
+
   // A fresh process has no local window, so the whole backlog must come from the
   // log. Reading one page and then tailing from the watermark skipped the middle.
   const reader = createEventBus({ bufferSize: 10, eventId: ids, iso, log });
@@ -384,4 +419,27 @@ test('a watermark recovers a row inserted before a crash reached the head', asyn
   });
   assert.deepEqual(next, { appended: true });
   assert.deepEqual(await store.log.watermark('t_wm'), { seq: 8, generation: 1 });
+});
+
+test('durable subscribers and local replay expose only committed appends', async () => {
+  const inner = createInMemoryEventLog({ bufferSize: 8 });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const bus = inMemoryBus({
+    ...inner,
+    append: async event => {
+      await gate;
+      if (event.seq === 3) throw new Error('append failed');
+      return inner.append(event);
+    },
+  });
+  const live: number[] = [];
+  bus.subscribe('t', 0, event => live.push(event.seq));
+  for (let i = 0; i < 3; i++) bus.publish({ taskId: 't', generation: 1, agent: 'coderax', type: 'task.started' });
+  assert.deepEqual(live, []);
+  assert.deepEqual(bus.replay('t', 0).events, []);
+  release();
+  await assert.rejects(bus.flush('t'), /append failed/);
+  assert.deepEqual(live, [1, 2]);
+  assert.deepEqual(bus.replay('t', 0).events.map(event => event.seq), [1, 2]);
 });

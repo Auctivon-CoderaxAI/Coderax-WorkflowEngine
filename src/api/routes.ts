@@ -44,8 +44,8 @@ function eventId(value: unknown): string {
 async function* toEventStream(stream: {
   replay: { events: unknown[] };
   subscribe: (listener: (event: unknown) => void) => () => void;
-  close?: () => void;
-}): AsyncIterable<unknown> {
+  close: () => void;
+}, signal: AbortSignal): AsyncIterable<unknown> {
   const seen = new Set<string>();
   let unsubscribe: (() => void) | null = null;
   try {
@@ -65,25 +65,26 @@ async function* toEventStream(stream: {
       wake?.();
     });
 
-    for (;;) {
+    while (!signal.aborted) {
       const next = pending.shift();
       if (next !== undefined) {
         yield next;
         if (isTerminalPayload(next)) return;
         continue;
       }
+      const resolveWake = (): void => wake?.();
       await new Promise<void>((resolve) => {
         wake = resolve;
-        const timer = setTimeout(resolve, 30_000);
-        timer.unref();
+        signal.addEventListener('abort', resolveWake, { once: true });
       });
+      signal.removeEventListener('abort', resolveWake);
       wake = null;
     }
   } finally {
     // A replay that already ended the stream never calls `subscribe`; releasing
     // the buffered subscription here keeps it from outliving the connection.
     unsubscribe?.();
-    stream.close?.();
+    stream.close();
   }
 }
 
@@ -167,7 +168,8 @@ async function* chatFrames<T extends { text: string }>(reply: T): AsyncIterable<
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
     if (context.accept.toLowerCase().includes('text/event-stream')) {
-      return { kind: 'sse', status: 200, events: chatFrames(result.value) };
+      // The reply is already computed, so a disconnect has nothing to release.
+      return { kind: 'sse', status: 200, events: chatFrames(result.value), close: () => undefined };
     }
     return { kind: 'json', status: 200, body: result.value };
   });
@@ -229,7 +231,10 @@ async function* chatFrames<T extends { text: string }>(reply: T): AsyncIterable<
     );
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'sse', status: 200, events: toEventStream(result.value) };
+    const controller = new AbortController();
+    return { kind: 'sse', status: 200, events: toEventStream(result.value, controller.signal),
+      close: () => { controller.abort(); result.value.close(); },
+    };
   });
 
   registry.register('listConversations', async (context) => ({

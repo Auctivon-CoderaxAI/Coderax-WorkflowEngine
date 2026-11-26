@@ -75,23 +75,30 @@ export function createHttpServer(input: {
           return;
         }
 
-        response.writeHead(result.status, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-store',
-          connection: 'keep-alive',
-        });
-        for await (const event of result.events) {
-          if (response.destroyed || response.writableEnded) break;
-          // The SSE id carries the per-task sequence, so a browser reconnect sends
-          // Last-Event-ID and resumes after the last frame it actually rendered.
-          const seq =
-            typeof event === 'object' && event !== null
-              ? (event as { seq?: unknown }).seq
-              : undefined;
-          if (typeof seq === 'number') response.write(`id: ${seq}\n`);
-          response.write(`data: ${JSON.stringify(event)}\n\n`);
+        response.once('close', result.close);
+        if (response.destroyed) { result.close(); return; }
+        try {
+          response.writeHead(result.status, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-store',
+            connection: 'keep-alive',
+          });
+          for await (const event of result.events) {
+            if (response.destroyed || response.writableEnded) break;
+            // The SSE id carries the per-task sequence, so a browser reconnect sends
+            // Last-Event-ID and resumes after the last frame it actually rendered.
+            const seq =
+              typeof event === 'object' && event !== null
+                ? (event as { seq?: unknown }).seq
+                : undefined;
+            if (typeof seq === 'number') response.write(`id: ${seq}\n`);
+            response.write(`data: ${JSON.stringify(event)}\n\n`);
+          }
+          response.end();
+        } finally {
+          response.off('close', result.close);
+          result.close();
         }
-        response.end();
       } catch {
         if (!response.headersSent) {
           sendJson(response, 500, {

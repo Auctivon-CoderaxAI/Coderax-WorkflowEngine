@@ -255,6 +255,13 @@ test('a graceful stop interrupts an adapter that is still running and releases i
   const running = new Promise<void>((resolve) => {
     entered = resolve;
   });
+  let releaseWrite!: () => void;
+  const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+  const update = app.dependencies.tasks.updateFenced;
+  app.dependencies.tasks.updateFenced = async input => {
+    if (input.patch.checkpoint) await writeGate;
+    return update(input);
+  };
   // An adapter that ignores the abort: the process must still leave a recoverable
   // record and no live lease behind.
   agent.run = async (_request, report) => {
@@ -274,13 +281,11 @@ test('a graceful stop interrupts an adapter that is still running and releases i
   if (!submitted.ok) return;
   await running;
 
-  // Wait for the checkpoint write that follows the step report.
-  await waitFor(async () => {
-    const task = await app.dependencies.tasks.get(submitted.value.taskId);
-    return task?.checkpoint.completedSteps.includes('step-1') ? true : null;
-  });
-
-  await app.stop();
+  const stopping = app.stop();
+  // Let the runner finish its cancellation grace while the accepted write is blocked.
+  await new Promise(resolve => setTimeout(resolve, 300));
+  releaseWrite();
+  await stopping;
 
   const task = await app.dependencies.tasks.get(submitted.value.taskId);
   assert.equal(task?.state, 'interrupted');
@@ -305,6 +310,8 @@ test('a graceful stop interrupts an adapter that is still running and releases i
   // A restart repairs nothing further and does not duplicate the ending.
   const restarted = await mongoApp({ database, workspace });
   try {
+    const retry = await restarted.service.retryTask(principal, submitted.value.taskId, task!.generation);
+    assert.equal(retry.ok, false);
     const again = await restarted.dependencies.events.read(submitted.value.taskId, 0);
     assert.equal(
       again.events.filter((event) => event.type === 'task.interrupted').length,

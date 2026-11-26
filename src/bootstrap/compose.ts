@@ -596,6 +596,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     // The log shares the task record's durability tier, so a settlement cannot
     // announce a terminal event into a stream that a restart will not have.
     log: persistence.events,
+    processLocal: persistence.driver === 'memory',
   });
   const arbiter = new EngineRunArbiter();
   const runner = createTaskRunner({

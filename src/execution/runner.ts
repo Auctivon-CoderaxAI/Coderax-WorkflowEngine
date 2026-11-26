@@ -14,7 +14,14 @@ export type RunOutcome =
       /** Model requests the run issued, recorded in the durable task. */
       requests?: number;
     }
-  | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
+  | {
+      kind: 'failed';
+      code: EngineFailureCode;
+      detail: string;
+      retryable: boolean;
+      /** The adapter's own claim that the start never dispatched. */
+      adapterRetryableStart?: boolean;
+    }
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
   | { kind: 'interrupted'; detail: string }
@@ -215,6 +222,7 @@ export function createTaskRunner(input: {
               code: outcome.code,
               detail: outcome.detail,
               retryable: outcome.retryable,
+              adapterRetryableStart: outcome.retryable,
             },
             ownershipLost: false,
           };

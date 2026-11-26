@@ -109,6 +109,7 @@ export type TaskFailure = {
   code: string;
   detail?: string;
   retryable?: boolean;
+  adapterRetryableStart?: boolean;
 };
 
 /**

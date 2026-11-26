@@ -20,6 +20,7 @@ export type StoredReplay = {
   events: ExecutionEvent[];
   /** True when events before the first returned one are no longer retained. */
   truncated: boolean;
+  hasMore?: boolean;
 };
 
 export type EventWatermark = {
@@ -102,8 +103,8 @@ export function createInMemoryEventLog(input: { bufferSize: number }): EventLog 
       const oldest = state.events[0]?.seq ?? 0;
       // Same page shape as the database: the earliest events after the cursor,
       // and a flag when more remain or the head was already pruned.
-      const truncated = retained.length > bounded || (state.events.length > 0 && oldest > after + 1);
-      return { events: retained.slice(0, bounded), truncated };
+      const truncated = state.events.length > 0 && oldest > after + 1;
+      return { events: retained.slice(0, bounded), truncated, hasMore: retained.length > bounded };
     },
 
     watermark: async (taskId) => {
