@@ -149,26 +149,46 @@ test('cancellation during approval prevents an approved write', async () => {
   }
 });
 
-test('the HTTP tool rejects plaintext before approval and dispatches approved HTTPS', async (t) => {
+test('the HTTP tool refuses plaintext before approval and private destinations before dispatch', async () => {
   const space = workspace();
   try {
     const tools = runtime(true);
-    const fetch = t.mock.method(globalThis, 'fetch', async () => new Response('verified'));
-    const ensure = t.mock.fn(async () => ({ decision: 'granted' as const }));
-    const call = (url: string) => tools.call({
+    let approvals = 0;
+    const ensure = async (): Promise<{ decision: ApprovalDecision }> => {
+      approvals += 1;
+      return { decision: 'granted' };
+    };
+    const call = (target: ReturnType<typeof runtime>, url: string) => target.call({
       name: 'http.fetch', arguments: { url },
       context: context(space.root), gate: { ensure },
     });
 
-    const refused = await call('http://allowed.example/resource');
+    const refused = await call(tools, 'http://allowed.example/resource');
     assert.equal(!refused.result.ok && refused.result.code, 'validation_failed');
-    assert.equal(ensure.mock.callCount(), 0);
-    assert.equal(fetch.mock.callCount(), 0);
+    assert.equal(approvals, 0);
 
-    const approved = await call('https://allowed.example/resource');
-    assert.equal(approved.result.ok, true);
-    assert.equal(ensure.mock.callCount(), 1);
-    assert.equal(fetch.mock.callCount(), 1);
+    const foreign = await call(tools, 'https://not-allowed.example/resource');
+    assert.equal(!foreign.result.ok && foreign.result.code, 'permission_required');
+
+    const privateNetwork = createToolRuntime({
+      tools: createBuiltinTools({
+        shellEnabled: false,
+        allowedCommands: [],
+        networkEnabled: true,
+        allowedHosts: ['192.168.1.10'],
+        maxOutputBytes: 10_000,
+        commandTimeoutMs: 1_000,
+        maxSearchFiles: 100,
+        memory: null,
+        knowledge: null,
+      }),
+    });
+    const privateTarget = await call(privateNetwork, 'https://192.168.1.10/resource');
+    assert.equal(!privateTarget.result.ok && privateTarget.result.code, 'permission_required');
+    assert.match(
+      privateTarget.result.ok === false ? privateTarget.result.detail : '',
+      /non-public/,
+    );
   } finally {
     space.cleanup();
   }

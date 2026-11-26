@@ -154,20 +154,6 @@ test('tokens are reserved, not merely counted after a call', async () => {
   );
 });
 
-test('an external engine is charged once after its run, not reserved twice', async () => {
-  const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 100 });
-  const now = new Date('2026-11-26T10:00:00.000Z');
-  await ledger.charge('owner', { inputTokens: 30, outputTokens: 20 }, now);
-  assert.deepEqual(await ledger.snapshot('owner', now), {
-    requests: 1,
-    inputTokens: 30,
-    outputTokens: 20,
-  });
-  assert.equal(await ledger.available('owner', now), true);
-  await ledger.charge('owner', { inputTokens: 40, outputTokens: 20 }, now);
-  assert.equal(await ledger.available('owner', now), false);
-});
-
 test('partial provider usage is settled against the reservation, not zero', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 1_000 });
   const now = new Date('2026-11-26T10:00:00.000Z');

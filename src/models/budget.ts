@@ -91,8 +91,6 @@ export type BudgetLedger = {
    * unused token allowance.
    */
   release: (reservationId: string, options?: { dispatched?: boolean }) => Promise<void>;
-  /** Charge an external engine that did not go through the router. */
-  charge: (ownerId: string, usage: Usage, at: Date) => Promise<void>;
   snapshot: (ownerId: string, at: Date) => Promise<BudgetSnapshot>;
 };
 
@@ -268,25 +266,6 @@ export function createBudgetLedger(input: {
         dispatched: options.dispatched === true,
       });
       reservations.delete(reservationId);
-    },
-
-    charge: async (ownerId, usage, at) => {
-      // Charge without a ceiling check: the call already happened outside the
-      // router, so refusing it now would hide real spend. It is still recorded
-      // durably so the next reservation sees it.
-      const key = budgetKey(ownerId, at);
-      const id = `budget_${randomUUID()}`;
-      await store.reserve({
-        key,
-        reservationId: id,
-        maxRequests: Number.MAX_SAFE_INTEGER,
-        maxTokens: Number.MAX_SAFE_INTEGER,
-        tokens: 0,
-      });
-      await store.settle({
-        key, reservationId: id, reservedTokens: 0,
-        reservedInputTokens: 0, reservedOutputTokens: 0, usage,
-      });
     },
 
     snapshot: async (ownerId, at) => {

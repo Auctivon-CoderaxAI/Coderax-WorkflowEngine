@@ -19,6 +19,28 @@ settlement/release; its competing router and gateway were not merged. PR #3's
 planner was reconciled through PR #5, not as a second planner. The branch under
 review is `security/reconciliation`.
 
+PR #2 (`feat/intelligence-core`, head `c851c34`) was reviewed again for security
+fixes that this branch still needed. Two were genuine gaps and are adopted:
+
+- `src/security/network.ts` — SSRF and DNS-rebinding protection for a
+  model-initiated fetch. A hostname allowlist alone lets an allow-listed name
+  resolve to a metadata service or a private port, and a second DNS answer can
+  move the connection after validation. The module resolves every address,
+  refuses non-public ranges, pins the validated address into the request and
+  never follows a redirect. `http.fetch` now uses it instead of `fetch`.
+- `src/security/shell.ts` — command validation for `shell.run`. An allowlisted
+  name is not enough (`node -e`, `sh -c`, `git -c`, `xargs` and a workspace-bin
+  `PATH` shadow all escape it), so the module resolves an absolute executable,
+  refuses launcher commands, dangerous interpreter flags, control characters and
+  host-path arguments. The process still starts with `shell: false`.
+
+PR #2's plugin manifests, execution receipts, arbitration loop and native-agent
+rewrite are **not** adopted: they belong to PR #2's own review, and importing them
+here would create a second execution and receipt authority. Its
+redacted-approval-preview fix (`c851c34`) has no equivalent gap here because this
+branch's approval `description` never contains tool arguments; tool inputs are
+already redacted at the event boundary by `redactToolInput`.
+
 Baseline reproduction was executed, not inferred: a clean worktree at `808dfd3`
 (`npm ci && npm run build`) ran the script preserved at
 `docs/evidence/baseline-808dfd3-repro.mjs` against the real services and gateway
@@ -282,61 +304,12 @@ These are recorded so the next integration does not inherit them silently.
 | `feat/native-reasoning-planner` | `src/permissions/gate.ts` adds another approval gate. | Same reason: one permission authority. |
 | `feat/durable-events` | Carries the durable-events change only as base64 snapshots. | Superseded by the reconciled `feat/durable-events-integration`. |
 
-## Verification at the pushed head
+## Branch-level observations, superseded
 
-```
-npm ci
-npm run verify
-→ build 0, 162/162 tests, openapi.json matches the published contracts
-```
-
-Baseline evidence: the worktree at `808dfd3` printed the six `true` results above
-before the fix; the same behaviours are asserted and green at this head.
-
-## Coordination with concurrent work (2026-11-26)
-
-The two active pull requests advanced past the tips merged here while this branch
-was being verified. They now carry overlapping fixes, so this branch must not
-merge ahead of them and is not a competing authority.
-
-| Active branch | Head | Overlap with this branch |
-| --- | --- | --- |
-| `feat/zero-cost-model-router` (PR #4) | `1cd780d` | `src/models/policy.ts` adds a required per-operation data-processing policy. It is **stronger** than the hosting check in finding 3: private mode denies every hosted provider unless an exact owner grant with location, retention and training terms exists. It also hardens budget accounting and provider boundaries, and adds `tests/unit/policy.test.ts` and `tests/security/isolation.test.ts`. |
-| `feat/execution-supervisor` (PR #5) | `13d4b4f` | Its own `src/security/endpoint.ts` (`credentialEndpoint`), persisted action-bound approvals, external-agent history isolation, tool-approval consumption, supervisor admission and workspace admission. This overlaps findings 2, 4, 5, 9 and 11, and adds a second endpoint helper at the same path as this branch's. |
-| `feat/intelligence-core` (PR #2), `feat/native-reasoning-planner` (PR #3) | | PR #5 reconciled them (`e02c217`); its head is the current integration point for that work. |
-
-What this means for a rebase:
-
-- Where the active PRs implement a stronger rule, theirs wins. The
-  policy registry (PR #4) replaces the hosting check; the supervisor's
-  atomic admission replaces the mode-root directory handing; PR #5's
-  `credentialEndpoint` must be the single endpoint helper, extended with the
-  embedded-credential, query and fragment rejection (and applied to config
-  `baseURL` fields) rather than kept as a second function.
-- Genuine deltas that survive a rebase: the conversation owner/mode/kind
-  identity check (finding 1), the per-conversation workspace directory consumed
-  by the supervisor's quarantine (finding 6), the pre-validation JSON body bound
-  and the zod analysis (finding 12), and the baseline reproduction in this
-  document with its regression suite.
-- The branches are mergeable individually against `main` but not verified
-  against each other; PR #4 rewrites `src/models/router.ts` while PR #5 also
-  touches it. The merge order is the owner's decision, and this branch should be
-  rebased after both rather than merged first.
-- No duplicate pull request was opened for this work; PR #4 and PR #5 already
-  own most of these fixes, and `AGENTS.md` forbids duplicate PRs. The pushed
-  branch is the evidence and the rebase base, not a merge candidate on its own.
-
-## Limitations
-
-- No live MongoDB was contacted. Durability is proven against the
-  semantics-faithful collection fake, including unique indexes, dotted updates and
-  conditional approval consumption.
-- The budget ledger is process-local (finding 11).
-- `npm audit` still lists the zod advisory (finding 12), by decision.
-- Hosted CI did not run for this head; see the pull request for the executed
-  command and its exact output.
-- An independent review is required before merge and was not fabricated here.
-
+The branch-level notes that stood here were written before the authoritative
+pull requests were merged: they record an earlier 162-test run, a process-local
+budget and an uncontacted MongoDB. The consolidated verification below is the
+current evidence. The findings table above is history, not disposition.
 
 ## Consolidated verification (2026-11-26)
 
@@ -346,13 +319,41 @@ the live gate is the distributed evidence.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full compiled suite | `node --test "dist/tests/**/*.test.js"` with `CODERAX_REQUIRE_MONGO=1` | **341 passed, 0 failed, 0 skipped** |
+| Full compiled suite | `node --test "dist/tests/**/*.test.js"` with `CODERAX_REQUIRE_MONGO=1` | **349 passed, 0 failed, 0 skipped** |
 | Every permanent gate | `node dist/scripts/run-gates.js all` | **11/11 passed** |
-| Gate manifest coverage | `node dist/scripts/run-gates.js coverage` | 50 test files assigned, none unclaimed |
+| Gate manifest coverage | `node dist/scripts/run-gates.js coverage` | 52 test files assigned, none unclaimed |
 | Dependency audit | `node dist/scripts/run-gates.js audit` | critical 0, high 0, moderate 0 |
 | OpenAPI drift | `node dist/scripts/run-gates.js openapi` | no drift |
 | Baseline reproduction | clean worktree at `808dfd3`, `npm ci && npm run build && node repro.mjs` | all six defects `true` |
-| Live quota window | `tests/live/mongo.test.ts` | one winner across two replicas; replayed settlement charged once |
+| Live quota window | `tests/live/mongo.test.ts` | deterministic: unique budget index, second replica refused, replayed settlement charged once; three consecutive live-suite runs green |
+
+### Simplification pass
+
+A fresh-eyes review removed state and writes that no invariant needed:
+
+- `BudgetLedger.charge` had no production caller; external dispatch already
+  reserves and releases through the router. Removed with its unit test.
+- `lastReservationId` was written on every first reservation and never read.
+  Removed.
+- Settlement and release each performed a second `updateOne` to clamp a negative
+  reservation balance. The reservation-id guard inside the same atomic update
+  makes that state unreachable, so the clamp and its extra round-trip are gone.
+- The `budgetKey` re-export from `src/persistence/budgets.ts` had no importer and
+  was removed, leaving one import path for the key.
+- The stale branch-level verification, coordination and limitations sections of
+  this document were replaced by the consolidated evidence below; they described
+  a 162-test run, a process-local budget and an uncontacted MongoDB, none of
+  which is true at this head.
+
+### Deterministic live quota evidence
+
+The live quota test no longer races two inserts to produce its result. It owns a
+database of its own, asserts the unique `budget_window` index,
+takes the only request slot with one ledger, refuses a second ledger against the
+same durable window, replays the settlement through a fresh store and verifies a
+fresh process reads the same totals. Every step has one possible outcome, so the
+test does not depend on scheduling. It was run three times consecutively with a
+real MongoDB 7.0.14 server: 7 passed, 0 failed, 0 skipped each time.
 
 ### Authority consolidation
 
@@ -369,6 +370,9 @@ the live gate is the distributed evidence.
   Mongo window or the same atomic window in-process. Reservation ids make
   settlement and release exactly-once; the daily ceiling lives in the store, not
   in a process map.
+- `src/security/network.ts` is the only outbound-fetch policy and
+  `src/security/shell.ts` the only command policy. `src/security/endpoint.ts`
+  remains the only credential-endpoint policy; the two do not overlap.
 
 ### Dependency advisory
 

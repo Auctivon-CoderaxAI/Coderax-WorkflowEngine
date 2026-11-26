@@ -8,7 +8,7 @@ import { composeApplication } from '../../src/bootstrap/compose.js';
 import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
 import type { MongoCollectionLike } from '../../src/persistence/mongo.js';
 import { createMongoBudgetStore, ensureBudgetIndexes } from '../../src/persistence/budgets.js';
-import { createBudgetLedger } from '../../src/models/budget.js';
+import { budgetKey, createBudgetLedger } from '../../src/models/budget.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../../src/persistence/mongo.js';
 import { createLeaseStore } from '../../src/persistence/work-runs.js';
 import { workRunKey } from '../../src/execution/lease.js';
@@ -462,45 +462,49 @@ test(
     requiresDatabase();
     const client = new MongoClient(uri as string);
     await client.connect();
-    const database = client.db(databaseName);
-    const collection = database.collection('live_budget') as unknown as MongoCollectionLike;
+    // A database of this test's own. The tests above drop the shared database
+    // when they finish, so a quota assertion must not depend on which test ran
+    // first or on a concurrent insert race to produce a result.
+    const database = client.db(`${databaseName}_quota`);
+    const collection = database.collection('budget_windows') as unknown as MongoCollectionLike;
     try {
-      await collection.deleteMany({});
       await ensureBudgetIndexes(collection);
+      const indexes = await database.collection('budget_windows').listIndexes().toArray();
+      assert.ok(
+        indexes.some((index) => index.name === 'budget_window' && index.unique === true),
+        JSON.stringify(indexes),
+      );
+
       const now = new Date('2026-11-26T10:00:00.000Z');
-      const first = createBudgetLedger({
-        maxRequestsPerDay: 1,
-        maxTokensPerDay: 1_000,
-        store: createMongoBudgetStore(collection),
-      });
-      const second = createBudgetLedger({
-        maxRequestsPerDay: 1,
-        maxTokensPerDay: 1_000,
-        store: createMongoBudgetStore(collection),
-      });
+      const limits = { maxRequestsPerDay: 1, maxTokensPerDay: 1_000 };
+      const first = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
 
-      // Two replicas race for the only request slot in the day.
-      const outcomes = await Promise.all([
-        first.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
-        second.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
-      ]);
-      assert.equal(outcomes.filter((outcome) => outcome.allowed).length, 1);
-      const winner = outcomes.find((outcome) => outcome.allowed);
-      assert.ok(winner && winner.allowed);
-      if (!winner || !winner.allowed) return;
+      // The first replica takes the only request slot of the day.
+      const winner = await first.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 });
+      assert.equal(winner.allowed, true);
+      if (!winner.allowed) return;
 
-      // A replayed settlement must not charge the owner twice.
-      await Promise.all([
-        first.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 }),
-        first.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 }),
-      ]);
+      // A second replica shares the durable window and is refused.
+      const second = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
+      const refused = await second.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 });
+      assert.equal(refused.allowed, false);
+      assert.equal(refused.allowed === false && refused.reason, 'requests');
+
+      // Settlement is applied once. Replaying the same reservation through a
+      // fresh store (as another replica would) is a no-op, not a second charge.
+      await first.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 });
+      const replay = await createMongoBudgetStore(collection).settle({
+        key: budgetKey('owner', now),
+        reservationId: winner.reservation.id,
+        reservedTokens: 20,
+        reservedInputTokens: 10,
+        reservedOutputTokens: 10,
+        usage: { inputTokens: 7, outputTokens: 3 },
+      });
+      assert.equal(replay, false);
 
       // A fresh process reads the same durable window, not a local copy.
-      const restarted = createBudgetLedger({
-        maxRequestsPerDay: 1,
-        maxTokensPerDay: 1_000,
-        store: createMongoBudgetStore(collection),
-      });
+      const restarted = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
       assert.deepEqual(await restarted.snapshot('owner', now), {
         requests: 1,
         inputTokens: 7,
@@ -508,7 +512,7 @@ test(
       });
       assert.equal(await restarted.available('owner', now), false);
     } finally {
-      await database.collection('live_budget').drop().catch(() => undefined);
+      await database.dropDatabase().catch(() => undefined);
       await client.close().catch(() => undefined);
     }
   },

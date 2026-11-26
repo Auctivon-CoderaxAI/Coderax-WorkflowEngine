@@ -1,5 +1,4 @@
 import type { BudgetWindow, BudgetWindowStore } from '../models/budget.js';
-import { budgetKey } from '../models/budget.js';
 import type { MongoCollectionLike } from './mongo.js';
 
 /**
@@ -67,7 +66,7 @@ export function createMongoBudgetStore(collection: MongoCollectionLike): BudgetW
   }
 
   return {
-    reserve: async ({ key, reservationId, maxRequests, maxTokens, tokens }) => {
+    reserve: async ({ key, maxRequests, maxTokens, tokens }) => {
       const incremented = await conditionalIncrement(key, maxRequests, maxTokens, tokens);
       if (incremented) return { allowed: true, window: incremented };
 
@@ -84,7 +83,6 @@ export function createMongoBudgetStore(collection: MongoCollectionLike): BudgetW
           outputTokens: 0,
           reservedTokens: tokens,
           committed: tokens,
-          lastReservationId: reservationId,
           settledIds: [],
           releasedIds: [],
         });
@@ -126,15 +124,7 @@ export function createMongoBudgetStore(collection: MongoCollectionLike): BudgetW
         },
         { returnDocument: 'after', includeResultMetadata: false },
       );
-      if (!applied) return false;
-      // Defensive clamp; the id guard above makes an overshoot a corrupt-row
-      // signal rather than a normal path.
-      await collection.updateOne(
-        { key, reservedTokens: { $lt: 0 } },
-        { $set: { reservedTokens: 0 } },
-        { upsert: false },
-      );
-      return true;
+      return applied !== null;
     },
 
     release: async ({ key, reservationId, reservedTokens, dispatched }) => {
@@ -157,13 +147,7 @@ export function createMongoBudgetStore(collection: MongoCollectionLike): BudgetW
         },
         { returnDocument: 'after', includeResultMetadata: false },
       );
-      if (!applied) return false;
-      await collection.updateOne(
-        { key, reservedTokens: { $lt: 0 } },
-        { $set: { reservedTokens: 0 } },
-        { upsert: false },
-      );
-      return true;
+      return applied !== null;
     },
 
     read: async (key) => {
@@ -180,5 +164,3 @@ export function budgetCollectionName(prefix: string): string {
 export async function ensureBudgetIndexes(collection: MongoCollectionLike): Promise<void> {
   await collection.createIndex({ key: 1 }, { unique: true, name: 'budget_window' });
 }
-
-export { budgetKey };

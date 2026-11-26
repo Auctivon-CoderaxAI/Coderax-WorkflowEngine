@@ -8,6 +8,8 @@ import type { Tool, ToolResult } from './types.js';
 import { bounded, failure, success } from './types.js';
 import { confinePath } from './paths.js';
 import { scopedChildEnvironment } from '../security/environment.js';
+import { authorizeUrl, pinnedRequest } from '../security/network.js';
+import { validateCommand } from '../security/shell.js';
 
 /**
  * Built-in tools are the capabilities Coderax Native owns directly. File access
@@ -71,19 +73,6 @@ async function directoryEntries(root: string, relative: string, depth: number): 
   }
   await walk(path.join(root, relative), depth);
   return lines.length > 0 ? lines : ['(empty)'];
-}
-
-function hostAllowed(hostname: string, allowedHosts: string[]): boolean {
-  const host = hostname.toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) {
-    return false;
-  }
-  if (host.includes(':') || host.endsWith('.local')) return false;
-  return allowedHosts.some((entry) => {
-    const allowed = entry.toLowerCase();
-    if (allowed.startsWith('.')) return host.endsWith(allowed);
-    return host === allowed;
-  });
 }
 
 export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
@@ -220,17 +209,17 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
       },
       run: async (input, context) => {
         const typed = input as { command: string; args: string[]; timeoutMs?: number };
-        if (!options.allowedCommands.includes(typed.command)) {
-          return failure(
-            'permission_required',
-            `That command is not allow-listed. Allowed: ${options.allowedCommands.join(', ') || 'none'}.`,
-          );
-        }
+        const validated = await validateCommand({
+          command: typed.command,
+          args: typed.args,
+          allowedCommands: options.allowedCommands,
+        });
+        if (!validated.ok) return failure('permission_required', validated.detail);
         const timeoutMs = typed.timeoutMs ?? options.commandTimeoutMs;
         return new Promise<ToolResult>((resolve) => {
           let settled = false;
           let collected = '';
-          const child = spawn(typed.command, typed.args, {
+          const child = spawn(validated.executable, validated.args, {
             cwd: context.workspaceRoot,
             shell: false,
             windowsHide: true,
@@ -315,37 +304,35 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
       resource: (input) => (input as { url: string }).url,
       run: async (input, context) => {
         const typed = input as { url: string; method: 'GET' | 'POST'; body?: string };
-        let parsed: URL;
-        try {
-          parsed = new URL(typed.url);
-        } catch {
-          return failure('validation_failed', 'That URL is not valid.');
+        const policy = {
+          allowedHosts: options.allowedHosts,
+          maxBytes: limit,
+          timeoutMs: 15_000,
+        };
+        // The policy refuses a private destination and pins the validated DNS
+        // answer; `fetch` cannot express either guarantee.
+        const authorized = await authorizeUrl(typed.url, policy);
+        if (!authorized.ok) {
+          const code = authorized.detail === 'That URL is not valid.' ? 'validation_failed' : 'permission_required';
+          return failure(code, authorized.detail);
         }
-        if (!hostAllowed(parsed.hostname, options.allowedHosts)) {
-          return failure(
-            'permission_required',
-            'That host is not allow-listed for this deployment.',
+        try {
+          const response = await pinnedRequest(
+            {
+              target: authorized.target,
+              method: typed.method,
+              headers: { accept: 'text/plain, application/json;q=0.9' },
+              signal: context.signal,
+              ...(typed.body === undefined ? {} : { body: typed.body }),
+            },
+            policy,
           );
-        }
-        const controller = new AbortController();
-        const onAbort = (): void => controller.abort();
-        context.signal.addEventListener('abort', onAbort, { once: true });
-        const timer = setTimeout(() => controller.abort(), 15_000);
-        try {
-          const response = await fetch(parsed, {
-            method: typed.method,
-            ...(typed.body ? { body: typed.body } : {}),
-            signal: controller.signal,
-            redirect: 'manual',
-            headers: { accept: 'text/plain, application/json;q=0.9' },
-          });
-          const text = await response.text();
-          return output(`HTTP ${response.status}\n${bounded(text, limit)}`, limit);
+          return output(
+            `HTTP ${response.status}${response.truncated ? ' (truncated)' : ''}\n${bounded(response.text, limit)}`,
+            limit,
+          );
         } catch {
           return failure('tool_failed', 'The request failed.');
-        } finally {
-          clearTimeout(timer);
-          context.signal.removeEventListener('abort', onAbort);
         }
       },
     });
