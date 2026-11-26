@@ -50,7 +50,17 @@ export function createTaskRunner(input: {
       let ownershipLost = false;
       let cancelRequested = false;
 
-      const onExternalAbort = (): void => controller.abort();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener('abort', () => {
+          timeout = setTimeout(() => reject(new Error('Cleanup deadline exceeded')), 5000);
+        }, { once: true });
+      });
+      const onExternalAbort = (): void => {
+        cancelRequested = true;
+        controller.abort();
+      };
+      if (request.signal.aborted) onExternalAbort();
       request.signal.addEventListener('abort', onExternalAbort, { once: true });
 
       const heartbeat = async (): Promise<void> => {
@@ -81,7 +91,12 @@ export function createTaskRunner(input: {
       timer.unref();
 
       try {
-        const outcome = await adapter.run({ ...request, signal: controller.signal }, report);
+        const outcome = await Promise.race([
+          adapter.run({ ...request, signal: controller.signal }, event => {
+            if (!controller.signal.aborted) report(event);
+          }),
+          deadline,
+        ]);
         if (ownershipLost) {
           return {
             outcome: {
@@ -123,6 +138,7 @@ export function createTaskRunner(input: {
             ownershipLost: true,
           };
         }
+        if (cancelRequested) return { outcome: { kind: 'cancelled' }, ownershipLost: false };
         return {
           outcome: {
             kind: 'failed',
@@ -134,6 +150,7 @@ export function createTaskRunner(input: {
         };
       } finally {
         clearInterval(timer);
+        clearTimeout(timeout);
         request.signal.removeEventListener('abort', onExternalAbort);
       }
     },

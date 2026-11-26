@@ -65,15 +65,13 @@ Options, cheapest first:
 | Option | Cost | Requirement | Status |
 | --- | --- | --- | --- |
 | **Self-hosted GitHub Actions runner on the authorized Oracle Always Free instance** | $0 — self-hosted runners do not consume hosted minutes and are not affected by the hosted billing restriction | Access to the existing OCI host to register the runner | Recommended; blocked on host access |
-| Cloudflare Workers Builds | $0 within the free build allowance | Connect the repository in the Cloudflare dashboard | Possible for the engine's build only; not a test runner |
+| Cloudflare Workers Builds | $0 within the free build allowance | Connect the repository in the Cloudflare dashboard | Configurable build commands can run tests. Validate this repository’s verification command and free allowance remotely; engine deployment compatibility is a separate question. |
 | Greptile | $0 Starter | App install | Reviews code, does not run tests |
 | Purchasing hosted minutes | > $0 | — | Prohibited by the owner |
 
-Until a runner exists, verification is executed on the owner's workstation and
-reported as **local evidence**, never as a passing hosted check. This is a
-deviation from the "no local engineering workloads" requirement, and it is called
-out rather than hidden: this session has no authorized cloud environment to
-execute in, and the hosted alternative is billing-blocked.
+Until an authorized remote runner passes the required check, hosted verification
+remains blocked. Prior workstation results are historical evidence; the charter
+requires cloud compute for future verification.
 
 ## Current state
 

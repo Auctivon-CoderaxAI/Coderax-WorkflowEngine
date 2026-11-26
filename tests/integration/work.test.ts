@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
 import { startTestApp, waitFor } from '../helpers.js';
 
@@ -107,6 +108,123 @@ test('a second task in the same conversation is refused while one is live', asyn
     assert.equal(second.ok === false && second.code, 'busy');
 
     await started.app.service.cancelTask(principal, first.value.taskId, 'test cleanup');
+  } finally {
+    await started.close();
+  }
+});
+
+test('reported text and nested arguments are scrubbed before replay and persistence', async () => {
+  const started = await startTestApp();
+  try {
+    const agent = started.app.dependencies.agents.get('coderax');
+    assert.ok(agent);
+    agent.run = async (_request, report) => {
+      report({ type: 'text.replace', text: 'reply: sk-example' });
+      report({ type: 'text.delta', text: '0123456789 done' });
+      report({ type: 'tool.call', tool: 'test', callId: 'call', input: [{ api_key: 'sample value' }] });
+      assert.throws(() => report({ type: 'file.edit', path: 'x'.repeat(1025) }), /file.edit path/);
+      report({ type: 'file.edit', path: 'x'.repeat(1024) });
+      return { ok: true, summary: 'done' };
+    };
+    const task = await started.app.service.submitWork(principal, {
+      objective: 'exercise reports', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(task.ok);
+    await started.app.dependencies.scheduler.idle();
+    const replay = started.app.dependencies.events.replay(task.value.taskId, 0);
+    for (const event of replay.events) ExecutionEvent.parse(event);
+    const frames = JSON.stringify(replay.events);
+    assert.doesNotMatch(frames, /sk-example|0123456789|sample value/);
+    assert.match(frames, /redacted-key/);
+    assert.equal(replay.events.filter(event => event.type === 'file.edit').length, 1);
+    const conversation = await started.app.service.conversation(principal, task.value.conversationId);
+    assert.ok(conversation.ok);
+    assert.equal(conversation.value.messages.at(-1)?.text, 'reply: [redacted-key] done');
+  } finally {
+    await started.close();
+  }
+});
+
+test('cancellation releases a hung adapter and ignores its late reports', { timeout: 10000 }, async () => {
+  const started = await startTestApp();
+  try {
+    const agent = started.app.dependencies.agents.get('coderax');
+    assert.ok(agent);
+    let markEntered!: () => void;
+    const entered = new Promise<void>(resolve => { markEntered = resolve; });
+    let late = () => {};
+    agent.run = async (_request, report) => {
+      late = () => report({ type: 'text.delta', text: 'stale ' });
+      markEntered();
+      return new Promise(() => {});
+    };
+    const task = await started.app.service.submitWork(principal, {
+      objective: 'cancel hung adapter', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(task.ok);
+    await entered;
+    await started.app.service.cancelTask(principal, task.value.taskId);
+    await started.app.dependencies.scheduler.idle();
+    const status = await started.app.service.task(principal, task.value.taskId);
+    assert.ok(status.ok);
+    assert.equal(status.value.state, 'cancelled');
+    late();
+    assert.doesNotMatch(JSON.stringify(started.app.dependencies.events.replay(task.value.taskId, 0)), /stale/);
+    agent.run = async () => ({ ok: true, summary: 'done' });
+    const next = await started.app.service.submitWork(principal, {
+      objective: 'next', conversationId: task.value.conversationId, mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(next.ok);
+    await started.app.service.cancelTask(principal, next.value.taskId);
+  } finally {
+    await started.close();
+  }
+});
+
+test('late reports and cleanup cannot touch a resumed generation', async () => {
+  const started = await startTestApp();
+  try {
+    const deps = started.app.dependencies;
+    const agent = deps.agents.get('coderax');
+    assert.ok(agent);
+    let stopOld: (() => void) | undefined;
+    let currentSignal: AbortSignal | undefined;
+    let finishCurrent: (() => void) | undefined;
+    agent.run = async ({ signal }, report) => {
+      if (!stopOld) {
+        await new Promise<void>(resolve => {
+          stopOld = () => {
+            report({ type: 'text.replace', text: 'stale output' });
+            resolve();
+          };
+        });
+      } else {
+        currentSignal = signal;
+        report({ type: 'text.delta', text: 'current output' });
+        await new Promise<void>(resolve => { finishCurrent = resolve; });
+      }
+      return { ok: true, summary: 'done' };
+    };
+    const task = await started.app.service.submitWork(principal, {
+      objective: 'resume a stalled generation', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(task.ok);
+    const { taskId, generation, conversationId } = task.value;
+    const finishOld = await waitFor(async () => stopOld);
+    deps.clock.now = () => new Date(Date.now() + 60_000);
+    const resumed = await started.app.service.resumeTask(principal, taskId, generation);
+    assert.ok(resumed.ok && resumed.value.outcome === 'accepted');
+    const finish = await waitFor(async () => finishCurrent);
+    finishOld();
+    await waitFor(async () => deps.scheduler.active() === 1 || null);
+    assert.doesNotMatch(JSON.stringify(deps.events.replay(taskId, 0)), /stale/);
+    await started.app.service.cancelTask(principal, taskId);
+    assert.equal(currentSignal?.aborted, true);
+    finish();
+    await deps.scheduler.idle();
+    const conversation = await started.app.service.conversation(principal, conversationId);
+    assert.ok(conversation.ok);
+    assert.equal(conversation.value.messages.at(-1)?.text, 'current output');
   } finally {
     await started.close();
   }

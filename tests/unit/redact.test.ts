@@ -36,3 +36,8 @@ test('redaction is bounded and leaves ordinary text untouched', () => {
   assert.equal(redactText(ordinary), ordinary);
   assert.ok(redactText('x'.repeat(50_000)).length <= 4_000);
 });
+
+test('quoted JSON credentials are scrubbed, including escaped value quotes', () => {
+  const diagnostic = JSON.stringify({ api_key: 'sample"private value' });
+  assert.equal(redactText(diagnostic), '{"api_key":[redacted]}');
+});

@@ -16,12 +16,29 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/([?&](?:token|key|api_key|apikey|password|secret|sig)=)[^&\s]+/gi, '$1[redacted]'],
   [
     // `Bearer` is handled above, so it is not re-consumed as a bare value.
-    /(\b(?:token|password|passwd|secret|api[_-]?key|authorization)\b\s*[:=]\s*)(?!Bearer\b)("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+    /(\b(?:token|password|passwd|secret|api[_-]?key|authorization)\b["']?\s*[:=]\s*)(?!Bearer\b)("(?:\\[\s\S]|[^"\\])*(?:"|\\?$)|'(?:\\[\s\S]|[^'\\])*(?:'|\\?$)|[^\s,;]+)/gi,
     '$1[redacted]',
   ],
   // Absolute home directories leak an owner's name and layout.
   [/(?:\/home\/|\/Users\/|[A-Za-z]:\\Users\\)[^\\/\s"']+/g, '[home]'],
 ];
+
+/** Preserve the length of ordinary assistant replies; diagnostics are bounded separately. */
+export function redactContent(value: string): string {
+  for (const [pattern, replacement] of PATTERNS) value = value.replace(pattern, replacement);
+  return value;
+}
+
+export function redactToolInput(input: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(input, (key, value: unknown) => {
+      if (/^(?:token|password|passwd|secret|api[_-]?key|authorization)$/i.test(key)) return '[redacted]';
+      return typeof value === 'string' ? redactContent(value) : value;
+    }));
+  } catch {
+    return '[redacted]';
+  }
+}
 
 /** Bounds the work a pathological string can cause. */
 const MAX_INPUT = 20_000;
@@ -42,9 +59,7 @@ export function redactText(
       text = text.split(secret).join('[redacted]');
     }
   }
-  for (const [pattern, replacement] of PATTERNS) {
-    text = text.replace(pattern, replacement);
-  }
+  text = redactContent(text);
   const bound = Math.min(Math.max(1, limit), MAX_OUTPUT);
   return text.length > bound ? `${text.slice(0, bound - 1)}…` : text;
 }

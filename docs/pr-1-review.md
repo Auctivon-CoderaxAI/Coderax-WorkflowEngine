@@ -111,13 +111,12 @@ resource the agent is waiting on. The permission store is the authority; the eve
 must reference a record that exists. Wiring this belongs with the real adapter
 work (F3).
 
-### F6 — M — No bounded adapter cleanup (open)
+### F6 — M — Bounded adapter cleanup (fixed)
 
-Coderax bounds cancellation cleanup at 5 s so a dead transport cannot hold the
-task lease indefinitely (`engines/run.ts`, `CLEANUP_TIMEOUT_MS`). This engine's
-runner relies on the abort signal alone; a hung `run()` keeps the lease until the
-TTL expires. Not a correctness hole — the lease still fences — but it delays
-recovery and blocks a retry.
+The old heartbeat could renew a hung adapter’s lease indefinitely, even after
+cancellation. The runner now allows five seconds for cleanup after abort, then
+stops heartbeating. Cancellation settles through the fenced task write and
+token-checked release. A superseded run cannot settle the task.
 
 ### F7 — M — No prompt construction from the conversation (fixed)
 
@@ -194,5 +193,5 @@ Phases 4–9 cannot be claimed from this repository alone. In dependency order:
 1. Real adapter transports (F3) — without them the engine executes only Native.
 2. Persistence for tasks, conversations, memory, events, notifications (F2).
 3. Prompt construction from the transcript (F7) — required for continuity.
-4. Approval records (F5) and bounded cleanup (F6).
+4. Approval records (F5). Bounded cleanup (F6) is now implemented.
 5. Only then client migration, deployment, and removal of the legacy engine.

@@ -28,7 +28,7 @@ import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
-import { redactText } from '../observability/redact.js';
+import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
@@ -131,7 +131,6 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
-  const textByTask = new Map<string, string>();
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -255,7 +254,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    * When ownership was lost the function writes nothing at all: a superseded run
    * must never overwrite the state a newer generation owns.
    */
-  async function settle(task: TaskRecord, token: string, outcome: RunOutcome): Promise<void> {
+  async function settle(
+    task: TaskRecord,
+    token: string,
+    outcome: RunOutcome,
+    checkpoint?: TaskRecord['checkpoint'],
+  ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       return;
     }
@@ -283,7 +287,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               },
             };
 
-    const applied = await deps.tasks.updateFenced({ taskId: task.taskId, token, patch });
+    const applied = await deps.tasks.updateFenced({
+      taskId: task.taskId,
+      token,
+      patch: checkpoint ? { ...patch, checkpoint } : patch,
+    });
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
         await releaseLease(task, token);
@@ -292,7 +300,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
 
     const settled = applied.task;
-    const text = textByTask.get(task.taskId) ?? '';
+    const text = checkpoint?.text ?? '';
     if (text.length > 0) {
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
@@ -344,7 +352,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         detail: outcome.code,
       });
     }
-    textByTask.delete(task.taskId);
     await releaseLease(task, token);
   }
 
@@ -423,9 +430,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
-    textByTask.set(taskId, started.task.checkpoint.text);
+    let text = started.task.checkpoint.text;
+    let visible = text;
+    const emitText = (next: string, replace = false): void => {
+      if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
+      else if (next !== visible) publish(started.task, 'text.delta', { text: next.slice(visible.length) });
+      visible = next;
+    };
 
     const report = (event: AgentReportEvent): void => {
+      if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
       if (event.type === 'step.started') {
         const existing = steps.find((step) => step.id === event.stepId);
         if (existing) existing.state = 'running';
@@ -448,28 +462,26 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           token,
           patch: {
             steps,
-            checkpoint: { completedSteps: [...completed], text: textByTask.get(taskId) ?? '' },
+            checkpoint: { completedSteps: [...completed], text: visible },
             updatedAt: deps.clock.iso(),
           },
         });
         return;
       }
-      if (event.type === 'text.delta') {
-        const text = textByTask.get(taskId) ?? '';
-        textByTask.set(taskId, text + event.text);
-        publish(started.task, 'text.delta', { text: event.text });
-        return;
-      }
-      if (event.type === 'text.replace') {
-        textByTask.set(taskId, event.text);
-        publish(started.task, 'text.replace', { text: event.text });
+      if (event.type === 'text.delta' || event.type === 'text.replace') {
+        text = event.type === 'text.replace' ? event.text : text + event.text;
+        // A trailing token can become a credential when the next delta arrives.
+        let end = text.length;
+        while (end > 0 && !/\s/.test(text.charAt(end - 1))) end--;
+        const complete = text.slice(0, end);
+        emitText(redactContent(complete), event.type === 'text.replace');
         return;
       }
       if (event.type === 'tool.call') {
         publish(started.task, 'tool.call', {
           callId: event.callId,
           tool: event.tool,
-          ...(event.input === undefined ? {} : { input: event.input }),
+          ...(event.input === undefined ? {} : { input: redactToolInput(event.input) }),
         });
         return;
       }
@@ -483,6 +495,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return;
       }
       if (event.type === 'file.edit') {
+        if (typeof event.path !== 'string' || event.path.length < 1 || event.path.length > 1024) {
+          throw new RangeError('file.edit path must contain 1–1024 characters.');
+        }
         publish(started.task, 'file.edit', { path: event.path });
         return;
       }
@@ -518,15 +533,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
       report,
     });
+    if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
 
     if (result.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer
       // owns the task, and the new owner is the only writer of its state.
-      textByTask.delete(taskId);
       return;
     }
-    await settle(started.task, token, result.outcome);
+    const safeText = redactContent(text);
+    emitText(safeText);
+    const outcome = result.outcome.kind === 'completed'
+      ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
+      : result.outcome;
+    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
