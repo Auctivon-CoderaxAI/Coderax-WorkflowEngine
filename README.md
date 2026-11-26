@@ -58,7 +58,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 144 tests: unit, contract, integration, security, e2e
+npm test                          # 146 tests: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 

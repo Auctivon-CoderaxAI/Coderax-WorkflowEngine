@@ -375,6 +375,86 @@ test('two replicas dispatch one due occurrence exactly once', async () => {
   assert.equal((await store.get(schedule.scheduleId))?.runsTotal, 1);
 });
 
+test('durable capacity admits one run across replicas and quarantines before reuse', async () => {
+  const store = createScheduleRepository();
+  const first = scheduleRecord({ scheduleId: 'sch_first', nextRunAt: NOW });
+  const second = scheduleRecord({ scheduleId: 'sch_second', nextRunAt: NOW });
+  await store.create(first);
+  await store.create(second);
+  const port = testPort();
+  const clock = testClock();
+  const a = engineFor({ store, port: port.port, clock: clock.clock, settings: { maxConcurrentRuns: 1 } });
+  const b = engineFor({ store, port: port.port, clock: clock.clock, settings: { maxConcurrentRuns: 1 } });
+
+  await Promise.all([a.tick(), b.tick()]);
+  assert.equal(port.calls.length, 1, 'one durable slot admits one occurrence');
+  assert.equal(await store.countCapacity(), 1);
+
+  // A second admission cannot use the slot while the first run is live.
+  const blocked = await store.reserveCapacity({
+    executionId: 'exe_blocked',
+    generation: 1,
+    limit: 1,
+    leaseUntil: '2026-11-26T12:01:00.000Z',
+    now: NOW,
+  });
+  assert.deepEqual(blocked, { ok: false, reason: 'full' });
+});
+
+test('the capacity ledger holds an expired slot until it is released', async () => {
+  const store = createScheduleRepository();
+  const reserved = await store.reserveCapacity({
+    executionId: 'exe_live',
+    generation: 3,
+    limit: 1,
+    leaseUntil: '2026-11-26T12:01:00.000Z',
+    now: NOW,
+  });
+  assert.equal(reserved.ok, true);
+  assert.deepEqual(
+    await store.reserveCapacity({
+      executionId: 'exe_live',
+      generation: 4,
+      limit: 1,
+      leaseUntil: '2026-11-26T12:02:00.000Z',
+      now: NOW,
+    }),
+    { ok: false, reason: 'exists' },
+  );
+  assert.equal(
+    await store.renewCapacity({
+      executionId: 'exe_live',
+      leaseUntil: '2026-11-26T12:05:00.000Z',
+    }),
+    true,
+  );
+  assert.equal(await store.quarantineExpiredCapacity('2026-11-26T12:04:00.000Z'), 0);
+  assert.equal(await store.quarantineExpiredCapacity('2026-11-26T12:06:00.000Z'), 1);
+
+  // Quarantine is not capacity: an expired lease cannot authorize another run.
+  assert.equal(await store.countCapacity(), 1);
+  assert.deepEqual(
+    (await store.listQuarantinedCapacity()).map((slot) => slot.executionId),
+    ['exe_live'],
+  );
+  assert.equal(
+    (
+      await store.reserveCapacity({
+        executionId: 'exe_other',
+        generation: 1,
+        limit: 1,
+        leaseUntil: '2026-11-26T12:07:00.000Z',
+        now: NOW,
+      })
+    ).ok,
+    false,
+  );
+
+  assert.equal(await store.releaseCapacity('exe_live'), 'released');
+  assert.equal(await store.releaseCapacity('exe_live'), 'absent');
+  assert.equal(await store.countCapacity(), 0);
+});
+
 test('a missed occurrence is recorded once and the next run is not a backlog', async () => {
   const store = createScheduleRepository();
   const schedule = scheduleRecord({

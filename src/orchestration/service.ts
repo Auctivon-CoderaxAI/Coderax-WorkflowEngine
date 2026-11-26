@@ -862,10 +862,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   }
 
   const schedulePort: SchedulePort = {
-    dispatch: async ({ schedule, taskId, conversationId, trigger, selectedTimingRevision, occurrenceKey, executionId, accept }) => {
-      // A dispatch can race the owner's cancellation. The receipt was already
-      // written, but no Work may start for a schedule that is no longer active
-      // in the cancelled sense.
+    dispatch: async ({ schedule, scheduleVersion, taskId, conversationId, trigger, selectedTimingRevision, occurrenceKey, executionId, accept }) => {
+      // A dispatch can race an owner edit, pause, cancellation or an event-rule
+      // change. The occurrence was selected from an exact revision, timing rule
+      // and occurrence key; a newer schedule must be re-evaluated, never
+      // submitted with the stale plan it was admitted under.
       const current = await deps.schedules.get(schedule.scheduleId);
       if (!current) {
         return { ok: false, reason: 'refused', detail: 'That schedule no longer exists.' };
@@ -878,6 +879,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           (record.state === 'active' && (record.timingRevision ?? 0) === selectedTimingRevision &&
             (trigger !== 'schedule' || record.nextRunAt === occurrenceKey)));
       if (!eligible(current)) return { ok: false, reason: 'refused', detail: 'That occurrence is no longer eligible.' };
+      if (current.version !== scheduleVersion) {
+        return {
+          ok: false,
+          reason: 'refused',
+          detail: 'The schedule changed while this occurrence was being prepared.',
+        };
+      }
       const adapter = deps.agents.resolve(current.agent);
       if (!adapter.ok) {
         return { ok: false, reason: 'refused', detail: adapter.detail };

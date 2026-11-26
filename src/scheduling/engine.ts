@@ -59,6 +59,8 @@ export type SchedulePort = {
   /** Submits Work through the authoritative orchestration service. */
   dispatch: (input: {
     schedule: ScheduleRecord;
+    /** The revision the occurrence was selected from; dispatch refuses a newer one. */
+    scheduleVersion: number;
     taskId: string;
     conversationId: string;
     attempt: number;
@@ -109,6 +111,17 @@ type OccurrencePlan = {
 
 const FAILURE_DETAIL_LIMIT = 1_000;
 const NOTICE_SUMMARY_LIMIT = 500;
+/**
+ * A live receipt renews this lease every tick. A lease that expires is
+ * quarantined, not freed: the slot only returns after the abandoned task is
+ * verified terminal, so capacity can never authorize a second run against work
+ * that may still act.
+ */
+const CAPACITY_LEASE_MS = 60_000;
+
+function capacityLeaseUntil(now: Date): string {
+  return new Date(now.getTime() + CAPACITY_LEASE_MS).toISOString();
+}
 
 export function createScheduleEngine(input: {
   store: ScheduleRepository;
@@ -415,13 +428,8 @@ export function createScheduleEngine(input: {
       };
     }
 
-    if ((await store.countActive()) >= settings.maxConcurrentRuns) {
-      return {
-        kind: 'skip',
-        detail: 'The engine concurrency limit for scheduled runs is reached.',
-      };
-    }
-
+    // Capacity is reserved atomically at dispatch, after the occurrence is
+    // recorded. A read-then-count check here would be advisory only.
     return { kind: 'proceed' };
   }
 
@@ -460,6 +468,29 @@ export function createScheduleEngine(input: {
     const executionId = ids.executionId();
     const conversationId = scheduledConversationId(plan.schedule.scheduleId);
     const taskId = scheduledTaskId(plan.schedule.scheduleId, plan.occurrenceKey, attempt);
+    const capacity = await store.reserveCapacity({
+      executionId,
+      generation: plan.schedule.version,
+      limit: settings.maxConcurrentRuns,
+      leaseUntil: capacityLeaseUntil(now),
+      now: iso(),
+    });
+    if (!capacity.ok) {
+      // `exists` is not a slot this dispatch owns: proceeding would submit Work
+      // uncounted under an identifier collision. Both outcomes refuse the run.
+      const dispatch = await skipOccurrence(
+        plan,
+        capacity.reason === 'full'
+          ? 'The durable scheduled-run capacity is full; this occurrence was not admitted.'
+          : 'The execution identifier collided with an existing reservation; this occurrence was not admitted.',
+      );
+      return {
+        dispatch,
+        created: dispatch !== null,
+        submitted: false,
+        advanceHandled: false,
+      };
+    }
     const execution = executionFor(plan, {
       executionId,
       state: 'claimed',
@@ -479,6 +510,7 @@ export function createScheduleEngine(input: {
     if (!created.created) {
       // Another replica owns this occurrence. It also owns the schedule advance;
       // this caller must not submit a second run.
+      await store.releaseCapacity(executionId);
       return {
         dispatch: toDispatch(created.execution, true),
         created: false,
@@ -490,7 +522,7 @@ export function createScheduleEngine(input: {
     const outcome = await port.dispatch({
       executionId, accept: eligible => account(execution, eligible),
       schedule: plan.schedule,
-      trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0, occurrenceKey: plan.occurrenceKey,
+trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0, occurrenceKey: plan.occurrenceKey, scheduleVersion: plan.schedule.version,
       taskId,
       conversationId,
       attempt,
@@ -509,6 +541,9 @@ export function createScheduleEngine(input: {
         advanceHandled: false,
       };
     }
+
+    // A refusal or busy result created no Work task, so its slot is reusable now.
+    await store.releaseCapacity(executionId);
 
     if (outcome.reason === 'duplicate') {
       // The deterministic task id already exists (a previous dispatch landed).
@@ -638,6 +673,14 @@ export function createScheduleEngine(input: {
     const taskId = execution.taskId;
     if (!taskId) return;
 
+    // A replica that is still reconciling this receipt owns a live slot. The
+    // renewal is fenced to an active reservation; a quarantined slot stays
+    // quarantined until the task is verified terminal below.
+    await store.renewCapacity({
+      executionId: execution.executionId,
+      leaseUntil: capacityLeaseUntil(now),
+    });
+
     const snapshot = await port.taskSnapshot(taskId);
     if (!snapshot) {
       if (execution.state !== 'claimed') return;
@@ -666,6 +709,7 @@ export function createScheduleEngine(input: {
           });
           report.missed += 1;
         }
+        await store.releaseCapacity(execution.executionId);
         return;
       }
       // Recovery is safe: the task id is deterministic, so a submit that lands
@@ -683,13 +727,25 @@ export function createScheduleEngine(input: {
             finishedAt: iso(),
           },
         });
+        await store.releaseCapacity(execution.executionId);
         return;
       }
+      // A quarantined reservation may have been released after the crash that
+      // interrupted the original dispatch. Recovery must hold capacity again
+      // before it submits, not run uncounted.
+      const capacity = await store.reserveCapacity({
+        executionId: execution.executionId,
+        generation: schedule.version,
+        limit: settings.maxConcurrentRuns,
+        leaseUntil: capacityLeaseUntil(now),
+        now: iso(),
+      });
+      if (!capacity.ok && capacity.reason === 'full') return;
       const outcome = await port.dispatch({
         executionId: execution.executionId, accept: eligible => account(execution, eligible),
         schedule,
-        trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: execution.occurrenceKey,
-        selectedTimingRevision: execution.selectedTimingRevision ?? 0,
+trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: execution.occurrenceKey,
+        selectedTimingRevision: execution.selectedTimingRevision ?? 0, scheduleVersion: schedule.version,
         taskId,
         conversationId: execution.conversationId,
         attempt: execution.attempt,
@@ -742,6 +798,7 @@ export function createScheduleEngine(input: {
         from: ONGOING_EXECUTION_STATES,
         patch: { state: 'cancelled', detail: 'The Work task was cancelled.', updatedAt: iso(), finishedAt: iso() },
       });
+      await store.releaseCapacity(execution.executionId);
       report.reconciled += 1;
       return;
     }
@@ -777,6 +834,7 @@ export function createScheduleEngine(input: {
         );
         report.reconciled += 1;
       }
+      await store.releaseCapacity(execution.executionId);
       return;
     }
 
@@ -825,6 +883,7 @@ export function createScheduleEngine(input: {
       },
     });
     if (!moved) return;
+    await store.releaseCapacity(execution.executionId);
     const updated = await patchSchedule(schedule.scheduleId, (current) => {
       const failures = current.consecutiveFailures + 1;
       const shouldPause =
@@ -879,10 +938,18 @@ export function createScheduleEngine(input: {
           from: ['retry_wait'],
           patch: { state: 'cancelled', detail: 'The schedule was cancelled.', updatedAt: iso(), finishedAt: iso() },
         });
+        await store.releaseCapacity(execution.executionId);
         continue;
       }
       if ((await store.countActiveExecutions(schedule.scheduleId)) > 0) continue;
-      if ((await store.countActive()) >= settings.maxConcurrentRuns) break;
+      const capacity = await store.reserveCapacity({
+        executionId: execution.executionId,
+        generation: schedule.version,
+        limit: settings.maxConcurrentRuns,
+        leaseUntil: capacityLeaseUntil(now),
+        now: iso(),
+      });
+      if (!capacity.ok && capacity.reason === 'full') break;
 
       const claim = await store.claim({
         ...execution, state: 'claimed', nextAttemptAt: null, updatedAt: iso(),
@@ -893,7 +960,7 @@ export function createScheduleEngine(input: {
       const outcome = await port.dispatch({
         executionId: execution.executionId, accept: eligible => account(execution, eligible),
         schedule,
-        trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurrenceKey: execution.occurrenceKey,
+trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurrenceKey: execution.occurrenceKey, scheduleVersion: schedule.version,
         taskId: claimed.taskId,
         conversationId: claimed.conversationId,
         attempt: claimed.attempt,
@@ -926,6 +993,34 @@ export function createScheduleEngine(input: {
     }
   }
 
+  /**
+   * Expired reservations are quarantined and keep occupying capacity. Only a
+   * terminal task snapshot releases them; a task that may still act never does.
+   */
+  async function recoverCapacity(now: Date): Promise<void> {
+    await store.quarantineExpiredCapacity(now.toISOString());
+    for (const slot of await store.listQuarantinedCapacity()) {
+      const execution = await store.getExecution(slot.executionId);
+      if (!execution) {
+        await store.releaseCapacity(slot.executionId);
+        continue;
+      }
+      if (execution.taskId) {
+        const snapshot = await port.taskSnapshot(execution.taskId);
+        // Unknown is not terminal: hold the slot until either the task is
+        // verified terminal or reconciliation records it missed.
+        if (!snapshot) continue;
+        const terminal =
+          snapshot.state === 'completed' ||
+          snapshot.state === 'failed' ||
+          snapshot.state === 'interrupted' ||
+          snapshot.state === 'cancelled';
+        if (!terminal) continue;
+      }
+      await store.releaseCapacity(slot.executionId);
+    }
+  }
+
   async function runTick(): Promise<ScheduleTickReport> {
     const report = emptyReport();
     const now = clock.now();
@@ -945,12 +1040,12 @@ export function createScheduleEngine(input: {
       await reconcileExecution(execution, now, report);
     }
 
+    await recoverCapacity(now);
     await dispatchRetries(now, report);
 
     const due = await store.listDue({ now: now.toISOString(), limit: settings.batchSize });
     report.due = due.length;
     for (const schedule of due) {
-      if ((await store.countActive()) >= settings.maxConcurrentRuns) break;
       await handleDue(schedule, now, report);
     }
 

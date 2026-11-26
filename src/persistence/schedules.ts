@@ -34,6 +34,25 @@ export type ExecutionCreateResult = {
   execution: ScheduleExecutionRecord;
 };
 
+/**
+ * One occupied scheduled-run slot. A reservation is created atomically with a
+ * bounded push, settled with an idempotent pull, and never silently expires
+ * into free capacity: an expired lease is quarantined and keeps counting until
+ * the abandoned task is verified terminal.
+ */
+export type CapacityReservation = {
+  executionId: string;
+  /** Schedule revision at admission, recorded for audit and duplicate refusal. */
+  generation: number;
+  state: 'active' | 'quarantined';
+  leaseUntil: string;
+  reservedAt: string;
+};
+
+export type CapacityReserveResult =
+  | { ok: true; reservation: CapacityReservation }
+  | { ok: false; reason: 'full' | 'exists' };
+
 export type ScheduleRepository = {
   create: (schedule: ScheduleRecord) => Promise<ScheduleCreateResult>;
   get: (scheduleId: string) => Promise<ScheduleRecord | null>;
@@ -75,6 +94,26 @@ export type ScheduleRepository = {
   ) => Promise<number>;
   countActiveExecutions: (scheduleId: string) => Promise<number>;
   countActive: () => Promise<number>;
+
+  /** Atomic, bounded admission shared by every replica. */
+  reserveCapacity: (input: {
+    executionId: string;
+    generation: number;
+    limit: number;
+    leaseUntil: string;
+    now: string;
+  }) => Promise<CapacityReserveResult>;
+  /** Extends a live reservation; false when it was settled or quarantined. */
+  renewCapacity: (input: {
+    executionId: string;
+    leaseUntil: string;
+  }) => Promise<boolean>;
+  /** Idempotent settlement. Quarantined slots are released once verified safe. */
+  releaseCapacity: (executionId: string) => Promise<'released' | 'absent'>;
+  /** Marks expired active leases quarantined; it never frees a slot. */
+  quarantineExpiredCapacity: (now: string) => Promise<number>;
+  listQuarantinedCapacity: () => Promise<CapacityReservation[]>;
+  countCapacity: () => Promise<number>;
 };
 
 export type ScheduleNoticeStore = {
@@ -125,6 +164,7 @@ export function createScheduleRepository(): ScheduleRepository {
   const schedules = new Map<string, ScheduleRecord>();
   const executions = new Map<string, ScheduleExecutionRecord>();
   const byExecutionKey = new Map<string, string>();
+  let capacity: CapacityReservation[] = [];
 
   return {
     create: async (schedule) => {
@@ -191,6 +231,8 @@ export function createScheduleRepository(): ScheduleRepository {
     },
 
     createExecution: async (execution) => {
+      const collision = executions.get(execution.executionId);
+      if (collision) return { created: false, execution: clone(collision) };
       const existingId = byExecutionKey.get(execution.executionKey);
       if (existingId) {
         const existing = executions.get(existingId);
@@ -254,6 +296,53 @@ export function createScheduleRepository(): ScheduleRepository {
       [...executions.values()].filter((execution) =>
         ONGOING_EXECUTION_STATES.includes(execution.state),
       ).length,
+
+    reserveCapacity: async ({ executionId, generation, limit, leaseUntil, now }) => {
+      if (capacity.some((slot) => slot.executionId === executionId)) {
+        return { ok: false, reason: 'exists' };
+      }
+      if (capacity.length >= Math.max(1, limit)) return { ok: false, reason: 'full' };
+      const reservation: CapacityReservation = {
+        executionId,
+        generation,
+        state: 'active',
+        leaseUntil,
+        reservedAt: now,
+      };
+      capacity.push(reservation);
+      return { ok: true, reservation: clone(reservation) };
+    },
+
+    renewCapacity: async ({ executionId, leaseUntil }) => {
+      const slot = capacity.find(
+        (candidate) => candidate.executionId === executionId && candidate.state === 'active',
+      );
+      if (!slot) return false;
+      slot.leaseUntil = leaseUntil;
+      return true;
+    },
+
+    releaseCapacity: async (executionId) => {
+      const before = capacity.length;
+      capacity = capacity.filter((slot) => slot.executionId !== executionId);
+      return capacity.length === before ? 'absent' : 'released';
+    },
+
+    quarantineExpiredCapacity: async (now) => {
+      let quarantined = 0;
+      for (const slot of capacity) {
+        if (slot.state === 'active' && slot.leaseUntil.localeCompare(now) < 0) {
+          slot.state = 'quarantined';
+          quarantined += 1;
+        }
+      }
+      return quarantined;
+    },
+
+    listQuarantinedCapacity: async () =>
+      capacity.filter((slot) => slot.state === 'quarantined').map(clone),
+
+    countCapacity: async () => capacity.length,
   };
 }
 

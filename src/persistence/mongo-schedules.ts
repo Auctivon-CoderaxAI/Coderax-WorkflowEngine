@@ -8,6 +8,8 @@ import type { ScheduleNoticeList } from '@coderax/contracts';
 import { isDuplicateKey } from './mongo.js';
 import type { MongoCollectionLike } from './mongo.js';
 import type {
+  CapacityReservation,
+  CapacityReserveResult,
   ExecutionCreateResult,
   ScheduleCreateResult,
   ScheduleNoticeStore,
@@ -64,6 +66,46 @@ function toExecution(document: Record<string, unknown>): ScheduleExecutionRecord
   return strip(document) as unknown as ScheduleExecutionRecord;
 }
 
+/**
+ * The capacity ledger is one document per process-independent scope. Its size
+ * bounds the number of scheduled runs, so a bounded array is safe and lets a
+ * reservation, its renewal and its settlement each be a single-document atomic
+ * operation without requiring a replica-set transaction.
+ */
+const CAPACITY_ID = 'schedule-capacity@v1';
+
+type CapacityCollection = {
+  findOne: (filter: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+  findOneAndUpdate: (
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options: Record<string, unknown>,
+  ) => Promise<Record<string, unknown> | null>;
+  updateOne: (
+    filter: Record<string, unknown>,
+    update: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ) => Promise<unknown>;
+};
+
+function capacityRows(document: Record<string, unknown> | null): CapacityReservation[] {
+  const rows = document?.reservations;
+  if (!Array.isArray(rows)) return [];
+  return rows.flatMap((row) => {
+    if (
+      typeof row !== 'object' ||
+      row === null ||
+      typeof (row as CapacityReservation).executionId !== 'string' ||
+      typeof (row as CapacityReservation).leaseUntil !== 'string' ||
+      ((row as CapacityReservation).state !== 'active' &&
+        (row as CapacityReservation).state !== 'quarantined')
+    ) {
+      return [];
+    }
+    return [row as CapacityReservation];
+  });
+}
+
 function toNotice(document: Record<string, unknown>): ScheduleNoticeRecord {
   if (
     typeof document.noticeId !== 'string' ||
@@ -91,6 +133,10 @@ export async function ensureScheduleIndexes(input: {
   await input.schedules.createIndex(
     { ownerId: 1, createdAt: -1 },
     { name: 'schedule_owner_created' },
+  );
+  await input.executions.createIndex(
+    { executionId: 1 },
+    { unique: true, name: 'execution_id' },
   );
   await input.executions.createIndex(
     { executionKey: 1 },
@@ -128,6 +174,42 @@ export function createMongoScheduleRepository(input: {
   executions: MongoCollectionLike;
 }): ScheduleRepository {
   const { schedules, executions } = input;
+
+  const capacityCollection = executions as unknown as CapacityCollection;
+
+  async function readCapacity(): Promise<{
+    revision: number;
+    reservations: CapacityReservation[];
+  }> {
+    await capacityCollection.updateOne(
+      { _id: CAPACITY_ID },
+      {
+        $setOnInsert: {
+          _id: CAPACITY_ID,
+          reservations: [],
+          revision: 0,
+        },
+      },
+      { upsert: true },
+    );
+    const document = await capacityCollection.findOne({ _id: CAPACITY_ID });
+    return {
+      revision: typeof document?.revision === 'number' ? document.revision : 0,
+      reservations: capacityRows(document ?? null),
+    };
+  }
+
+  async function writeCapacity(
+    expectedRevision: number,
+    reservations: CapacityReservation[],
+  ): Promise<boolean> {
+    const result = (await capacityCollection.updateOne(
+      { _id: CAPACITY_ID, revision: expectedRevision },
+      { $set: { reservations, revision: expectedRevision + 1 } },
+      {},
+    )) as { matchedCount?: number };
+    return (result.matchedCount ?? 0) === 1;
+  }
 
   return {
     create: async (schedule): Promise<ScheduleCreateResult> => {
@@ -287,6 +369,93 @@ export function createMongoScheduleRepository(input: {
         .toArray();
       return documents.length;
     },
+
+    reserveCapacity: async ({
+      executionId,
+      generation,
+      limit,
+      leaseUntil,
+      now,
+    }): Promise<CapacityReserveResult> => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const current = await readCapacity();
+        if (current.reservations.some((slot) => slot.executionId === executionId)) {
+          return { ok: false, reason: 'exists' };
+        }
+        if (current.reservations.length >= Math.max(1, limit)) {
+          return { ok: false, reason: 'full' };
+        }
+        const reservation: CapacityReservation = {
+          executionId,
+          generation,
+          state: 'active',
+          leaseUntil,
+          reservedAt: now,
+        };
+        // A revision compare-and-swap is one atomic single-document write in
+        // Mongo. A concurrent replica either sees the slot or retries against
+        // the new revision; it can never admit past the bound.
+        if (await writeCapacity(current.revision, [...current.reservations, reservation])) {
+          return { ok: true, reservation };
+        }
+      }
+      return { ok: false, reason: 'full' };
+    },
+
+    renewCapacity: async ({ executionId, leaseUntil }) => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const current = await readCapacity();
+        const slot = current.reservations.find(
+          (candidate) => candidate.executionId === executionId && candidate.state === 'active',
+        );
+        if (!slot) return false;
+        const next = current.reservations.map((candidate) =>
+          candidate.executionId === executionId ? { ...candidate, leaseUntil } : candidate,
+        );
+        if (await writeCapacity(current.revision, next)) return true;
+      }
+      return false;
+    },
+
+    releaseCapacity: async (executionId) => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const current = await readCapacity();
+        if (!current.reservations.some((slot) => slot.executionId === executionId)) {
+          return 'absent';
+        }
+        const next = current.reservations.filter(
+          (slot) => slot.executionId !== executionId,
+        );
+        if (await writeCapacity(current.revision, next)) return 'released';
+      }
+      // The slot stays quarantined and is retried by recovery; never report a
+      // release that did not commit.
+      return 'absent';
+    },
+
+    quarantineExpiredCapacity: async (now) => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const current = await readCapacity();
+        const expired = current.reservations.filter(
+          (slot) => slot.state === 'active' && slot.leaseUntil.localeCompare(now) < 0,
+        ).length;
+        if (expired === 0) return 0;
+        const next = current.reservations.map((slot) =>
+          slot.state === 'active' && slot.leaseUntil.localeCompare(now) < 0
+            ? { ...slot, state: 'quarantined' as const }
+            : slot,
+        );
+        if (await writeCapacity(current.revision, next)) return expired;
+      }
+      return 0;
+    },
+
+    listQuarantinedCapacity: async () => {
+      const current = await readCapacity();
+      return current.reservations.filter((slot) => slot.state === 'quarantined');
+    },
+
+    countCapacity: async () => (await readCapacity()).reservations.length,
   };
 }
 
