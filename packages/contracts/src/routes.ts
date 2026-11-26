@@ -1,5 +1,6 @@
 import type { z } from 'zod';
-import { AgentList } from './capabilities.js';
+import { Deliverable, DeliverableRequest } from './artifacts.js';
+import { AgentList, CapabilityReport } from './capabilities.js';
 import { Problem } from './errors.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
@@ -131,6 +132,25 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['discovery'],
     auth: 'owner',
     response: { status: 200, description: 'Model list', schema: ModelList },
+  },
+  {
+    operationId: 'listCapabilities',
+    method: 'GET',
+    path: '/v1/capabilities',
+    summary: 'Artifact formats and media capabilities, with truthful availability.',
+    tags: ['discovery'],
+    auth: 'owner',
+    response: { status: 200, description: 'Capability report', schema: CapabilityReport },
+  },
+  {
+    operationId: 'generateDeliverable',
+    method: 'POST',
+    path: '/v1/deliverables',
+    summary: 'Produce and objectively verify a document, workbook, deck, dataset analysis, source tree or media inspection.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: DeliverableRequest,
+    response: { status: 201, description: 'Verified deliverable', schema: Deliverable },
   },
   {
     operationId: 'submitChat',

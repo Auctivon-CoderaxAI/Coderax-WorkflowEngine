@@ -1,4 +1,5 @@
 import { z } from 'zod';
+
 import { Budget } from './models.js';
 import {
   AgentId,
@@ -56,15 +57,6 @@ export const WorkSubmitRequest = z
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
 
-export const Artifact = z
-  .object({
-    path: z.string().min(1).max(1024),
-    bytes: z.number().int().nonnegative().optional(),
-    digest: z.string().min(1).max(128).optional(),
-  })
-  .strict();
-export type Artifact = z.infer<typeof Artifact>;
-
 export const TaskStatus = z
   .object({
     taskId: TaskId,
@@ -85,7 +77,17 @@ export const TaskStatus = z
     result: z
       .object({
         summary: z.string().max(20_000).optional(),
-        artifacts: z.array(Artifact),
+        artifacts: z.array(
+          z
+            .object({
+              path: z.string().min(1).max(1024),
+              bytes: z.number().int().nonnegative().optional(),
+              digest: z.string().min(1).max(128).optional(),
+              /** The durable service is the authority; this is a task reference. */
+              artifactId: z.string().min(1).max(80).optional(),
+            })
+            .strict(),
+        ),
       })
       .strict()
       .optional(),

@@ -18,6 +18,8 @@ import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { ArtifactService } from '../artifacts/service.js';
 import type { Router } from '../api/router.js';
+import type { ArtifactToolkit } from '../artifacts/types.js';
+import type { CapabilityRegistry } from '../capabilities/registry.js';
 
 /**
  * Dependencies are named, not positional.
@@ -47,6 +49,8 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  toolkit: ArtifactToolkit;
+  capabilities: CapabilityRegistry;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -69,6 +73,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'scheduler',
   'health',
+  'toolkit',
+  'capabilities',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

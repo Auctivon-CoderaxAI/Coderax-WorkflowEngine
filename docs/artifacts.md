@@ -261,3 +261,17 @@ read that promises missing bytes.
 - The Native agent returns text; artifacts are stored when a client or a task
   uploads them or associates them with a task. Nothing generates files on its
   own.
+
+## Deliverables from the artifact toolkit
+
+`src/artifacts/toolkit.ts` produces DOCX, PDF, Markdown, XLSX, PPTX, CSV, JSON
+and source-tree deliverables. It stages and verifies each file inside the run's
+confined workspace, then commits it through the durable service above; a
+deliverable succeeds only when every file has an `ArtifactDescriptor`. The
+toolkit owns no storage and exposes no second artifact shape.
+
+Software is stored as one flattened artifact per file (`src__index.js`) because
+the durable service accepts a bounded filename, not a path.
+
+Generated HTML is staged for verification but stored as `text/plain`: the
+durable media list deliberately excludes active content.

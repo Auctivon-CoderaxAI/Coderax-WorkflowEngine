@@ -2,11 +2,14 @@ import type {
   AgentId,
   AgentList,
   BudgetState,
+  CapabilityReport,
   ChatReply,
   ChatRequest,
   Conversation,
   ConversationList,
   DataMode,
+  Deliverable,
+  DeliverableRequest,
   MemoryList,
   ModelList,
   NotificationList,
@@ -51,6 +54,9 @@ import { fail, ok } from '../support/result.js';
 import type { ArtifactService } from '../artifacts/service.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
+import type { ArtifactToolkit } from '../artifacts/types.js';
+import { ArtifactPersistError } from '../artifacts/types.js';
+import type { CapabilityRegistry } from '../capabilities/registry.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -72,6 +78,9 @@ export type ApplicationServiceDeps = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  toolkit: ArtifactToolkit;
+  /** The single capability registry; no module reports capabilities separately. */
+  capabilities: CapabilityRegistry;
 };
 
 export type EventStream = {
@@ -85,6 +94,11 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  capabilities: () => CapabilityReport;
+  deliver: (
+    principal: Principal,
+    request: DeliverableRequest,
+  ) => Promise<ServiceResult<Deliverable>>;
   submitWork: (
     principal: Principal,
     request: WorkSubmitRequest,
@@ -282,7 +296,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: now,
             result: {
               summary: outcome.summary.slice(0, 20_000),
-              artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+              artifacts: (outcome.artifacts ?? []).map((artifact) => ({
+                path: artifact.filename,
+                bytes: artifact.bytes,
+                digest: artifact.sha256,
+                artifactId: artifact.artifactId,
+              })),
             },
             ...(outcome.usage ? { usage: outcome.usage } : {}),
             ...(outcome.model ? { model: outcome.model } : {}),
@@ -543,6 +562,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       token,
       adapter: adapter.value as AgentAdapter,
       request: {
+        taskId: task.taskId,
         ownerId: task.ownerId,
         tenantId: task.tenantId,
         conversationId: task.conversationId,
@@ -630,6 +650,53 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
+    capabilities: () => deps.capabilities.report(),
+
+    deliver: async (principal, request) => {
+      const workspace = await resolveEngineWorkspace({
+        mode: request.mode,
+        roots: workspaceRoots(deps.config.workspaces),
+      });
+      if (!workspace.ok) return workspace;
+      return deps.toolkit.produce({
+        request,
+        context: {
+          mode: request.mode,
+          root: workspace.value.root,
+          clock: deps.clock,
+          ids: deps.ids,
+          // The owner's own request is the authorization; the write is still
+          // confined to the resolved mode root and recorded as a receipt.
+          authorize: () => true,
+          receipts: (entry) => {
+            const record = deps.audit.record({
+              actor: principal.ownerId,
+              action: entry.action,
+              outcome: entry.outcome === 'completed' ? 'completed' : 'refused',
+              detail: entry.detail.slice(0, 500),
+            });
+            return { receipt: record.receipt, at: record.at };
+          },
+          persist: async (generated) => {
+            const uploaded = await deps.artifactService.upload(principal, {
+              filename: generated.filename,
+              mediaType: generated.mediaType,
+              kind: generated.kind,
+              contentBase64: Buffer.from(generated.data).toString('base64'),
+              mode: request.mode,
+              ...(generated.sha256 === undefined
+                  ? {}
+                  : { sha256: generated.sha256.replace(/^sha256:/, '') }),
+              ...(generated.title === undefined
+                ? {}
+                : { note: generated.title.slice(0, 500) }),
+            });
+            if (!uploaded.ok) throw new ArtifactPersistError(uploaded.detail);
+            return uploaded.value.artifact;
+          },
+        },
+      });
+    },
 
     submitWork: async (principal, request) => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
@@ -784,6 +851,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             path: artifact.filename,
             bytes: artifact.bytes,
             digest: artifact.sha256,
+            artifactId: artifact.artifactId,
           })),
         };
       }

@@ -84,6 +84,8 @@ export const EngineFailureCode = z.enum([
   'provider_error',
   'budget_exhausted',
   'paid_model_refused',
+  'validation_failed',
+  'permission_required',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;
 

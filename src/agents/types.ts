@@ -1,6 +1,7 @@
 import type {
   AgentId,
   AgentIsolation,
+  ArtifactDescriptor,
   Availability,
   Budget,
   DataMode,
@@ -31,6 +32,8 @@ export type AgentHistoryTurn = {
 };
 
 export type AgentRunRequest = {
+  /** Present for a durable Work run; absent for a single Chat turn. */
+  taskId?: string;
   ownerId: string;
   tenantId: string | null;
   conversationId: string;
@@ -74,7 +77,13 @@ export type AgentReportEvent =
 export type AgentReport = (event: AgentReportEvent) => void;
 
 export type AgentRunOutcome =
-  | { ok: true; summary: string; usage?: Usage; model?: ModelRef }
+  | {
+      ok: true;
+      summary: string;
+      usage?: Usage;
+      model?: ModelRef;
+      artifacts?: ArtifactDescriptor[];
+    }
   | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
 
 export type AgentAdapter = {
