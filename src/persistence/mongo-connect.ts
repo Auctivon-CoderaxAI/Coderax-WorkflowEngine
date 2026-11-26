@@ -34,6 +34,12 @@ export class MongoUnavailableError extends Error {
 }
 
 type MongoClientLike = {
+  options: Readonly<{
+    tls?: boolean;
+    srvHost?: string;
+    directConnection?: boolean;
+    hosts: ReadonlyArray<{ host?: string; socketPath?: string }>;
+  }>;
   connect: () => Promise<void>;
   db: (name: string) => {
     command: (spec: Record<string, unknown>) => Promise<unknown>;
@@ -66,15 +72,38 @@ async function loadDriver(): Promise<MongoDriverModule> {
     return (await import(specifier)) as MongoDriverModule;
   } catch {
     throw new MongoUnavailableError(
-      "persistence.driver is mongo but the 'mongodb' package is not installed on this host; install it or select persistence.driver=memory",
+      "persistence.driver is mongo but the 'mongodb' package is not installed on this host; install version 5.7 or later, or select persistence.driver=memory",
     );
   }
 }
 
-export function createMongoConnector(): MongoConnector {
+export function createMongoConnector(load: () => Promise<MongoDriverModule> = loadDriver): MongoConnector {
   return async ({ uri, database }) => {
-    const driver = await loadDriver();
-    const client = new driver.MongoClient(uri, { serverSelectionTimeoutMS: 5_000 });
+    const driver = await load();
+    let client: MongoClientLike;
+    const options = { serverSelectionTimeoutMS: 5_000 };
+    try {
+      client = new driver.MongoClient(uri, options);
+    } catch {
+      throw new MongoUnavailableError('The configured MongoDB connection string or options are invalid.');
+    }
+    const settings = client.options;
+    if (settings.tls !== true) {
+      const host = settings.hosts[0];
+      const local = !settings.srvHost && settings.hosts.length === 1 && host &&
+        (host.socketPath || host.host === 'localhost' || host.host === '127.0.0.1' || host.host === '::1');
+      if (!local) {
+        throw new MongoUnavailableError('Remote MongoDB connections require TLS.');
+      }
+      // A loopback seed must not discover unencrypted remote replica members.
+      if (!settings.directConnection) {
+        try {
+          client = new driver.MongoClient(uri, { ...options, directConnection: true });
+        } catch {
+          throw new MongoUnavailableError('Local MongoDB without TLS requires a direct connection.');
+        }
+      }
+    }
     try {
       await client.connect();
       const db = client.db(database);

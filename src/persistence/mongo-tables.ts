@@ -171,7 +171,7 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       const updated = await collection.findOneAndUpdate(
         { taskId, runToken: token, state: { $nin: TERMINAL } },
         { $set: { ...defined(patch), runToken: token } },
-        { returnDocument: 'after' },
+        { returnDocument: 'after', includeResultMetadata: false },
       );
       if (updated) return { applied: true, task: toTask(updated) };
 
@@ -188,7 +188,7 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       const updated = await collection.findOneAndUpdate(
         { taskId, runToken: null },
         { $set: defined(patch) },
-        { returnDocument: 'after' },
+        { returnDocument: 'after', includeResultMetadata: false },
       );
       return updated !== null;
     },
@@ -216,7 +216,7 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
             result: null,
           },
         },
-        { returnDocument: 'after' },
+        { returnDocument: 'after', includeResultMetadata: false },
       );
       if (!updated) return { applied: false, reason: 'superseded' };
       return { applied: true, task: toTask(updated) };

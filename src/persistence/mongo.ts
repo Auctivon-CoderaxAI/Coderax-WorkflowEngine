@@ -37,7 +37,7 @@ export type MongoCollectionLike = {
   findOneAndUpdate: (
     filter: MongoFilter,
     update: { $set: Record<string, unknown> },
-    options: { returnDocument: 'after' },
+    options: { returnDocument: 'after'; includeResultMetadata: false },
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
     filter: MongoFilter,
@@ -129,7 +129,7 @@ export function createMongoWorkRunTable(collection: MongoCollectionLike): WorkRu
       const document = await collection.findOneAndUpdate(
         { key, token, expiresAt: { $gt: now } },
         { $set: { expiresAt } },
-        { returnDocument: 'after' },
+        { returnDocument: 'after', includeResultMetadata: false },
       );
       return document ? toRow(document) : null;
     },
@@ -143,7 +143,7 @@ export function createMongoWorkRunTable(collection: MongoCollectionLike): WorkRu
       const document = await collection.findOneAndUpdate(
         { key, expiresAt: { $gt: now } },
         { $set: { cancelRequested: true } },
-        { returnDocument: 'after' },
+        { returnDocument: 'after', includeResultMetadata: false },
       );
       return document ? toRow(document) : null;
     },
