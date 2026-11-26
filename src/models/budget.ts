@@ -1,68 +1,111 @@
 import type { Usage } from '@coderax/contracts';
+import type { BudgetStore } from '../persistence/budgets.js';
 
 /**
- * Zero-cost enforcement needs a hard local ceiling, not a warning. The ledger
- * reserves before a request is sent, so an exhausted budget refuses the request
- * instead of discovering the overrun afterwards. Counters reset on the UTC day
- * boundary, which is what the provider's published free tier uses.
+ * The zero-cost budget is a reservation ledger, not a warning counter.
+ *
+ * A request reserves one request slot and a token allowance before the provider
+ * is called. A skipped candidate is released; a completed call is settled with
+ * its actual usage. The counters live in the persistence layer, so two replicas
+ * cannot each see the same remaining allowance and both admit the last request.
  */
+export type BudgetReservation = {
+  id: string;
+  ownerId: string;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type BudgetSnapshot = {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type ReserveOutcome =
+  | { allowed: true; reservation: BudgetReservation; requests: number }
+  | {
+      allowed: false;
+      reason: 'requests' | 'tokens';
+      detail: string;
+      requests: number;
+    };
+
 export type BudgetLedger = {
-  reserve: (ownerId: string, at: Date) => { allowed: boolean; requests: number };
-  /** Gives back a reservation when the request was refused after reserving. */
-  release: (ownerId: string, at: Date) => void;
-  consume: (ownerId: string, usage: Usage, at: Date) => void;
-  snapshot: (ownerId: string, at: Date) => {
-    requests: number;
+  available: (ownerId: string, at: Date) => Promise<boolean>;
+  reserve: (input: {
+    ownerId: string;
+    at: Date;
     inputTokens: number;
     outputTokens: number;
-  };
+    reservationId: string;
+  }) => Promise<ReserveOutcome>;
+  settle: (reservationId: string, usage: Usage) => Promise<boolean>;
+  /**
+   * Release an unspent reservation. `dispatched` charges the request slot for an
+   * attempt that may already have reached the provider while returning its
+   * unused token allowance.
+   */
+  release: (reservationId: string, options?: { dispatched?: boolean }) => Promise<boolean>;
+  snapshot: (ownerId: string, at: Date) => Promise<BudgetSnapshot>;
 };
 
 export function createBudgetLedger(input: {
+  store: BudgetStore;
   maxRequestsPerDay: number;
   maxTokensPerDay: number;
 }): BudgetLedger {
-  type Day = { requests: number; inputTokens: number; outputTokens: number };
-  const days = new Map<string, Day>();
-
-  const dayKey = (ownerId: string, at: Date): string =>
-    `${ownerId}:${at.toISOString().slice(0, 10)}`;
-
-  function day(ownerId: string, at: Date): Day {
-    const key = dayKey(ownerId, at);
-    const existing = days.get(key);
-    if (existing) return existing;
-    const created: Day = { requests: 0, inputTokens: 0, outputTokens: 0 };
-    days.set(key, created);
-    return created;
-  }
+  const dayKey = (at: Date): string => at.toISOString().slice(0, 10);
 
   return {
-    reserve: (ownerId, at) => {
-      const state = day(ownerId, at);
-      const tokens = state.inputTokens + state.outputTokens;
-      if (state.requests >= input.maxRequestsPerDay || tokens >= input.maxTokensPerDay) {
-        return { allowed: false, requests: state.requests };
+    available: async (ownerId, at) => {
+      // A probe for the owner's next request; the authoritative check is the
+      // conditional update in `reserve`.
+      const state = await input.store.snapshot(ownerId, dayKey(at));
+      return (
+        state.requests < input.maxRequestsPerDay &&
+        state.inputTokens + state.outputTokens < input.maxTokensPerDay
+      );
+    },
+
+    reserve: async ({ ownerId, at, inputTokens, outputTokens, reservationId }) => {
+      const inTokens = Math.max(0, Math.ceil(inputTokens));
+      const outTokens = Math.max(0, Math.ceil(outputTokens));
+      const outcome = await input.store.reserve({
+        reservation: {
+          id: reservationId,
+          ownerId,
+          day: dayKey(at),
+          inputTokens: inTokens,
+          outputTokens: outTokens,
+          state: 'reserved',
+        },
+        maxRequests: input.maxRequestsPerDay,
+        maxTokens: input.maxTokensPerDay,
+      });
+      if (!outcome.allowed) {
+        return {
+          allowed: false,
+          reason: outcome.reason,
+          detail:
+            outcome.reason === 'requests'
+              ? 'The daily zero-cost request budget is exhausted.'
+              : 'The daily zero-cost token budget cannot cover this request.',
+          requests: outcome.requests,
+        };
       }
-      state.requests += 1;
-      return { allowed: true, requests: state.requests };
-    },
-    release: (ownerId, at) => {
-      const state = day(ownerId, at);
-      if (state.requests > 0) state.requests -= 1;
-    },
-    consume: (ownerId, usage, at) => {
-      const state = day(ownerId, at);
-      state.inputTokens += usage.inputTokens ?? 0;
-      state.outputTokens += usage.outputTokens ?? 0;
-    },
-    snapshot: (ownerId, at) => {
-      const state = day(ownerId, at);
       return {
-        requests: state.requests,
-        inputTokens: state.inputTokens,
-        outputTokens: state.outputTokens,
+        allowed: true,
+        reservation: { id: reservationId, ownerId, inputTokens: inTokens, outputTokens: outTokens },
+        requests: outcome.requests,
       };
     },
+
+    settle: (reservationId, usage) => input.store.settle(reservationId, usage),
+
+    release: (reservationId, options = {}) =>
+      input.store.release(reservationId, { dispatched: options.dispatched === true }),
+
+    snapshot: (ownerId, at) => input.store.snapshot(ownerId, dayKey(at)),
   };
 }

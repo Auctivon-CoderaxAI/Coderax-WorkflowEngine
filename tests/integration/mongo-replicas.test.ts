@@ -62,6 +62,11 @@ test(
         assert.ok(names.has(required), `readiness is missing ${required}`);
       }
       assert.equal(first.service.handshake().deploymentRevision, 'replica-test-rev-1');
+      assert.equal(
+        first.service.handshake().capabilities.executionSupervisor.state,
+        'available',
+        'the supervisor capability is reported only because it is enforced',
+      );
 
       // Concurrent duplicate submissions across replicas.
       const request = {
@@ -227,6 +232,48 @@ test(
         'a consumed grant can never authorize a second action',
       );
 
+      // Durable quarantine: one replica abandons an execution, and the other
+      // refuses the same workspace rather than writing beside it.
+      const quarantineIdentity = (executionId: string) => ({
+        executionId,
+        kind: 'work' as const,
+        taskId: null,
+        conversationId: 'conv_quarantine',
+        ownerId: OWNER_ID,
+        tenantId: null,
+        agent: 'coderax' as const,
+        mode: 'cloud' as const,
+        generation: 1,
+        token: null,
+      });
+      const abandoned = await first.dependencies.supervisor.run({
+        identity: quarantineIdentity('exec_quarantine_a'),
+        adapter: { agent: 'coderax', workload: 'in-process' },
+        workspaceRoot: workspace.cloudRoot,
+        scopes: ['workspace.write'],
+        launch: async () => ({
+          outcome: { kind: 'cancelled' as const, abandoned: true },
+          abandoned: true,
+        }),
+      });
+      assert.equal(abandoned.admitted, true);
+      assert.equal(abandoned.admitted && abandoned.termination.kind, 'unverified');
+      assert.equal(abandoned.admitted && abandoned.workspaceHeld, true);
+      assert.ok(
+        await second.dependencies.quarantine.find(workspace.cloudRoot, Date.now()),
+        'the hold must be visible to the replica that never ran the workload',
+      );
+      const refusedByHold = await second.dependencies.supervisor.run({
+        identity: quarantineIdentity('exec_quarantine_b'),
+        adapter: { agent: 'coderax', workload: 'in-process' },
+        workspaceRoot: workspace.cloudRoot,
+        scopes: ['workspace.write'],
+        launch: async () => ({ outcome: { kind: 'completed' as const, summary: 'unreachable' } }),
+      });
+      assert.equal(refusedByHold.admitted, false);
+      assert.equal(refusedByHold.admitted === false && refusedByHold.code, 'workspace_denied');
+      await second.dependencies.quarantine.release(workspace.cloudRoot);
+
       // Retention never removes user history or anything an execution needs.
       const ancient = taskRecord({
         taskId: 'task_ancient',
@@ -241,6 +288,81 @@ test(
       assert.ok(await first.dependencies.tasks.get('task_ancient'));
       assert.ok(await second.dependencies.tasks.get(taskId));
       assert.ok(await second.dependencies.conversations.get(OWNER_ID, record.conversationId));
+    } finally {
+      await first.stop().catch(() => undefined);
+      await second.stop().catch(() => undefined);
+      const client = await MongoClient.connect(uri!, { directConnection: true });
+      try {
+        await client.db(database).dropDatabase();
+      } finally {
+        await client.close();
+      }
+      workspace.cleanup();
+    }
+  },
+);
+
+test(
+  'two replicas share one durable budget reservation',
+  {
+    skip: uri ? false : required ? false : 'CODERAX_TEST_MONGODB_URI is not set',
+    timeout: 120_000,
+  },
+  async () => {
+    assert.ok(uri, 'CODERAX_REQUIRE_MONGODB=1 requires CODERAX_TEST_MONGODB_URI');
+    const workspace = createWorkspaces();
+    const database = `coderax_budget_${randomUUID().replace(/-/g, '')}`;
+    const config = baseConfig(workspace, {
+      persistence: { driver: 'mongo', database, collectionPrefix: '' },
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        dailyRequestBudget: 1,
+        dailyTokenBudget: 2_000_000,
+      },
+    });
+    const env = {
+      CODERAX_OWNER_TOKEN: OWNER_TOKEN,
+      CODERAX_MONGODB_URI: uri,
+    };
+    const first = await composeApplication({ config, env, gateway: fakeGateway() });
+    const second = await composeApplication({ config, env, gateway: fakeGateway() });
+    try {
+      await first.start();
+      await second.start();
+      const submissions = await Promise.all([
+        first.service.submitWork(principal, {
+          objective: 'Budget contender A',
+          mode: 'cloud',
+          requireApproval: false,
+          idempotencyKey: 'budget-replica-a',
+        }),
+        second.service.submitWork(principal, {
+          objective: 'Budget contender B',
+          mode: 'cloud',
+          requireApproval: false,
+          idempotencyKey: 'budget-replica-b',
+        }),
+      ]);
+      const accepted = submissions.filter((entry) => entry.ok);
+      const refused = submissions.filter(
+        (entry) => !entry.ok && entry.code === 'budget_exhausted',
+      );
+      assert.equal(accepted.length, 1, 'only one replica may take the single request slot');
+      assert.equal(refused.length, 1, 'the other must fail closed on the shared reservation');
+
+      const replay = await second.service.submitWork(principal, {
+        objective: 'Budget contender C',
+        mode: 'cloud',
+        requireApproval: false,
+        idempotencyKey: 'budget-replica-c',
+      });
+      assert.equal(replay.ok, false);
+      assert.equal(replay.ok === false && replay.code, 'budget_exhausted');
+
+      const left = await first.service.budget(principal);
+      const right = await second.service.budget(principal);
+      assert.equal(left.used.requests, 1);
+      assert.equal(right.used.requests, 1, 'both replicas read the same counter');
     } finally {
       await first.stop().catch(() => undefined);
       await second.stop().catch(() => undefined);

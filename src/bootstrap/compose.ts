@@ -21,7 +21,9 @@ import { createJsonLogger } from '../observability/logger.js';
 import { createEventBus } from '../events/bus.js';
 import { createArtifactStorage } from '../artifacts/store.js';
 import { createTaskRunner } from '../execution/runner.js';
-import { createQuarantineRegistry } from '../execution/quarantine.js';
+import { createExecutionSupervisor } from '../execution/supervisor.js';
+import { createCapabilityBroker } from '../execution/capabilities.js';
+import { createUnavailableIsolationProvider } from '../execution/termination.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
@@ -192,11 +194,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     allowPaid: false,
   });
 
-  const budget = createBudgetLedger({
-    maxRequestsPerDay: config.models.dailyRequestBudget,
-    maxTokensPerDay: config.models.dailyTokenBudget,
-  });
-
   const persistence = await buildPersistence({
     config,
     env,
@@ -232,9 +229,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     log: persistence.events,
     retain: config.execution.eventRetain,
   });
-  const quarantine = createQuarantineRegistry({
-    ttlMs: config.execution.cancelQuarantineMs,
+  const budget = createBudgetLedger({
+    store: persistence.budget,
+    maxRequestsPerDay: config.models.dailyRequestBudget,
+    maxTokensPerDay: config.models.dailyTokenBudget,
   });
+  const quarantine = persistence.quarantine;
+  const executions = persistence.executions;
   const runner = createTaskRunner({
     lease,
     clock,
@@ -243,17 +244,32 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     cleanupGraceMs: config.execution.cancelGraceMs,
     onLeaseFailure: (kind) => metrics.recordLeaseFailure(kind),
     onAbandoned: ({ scope, generation, workspaceRoot }) => {
-      // The adapter ignored its abort and may still be running. Nothing can kill
-      // it in-process, so the root it can still write is taken out of service
-      // until the quarantine expires.
-      quarantine.poison({
-        root: workspaceRoot,
-        generation,
-        taskId: scope.conversationId,
-        reason: 'A cancelled adapter did not stop within the grace period.',
-        now: clock.now().getTime(),
-      });
+      // The adapter ignored its abort and may still be running. The supervisor
+      // normally records this hold, but the runner is the component that actually
+      // observed the abandoned adapter, so it writes the same shared row too.
+      void quarantine
+        .poison({
+          root: workspaceRoot,
+          generation,
+          taskId: scope.conversationId,
+          reason: 'A cancelled adapter did not stop within the grace period.',
+          now: clock.now().getTime(),
+        })
+        .catch(() => undefined);
     },
+  });
+  const supervisor = createExecutionSupervisor({
+    clock,
+    ids,
+    executions,
+    quarantine,
+    capabilities: createCapabilityBroker(),
+    isolation: createUnavailableIsolationProvider(
+      'No deployment-platform workload-isolation provider is configured; termination of an external workload cannot be observed from this process.',
+    ),
+    containmentHoldMs: config.execution.cancelQuarantineMs,
+    shutdownGraceMs: config.execution.shutdownGraceMs,
+    heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -337,6 +353,17 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         }),
       },
       {
+        name: 'execution.supervisor',
+        required: true,
+        check: async () => {
+          const report = await supervisor.isolation();
+          return {
+            status: report.status === 'degraded' ? ('degraded' as const) : ('ok' as const),
+            detail: report.detail,
+          };
+        },
+      },
+      {
         name: 'models',
         required: true,
         check: async () => {
@@ -401,7 +428,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         name: 'workspaces.quarantine',
         required: false,
         check: async () => {
-          const entries = quarantine.list(clock.now().getTime());
+          const entries = await quarantine.list(clock.now().getTime());
           return entries.length === 0
             ? { status: 'ok' as const, detail: 'No workspace is quarantined.' }
             : {
@@ -435,6 +462,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     scheduler,
     health,
+    supervisor,
+    executions,
     quarantine,
     checkpoints,
     idempotency,

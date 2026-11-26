@@ -27,6 +27,10 @@ downgrade.
 | Permission request | `permissions` | unique `requestId`, `(ownerId, taskId, requestedAt)`, `(taskId, scope, resource, binding, decision, consumed)`, `expiresAt` | `/v1/work/{id}/permissions`, `/v1/permissions` |
 | Audit receipt | `audit_receipts` | unique `receipt`, `(actor, at)`, `(taskId, at)` | `GET /v1/work/{id}/receipts` |
 | Idempotency record | `idempotency` | unique `(ownerId, key)`, `expiresAt` | `POST /v1/work` |
+| Execution attempt | `executions` | unique `executionId`, `(phase, lastHeartbeatAt)`, `(taskId, startedAt)` | supervisor evidence |
+| Workspace quarantine | `quarantine` | unique `root`, `until` | readiness and admission |
+| Budget day | `budget_days` | unique `(ownerId, day)` | `GET /v1/budget` |
+| Budget reservation | `budget_reservations` | unique `id`, `(ownerId, day)` | Work and Chat admission |
 
 The collection names are prefixed by `persistence.collectionPrefix`, so one
 database can host more than one deployment without sharing a row.
@@ -58,6 +62,23 @@ An approved, unconsumed grant may be revoked by deciding `denied`; the row keeps
 replayed. Expired grants authorize nothing and are removed by the permission
 retention window. Every decision and consumption is owner- and task-conditioned
 in the same write filter, not in a caller-side check.
+
+## Shared reservations and quarantine
+
+A budget reservation is written before a task or Chat turn may run. The day row
+is updated by one conditional `$inc` that checks both the request cap and the
+remaining token allowance, so two replicas racing for the last slot produce one
+success and one `budget_exhausted`. Reservation ids derive from the task and
+generation (or the Chat execution id), which makes an admission retry idempotent.
+Settling adjusts token counters to actual usage; the reservation state prevents a
+second settle or release from charging twice. A provider that omits usage is
+charged the reserved amount, never zero.
+
+A workspace quarantine row is written when termination could not be verified.
+Its unique `root` is read by every replica before execution admission, and it
+expires by deadline rather than by the process that wrote it. This is what makes
+the hold survive a crash and a replica change; it is not a claim that live
+capability revocation is cross-replica.
 
 ## Bounded reads
 
@@ -104,8 +125,14 @@ request, checkpoints, audit receipts and idempotent replay.
 `mongo-replicas` starts two applications against one database and verifies one
 logical task and transcript for concurrent duplicate submissions, cross-replica
 event replay, notification deduplication, owner isolation, lease arbitration,
-exactly one consumption of one approval, concurrent memory convergence and
-retention safety for old user history.
+exactly one consumption of one approval, concurrent memory convergence, durable
+cross-replica quarantine and retention safety for old user history. A second
+replica test gives two applications one shared request slot and proves exactly
+one submission is admitted.
+
+`mongo-restart` also verifies that the supervised execution record and its
+transcript survive a restart, and that the budget counter is read from the
+database rather than reset with the process.
 
 A fake collection is used for adapter semantics only; it is not accepted as
 persistence evidence. `npm run test:mongo` sets `CODERAX_REQUIRE_MONGODB=1`, so a

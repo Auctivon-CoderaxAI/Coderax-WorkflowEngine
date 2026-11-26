@@ -109,7 +109,7 @@ differs from the catalogue.
 | `getArtifactContent` | `GET /v1/artifacts/{artifactId}/content` | 200 `ArtifactContent` | owner; sha256 verified |
 | `deleteConversation` | `DELETE /v1/conversations/{conversationId}` | 200 `ConversationDeletion` | owner; refuses while a task is live |
 | `deleteMemory` | `DELETE /v1/memory/{key}` | 200 `MemoryDeletion` | owner; exact key and mode |
-| `getBudget` | `GET /v1/budget` | 200 `BudgetState` | owner; zero-cost ledger |
+| `getBudget` | `GET /v1/budget` | 200 `BudgetState` | owner; durable shared reservation ledger |
 | `getMetrics` | `GET /v1/metrics` | 200 `MetricsReport` | owner; process-local counters |
 | `listReceipts` | `GET /v1/work/{taskId}/receipts` | 200 `ReceiptList` | owner; durable audit page |
 
@@ -261,11 +261,11 @@ force-pushed by this work:
 | Branch | Head | Contract interaction |
 | --- | --- | --- |
 | `feat/intelligence-core` | `24c90e0` | reserves `ChatFrame` and `negotiated`; adds tools/routing/knowledge routes |
-| `feat/zero-cost-model-router` | `43f3581` | router internals; no new route ids |
+| `feat/zero-cost-model-router` | `7b4ec1d` | router internals; its reservation shape is integrated into the durable budget, no new route ids |
 | `feat/native-reasoning-planner` | `c241bae` | permission producer; no new route ids |
 | `feat/durable-events` | `9b3fd7d` | snapshots only |
 | `feat/durable-events-integration` | `2554edc` | reserves `markNotificationsRead`; adds persistent event log |
-| `feat/execution-supervisor` | `a4fabac` | supervisor internals; no new route ids |
+| `feat/execution-supervisor` | `13d4b4f` | integrated here: durable execution identity, termination evidence and shared quarantine; no new route ids |
 | `ci/permanent-quality-gate` | `676ad8c` | gates; no route ids |
 | `security/remediation-808dfd3` | `74b1264` | hardening; no route ids |
 

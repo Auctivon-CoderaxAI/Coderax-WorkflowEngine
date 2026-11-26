@@ -52,6 +52,7 @@ function ids(): IdGenerator {
     messageId: () => `msg_${(seq += 1)}`,
     eventId: () => `evt_${(seq += 1)}`,
     runToken: () => `run_${(seq += 1)}`,
+    executionId: () => `exec_${(seq += 1)}`,
     requestId: () => `req_${(seq += 1)}`,
     receipt: () => `rcpt_${(seq += 1)}`,
     checkpointId: () => `ckpt_${(seq += 1)}`,

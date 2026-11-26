@@ -46,6 +46,8 @@ export type MongoCollectionLike = {
       $setOnInsert?: Record<string, unknown>;
       /** Monotonic update used by the event head; never lowers a value. */
       $max?: Record<string, unknown>;
+      /** Counter update used by the durable budget ledger. */
+      $inc?: Record<string, number>;
     },
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;

@@ -17,7 +17,9 @@ import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
-import type { QuarantineRegistry } from '../execution/quarantine.js';
+import type { QuarantineStore } from '../persistence/quarantine.js';
+import type { ExecutionRepository } from '../persistence/executions.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
 import type { CheckpointStore } from '../persistence/checkpoints.js';
 import type { IdempotencyStore } from '../persistence/idempotency.js';
 import type { RetentionService } from '../persistence/retention.js';
@@ -56,7 +58,9 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
-  quarantine: QuarantineRegistry;
+  supervisor: ExecutionSupervisor;
+  executions: ExecutionRepository;
+  quarantine: QuarantineStore;
   checkpoints: CheckpointStore;
   idempotency: IdempotencyStore;
   retention: RetentionService;
@@ -86,6 +90,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'scheduler',
   'health',
+  'supervisor',
+  'executions',
   'quarantine',
   'checkpoints',
   'idempotency',

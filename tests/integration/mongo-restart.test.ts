@@ -3,7 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { MongoClient } from 'mongodb';
 import { composeApplication } from '../../src/bootstrap/compose.js';
-import { baseConfig, createWorkspaces, fakeGateway, OWNER_TOKEN, waitFor } from '../helpers.js';
+import {
+  baseConfig,
+  createWorkspaces,
+  fakeGateway,
+  OWNER_ID,
+  OWNER_TOKEN,
+  waitFor,
+} from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -111,6 +118,15 @@ test(
       const reopened = await second.service.task(principal, taskId);
       assert.equal(reopened.ok, true);
       assert.equal(reopened.ok && reopened.value.state, 'completed');
+
+      const executions = await second.dependencies.executions.listByTask(taskId);
+      assert.equal(executions.length, 1, 'one supervised attempt must survive the restart');
+      assert.equal(executions[0]?.cause, 'completed');
+      assert.equal(executions[0]?.termination?.status, 'verified');
+      assert.ok(
+        (await second.dependencies.budget.snapshot(OWNER_ID, new Date())).requests >= 1,
+        'the budget reservation is durable, not process-local',
+      );
 
       const conversation = await second.service.conversation(principal, conversationId);
       assert.equal(conversation.ok, true);

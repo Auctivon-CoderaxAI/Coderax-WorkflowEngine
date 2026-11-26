@@ -40,6 +40,8 @@ are clients of the same versioned API.
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; live-verified by the restart and two-replica suites | `src/bootstrap/compose.ts` |
 | Task, conversation, memory, event, notification and permission persistence | `persistence.driver=mongo`; no silent in-memory downgrade; live-verified across restart and two replicas | `src/persistence/*` |
 | Distributed single-use permission consumption | One conditional update; two replicas racing one approval produce one grant | `src/permissions/store.ts` |
+| Supervised execution identity, termination evidence and quarantine | Durable `executions` rows; unverified termination writes a shared `quarantine` hold | `src/execution/supervisor.ts`, `docs/supervisor.md` |
+| Shared zero-cost request reservation | Conditional update on one owner/day row; two replicas cannot both take the last slot | `src/persistence/mongo-budgets.ts` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |
 
@@ -54,7 +56,7 @@ simplified and what is still missing.
 
 ```bash
 npm install
-npm run verify                    # build, pack, 158 tests, OpenAPI drift gate
+npm run verify                    # build, pack, 163 tests, OpenAPI drift gate
 npm test                          # tests only: unit, contract, integration, security, e2e
 CODERAX_TEST_MONGODB_URI='mongodb://127.0.0.1:27019/?directConnection=true' \
   npm run test:mongo              # required real-MongoDB restart and two-replica lane

@@ -105,6 +105,8 @@ export const ExecutionConfig = z
      * directory with it; the entry expires so a deployment recovers by itself.
      */
     cancelQuarantineMs: z.number().int().min(1_000).max(3_600_000).default(300_000),
+    /** How long shutdown waits for supervised attempts to unwind. */
+    shutdownGraceMs: z.number().int().min(100).max(60_000).default(5_000),
   })
   .strict();
 

@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createEventBus } from '../../src/events/bus.js';
 import { createMemoryEventLog } from '../../src/events/log.js';
-import { createQuarantineRegistry } from '../../src/execution/quarantine.js';
+import {
+  createInMemoryQuarantineTable,
+  createQuarantineStore,
+} from '../../src/execution/quarantine.js';
 
 // One id space for the file: a simulated restart must keep the same identity
 // domain, or a fresh prefix would make an old event look new again.
@@ -157,25 +160,32 @@ test('backpressure drops intermediate deltas but never the terminal event', asyn
   assert.equal(stored.at(-1)?.type, 'task.completed');
 });
 
-test('a quarantined workspace refuses new work until it expires or is released', () => {
-  const registry = createQuarantineRegistry({ ttlMs: 1_000 });
-  registry.poison({
+test('a quarantined workspace refuses new work until it expires or is released', async () => {
+  const registry = createQuarantineStore({
+    table: createInMemoryQuarantineTable(),
+    ttlMs: 1_000,
+  });
+  await registry.poison({
     root: '/srv/cloud',
     generation: 2,
     taskId: 'task-6',
     reason: 'adapter ignored abort',
     now: 0,
   });
-  assert.equal(registry.check('/srv/cloud', 500)?.generation, 2);
-  assert.equal(registry.check('/srv/cloud', 1_001), null, 'the entry expires without an operator');
-  registry.poison({
+  assert.equal((await registry.find('/srv/cloud', 500))?.generation, 2);
+  assert.equal(
+    await registry.find('/srv/cloud', 1_001),
+    null,
+    'the entry expires without an operator',
+  );
+  await registry.poison({
     root: '/srv/private',
     generation: 1,
     taskId: 'task-7',
     reason: 'adapter ignored abort',
     now: 0,
   });
-  assert.equal(registry.list(0).length, 1);
-  assert.equal(registry.release('/srv/private'), true);
-  assert.equal(registry.check('/srv/private', 0), null);
+  assert.equal((await registry.list(0)).length, 1);
+  assert.equal(await registry.release('/srv/private'), true);
+  assert.equal(await registry.find('/srv/private', 0), null);
 });

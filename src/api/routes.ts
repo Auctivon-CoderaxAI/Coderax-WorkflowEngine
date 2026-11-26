@@ -313,7 +313,7 @@ async function* chatFrames(reply: { text: string }): AsyncIterable<SseFrame> {
   registry.register('getBudget', async (context) => ({
     kind: 'json',
     status: 200,
-    body: service.budget(context.principal),
+    body: await service.budget(context.principal),
   }));
 
   registry.register('getMetrics', async (context) => ({

@@ -166,7 +166,7 @@ test('concurrent duplicate submissions create one task and charge the budget onc
     const conversation = await api.conversation(left.conversationId);
     assert.equal(conversation.messages.length, 2, 'the loser must not write a transcript');
     assert.equal(
-      started.app.dependencies.budget.snapshot(OWNER_ID, new Date()).requests,
+      (await started.app.dependencies.budget.snapshot(OWNER_ID, new Date())).requests,
       1,
       'the losing reservation must be released',
     );

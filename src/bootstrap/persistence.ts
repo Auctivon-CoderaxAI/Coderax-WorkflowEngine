@@ -12,6 +12,18 @@ import type { AuditLog } from '../observability/audit.js';
 import type { CheckpointStore } from '../persistence/checkpoints.js';
 import type { IdempotencyStore } from '../persistence/idempotency.js';
 import type { EventLog } from '../events/log.js';
+import type { ExecutionRepository } from '../persistence/executions.js';
+import type { QuarantineStore } from '../persistence/quarantine.js';
+import type { BudgetStore } from '../persistence/budgets.js';
+import { createExecutionRepository } from '../persistence/executions.js';
+import { createMongoExecutionRepository, ensureExecutionIndexes } from '../persistence/mongo-executions.js';
+import {
+  createInMemoryQuarantineTable,
+  createQuarantineStore,
+} from '../persistence/quarantine.js';
+import { createMongoQuarantineTable, ensureQuarantineIndexes } from '../persistence/mongo-quarantine.js';
+import { createMemoryBudgetStore } from '../persistence/budgets.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/mongo-budgets.js';
 import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
 import type { MongoCollectionLike } from '../persistence/mongo.js';
@@ -83,6 +95,12 @@ export type PersistenceStores = {
   idempotency: IdempotencyStore;
   /** Durable execution events; the payload side of the event stream. */
   events: EventLog;
+  /** Attempt-level identities, termination evidence and stale retirement. */
+  executions: ExecutionRepository;
+  /** Shared workspace holds that outlive the process that created them. */
+  quarantine: QuarantineStore;
+  /** Zero-cost reservation counters, shared by every replica. */
+  budget: BudgetStore;
   ping: () => Promise<PersistenceHealth>;
   close: () => Promise<void>;
 };
@@ -171,6 +189,12 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       checkpoints: createCheckpointStore(),
       idempotency: createIdempotencyStore(),
       events: createMemoryEventLog(),
+      executions: createExecutionRepository(),
+      quarantine: createQuarantineStore({
+        table: createInMemoryQuarantineTable(),
+        ttlMs: config.execution.cancelQuarantineMs,
+      }),
+      budget: createMemoryBudgetStore(),
       ping,
       close: NO_CLOSE,
     };
@@ -191,6 +215,12 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const checkpoints = database.collection(collectionName(config, 'checkpoints'));
   const events = database.collection(collectionName(config, 'events'));
   const eventHeads = database.collection(collectionName(config, 'event_heads'));
+  const executions = database.collection(collectionName(config, 'executions'));
+  const quarantine = database.collection(collectionName(config, 'quarantine'));
+  const budgetDays = database.collection(collectionName(config, 'budget_days'));
+  const budgetReservations = database.collection(
+    collectionName(config, 'budget_reservations'),
+  );
 
   try {
     await ensureWorkRunIndexes(workRuns);
@@ -205,6 +235,9 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureAuditIndexes(audit);
     await ensureCheckpointIndexes(checkpoints);
     await ensureEventIndexes({ events, heads: eventHeads });
+    await ensureExecutionIndexes(executions);
+    await ensureQuarantineIndexes(quarantine);
+    await ensureBudgetIndexes({ days: budgetDays, reservations: budgetReservations });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -256,6 +289,12 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     checkpoints: createMongoCheckpointStore(checkpoints),
     idempotency: createMongoIdempotencyStore(idempotency),
     events: createMongoEventLog({ events, heads: eventHeads }),
+    executions: createMongoExecutionRepository(executions),
+    quarantine: createQuarantineStore({
+      table: createMongoQuarantineTable(quarantine),
+      ttlMs: config.execution.cancelQuarantineMs,
+    }),
+    budget: createMongoBudgetStore({ days: budgetDays, reservations: budgetReservations }),
     ping,
     close: database.close,
   };
