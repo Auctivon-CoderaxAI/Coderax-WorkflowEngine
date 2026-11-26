@@ -724,7 +724,12 @@ export function createScheduleEngine(input: {
     }
 
     const failureCode = snapshot.failure?.code ?? 'provider_error';
-    const retryable = snapshot.failure?.retryable !== false;
+    // Only an adapter-confirmed retryable *failure* may be replayed as a new
+    // task. An interrupted run may already have performed work and has a
+    // resumable checkpoint; replacing it would discard that checkpoint and
+    // repeat steps. The owner resumes it through the Work resume operation.
+    const interrupted = snapshot.state === 'interrupted';
+    const retryable = !interrupted && snapshot.failure?.retryable === true;
     if (retryable && execution.attempt < execution.maxAttempts) {
       const delayMs = schedule.retry.delaySeconds * 1_000;
       const moved = await store.updateExecution({
@@ -752,7 +757,12 @@ export function createScheduleEngine(input: {
       from: ONGOING_EXECUTION_STATES,
       patch: {
         state: 'failed',
-        detail: truncate(`Failed with ${failureCode}.`, FAILURE_DETAIL_LIMIT),
+        detail: truncate(
+          interrupted
+            ? `Attempt ${execution.attempt} was interrupted and is resumable; it was not replayed as a new task.`
+            : `Failed with ${failureCode}.`,
+          FAILURE_DETAIL_LIMIT,
+        ),
         updatedAt: iso(),
         finishedAt: iso(),
       },
@@ -776,9 +786,11 @@ export function createScheduleEngine(input: {
       schedule,
       executionId: execution.executionId,
       kind: 'failed',
-      summary: pausedForFailures
-        ? `Scheduled run "${schedule.name}" failed with ${failureCode} after ${execution.attempt} attempt(s); the schedule was paused to prevent a runaway.`
-        : `Scheduled run "${schedule.name}" failed with ${failureCode} after ${execution.attempt} attempt(s).`,
+      summary: interrupted
+        ? `Scheduled run "${schedule.name}" was interrupted after ${execution.attempt} attempt(s); the Work task is resumable and was not replayed automatically.`
+        : pausedForFailures
+          ? `Scheduled run "${schedule.name}" failed with ${failureCode} after ${execution.attempt} attempt(s); the schedule was paused to prevent a runaway.`
+          : `Scheduled run "${schedule.name}" failed with ${failureCode} after ${execution.attempt} attempt(s).`,
     });
     report.reconciled += 1;
   }

@@ -816,6 +816,41 @@ test('a transient store failure is reported and the next tick still runs', async
   assert.equal(engine.lastTick().error, null);
 });
 
+test('an interrupted attempt is resumable, not replayed as a new task', async () => {
+  const store = createScheduleRepository();
+  const schedule = scheduleRecord({
+    nextRunAt: NOW,
+    retry: { maxAttempts: 3, delaySeconds: 0 },
+  });
+  await store.create(schedule);
+  const port = testPort();
+  const clock = testClock(NOW);
+  const engine = engineFor({ store, port: port.port, clock: clock.clock });
+
+  await engine.tick();
+  const taskId = port.calls[0]?.taskId as string;
+  port.snapshots.set(taskId, {
+    state: 'interrupted',
+    summary: null,
+    // Orchestration marks an interrupted run retryable so Work resume is
+    // allowed; that is not an adapter confirmation that replay is safe.
+    failure: { code: 'cancelled', retryable: true },
+  });
+  await engine.tick();
+
+  const [execution] = await store.listExecutions(schedule.scheduleId, 10);
+  assert.equal(execution?.state, 'failed');
+  assert.equal(execution?.taskId, taskId, 'the resumable task keeps its receipt link');
+  assert.match(execution?.detail ?? '', /resumable/);
+  assert.equal(execution?.attempt, 1, 'no new attempt was started');
+
+  // A further tick must not dispatch a replacement task.
+  clock.advance(1_000);
+  await engine.tick();
+  assert.equal(port.calls.length, 1);
+  assert.equal((await store.listExecutions(schedule.scheduleId, 10)).length, 1);
+});
+
 test('an adapter with ungated side effects is refused for a schedule', () => {
   assert.match(scheduleSideEffectRefusal('ungated') ?? '', /not gated by owner approval/);
   assert.equal(scheduleSideEffectRefusal('none'), null);
