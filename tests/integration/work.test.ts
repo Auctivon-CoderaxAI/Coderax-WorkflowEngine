@@ -295,7 +295,10 @@ test('an unacknowledged committed create remains pending until scheduled', async
   const request = { objective: 'one run', mode: 'cloud' as const, requireApproval: false, idempotencyKey: 'retry-commit' };
   try {
     const first = started.app.service.submitWork(principal, request);
-    await committed;
+    await Promise.race([
+      committed,
+      first.then((result) => assert.fail(`submission settled before create: ${JSON.stringify(result)}`)),
+    ]);
     const pending = await started.app.service.submitWork(principal, request);
     assert.ok(!pending.ok && pending.retryable);
     unblock();

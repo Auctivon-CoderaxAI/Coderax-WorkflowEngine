@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { channel } from 'node:diagnostics_channel';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import type { ChatStreamEvent, ExecutionEvent } from '@coderax/contracts';
 import { CoderaxApiError, CoderaxClient, CoderaxContractError } from '@coderax/sdk';
@@ -179,6 +181,16 @@ test('disconnecting during Chat still persists the redacted assistant summary', 
   const client = clientFor(started.url);
   let finish!: () => void;
   const gate = new Promise<void>((resolve) => { finish = resolve; });
+  let disconnected = false;
+  const requests = channel('http.server.request.start');
+  const port = Number(new URL(started.url).port);
+  const observeChat = (event: unknown) => {
+    const { request, response } = event as { request: IncomingMessage; response: ServerResponse };
+    if (request.socket.localPort === port && request.url === '/v1/chat') {
+      response.once('close', () => { disconnected = !response.writableEnded; });
+    }
+  };
+  requests.subscribe(observeChat);
   try {
     const adapter = started.app.dependencies.agents.get('coderax');
     assert.ok(adapter);
@@ -194,11 +206,13 @@ test('disconnecting during Chat still persists the redacted assistant summary', 
     const conversationId = first.value.conversationId;
     controller.abort();
     await stream.return(undefined);
+    await waitFor(async () => disconnected);
     finish();
     const reply = await waitFor(async () => (await client.conversation(conversationId))
       .messages.find((message) => message.role === 'assistant'));
     assert.equal(reply.text, 'api_key=[redacted]');
   } finally {
+    requests.unsubscribe(observeChat);
     finish();
     await started.close();
   }
