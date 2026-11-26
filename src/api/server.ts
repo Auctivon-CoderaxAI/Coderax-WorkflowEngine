@@ -66,6 +66,7 @@ export function createHttpServer(input: {
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
+          accept: request.headers.accept,
         });
 
         if (result.kind === 'json') {

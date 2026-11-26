@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ChatReply } from './tasks.js';
 import { Availability } from './capabilities.js';
 import { PermissionScope } from './permissions.js';
 import { CostClass, DataMode, IsoDateTime, ModelRef } from './primitives.js';
@@ -156,3 +157,17 @@ export const KnowledgeList = z
   .object({ documents: z.array(KnowledgeSummary) })
   .strict();
 export type KnowledgeList = z.infer<typeof KnowledgeList>;
+
+/**
+ * One frame of the Chat SST stream.
+ *
+ * Chat answers `text/event-stream` when the client asks for it and a JSON body
+ * otherwise. The frames are published here so a client cannot invent its own
+ * shape: `chat.delta` carries the assistant text, and `chat.completed` carries
+ * the same `ChatReply` the JSON response would have returned.
+ */
+export const ChatFrame = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('chat.delta'), text: z.string() }).strict(),
+  z.object({ type: z.literal('chat.completed'), reply: ChatReply }).strict(),
+]);
+export type ChatFrame = z.infer<typeof ChatFrame>;

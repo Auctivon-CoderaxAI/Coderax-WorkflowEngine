@@ -12,6 +12,16 @@ export type ModelCompletionRequest = {
   /** Only a tool-capable model may serve an action turn. */
   requiresTools?: boolean;
   requiresVision?: boolean;
+  /** The owner whose daily zero-cost budget this call is charged to. */
+  ownerId?: string;
+  /**
+   * The exact tool catalogue text embedded in the prompt. It is counted as
+   * input separately so token accounting cannot omit the largest fixed part of
+   * a Native prompt.
+   */
+  toolSchemaText?: string;
+  /** Ask the provider to stream; usage is folded from the streamed frames. */
+  stream?: boolean;
 };
 
 export type ModelGateway = {

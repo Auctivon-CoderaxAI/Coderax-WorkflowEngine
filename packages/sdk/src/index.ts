@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  ChatFrame,
   ChatReply,
   Conversation,
   ConversationList,
@@ -220,6 +221,36 @@ export class CoderaxClient {
       path: '/v1/chat',
       body: request,
     });
+  }
+
+  /**
+   * The same Chat turn over the shared SSE transport. Each frame is validated
+   * against the published `ChatFrame` schema, so a deployment that streams a
+   * shape the contract does not describe fails here instead of in a renderer.
+   */
+  async *chatStream(
+    request: ChatRequest,
+    options: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<ChatFrame> {
+    const path = '/v1/chat';
+    const response = await this.options.fetchImpl(joinUrl(this.options.baseUrl, path), {
+      method: 'POST',
+      headers: this.headers('text/event-stream'),
+      body: JSON.stringify(request),
+      redirect: 'error',
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!response.ok || !response.body) {
+      await this.parse(ChatReply, response, path);
+      throw new CoderaxContractError('the chat stream had no body');
+    }
+    for await (const frame of parseSse(response.body)) {
+      const parsed = ChatFrame.safeParse(frame);
+      if (!parsed.success) {
+        throw new CoderaxContractError('a chat frame did not match the published schema');
+      }
+      yield parsed.data;
+    }
   }
 
   submitWork(request: WorkSubmitRequest): Promise<TaskAccepted> {

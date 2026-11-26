@@ -56,6 +56,11 @@ export type RouteSpec = {
   response: { status: number; description: string; schema: z.ZodTypeAny };
   /** Server-sent events rather than a single JSON body. */
   stream?: boolean;
+  /**
+   * A streaming operation that also answers JSON when the client does not send
+   * `Accept: text/event-stream`. Without this, `stream` means SSE only.
+   */
+  negotiated?: boolean;
 };
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
@@ -164,7 +169,8 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     auth: 'owner',
     body: ChatRequest,
     stream: true,
-    response: { status: 200, description: 'Chat reply', schema: ChatReply },
+    negotiated: true,
+    response: { status: 200, description: 'Chat reply or SSE frames', schema: ChatReply },
   },
   {
     operationId: 'submitWork',

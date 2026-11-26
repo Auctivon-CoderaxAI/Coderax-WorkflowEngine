@@ -30,12 +30,42 @@ export function createWorkspaces(): TestWorkspace {
   };
 }
 
+/**
+ * Published zero-cost terms for the test model. Tests use a real record shape so
+ * the eligibility gate is exercised rather than bypassed: the date window is
+ * relative to now, and every billed unit is zero.
+ */
+export function verifiedTerms(overrides?: Record<string, unknown>): Record<string, unknown> {
+  const now = Date.now();
+  return {
+    source: 'https://provider.example/pricing',
+    observedAt: new Date(now - 3_600_000).toISOString(),
+    expiresAt: new Date(now + 30 * 86_400_000).toISOString(),
+    currency: 'USD',
+    inputPerMillionTokens: 0,
+    outputPerMillionTokens: 0,
+    requestPerCall: 0,
+    ...(overrides ?? {}),
+  };
+}
+
 export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, unknown>): EngineConfig {
   return EngineConfigSchema.parse({
     server: { host: '127.0.0.1', port: 0 },
     auth: { ownerId: OWNER_ID },
     workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
-    models: { route: [{ providerId: 'free', modelId: 'coderax-small' }] },
+    models: {
+      route: [{ providerId: 'free', modelId: 'coderax-small' }],
+      evidence: [
+        {
+          providerId: 'free',
+          modelId: 'coderax-small',
+          toolCalling: true,
+          contextTokens: 32_000,
+          terms: verifiedTerms(),
+        },
+      ],
+    },
     execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
     ...(overrides ?? {}),
   });

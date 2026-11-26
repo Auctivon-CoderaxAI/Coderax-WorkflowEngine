@@ -146,7 +146,7 @@ export type ApplicationService = {
     taskId: string,
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
-  budget: (principal: Principal) => BudgetState;
+  budget: (principal: Principal) => Promise<BudgetState>;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
   shutdown: () => Promise<void>;
@@ -781,7 +781,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail(
           'budget_exhausted',
@@ -1117,7 +1117,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
@@ -1175,7 +1175,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome.retryable,
         );
       }
-      deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+      await deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
@@ -1236,8 +1236,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    budget: (principal) => {
-      const used = deps.budget.snapshot(principal.ownerId, deps.clock.now());
+    budget: async (principal) => {
+      const used = await deps.budget.snapshot(principal.ownerId, deps.clock.now());
       const budget = {
         maxRequests: deps.config.models.dailyRequestBudget,
         maxInputTokens: deps.config.models.dailyTokenBudget,

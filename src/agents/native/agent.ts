@@ -10,7 +10,7 @@ import { createNativePlanner } from './planner.js';
 import { buildActionPrompt, NATIVE_ACTION_SYSTEM } from './prompt.js';
 import { parseAction } from './action.js';
 import type { ToolContext } from '../../tools/types.js';
-import { isRouterExhausted } from '../../models/routed.js';
+import { isBudgetExhausted, isRouterExhausted } from '../../models/routed.js';
 
 /**
  * Coderax Native is the default and the only engine with no external dependency.
@@ -123,6 +123,26 @@ export function createNativeAgent(input: {
         input: undefined,
         output: undefined,
       };
+      let calls = 0;
+      /**
+       * A per-task execution budget is a ceiling on this run, checked before each
+       * call and after each reported usage. It is independent of the owner's
+       * daily budget: a single task cannot consume the whole day either.
+       */
+      const budgetSpent = (): boolean => {
+        const budget = request.budget;
+        if (!budget) return false;
+        if (calls > budget.maxRequests) return true;
+        if ((totals.input ?? 0) > budget.maxInputTokens) return true;
+        if ((totals.output ?? 0) > budget.maxOutputTokens) return true;
+        return false;
+      };
+      const budgetFailure = (): AgentRunOutcome => ({
+        ok: false,
+        code: 'budget_exhausted',
+        detail: 'This task reached its execution budget; it stopped without exceeding it.',
+        retryable: false,
+      });
       const history = request.history ?? [];
       const cancelled = (): AgentRunOutcome => ({
         ok: false,
@@ -146,8 +166,11 @@ export function createNativeAgent(input: {
                 ...(tools
                   ? {
                       complete: async (prompt: string, signalAbort: AbortSignal) => {
+                        if (budgetSpent()) throw new Error('budget_exhausted');
+                        calls += 1;
                         const completion = await gateway.complete({
                           model: request.model,
+                          ownerId: request.ownerId,
                           system:
                             'You are Coderax Native. Plan the work. Return only a JSON array of step titles.',
                           prompt,
@@ -212,6 +235,8 @@ export function createNativeAgent(input: {
           if (request.signal.aborted) return cancelled();
 
           const replay = pending?.stepId === step.id ? pending : null;
+          if (!replay && budgetSpent()) return budgetFailure();
+          if (!replay) calls += 1;
           let completion;
           try {
             completion = replay ? { text: replay.json, usage: undefined } : await gateway.complete({
@@ -230,6 +255,8 @@ export function createNativeAgent(input: {
                 catalogue: toolCatalogue,
               }),
               signal: request.signal,
+              ownerId: request.ownerId,
+              toolSchemaText: toolCatalogue,
               routingMode: tools ? 'complex' : 'fast',
               ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
             });
@@ -243,6 +270,9 @@ export function createNativeAgent(input: {
                 retryable: true,
               };
             }
+            if (isBudgetExhausted(error) || (error instanceof Error && error.message === 'budget_exhausted')) {
+              return budgetFailure();
+            }
             return {
               ok: false,
               code: 'provider_error',
@@ -253,6 +283,11 @@ export function createNativeAgent(input: {
             };
           }
           accumulate(totals, completion.usage);
+          if (budgetSpent()) {
+            // The call already happened; report what it cost and stop cleanly
+            // rather than spending further on a task that is over its ceiling.
+            return budgetFailure();
+          }
 
           const action = parseAction(completion.text);
           if (action.kind === 'final') {

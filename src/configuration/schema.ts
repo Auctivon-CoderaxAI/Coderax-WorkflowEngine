@@ -72,11 +72,33 @@ export const EnginesConfig = z
   .strict();
 
 /**
- * Recorded capability and quota evidence for one model. The router ranks on
- * these numbers; a model with no entry inherits neutral defaults and is still
- * free-only, so omission cannot create a paid path.
+ * A provider's published zero-cost terms for one exact model.
+ *
+ * This is the only field that can make a model eligible. It is deliberately
+ * shaped like a price list rather than a boolean: an owner records where the
+ * price was observed, when, and for how long that observation is valid, and the
+ * engine checks all three. `source` must be an HTTPS URL; a value that is a
+ * label, a guess or a local file is not evidence.
  */
-export const ModelCatalogEntry = z
+export const ModelTerms = z
+  .object({
+    source: z.string().url().max(2048),
+    observedAt: z.string().datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }),
+    currency: z.literal('USD'),
+    inputPerMillionTokens: z.number().min(0),
+    outputPerMillionTokens: z.number().min(0),
+    requestPerCall: z.number().min(0).default(0),
+  })
+  .strict();
+
+/**
+ * Recorded capability, quota and pricing evidence for one model. Capability and
+ * quota numbers only rank and bound a model; they cannot make it eligible. Only
+ * `terms`, evaluated against the clock, can do that. Omitting `terms` leaves the
+ * cost unknown, which the engine treats as `paid` and refuses.
+ */
+export const ModelEvidence = z
   .object({
     providerId: z.string().min(1).max(64),
     modelId: z.string().min(1).max(160),
@@ -90,21 +112,32 @@ export const ModelCatalogEntry = z
     requestsPerMinute: z.number().int().min(1).max(10_000).default(20),
     requestsPerDay: z.number().int().min(1).max(1_000_000).default(500),
     tokensPerDay: z.number().int().min(1).max(1_000_000_000).default(500_000),
+    /** A per-request input ceiling published by the provider, when it has one. */
+    maxInputTokens: z.number().int().min(1).max(50_000_000).optional(),
+    /** A per-request output ceiling published by the provider, when it has one. */
+    maxOutputTokens: z.number().int().min(1).max(10_000_000).optional(),
+    /** Concurrent requests the provider's free tier allows. */
+    concurrentRequests: z.number().int().min(1).max(1_000).default(1),
+    terms: ModelTerms.optional(),
   })
   .strict();
 
 export const ModelsConfig = z
   .object({
-    /** Ordered candidates for free inference routing; first usable one wins. */
+    /** Ordered candidates; order is a tie-break, never proof of cost. */
     route: z.array(ModelRef).min(1),
-    /** Optional capability/quota evidence; ranking is neutral without it. */
-    catalog: z.array(ModelCatalogEntry).default([]),
-    /** Bounded fallback across approved free models, never to a paid one. */
+    /** Capability, quota and pricing evidence per model. */
+    evidence: z.array(ModelEvidence).default([]),
+    /** Bounded fallback across verified-free models, never to a paid one. */
     maxFallbacks: z.number().int().min(0).max(5).default(2),
     /** Zero-cost is a literal: there is no configuration that enables paid use. */
     allowPaid: z.literal(false).default(false),
     dailyRequestBudget: z.number().int().min(1).max(100_000).default(1_000),
     dailyTokenBudget: z.number().int().min(1).max(100_000_000).default(2_000_000),
+    /** Consecutive provider failures before its circuit opens. */
+    circuitFailureThreshold: z.number().int().min(1).max(20).default(3),
+    /** How long an open circuit refuses traffic before one probe is allowed. */
+    circuitCooldownMs: z.number().int().min(1_000).max(600_000).default(60_000),
   })
   .strict();
 

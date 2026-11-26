@@ -12,15 +12,21 @@ import type {
 import { modelKey } from '@coderax/contracts';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
+import type { Eligibility } from './eligibility.js';
+import type { CircuitBreakers } from './circuit.js';
+import { createCircuitBreakers } from './circuit.js';
 
 /**
  * Provider-independent zero-cost routing.
  *
- * The router owns the only decision about which model is used. A provider is
- * admitted only when its cost evidence is recorded as verified-free and every
- * model it exposes is free; a model whose cost cannot be established is refused
- * rather than "assumed free". Quotas are counted locally per provider and day,
- * so an exhausted free tier fails closed instead of reaching a paid path.
+ * The router owns the only decision about which model is used. A model is
+ * admitted only when its own recorded terms prove zero cost; a provider-level
+ * flag, a configured route and a working API key are all insufficient. A model
+ * whose cost cannot be established is refused rather than "assumed free".
+ *
+ * Quotas are counted locally per model and day, provider circuits stop a failing
+ * endpoint from being retried forever, and fallback is bounded to the set of
+ * models that are already verified free, so no retry can reach a paid path.
  */
 
 export type ModelProfile = {
@@ -30,6 +36,15 @@ export type ModelProfile = {
   toolCalling: boolean;
   multimodal: boolean;
   contextTokens: number;
+};
+
+export type ProviderLimits = {
+  requestsPerMinute: number;
+  requestsPerDay: number;
+  tokensPerDay: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  concurrentRequests: number;
 };
 
 export type ProviderQuota = {
@@ -42,13 +57,16 @@ export type ProviderModel = {
   ref: ModelRef;
   label: string;
   costClass: CostClass;
+  /** The verified-free verdict this model was admitted on. */
+  eligibility: Eligibility;
   profile: ModelProfile;
+  limits: ProviderLimits;
   availability: Availability;
 };
 
 export type ProviderDescriptor = {
   id: string;
-  /** `verified-free` is an owner record; `unverified` is refused. */
+  /** Summary only; admission is decided per model, never by this field. */
   costEvidence: 'verified-free' | 'unverified';
   quota: ProviderQuota;
   models: ProviderModel[];
@@ -61,7 +79,11 @@ export type RoutingRequest = {
   requireTools?: boolean;
   /** Only models that accept images may be chosen. */
   requireVision?: boolean;
+  /** Estimated prompt size, checked against a provider's per-request ceiling. */
+  estimatedInputTokens?: number;
 };
+
+export type Reservation = { ref: ModelRef; reservedTokens: number };
 
 export type Router = {
   list: () => ModelList;
@@ -73,8 +95,24 @@ export type Router = {
     request: RoutingRequest,
     limit: number,
   ) => ProviderModel[];
-  reserve: (model: ProviderModel, at: Date) => ServiceResult<ModelRef>;
-  recordUsage: (model: ProviderModel, usage: { inputTokens?: number; outputTokens?: number }, at: Date) => void;
+  /** Atomic local reservation of one request and its estimated tokens. */
+  reserve: (
+    model: ProviderModel,
+    at: Date,
+    tokens: number,
+  ) => ServiceResult<Reservation>;
+  settle: (
+    model: ProviderModel,
+    usage: { inputTokens?: number; outputTokens?: number },
+    at: Date,
+    reservedTokens: number,
+  ) => void;
+  recordFailure: (model: ProviderModel, at: Date, retryAfterMs?: number) => void;
+  recordSuccess: (model: ProviderModel) => void;
+  /** Circuit and quota state, for health and diagnostics. */
+  health: (at: Date) => {
+    providers: Array<{ id: string; circuit: string; models: Array<{ ref: ModelRef; circuit: string }> }>;
+  };
 };
 
 type UsageWindow = {
@@ -82,6 +120,7 @@ type UsageWindow = {
   day: string;
   requests: number;
   tokens: number;
+  reserved: number;
 };
 
 const WEIGHTS: Readonly<Record<RoutingMode, { coding: number; reasoning: number; speed: number }>> = {
@@ -105,8 +144,13 @@ function score(model: ProviderModel, mode: RoutingMode): number {
   return base + (model.profile.toolCalling ? 0.02 : 0);
 }
 
-function isFree(provider: ProviderDescriptor, model: ProviderModel): boolean {
-  return provider.costEvidence === 'verified-free' && model.costClass === 'free';
+/**
+ * The zero-cost gate. Both halves are required: a verified verdict for this
+ * exact model, and a `free` cost class derived from that verdict. A descriptor
+ * that says `free` without a verdict is not eligible.
+ */
+function isFree(model: ProviderModel): boolean {
+  return model.costClass === 'free' && model.eligibility.verifiedFree;
 }
 
 export function createRouter(input: {
@@ -115,11 +159,15 @@ export function createRouter(input: {
   routeLimit?: number;
   /** Injectable clock so quota windows are testable. */
   now?: () => Date;
+  circuits?: CircuitBreakers;
 }): Router {
   const providers = input.providers.slice();
   const routeLimit = input.routeLimit ?? 8;
   const now = input.now ?? (() => new Date());
+  const circuits = input.circuits ?? createCircuitBreakers();
   const windows = new Map<string, UsageWindow>();
+  /** Providers that answered 429 with a reset window, until that window passes. */
+  const providerCooldown = new Map<string, { until: number; reason: string }>();
 
   function windowFor(model: ProviderModel, at: Date): UsageWindow {
     const key = modelKey(model.ref);
@@ -131,7 +179,7 @@ export function createRouter(input: {
       existing.minute = existing.minute.filter((stamp) => stamp > cutoff);
       return existing;
     }
-    const created: UsageWindow = { minute: [], day, requests: 0, tokens: 0 };
+    const created: UsageWindow = { minute: [], day, requests: 0, tokens: 0, reserved: 0 };
     windows.set(key, created);
     return created;
   }
@@ -146,10 +194,21 @@ export function createRouter(input: {
       minute: window.minute.length,
       requests: window.requests,
       tokens: window.tokens,
-      requestsThisMinute: Math.max(0, provider.quota.requestsPerMinute - window.minute.length),
+      reserved: window.reserved,
+      requestsThisMinute: Math.max(0, model.limits.requestsPerMinute - window.minute.length),
       requestsToday: Math.max(0, provider.quota.requestsPerDay - window.requests),
-      tokensToday: Math.max(0, provider.quota.tokensPerDay - window.tokens),
+      tokensToday: Math.max(0, provider.quota.tokensPerDay - window.tokens - window.reserved),
     };
+  }
+
+  function cooldown(providerId: string, at: Date): string | null {
+    const entry = providerCooldown.get(providerId);
+    if (!entry) return null;
+    if (at.getTime() >= entry.until) {
+      providerCooldown.delete(providerId);
+      return null;
+    }
+    return entry.reason;
   }
 
   /**
@@ -157,21 +216,28 @@ export function createRouter(input: {
    * the report states the availability it would carry.
    */
   function availabilityOf(provider: ProviderDescriptor, model: ProviderModel, at: Date): Availability {
-    if (provider.costEvidence !== 'verified-free') {
+    if (!isFree(model)) {
       return {
         available: false,
         reason: 'forbidden',
-        detail: 'This provider has no recorded zero-cost evidence.',
-      };
-    }
-    if (model.costClass !== 'free') {
-      return {
-        available: false,
-        reason: 'forbidden',
-        detail: 'Paid models are refused by the zero-cost gate.',
+        detail:
+          model.costClass === 'paid'
+            ? 'Paid models are refused by the zero-cost gate.'
+            : 'This model has no verified zero-cost evidence.',
       };
     }
     if (!model.availability.available) return model.availability;
+    const cooling = cooldown(provider.id, at);
+    if (cooling) {
+      return { available: false, reason: 'not_ready', detail: cooling };
+    }
+    if (!circuits.allow(`model:${modelKey(model.ref)}`, at)) {
+      return {
+        available: false,
+        reason: 'not_ready',
+        detail: 'This model is circuit-broken after repeated provider failures.',
+      };
+    }
     const quota = quotaState(provider, model, at);
     if (quota.requestsThisMinute <= 0) {
       return {
@@ -190,18 +256,21 @@ export function createRouter(input: {
     return model.availability;
   }
 
-  function eligible(
-    request: RoutingRequest,
-    at: Date,
-    requireTools = request.requireTools ?? false,
-  ): ProviderModel[] {
+  function eligible(request: RoutingRequest, at: Date): ProviderModel[] {
     const admitted: ProviderModel[] = [];
     for (const provider of providers) {
       for (const model of provider.models) {
-        if (!isFree(provider, model)) continue;
+        if (!isFree(model)) continue;
         if (!availabilityOf(provider, model, at).available) continue;
-        if (requireTools && !model.profile.toolCalling) continue;
+        if (request.requireTools && !model.profile.toolCalling) continue;
         if (request.requireVision && !model.profile.multimodal) continue;
+        if (
+          request.estimatedInputTokens !== undefined &&
+          model.limits.maxInputTokens !== undefined &&
+          request.estimatedInputTokens > model.limits.maxInputTokens
+        ) {
+          continue;
+        }
         admitted.push(model);
       }
     }
@@ -230,10 +299,10 @@ export function createRouter(input: {
       if (!found) {
         return fail('model_missing', 'That model is not in the verified zero-cost catalogue.');
       }
-      if (found.provider.costEvidence !== 'verified-free' || found.model.costClass !== 'free') {
+      if (found.model.costClass === 'paid' || !found.model.eligibility.verifiedFree) {
         return fail(
           'paid_model_refused',
-          'Coderax does not route to paid models; choose a verified zero-cost model.',
+          'Coderax does not route to paid or unpriced models; choose a verified zero-cost model.',
         );
       }
       const availability = availabilityOf(found.provider, found.model, at);
@@ -261,34 +330,66 @@ export function createRouter(input: {
 
   function fallbacks(primary: ProviderModel, request: RoutingRequest, limit: number): ProviderModel[] {
     if (limit <= 0) return [];
-    const ranked = eligible(request, now(), request.requireTools ?? false);
+    const ranked = eligible(request, now());
     return ranked
       .filter((model) => modelKey(model.ref) !== modelKey(primary.ref))
       .slice(0, limit);
   }
 
-  function reserve(model: ProviderModel, at: Date): ServiceResult<ModelRef> {
+  function reserve(model: ProviderModel, at: Date, tokens: number): ServiceResult<Reservation> {
     const provider = providerFor(model.ref);
     if (!provider) {
       return fail('model_missing', 'That provider is not registered.');
+    }
+    if (!isFree(model)) {
+      return fail('paid_model_refused', 'That model is not verified zero-cost.');
     }
     const availability = availabilityOf(provider, model, at);
     if (!availability.available) {
       return fail('model_missing', availability.detail);
     }
+    const wanted = Math.max(0, Math.ceil(tokens));
+    const quota = quotaState(provider, model, at);
+    if (wanted > quota.tokensToday) {
+      return fail('model_missing', 'The provider daily token quota cannot cover this request.');
+    }
+    if (model.limits.maxInputTokens !== undefined && wanted > model.limits.maxInputTokens) {
+      return fail('model_missing', 'The request exceeds this model’s published input limit.');
+    }
     const window = windowFor(model, at);
+    // One synchronous section: the check above and this write cannot interleave,
+    // so concurrent runs in this process cannot both spend the last slot.
     window.minute.push(at.getTime());
     window.requests += 1;
-    return ok(model.ref);
+    window.reserved += wanted;
+    return ok({ ref: model.ref, reservedTokens: wanted });
   }
 
-  function recordUsage(
+  function settle(
     model: ProviderModel,
     usage: { inputTokens?: number; outputTokens?: number },
     at: Date,
+    reservedTokens: number,
   ): void {
     const window = windowFor(model, at);
-    window.tokens += (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+    window.reserved = Math.max(0, window.reserved - Math.max(0, reservedTokens));
+    window.tokens += Math.max(0, usage.inputTokens ?? 0) + Math.max(0, usage.outputTokens ?? 0);
+  }
+
+  function recordFailure(model: ProviderModel, at: Date, retryAfterMs?: number): void {
+    circuits.failure(`model:${modelKey(model.ref)}`, at, retryAfterMs);
+    circuits.failure(`provider:${model.ref.providerId}`, at, retryAfterMs);
+    if (typeof retryAfterMs === 'number' && retryAfterMs > 0) {
+      providerCooldown.set(model.ref.providerId, {
+        until: at.getTime() + retryAfterMs,
+        reason: 'The provider asked the engine to wait before it retries.',
+      });
+    }
+  }
+
+  function recordSuccess(model: ProviderModel): void {
+    circuits.success(`model:${modelKey(model.ref)}`);
+    circuits.success(`provider:${model.ref.providerId}`);
   }
 
   function routerModel(provider: ProviderDescriptor, model: ProviderModel, at: Date): RouterModel {
@@ -318,14 +419,15 @@ export function createRouter(input: {
           return {
             requestsThisMinute: total.requestsThisMinute + window.minute.length,
             requestsToday: total.requestsToday + window.requests,
-            tokensToday: total.tokensToday + window.tokens,
+            tokensToday: total.tokensToday + window.tokens + window.reserved,
           };
         },
         { requestsThisMinute: 0, requestsToday: 0, tokensToday: 0 },
       );
+      const verified = provider.models.every((model) => isFree(model));
       return {
         id: provider.id,
-        costEvidence: provider.costEvidence,
+        costEvidence: verified ? 'verified-free' : 'unverified',
         quota: { ...provider.quota },
         used,
         models,
@@ -354,5 +456,18 @@ export function createRouter(input: {
     return { models: descriptors, route: route.map((model) => model.ref), allowPaid: false };
   }
 
-  return { list, report, select, fallbacks, reserve, recordUsage };
+  function health(at: Date) {
+    return {
+      providers: providers.map((provider) => ({
+        id: provider.id,
+        circuit: circuits.state(`provider:${provider.id}`, at),
+        models: provider.models.map((model) => ({
+          ref: model.ref,
+          circuit: circuits.state(`model:${modelKey(model.ref)}`, at),
+        })),
+      })),
+    };
+  }
+
+  return { list, report, select, fallbacks, reserve, settle, recordFailure, recordSuccess, health };
 }

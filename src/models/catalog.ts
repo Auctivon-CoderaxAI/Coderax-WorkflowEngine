@@ -5,7 +5,6 @@ import type {
   DataMode,
   RoutingMode,
 } from '@coderax/contracts';
-import { modelKey } from '@coderax/contracts';
 import type { Router } from './router.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
@@ -26,16 +25,13 @@ export type ModelCatalog = {
   ) => ServiceResult<ModelDescriptor>;
 };
 
-function usable(descriptor: ModelDescriptor, mode: DataMode): boolean {
-  if (!descriptor.availability.available) return false;
-  // Private mode is BYOK/local only; a hosted model is not a private resource.
-  if (mode === 'private' && descriptor.costClass !== 'free') return false;
-  return true;
-}
-
 /**
  * The catalogue a caller resolves against, implemented on the single router so
  * model discovery and model selection cannot disagree.
+ *
+ * There is deliberately no second catalogue implementation: a descriptor built
+ * from configuration could carry `costClass: 'free'` without evidence, which is
+ * exactly the inference the zero-cost rule forbids.
  */
 export function createRouterCatalog(router: Router): ModelCatalog {
   return {
@@ -63,60 +59,5 @@ export function createRouterCatalog(router: Router): ModelCatalog {
         availability: model.availability,
       });
     },
-  };
-}
-
-export function createModelCatalog(input: {
-  descriptors: ModelDescriptor[];
-  route: ModelRef[];
-  allowPaid: false;
-}): ModelCatalog {
-  const byKey = new Map(input.descriptors.map((descriptor) => [modelKey(descriptor.ref), descriptor]));
-  const routeRefs = [...input.route];
-
-  function resolve(
-    requested: ModelRef | null | undefined,
-    mode: DataMode,
-  ): ServiceResult<ModelDescriptor> {
-    if (requested) {
-      const descriptor = byKey.get(modelKey(requested));
-      if (!descriptor) {
-        return fail('engine_not_configured', 'That model is not in the verified catalogue.');
-      }
-      if (descriptor.costClass === 'paid' || input.allowPaid !== false) {
-        return fail(
-          'paid_model_refused',
-          'Coderax does not route to paid models; choose a verified zero-cost model.',
-        );
-      }
-      if (!usable(descriptor, mode)) {
-        return fail(
-          'model_missing',
-          `That model is not available for ${mode} execution: ${descriptor.availability.detail}`,
-        );
-      }
-      return ok(descriptor);
-    }
-
-    for (const ref of routeRefs) {
-      const descriptor = byKey.get(modelKey(ref));
-      if (descriptor && descriptor.costClass === 'free' && usable(descriptor, mode)) {
-        return ok(descriptor);
-      }
-    }
-    return fail(
-      'model_missing',
-      'No verified zero-cost model is available for this data mode.',
-    );
-  }
-
-  return {
-    list: () => ({
-      models: input.descriptors.map((descriptor) => ({ ...descriptor })),
-      route: [...routeRefs],
-      allowPaid: false,
-    }),
-    route: () => [...routeRefs],
-    resolve,
   };
 }

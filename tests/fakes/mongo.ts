@@ -12,13 +12,25 @@ function matches(document: Document, filter: MongoFilter): boolean {
     const value = document[field];
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
+      if ('$lt' in operators) {
+        const bound = operators.$lt as number;
+        if (typeof value !== 'number' || !(value < bound)) return false;
+      }
       if ('$lte' in operators) {
-        const bound = operators.$lte as Date;
-        if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
+        const bound = operators.$lte as Date | number;
+        if (bound instanceof Date) {
+          if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
+        } else if (typeof value !== 'number' || !(value <= bound)) {
+          return false;
+        }
       }
       if ('$gt' in operators) {
-        const bound = operators.$gt as Date;
-        if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
+        const bound = operators.$gt as Date | number;
+        if (bound instanceof Date) {
+          if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
+        } else if (typeof value !== 'number' || !(value > bound)) {
+          return false;
+        }
       }
       if ('$ne' in operators && value === operators.$ne) return false;
       if ('$in' in operators) {
@@ -122,13 +134,20 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = { ...documents[index], ...update.$set };
-      return { ...documents[index] };
+      const next = { ...documents[index], ...update.$set };
+      for (const [field, amount] of Object.entries(update.$inc ?? {})) {
+        next[field] = Number(next[field] ?? 0) + amount;
+      }
+      documents[index] = next;
+      return { ...next };
     },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);
       if (index !== -1) {
         const next = { ...documents[index], ...update.$set };
+        for (const [field, amount] of Object.entries(update.$inc ?? {})) {
+          next[field] = Number(next[field] ?? 0) + amount;
+        }
         assertUnique(next, index);
         documents[index] = next;
         return { matchedCount: 1, upsertedCount: 0 };
@@ -136,7 +155,17 @@ export function createFakeCollection(): FakeCollection {
       if (!options.upsert) {
         return { matchedCount: 0, upsertedCount: 0 };
       }
-      const candidate = { ...(update.$setOnInsert ?? {}), ...update.$set };
+      // An upsert seeds the document from the filter's equality fields, exactly
+      // as the driver does, so a `$inc` upsert still carries its key.
+      const equality = Object.fromEntries(
+        Object.entries(filter).filter(
+          ([, condition]) => condition === null || typeof condition !== 'object',
+        ),
+      );
+      const candidate: Document = { ...equality, ...(update.$setOnInsert ?? {}), ...update.$set };
+      for (const [field, amount] of Object.entries(update.$inc ?? {})) {
+        candidate[field] = Number(candidate[field] ?? 0) + amount;
+      }
       assertUnique(candidate, -1);
       documents.push(candidate);
       return { matchedCount: 0, upsertedCount: 1 };

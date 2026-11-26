@@ -1522,11 +1522,87 @@
         ],
         "responses": {
           "200": {
-            "description": "Chat reply",
+            "description": "Chat reply or SSE frames",
             "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conversationId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "messageId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "agent": {
+                      "type": "string",
+                      "enum": [
+                        "coderax",
+                        "opencode",
+                        "freebuff"
+                      ]
+                    },
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "providerId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "modelId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 160
+                        }
+                      },
+                      "required": [
+                        "providerId",
+                        "modelId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "usage": {
+                      "type": "object",
+                      "properties": {
+                        "inputTokens": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "outputTokens": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "conversationId",
+                    "messageId",
+                    "text",
+                    "agent",
+                    "model",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              },
               "text/event-stream": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Server-sent event frames."
                 }
               }
             }
@@ -2433,7 +2509,8 @@
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Server-sent event frames."
                 }
               }
             }

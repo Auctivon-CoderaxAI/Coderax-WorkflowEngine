@@ -10,6 +10,8 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
+  /** The client's Accept header, so a route can negotiate SSE against JSON. */
+  accept: string;
 };
 
 export type HandlerResult =
@@ -25,6 +27,7 @@ export type RawRequest = {
   path: string;
   authorization: string | undefined;
   bodyText: string;
+  accept?: string | undefined;
 };
 
 export type RouterResult =
@@ -220,6 +223,7 @@ export function createRouter(input: {
             query,
             body,
             requestId,
+            accept: raw.accept ?? '',
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);

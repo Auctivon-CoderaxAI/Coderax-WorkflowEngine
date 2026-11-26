@@ -1,4 +1,4 @@
-import type { AgentIsolation, EngineCapabilities } from '@coderax/contracts';
+import type { AgentIsolation, EngineCapabilities, ModelRef } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
@@ -14,6 +14,12 @@ import { createAgentRegistry } from '../agents/registry.js';
 import { probeAgents } from '../agents/probe.js';
 import { createRouterCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
+import { createCircuitBreakers } from '../models/circuit.js';
+import {
+  createEligibilityIndex,
+  describeRefusal,
+  type Eligibility,
+} from '../models/eligibility.js';
 import { createRouter as createModelRouter, type ProviderDescriptor } from '../models/router.js';
 import { createRoutedGateway } from '../models/routed.js';
 import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
@@ -107,32 +113,61 @@ function buildGateway(input: ComposeInput): ModelGateway | null {
 }
 
 /**
- * Providers are derived from the configured route. Every entry is free by
- * construction — there is no configuration field that can mark one paid — and
- * capability/quota evidence comes from `models.catalog` when the owner recorded
- * it. The router, not this function, decides which model serves a request.
+ * Providers are derived from the configured route, but a route is not evidence.
+ *
+ * Each model's cost class comes from `evaluateEligibility` over its recorded
+ * terms: a published price list for that exact model, observed from an HTTPS
+ * source, still current, with every billed unit at zero. A model with no record,
+ * an expired record, or any non-zero price is reported `paid` and refused. A
+ * provider is described as verified-free only when every model it serves is.
  */
 function modelProviders(input: {
   config: EngineConfig;
   gateway: ModelGateway | null;
-}): ProviderDescriptor[] {
+  at: Date;
+}): {
+  providers: ProviderDescriptor[];
+  refused: Array<{ ref: ModelRef; eligibility: Eligibility }>;
+} {
   const evidence = new Map(
-    input.config.models.catalog.map((entry) => [
-      `${entry.providerId}/${entry.modelId}`,
-      entry,
-    ]),
+    input.config.models.evidence.map((entry) => [modelKey(entry), entry]),
   );
-  const providerIds = [...new Set(input.config.models.route.map((ref) => ref.providerId))];
+  const eligibility = createEligibilityIndex(
+    input.config.models.evidence.flatMap((entry) => {
+      const terms = entry.terms;
+      if (!terms) return [];
+      return [
+        {
+          providerId: entry.providerId,
+          modelId: entry.modelId,
+          source: terms.source,
+          observedAt: terms.observedAt,
+          expiresAt: terms.expiresAt,
+          pricing: {
+            currency: terms.currency,
+            inputPerMillionTokens: terms.inputPerMillionTokens,
+            outputPerMillionTokens: terms.outputPerMillionTokens,
+            requestPerCall: terms.requestPerCall,
+          },
+        },
+      ];
+    }),
+    input.at,
+  );
+  const route = input.config.models.route;
+  const providerIds = [...new Set(route.map((ref) => ref.providerId))];
 
-  return providerIds.map((providerId) => {
-    const models = input.config.models.route
+  const providers = providerIds.map((providerId): ProviderDescriptor => {
+    const models = route
       .filter((ref) => ref.providerId === providerId)
       .map((ref) => {
         const entry = evidence.get(modelKey(ref));
+        const verdict = eligibility.get(ref);
         return {
           ref,
           label: entry?.label ?? `${ref.providerId} ${ref.modelId}`,
-          costClass: 'free' as const,
+          costClass: verdict.costClass,
+          eligibility: verdict,
           profile: {
             coding: entry?.coding ?? 0.5,
             reasoning: entry?.reasoning ?? 0.5,
@@ -141,8 +176,22 @@ function modelProviders(input: {
             multimodal: entry?.multimodal ?? false,
             contextTokens: entry?.contextTokens ?? 8192,
           },
+          limits: {
+            requestsPerMinute: entry?.requestsPerMinute ?? 20,
+            requestsPerDay: entry?.requestsPerDay ?? 500,
+            tokensPerDay: entry?.tokensPerDay ?? 500_000,
+            ...(entry?.maxInputTokens ? { maxInputTokens: entry.maxInputTokens } : {}),
+            ...(entry?.maxOutputTokens ? { maxOutputTokens: entry.maxOutputTokens } : {}),
+            concurrentRequests: entry?.concurrentRequests ?? 1,
+          },
           availability: input.gateway
-            ? { available: true, reason: 'ready' as const, detail: 'Verified zero-cost endpoint.' }
+            ? {
+                available: true,
+                reason: 'ready' as const,
+                detail: verdict.verifiedFree
+                  ? 'Verified zero-cost endpoint.'
+                  : describeRefusal(verdict),
+              }
             : {
                 available: false,
                 reason: 'not_configured' as const,
@@ -150,18 +199,25 @@ function modelProviders(input: {
               },
         };
       });
-    const first = evidence.get(modelKey(models[0]?.ref ?? input.config.models.route[0]!));
+    const verified = models.length > 0 && models.every((model) => model.eligibility.verifiedFree);
     return {
       id: providerId,
-      costEvidence: 'verified-free' as const,
+      costEvidence: verified ? 'verified-free' : 'unverified',
       quota: {
-        requestsPerMinute: first?.requestsPerMinute ?? 20,
-        requestsPerDay: first?.requestsPerDay ?? 500,
-        tokensPerDay: first?.tokensPerDay ?? 500_000,
+        requestsPerMinute: models[0]?.limits.requestsPerMinute ?? 20,
+        requestsPerDay: models[0]?.limits.requestsPerDay ?? 500,
+        tokensPerDay: models[0]?.limits.tokensPerDay ?? 500_000,
       },
       models,
     };
   });
+
+  const refused = providers
+    .flatMap((provider) => provider.models)
+    .filter((model) => !model.eligibility.verifiedFree)
+    .map((model) => ({ ref: model.ref, eligibility: model.eligibility }));
+
+  return { providers, refused };
 }
 
 /**
@@ -189,19 +245,56 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     throw error;
   }
 
+  const persistence = await buildPersistence({
+    config,
+    env,
+    clock,
+    ...(input.persistence ?? {}),
+  });
+  const budget = createBudgetLedger({
+    store: persistence.budgets,
+    maxRequestsPerDay: config.models.dailyRequestBudget,
+    maxTokensPerDay: config.models.dailyTokenBudget,
+  });
+
   const gateway = buildGateway(input);
-  const providers = modelProviders({ config, gateway });
-  const modelRouter = createModelRouter({ providers });
+  const { providers, refused } = modelProviders({ config, gateway, at: clock.now() });
+  const circuits = createCircuitBreakers({
+    failureThreshold: config.models.circuitFailureThreshold,
+    cooldownMs: config.models.circuitCooldownMs,
+  });
+  const modelRouter = createModelRouter({ providers, circuits });
   const gateways = new Map<string, ModelGateway>();
   if (gateway) {
     for (const provider of providers) gateways.set(provider.id, gateway);
   }
+
+  // Fail closed before accepting a request: a route, an API key or a reachable
+  // endpoint does not prove that a model is free. When nothing is verified, the
+  // engine has no zero-cost route and must not start a Native agent that could
+  // only fail or, worse, silently spend money.
+  const verifiedFree = providers.flatMap((provider) =>
+    provider.models.filter((model) => model.eligibility.verifiedFree),
+  );
+  if (config.engines.native.enabled && verifiedFree.length === 0) {
+    const reasons = refused
+      .slice(0, 5)
+      .map((entry) => `${entry.ref.providerId}/${entry.ref.modelId}: ${describeRefusal(entry.eligibility)}`);
+    throw new StartupError([
+      'No configured model has verified zero-cost terms; Native cannot start without a verified free route.',
+      ...(reasons.length > 0
+        ? reasons
+        : ['models.route is empty or unverified: record models.evidence[].terms from the provider’s published price list.']),
+    ]);
+  }
+
   const routedGateway =
     gateways.size > 0
       ? createRoutedGateway({
           router: modelRouter,
           gateways,
           maxFallbacks: config.models.maxFallbacks,
+          budget,
         })
       : null;
   const native = createNativeAgent({
@@ -264,17 +357,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const models = createRouterCatalog(modelRouter);
 
-  const budget = createBudgetLedger({
-    maxRequestsPerDay: config.models.dailyRequestBudget,
-    maxTokensPerDay: config.models.dailyTokenBudget,
-  });
-
-  const persistence = await buildPersistence({
-    config,
-    env,
-    clock,
-    ...(input.persistence ?? {}),
-  });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
@@ -404,9 +486,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: async () => ({
           status: 'ok' as const,
-          detail: `${tools.list().length} tool(s); ${modelRouter.report(config.routing.defaultMode).route.length} routed model(s); ${
-            mcp.names.length
-          } MCP server(s)${mcp.failures.length > 0 ? `; ${mcp.failures.length} unavailable` : ''}.`,
+          detail: `${tools.list().length} tool(s); ${verifiedFree.length} verified zero-cost model(s); ${
+            refused.length
+          } refused model(s); ${mcp.names.length} MCP server(s)${
+            mcp.failures.length > 0 ? `; ${mcp.failures.length} unavailable` : ''
+          }.`,
         }),
       },
     ],

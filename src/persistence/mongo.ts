@@ -36,12 +36,20 @@ export type MongoCollectionLike = {
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;
   findOneAndUpdate: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown> },
+    update: {
+      $set?: Record<string, unknown>;
+      /** Budget windows increment in place so the ceiling stays atomic. */
+      $inc?: Record<string, number>;
+    },
     options: { returnDocument: 'after'; includeResultMetadata: false },
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
     filter: MongoFilter,
-    update: { $set: Record<string, unknown>; $setOnInsert?: Record<string, unknown> },
+    update: {
+      $set?: Record<string, unknown>;
+      $setOnInsert?: Record<string, unknown>;
+      $inc?: Record<string, number>;
+    },
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;

@@ -7,18 +7,29 @@ port, fails closed when its prerequisite is absent, and is covered by a test.
 ## Model routing
 
 `src/models/router.ts` is the only module that decides which model serves a
-request. A provider is admitted only when:
+request, and `src/models/eligibility.ts` is the only module that decides whether
+a model is free. A model is admitted only when:
 
-- its recorded `costEvidence` is `verified-free`;
-- every model it exposes has `costClass: 'free'`;
-- the model reports itself available; and
+- its own record proves zero cost: an HTTPS `terms.source`, an `observedAt` that
+  is not in the future, an `expiresAt` that has not passed within a 90-day
+  window, currency `USD`, and every billed unit (input, output and per call) at
+  exactly `0`;
+- the router-derived `costClass` is `free` **and** the verdict is verified — a
+  descriptor that says `free` without evidence is refused;
+- the model reports itself available;
+- no provider retry-after cooldown and no open circuit blocks it; and
 - its local request and token quota has not been exhausted.
 
+Unknown pricing is `paid`, not free. A configured route, a working API key or a
+reachable endpoint proves authentication only. When Native is enabled and no
+routed model has verified terms, composition throws a `StartupError` naming each
+refused model and the reason, so the engine cannot start on an unproven route.
+
 `allowPaid` remains a literal `false`; there is no configuration field that can
-enable it. A requested paid model is refused with `paid_model_refused`, and an
-unknown or exhausted model with `model_missing`. When nothing eligible remains,
-routing fails closed with `No verified zero-cost model is available…` rather
-than trying a wider provider.
+enable it. A requested paid or unpriced model is refused with
+`paid_model_refused`, and an unknown or exhausted model with `model_missing`.
+When nothing eligible remains, routing fails closed with
+`No verified zero-cost model is available…` rather than trying a wider provider.
 
 Routing modes rank the eligible set:
 
@@ -32,7 +43,20 @@ A tool-capable model receives a 0.02 tie-break bonus, then context length, then
 the model key break ties deterministically. `GET /v1/routing` reports the ranked
 route and each provider's recorded evidence, quota and local usage.
 
-`src/models/routed.ts` implements the gateway over the router. A retryable
+Budget reservations are durable. `src/models/budget.ts` reserves one request and
+the estimated input tokens before a call is dispatched, and
+`src/persistence/budgets.ts` implements the window atomically — a conditional
+`findOneAndUpdate` with `$inc`, so two replicas racing for the last slot cannot
+both win. A settlement replaces the reservation with the usage the provider
+reported; a failed call releases it instead of charging it. Input accounting
+includes the system prompt, the user prompt and the serialized tool catalogue
+(`src/models/tokens.ts`); a provider that reports no usage is still charged the
+estimate, and streamed completions fold their usage frame before settlement.
+
+`src/models/circuit.ts` opens a per-model and per-provider circuit after a
+bounded number of consecutive failures and keeps it open for the provider's own
+`retry-after` window, clamped locally. `src/models/routed.ts` implements the
+gateway over the router. A retryable
 provider failure (HTTP 408/425/429/5xx, timeout, connection reset) falls back to
 the next approved free model, bounded by `models.maxFallbacks`. Authentication,
 validation, 404/422 and abort failures never fall back, because retrying them

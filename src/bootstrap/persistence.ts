@@ -1,6 +1,9 @@
 import type { EngineConfig } from '../configuration/schema.js';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore } from '../execution/lease.js';
+import type { BudgetStore } from '../models/budget.js';
+import { createMemoryBudgetStore } from '../models/budget.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/budgets.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -29,6 +32,8 @@ import { StartupError } from './startup-error.js';
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
   permissionCollection?: MongoCollectionLike;
+  /** Durable request and token budget windows, shared by every replica. */
+  budgets: BudgetStore;
   lease: LeaseStore;
   tasks: TaskRepository;
   conversations: ConversationRepository;
@@ -95,6 +100,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   if (settings.driver === 'memory') {
     return {
       driver: 'memory',
+      budgets: createMemoryBudgetStore(),
       lease: createLeaseStore(createInMemoryWorkRunTable()),
       tasks: createTaskRepository(),
       conversations: createConversationRepository(),
@@ -113,9 +119,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const notifications = database.collection(collectionName(config, 'notifications'));
 
   const permissionCollection = database.collection(collectionName(config, 'permissions'));
+  const budgetCollection = database.collection(collectionName(config, 'budget_windows'));
   try {
     await permissionCollection.createIndex({ requestId: 1 }, { unique: true, name: 'permission_request' });
     await permissionCollection.createIndex({ ownerId: 1, taskId: 1 }, { name: 'permission_task' });
+    await ensureBudgetIndexes(budgetCollection);
     await ensureWorkRunIndexes(workRuns);
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
@@ -131,6 +139,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   return {
     driver: 'mongo',
     permissionCollection,
+    budgets: createMongoBudgetStore(budgetCollection),
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
     conversations: createMongoConversationRepository({ conversations, messages }),

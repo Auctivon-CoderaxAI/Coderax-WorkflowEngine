@@ -1,9 +1,46 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ProviderDescriptor } from '../../src/models/router.js';
+import type { ProviderDescriptor, ProviderModel } from '../../src/models/router.js';
 import { createRouter } from '../../src/models/router.js';
+import { createCircuitBreakers } from '../../src/models/circuit.js';
 import { createRoutedGateway, isRouterExhausted } from '../../src/models/routed.js';
 import type { ModelGateway } from '../../src/agents/native/types.js';
+
+const ready = { available: true as const, reason: 'ready' as const, detail: 'ready' };
+
+function verified(): ProviderModel['eligibility'] {
+  return {
+    costClass: 'free',
+    verifiedFree: true,
+    reason: 'verified_zero_price_list',
+    source: 'https://provider.example/pricing',
+    expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+  };
+}
+
+function entry(
+  providerId: string,
+  modelId: string,
+  profile: ProviderModel['profile'],
+  overrides?: Partial<ProviderModel>,
+): ProviderModel {
+  const eligibility = overrides?.eligibility ?? verified();
+  return {
+    ref: { providerId, modelId },
+    label: modelId,
+    costClass: eligibility.costClass,
+    eligibility,
+    profile,
+    limits: {
+      requestsPerMinute: 10,
+      requestsPerDay: 10,
+      tokensPerDay: 10_000,
+      concurrentRequests: 1,
+    },
+    availability: ready,
+    ...(overrides ?? {}),
+  };
+}
 
 function provider(overrides?: Partial<ProviderDescriptor>): ProviderDescriptor {
   return {
@@ -11,22 +48,37 @@ function provider(overrides?: Partial<ProviderDescriptor>): ProviderDescriptor {
     costEvidence: 'verified-free',
     quota: { requestsPerMinute: 10, requestsPerDay: 10, tokensPerDay: 10_000 },
     models: [
-      {
-        ref: { providerId: 'free', modelId: 'fast' },
-        label: 'Fast',
-        costClass: 'free',
-        profile: { coding: 0.2, reasoning: 0.1, speed: 1, toolCalling: false, multimodal: false, contextTokens: 8192 },
-        availability: { available: true, reason: 'ready', detail: 'ready' },
-      },
-      {
-        ref: { providerId: 'free', modelId: 'deep' },
-        label: 'Deep',
-        costClass: 'free',
-        profile: { coding: 0.9, reasoning: 1, speed: 0.2, toolCalling: true, multimodal: true, contextTokens: 32_000 },
-        availability: { available: true, reason: 'ready', detail: 'ready' },
-      },
+      entry('free', 'fast', {
+        coding: 0.2,
+        reasoning: 0.1,
+        speed: 1,
+        toolCalling: false,
+        multimodal: false,
+        contextTokens: 8192,
+      }),
+      entry('free', 'deep', {
+        coding: 0.9,
+        reasoning: 1,
+        speed: 0.2,
+        toolCalling: true,
+        multimodal: true,
+        contextTokens: 32_000,
+      }),
     ],
     ...(overrides ?? {}),
+  };
+}
+
+function isolated(
+  id: string,
+  modelId: string,
+  profile: ProviderModel['profile'],
+): ProviderDescriptor {
+  return {
+    id,
+    costEvidence: 'verified-free',
+    quota: { requestsPerMinute: 10, requestsPerDay: 10, tokensPerDay: 10_000 },
+    models: [entry(id, modelId, profile)],
   };
 }
 
@@ -47,16 +99,20 @@ test('tool-capable and vision requirements exclude a model that cannot serve', (
   assert.equal(vision.ok && vision.value.ref.modelId, 'deep');
 });
 
-test('a paid or unverified model is refused, never substituted', () => {
+test('a paid model is refused, never substituted', () => {
   const paid = provider({
     models: [
-      {
-        ref: { providerId: 'free', modelId: 'paid' },
-        label: 'Paid',
+      entry('free', 'paid', {
+        coding: 1,
+        reasoning: 1,
+        speed: 1,
+        toolCalling: true,
+        multimodal: true,
+        contextTokens: 128_000,
+      }, {
         costClass: 'paid',
-        profile: { coding: 1, reasoning: 1, speed: 1, toolCalling: true, multimodal: true, contextTokens: 128_000 },
-        availability: { available: true, reason: 'ready', detail: 'ready' },
-      },
+        eligibility: { costClass: 'paid', verifiedFree: false, reason: 'price_not_zero' },
+      }),
     ],
   });
   const router = createRouter({ providers: [paid] });
@@ -64,61 +120,128 @@ test('a paid or unverified model is refused, never substituted', () => {
   assert.equal(requested.ok, false);
   assert.equal(requested.ok === false && requested.code, 'paid_model_refused');
   assert.equal(router.select({ mode: 'auto' }).ok, false);
+});
 
-  const unverified = createRouter({ providers: [provider({ costEvidence: 'unverified' })] });
-  const result = unverified.select({ mode: 'auto' });
-  assert.equal(result.ok, false);
-  assert.equal(result.ok === false && result.code, 'model_missing');
+test('a provider-level verified flag cannot admit an unverified model', () => {
+  const labelled = provider({
+    models: [
+      entry('free', 'unverified', {
+        coding: 1,
+        reasoning: 1,
+        speed: 1,
+        toolCalling: true,
+        multimodal: true,
+        contextTokens: 128_000,
+      }, {
+        eligibility: { costClass: 'free', verifiedFree: false, reason: 'terms_missing' },
+      }),
+    ],
+  });
+  // The descriptor still claims `free`; the evidence does not, so nothing routes.
+  assert.equal(labelled.costEvidence, 'verified-free');
+  const router = createRouter({ providers: [labelled] });
+  assert.equal(router.select({ mode: 'auto' }).ok, false);
 });
 
 test('daily quota exhaustion fails closed instead of routing wider', () => {
   let now = new Date('2026-11-26T10:00:00.000Z');
   const only = provider({ quota: { requestsPerMinute: 2, requestsPerDay: 2, tokensPerDay: 100 } });
   const router = createRouter({
-    providers: [{ ...only, models: (only.models ?? []).slice(0, 1) }],
+    providers: [{ ...only, models: only.models.slice(0, 1) }],
     now: () => now,
   });
   const first = router.select({ mode: 'fast' });
   assert.equal(first.ok, true);
   if (!first.ok) return;
-  assert.equal(router.reserve(first.value, now).ok, true);
-  assert.equal(router.reserve(first.value, now).ok, true);
-  assert.equal(router.reserve(first.value, now).ok, false);
+  assert.equal(router.reserve(first.value, now, 1).ok, true);
+  assert.equal(router.reserve(first.value, now, 1).ok, true);
+  assert.equal(router.reserve(first.value, now, 1).ok, false);
   assert.equal(router.select({ mode: 'fast' }).ok, false);
 
   now = new Date('2026-11-27T00:00:01.000Z');
   assert.equal(router.select({ mode: 'fast' }).ok, true);
 });
 
-test('a retryable provider failure falls back to the next approved free model', async () => {
-  const primary: ProviderDescriptor = {
-    id: 'alpha',
+test('a token reservation larger than the provider ceiling is refused', () => {
+  const router = createRouter({ providers: [provider()] });
+  const selected = router.select({ mode: 'fast' });
+  assert.equal(selected.ok, true);
+  if (!selected.ok) return;
+  assert.equal(router.reserve(selected.value, new Date(), 10_001).ok, false);
+});
+
+test('an open circuit stops routing to the failing model', () => {
+  const model = entry('free', 'deep', {
+    coding: 0.9,
+    reasoning: 1,
+    speed: 0.2,
+    toolCalling: true,
+    multimodal: false,
+    contextTokens: 32_000,
+  });
+  const only: ProviderDescriptor = {
+    id: 'free',
     costEvidence: 'verified-free',
     quota: { requestsPerMinute: 10, requestsPerDay: 10, tokensPerDay: 10_000 },
-    models: [
-      {
-        ref: { providerId: 'alpha', modelId: 'deep' },
-        label: 'Alpha deep',
-        costClass: 'free',
-        profile: { coding: 0.9, reasoning: 1, speed: 0.2, toolCalling: true, multimodal: false, contextTokens: 32_000 },
-        availability: { available: true, reason: 'ready', detail: 'ready' },
-      },
-    ],
+    models: [model],
   };
-  const secondary: ProviderDescriptor = {
-    id: 'beta',
-    costEvidence: 'verified-free',
-    quota: { requestsPerMinute: 10, requestsPerDay: 10, tokensPerDay: 10_000 },
-    models: [
-      {
-        ref: { providerId: 'beta', modelId: 'fast' },
-        label: 'Beta fast',
-        costClass: 'free',
-        profile: { coding: 0.2, reasoning: 0.1, speed: 1, toolCalling: false, multimodal: false, contextTokens: 8192 },
-        availability: { available: true, reason: 'ready', detail: 'ready' },
-      },
-    ],
-  };
+  const circuits = createCircuitBreakers({ failureThreshold: 2, cooldownMs: 30_000 });
+  let now = new Date('2026-11-26T10:00:00.000Z');
+  const router = createRouter({ providers: [only], circuits, now: () => now });
+
+  router.recordFailure(model, now);
+  assert.equal(router.select({ mode: 'auto' }).ok, true);
+  router.recordFailure(model, now);
+  const broken = router.select({ mode: 'auto' });
+  assert.equal(broken.ok, false);
+  assert.equal(router.health(now).providers[0]?.models[0]?.circuit, 'open');
+
+  // Half-open after the cooldown, closed again by one success.
+  now = new Date('2026-11-26T10:00:31.000Z');
+  assert.equal(router.select({ mode: 'auto' }).ok, true);
+  router.recordSuccess(model);
+  assert.equal(router.health(now).providers[0]?.models[0]?.circuit, 'closed');
+});
+
+test('a provider retry-after parks the provider until its own reset', () => {
+  let now = new Date('2026-11-26T10:00:00.000Z');
+  const one = isolated('alpha', 'deep', {
+    coding: 0.9,
+    reasoning: 1,
+    speed: 0.2,
+    toolCalling: false,
+    multimodal: false,
+    contextTokens: 32_000,
+  });
+  const router = createRouter({ providers: [one], now: () => now });
+  const model = one.models[0];
+  assert.ok(model);
+  router.recordFailure(model, now, 120_000);
+  assert.equal(router.select({ mode: 'auto' }).ok, false);
+
+  now = new Date('2026-11-26T10:01:59.000Z');
+  assert.equal(router.select({ mode: 'auto' }).ok, false);
+  now = new Date('2026-11-26T10:02:01.000Z');
+  assert.equal(router.select({ mode: 'auto' }).ok, true);
+});
+
+test('a retryable provider failure falls back to the next verified free model', async () => {
+  const primary = isolated('alpha', 'deep', {
+    coding: 0.9,
+    reasoning: 1,
+    speed: 0.2,
+    toolCalling: true,
+    multimodal: false,
+    contextTokens: 32_000,
+  });
+  const secondary = isolated('beta', 'fast', {
+    coding: 0.2,
+    reasoning: 0.1,
+    speed: 1,
+    toolCalling: false,
+    multimodal: false,
+    contextTokens: 8192,
+  });
   const router = createRouter({ providers: [primary, secondary] });
   const calls: string[] = [];
   const failing: ModelGateway = {
@@ -180,4 +303,32 @@ test('an exhausted route is a stable fail-closed error', async () => {
       }),
     (error: unknown) => isRouterExhausted(error),
   );
+});
+
+test('a provider that reports no usage is still accounted for', async () => {
+  const one = isolated('alpha', 'deep', {
+    coding: 0.9,
+    reasoning: 1,
+    speed: 0.2,
+    toolCalling: false,
+    multimodal: false,
+    contextTokens: 32_000,
+  });
+  const router = createRouter({ providers: [one] });
+  const gateway = createRoutedGateway({
+    router,
+    gateways: new Map([
+      ['alpha', { id: 'alpha', complete: async () => ({ text: 'twelve chars' }) }],
+    ]),
+    maxFallbacks: 0,
+  });
+  const completion = await gateway.complete({
+    model: { providerId: 'alpha', modelId: 'deep' },
+    system: 'system prompt',
+    prompt: 'a prompt',
+    toolSchemaText: '{"name":"fs.read"}',
+    signal: new AbortController().signal,
+  });
+  assert.ok(completion.usage?.inputTokens && completion.usage.inputTokens > 0);
+  assert.ok(completion.usage?.outputTokens && completion.usage.outputTokens > 0);
 });

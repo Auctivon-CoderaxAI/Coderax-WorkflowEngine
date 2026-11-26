@@ -32,7 +32,7 @@ are clients of the same versioned API.
 | Cancellation, resume, bounded same-engine retry | Implemented | `src/orchestration/service.ts`, e2e tests |
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
-| Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
+| Zero-cost model gate (verified terms, unknown cost refused, durable budget) | Implemented | `src/models/eligibility.ts`, `src/models/budget.ts`, `src/persistence/budgets.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent: plan, tool actions, reflection, recovery | Implemented | `src/agents/native` |
@@ -76,13 +76,35 @@ node -e "require('fs').mkdirSync('/srv/coderax/private',{recursive:true});requir
 CODERAX_ENGINE_CONFIG=./engine.json npm start
 ```
 
-`engine.json` carries the non-secret settings; environment variables win over it:
+`engine.json` carries the non-secret settings; environment variables win over it.
+A route entry alone is **not** evidence that a model is free: the engine refuses
+to start until every routed model carries `terms` recorded from the provider's
+published price list, with all prices zero and an unexpired observation window.
 
 ```json
 {
   "auth": { "ownerId": "owner" },
   "workspaces": { "privateRoot": "/srv/coderax/private", "cloudRoot": "/srv/coderax/cloud" },
-  "models": { "route": [{ "providerId": "openrouter", "modelId": "coderax:free" }] },
+  "models": {
+    "route": [{ "providerId": "openrouter", "modelId": "coderax:free" }],
+    "evidence": [
+      {
+        "providerId": "openrouter",
+        "modelId": "coderax:free",
+        "toolCalling": true,
+        "contextTokens": 32000,
+        "terms": {
+          "source": "https://openrouter.ai/models/coderax:free",
+          "observedAt": "2026-11-26T00:00:00.000Z",
+          "expiresAt": "2026-12-26T00:00:00.000Z",
+          "currency": "USD",
+          "inputPerMillionTokens": 0,
+          "outputPerMillionTokens": 0,
+          "requestPerCall": 0
+        }
+      }
+    ]
+  },
   "engines": { "default": "native" }
 }
 ```
