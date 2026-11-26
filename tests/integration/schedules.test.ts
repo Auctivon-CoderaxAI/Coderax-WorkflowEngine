@@ -501,3 +501,52 @@ test('recovery winning a stalled submission charges and appends just once', asyn
     await started.close();
   }
 });
+
+test('cap edit winning the accounting CAS prevents Work submission', async () => {
+  const started = await startTestApp();
+  const api = client(started.url);
+  try {
+    const { schedules, scheduler } = started.app.dependencies;
+    const rule = await api.createSchedule({ name: 'Release', objective: 'Report', timing: { kind: 'event', event: 'release' } });
+    await schedules.update({ scheduleId: rule.scheduleId, expectedVersion: 0, patch: { runsTotal: 1 } });
+    const update = schedules.update;
+    schedules.update = async input => {
+      if (input.patch.runsTotal) {
+        schedules.update = update;
+        await api.updateSchedule(rule.scheduleId, { limits: { maxRunsTotal: 1 } });
+      }
+      return update(input);
+    };
+    scheduler.enqueue = () => assert.fail('cap edit should prevent enqueue');
+    assert.equal((await api.triggerSchedule(rule.scheduleId)).state, 'refused');
+    assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
+    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 0);
+  } finally { await started.close(); }
+});
+
+test('append acknowledgement loss leaves a recoverable claim without a task or charge', async () => {
+  const started = await startTestApp({ config: { schedules: { ...FAST_SCHEDULES, dispatchTimeoutMs: 1000, tickMs: 60000 } } });
+  const api = client(started.url);
+  try {
+    const rule = await api.createSchedule({ name: 'Release', objective: 'Report', timing: { kind: 'event', event: 'release' } });
+    const { conversations, tasks } = started.app.dependencies;
+    const append = conversations.appendMessage;
+    conversations.appendMessage = async message => {
+      conversations.appendMessage = append;
+      await append(message);
+      throw new Error('lost append acknowledgement');
+    };
+    await assert.rejects(api.triggerSchedule(rule.scheduleId), CoderaxApiError);
+    const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
+    assert.ok(receipt?.taskId);
+    assert.equal(await tasks.get(receipt.taskId), null);
+    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 0);
+    await sleep(1100);
+    await started.app.service.tickSchedules();
+    await started.app.dependencies.scheduler.idle();
+    assert.equal((await api.task(receipt.taskId)).state, 'completed');
+    assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
+    assert.equal((await conversations.messages(receipt.conversationId)).filter(m => m.role === 'user').length, 1);
+    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+  } finally { await started.close(); }
+});

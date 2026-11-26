@@ -50,6 +50,7 @@ export type TaskFailure = {
  * newer one.
  */
 export type TaskRecord = {
+  scheduleAdmission?: { scheduleId: string; executionId: string };
   taskId: string;
   ownerId: string;
   tenantId: string | null;
@@ -199,6 +200,7 @@ export type SchedulePatch = Partial<
 export type ScheduleExecutionRecord = {
   executionId: string;
   executionKey: string;
+  noticePending?: boolean;
   selectedTimingRevision?: number;
   scheduleId: string;
   ownerId: string;
@@ -223,6 +225,7 @@ export type ScheduleExecutionPatch = Partial<
   Pick<
     ScheduleExecutionRecord,
     | 'state'
+    | 'noticePending'
     | 'attempt'
     | 'taskId'
     | 'detail'

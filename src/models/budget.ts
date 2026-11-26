@@ -8,7 +8,7 @@ import type { Usage } from '@coderax/contracts';
  */
 export type BudgetLedger = {
   available: (ownerId: string, at: Date) => boolean;
-  reserve: (ownerId: string, at: Date) => { allowed: boolean; requests: number };
+  reserve: (ownerId: string, at: Date) => { allowed: boolean; requests: number; release: () => void };
   consume: (ownerId: string, usage: Usage, at: Date) => void;
   snapshot: (ownerId: string, at: Date) => {
     requests: number;
@@ -45,10 +45,14 @@ export function createBudgetLedger(input: {
       const state = day(ownerId, at);
       const tokens = state.inputTokens + state.outputTokens;
       if (state.requests >= input.maxRequestsPerDay || tokens >= input.maxTokensPerDay) {
-        return { allowed: false, requests: state.requests };
+        return { allowed: false, requests: state.requests, release: () => {} };
       }
       state.requests += 1;
-      return { allowed: true, requests: state.requests };
+      let held = true;
+      return { allowed: true, requests: state.requests, release: () => {
+        if (held) state.requests--;
+        held = false;
+      } };
     },
     consume: (ownerId, usage, at) => {
       const state = day(ownerId, at);

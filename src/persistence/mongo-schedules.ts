@@ -104,6 +104,9 @@ export async function ensureScheduleIndexes(input: {
     { state: 1, createdAt: 1 },
     { name: 'execution_state_created' },
   );
+  await input.executions.createIndex({ noticePending: 1 }, {
+    name: 'execution_pending_notice', partialFilterExpression: { noticePending: true },
+  });
   for (const field of ['slot', 'scheduleId']) {
     await input.executions.createIndex({ [field]: 1 }, {
       unique: true, name: `execution_occupied_${field}`, partialFilterExpression: { occupiesSlot: true },
@@ -226,9 +229,9 @@ export function createMongoScheduleRepository(input: {
       return document ? toExecution(document) : null;
     },
 
-    updateExecution: async ({ executionId, from, patch }) => {
+    updateExecution: async ({ executionId, from, observed, patch }) => {
       const updated = await executions.findOneAndUpdate(
-        { executionId, state: { $in: [...from] } },
+        { executionId, state: { $in: [...from] }, ...(observed && { attempt: observed.attempt, taskId: observed.taskId }) },
         { $set: { ...defined(patch as ScheduleExecutionPatch),
           ...(patch.state && !['claimed', 'dispatched'].includes(patch.state) ? { occupiesSlot: false } : {}),
         } },
@@ -237,6 +240,7 @@ export function createMongoScheduleRepository(input: {
       return updated ? toExecution(updated) : null;
     },
 
+    pendingNotices: async limit => (await executions.find({ noticePending: true }).limit(limit).toArray()).map(toExecution),
     listPending: async (scheduleId) => (await executions.find({
       scheduleId, state: { $in: ['retry_wait', 'claimed', 'dispatched'] },
     }).toArray()).map(toExecution),

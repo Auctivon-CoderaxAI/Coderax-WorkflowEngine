@@ -648,7 +648,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
-  type SubmitOptions = { eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
+  type SubmitOptions = { scheduleAdmission?: TaskRecord['scheduleAdmission']; eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
 
   /**
    * The one Work acceptance path, shared by a client request and a scheduled
@@ -702,7 +702,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       updatedAt: now,
     });
     const appendObjective = () => deps.conversations.appendMessage({
-      messageId: deps.ids.messageId(),
+      messageId: options.taskId ? `msg_${options.taskId}` : deps.ids.messageId(),
       conversationId,
       role: 'user',
       text: request.objective,
@@ -712,6 +712,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!options.taskId) await appendObjective();
 
     const task: TaskRecord = {
+      ...(options.scheduleAdmission ? { scheduleAdmission: options.scheduleAdmission } : {}),
       taskId: options.taskId ?? deps.ids.taskId(),
       ownerId: principal.ownerId,
       tenantId: null,
@@ -758,6 +759,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return fail('busy', 'This conversation already has a live Work run.');
     }
 
+    if (options.taskId) {
+      // A lost append acknowledgement can be retried with the same message ID.
+      // No task exists or budget is reserved until its objective is durable.
+      try {
+        if (!(await appendObjective())) {
+          const messages = await deps.conversations.messages(conversationId);
+          if (!messages.some(message => message.messageId === `msg_${options.taskId}`)) {
+            throw new Error('The scheduled objective was not persisted.');
+          }
+        }
+      } catch (error) {
+        await deps.lease.release({ key, token });
+        throw error;
+      }
+    }
     const created = await deps.tasks.create({
       ...task,
       runToken: token,
@@ -775,15 +791,24 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (options.taskId) {
       // The unique task insert elects the only writer of admission effects.
       // The task is now visible to cancellation, but cannot execute until enqueue.
-      if (options.eligible && !(await options.eligible())) {
-        await settle(created.task, token, { kind: 'cancelled' });
-        return fail('validation_failed', 'That occurrence is no longer eligible.');
-      }
-      if (!reserve()) {
+      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      if (!reservation.allowed) {
         await settle(created.task, token, { kind: 'failed', code: 'budget_exhausted', detail: 'The daily request budget is exhausted.', retryable: false });
         return fail('budget_exhausted', 'The daily request budget is exhausted.');
       }
-      await appendObjective();
+      let admitted: boolean;
+      try {
+        admitted = !options.eligible || await options.eligible();
+      } catch (error) {
+        reservation.release();
+        await settle(created.task, token, { kind: 'cancelled' });
+        throw error;
+      }
+      if (!admitted) {
+        reservation.release();
+        await settle(created.task, token, { kind: 'cancelled' });
+        return fail('validation_failed', 'That occurrence is no longer eligible.');
+      }
     }
 
     publish(created.task, 'task.queued');
@@ -808,7 +833,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   }
 
   const schedulePort: SchedulePort = {
-    dispatch: async ({ schedule, taskId, conversationId, trigger, selectedTimingRevision, occurrenceKey }) => {
+    dispatch: async ({ schedule, taskId, conversationId, trigger, selectedTimingRevision, occurrenceKey, executionId, accept }) => {
       // A dispatch can race the owner's cancellation. The receipt was already
       // written, but no Work may start for a schedule that is no longer active
       // in the cancelled sense.
@@ -850,7 +875,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           requireApproval: true,
           conversationId,
         },
-        { taskId, conversationId, eligible: async () => eligible(await deps.schedules.get(current.scheduleId)) },
+        { taskId, conversationId, ...(trigger !== 'retry' && { scheduleAdmission: { scheduleId: current.scheduleId, executionId } }), eligible: () => accept(eligible) },
       );
       if (accepted.ok) return { ok: true };
       if (accepted.code === 'busy') {
@@ -870,6 +895,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!task) return null;
       const reconciled = await reconcile(task);
       return {
+        ...(task.scheduleAdmission && { admissionPending:
+          (await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId !== task.scheduleAdmission.executionId }),
         state: reconciled.state,
         summary: reconciled.result?.summary ?? null,
         failure: reconciled.failure
@@ -1117,31 +1144,45 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
       const token = deps.ids.runToken();
       const now = deps.clock.now();
-      const claimed = await deps.lease.claim({
-        key: workRunKey(scopeOf(task)),
-        owner: task.ownerId,
-        token,
-        now,
-        expiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs),
-      });
-      if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
+      if (task.failure?.code === 'budget_exhausted') {
+        return fail('budget_exhausted', 'This task was refused before admission; submit a new request.');
+      }
+      const reservation = deps.budget.reserve(principal.ownerId, now);
+      if (!reservation.allowed) return fail('budget_exhausted', 'The daily request budget is exhausted.');
+      let accepted = false;
+      try {
+        const claimed = await deps.lease.claim({
+          key: workRunKey(scopeOf(task)),
+          owner: task.ownerId,
+          token,
+          now,
+          expiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs),
+        });
+        if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
-      const applied = await deps.tasks.reissue({
-        taskId,
-        token,
-        now: deps.clock.iso(),
-        leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
-      });
-      if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
-      publish(applied.task, 'task.queued', {});
-      publish(applied.task, 'text.replace', { text: '' });
-      deps.scheduler.enqueue(() => execute(taskId, token));
-      return ok({
-        taskId,
-        state: 'queued',
-        generation: applied.task.generation,
-        outcome: 'accepted',
-      });
+        const applied = await deps.tasks.reissue({
+          taskId,
+          token,
+          now: deps.clock.iso(),
+          leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        });
+        if (!applied.applied) {
+          await releaseLease(task, token);
+          return fail('conflict', 'That task cannot be retried.');
+        }
+        accepted = true;
+        publish(applied.task, 'task.queued', {});
+        publish(applied.task, 'text.replace', { text: '' });
+        deps.scheduler.enqueue(() => execute(taskId, token));
+        return ok({
+          taskId,
+          state: 'queued',
+          generation: applied.task.generation,
+          outcome: 'accepted',
+        });
+      } finally {
+        if (!accepted) reservation.release();
+      }
     },
 
     chat: async (principal, request) => {

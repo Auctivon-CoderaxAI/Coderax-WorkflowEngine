@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
-import { startTestApp, waitFor } from '../helpers.js';
+import { startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -276,4 +276,22 @@ test('failed transcript and notification writes do not strand a settled run', as
   } finally {
     await started.close();
   }
+});
+
+test('retry rejects a budget refusal and refunds a failed reissue', async () => {
+  const started = await startTestApp();
+  try {
+    const { tasks } = started.app.dependencies;
+    const service = started.app.service;
+    const refused = taskRecord({ state: 'failed', failure: { code: 'budget_exhausted', detail: 'Budget', retryable: false } });
+    await tasks.create(refused);
+    const result = await service.retryTask(principal, refused.taskId, refused.generation);
+    assert.equal(!result.ok && result.code, 'budget_exhausted');
+    const failed = { ...refused, taskId: 'task_other', failure: null };
+    await tasks.create(failed);
+    tasks.reissue = async () => ({ applied: false, reason: 'superseded' });
+    const conflict = await service.retryTask(principal, failed.taskId, failed.generation);
+    assert.equal(!conflict.ok && conflict.code, 'conflict');
+    assert.equal(service.budget(principal).used.requests, 0);
+  } finally { await started.close(); }
 });

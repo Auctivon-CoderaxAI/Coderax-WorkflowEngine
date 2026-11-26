@@ -55,9 +55,11 @@ export type ScheduleRepository = {
   /** Applies a patch only while the receipt is still in one of `from`. */
   updateExecution: (input: {
     executionId: string;
+    observed?: Pick<ScheduleExecutionRecord, 'attempt' | 'taskId'>;
     from: readonly ScheduleExecutionState[];
     patch: ScheduleExecutionPatch;
   }) => Promise<ScheduleExecutionRecord | null>;
+  pendingNotices: (limit: number) => Promise<ScheduleExecutionRecord[]>;
   listPending: (scheduleId: string) => Promise<ScheduleExecutionRecord[]>;
   listExecutions: (scheduleId: string, limit: number) => Promise<ScheduleExecutionRecord[]>;
   listExecutionsByState: (
@@ -203,14 +205,15 @@ export function createScheduleRepository(): ScheduleRepository {
       return found ? clone(found) : null;
     },
 
-    updateExecution: async ({ executionId, from, patch }) => {
+    updateExecution: async ({ executionId, from, observed, patch }) => {
       const execution = executions.get(executionId);
-      if (!execution || !from.includes(execution.state)) return null;
+      if (!execution || !from.includes(execution.state) || (observed && (observed.attempt !== execution.attempt || observed.taskId !== execution.taskId))) return null;
       const next: ScheduleExecutionRecord = { ...execution, ...clone(patch) };
       executions.set(executionId, next);
       return clone(next);
     },
 
+    pendingNotices: async limit => [...executions.values()].filter(e => e.noticePending).slice(0, limit).map(clone),
     listPending: async (scheduleId) => [...executions.values()].filter(e => e.scheduleId === scheduleId && ['retry_wait', 'claimed', 'dispatched'].includes(e.state)).map(clone),
 
     listExecutions: async (scheduleId, limit) =>

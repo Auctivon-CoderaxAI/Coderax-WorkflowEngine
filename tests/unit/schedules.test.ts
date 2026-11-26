@@ -924,3 +924,95 @@ test('a stale limit decision cannot exhaust a schedule whose cap was raised', as
   assert.equal(dispatch.state, 'dispatched');
   assert.equal((await store.get(stale.scheduleId))?.state, 'active');
 });
+
+test('a refusal on retry survives a notice outage and never schedules another attempt', async () => {
+  const store = createScheduleRepository();
+  const schedule = scheduleRecord({ nextRunAt: null });
+  await store.create(schedule);
+  const receipt = executionRecord(schedule, {
+    state: 'retry_wait', attempt: 2, taskId: 'task_retry', nextAttemptAt: NOW,
+  });
+  await store.createExecution(receipt);
+  const notices = createScheduleNoticeStore();
+  const record = notices.record;
+  notices.record = async notice => {
+    await record(notice);
+    throw new Error('notice acknowledgement lost');
+  };
+  const port = testPort();
+  let submissions = 0;
+  port.port.dispatch = async () => {
+    submissions++;
+    return { ok: false, reason: 'refused', detail: 'Agent unavailable' };
+  };
+  const engine = engineFor({ store, notices, port: port.port, clock: testClock().clock });
+  await assert.rejects(engine.tick(), /acknowledgement lost/);
+  assert.equal((await store.getExecution(receipt.executionId))?.state, 'refused');
+  notices.record = record;
+  await engine.tick();
+  await engine.tick();
+  assert.equal(submissions, 1);
+  assert.equal((await notices.list(OWNER, 5)).notifications.length, 1);
+  assert.equal((await store.pendingNotices(10)).length, 0);
+});
+
+test('stop waits for a direct tick and prevents another pass', async () => {
+  const store = createScheduleRepository();
+  let release!: () => void;
+  let passes = 0;
+  store.pendingNotices = async () => {
+    passes++;
+    await new Promise<void>(resolve => { release = resolve; });
+    return [];
+  };
+  const engine = engineFor({ store, clock: testClock().clock, port: testPort().port });
+  const tick = engine.tick();
+  let stopped = false;
+  const stopping = engine.stop().then(() => { stopped = true; });
+  await Promise.resolve();
+  assert.equal(stopped, false);
+  release();
+  await Promise.all([tick, stopping]);
+  await engine.tick();
+  assert.equal(passes, 1);
+});
+
+test('a second replica preserves the cursor while the first owns the due claim', async () => {
+  const store = createScheduleRepository();
+  const schedule = scheduleRecord({ timing: { kind: 'once', at: NOW } });
+  await store.create(schedule);
+  const port = testPort();
+  const clock = testClock().clock;
+  const replica = engineFor({ store, clock, port: testPort().port });
+  port.port.dispatch = async () => {
+    await replica.tick();
+    assert.equal((await store.get(schedule.scheduleId))?.nextRunAt, NOW);
+    return { ok: true };
+  };
+  await engineFor({ store, port: port.port, clock }).tick();
+  assert.equal((await store.get(schedule.scheduleId))?.state, 'exhausted');
+  assert.equal((await store.get(schedule.scheduleId))?.runsTotal, 1);
+});
+
+test('reconciliation accounts landed Work once and refuses stale attempt writes', async () => {
+  const collections = { schedules: createFakeCollection(), executions: createFakeCollection(), notices: createFakeCollection() };
+  await ensureScheduleIndexes(collections);
+  for (const store of [createScheduleRepository(), createMongoScheduleRepository(collections)]) {
+    const schedule = scheduleRecord({ nextRunAt: null });
+    await store.create(schedule);
+    const receipt = executionRecord(schedule, { state: 'claimed', taskId: 'first' });
+    await store.claim(receipt, 1, false);
+    const port = testPort();
+    port.snapshots.set('first', { state: 'running', summary: null, failure: null });
+    const engine = engineFor({ store, port: port.port, clock: testClock().clock });
+    await engine.tick();
+    await engine.tick();
+    assert.equal((await store.get(schedule.scheduleId))?.runsTotal, 1);
+    await store.updateExecution({ executionId: receipt.executionId, from: ['dispatched'],
+      patch: { taskId: 'second', attempt: 2 } });
+    const stale = await store.updateExecution({ executionId: receipt.executionId, from: ['dispatched'],
+      observed: receipt, patch: { state: 'retry_wait' } });
+    assert.equal(stale, null);
+    assert.equal((await store.getExecution(receipt.executionId))?.state, 'dispatched');
+  }
+});

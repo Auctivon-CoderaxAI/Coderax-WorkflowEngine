@@ -45,6 +45,7 @@ export type ScheduleEngineSettings = {
 };
 
 export type ScheduleTaskSnapshot = {
+  admissionPending?: boolean;
   state: TaskState;
   summary: string | null;
   failure: { code: string; retryable: boolean } | null;
@@ -62,6 +63,8 @@ export type SchedulePort = {
     conversationId: string;
     attempt: number;
     trigger: ScheduleExecutionRecord['trigger'];
+    executionId: string;
+    accept: (eligible: (record: ScheduleRecord) => boolean) => Promise<boolean>;
     selectedTimingRevision: number;
     occurrenceKey: string;
   }) => Promise<ScheduleDispatchOutcome>;
@@ -117,7 +120,7 @@ export function createScheduleEngine(input: {
 }): ScheduleEngine {
   const { store, notices, port, settings, clock, ids } = input;
   let timer: NodeJS.Timeout | null = null;
-  let inTick = false;
+  let stopping = false;
   let current: Promise<ScheduleTickReport> | null = null;
   let lastTickAt: string | null = null;
   let lastError: string | null = null;
@@ -159,6 +162,9 @@ export function createScheduleEngine(input: {
       createdAt: iso(),
       read: false,
     });
+    if (input.kind !== 'completed') {
+      await store.updateExecution({ executionId: input.executionId, from: [input.kind], patch: { noticePending: false } });
+    }
   }
 
   /**
@@ -214,6 +220,25 @@ export function createScheduleEngine(input: {
     return applied.applied;
   }
 
+  // A schedule has at most one active receipt. Read the schedule version first,
+  // then verify the claim: an old dispatcher cannot count its receipt again
+  // after a later occurrence replaces lastExecutionId.
+  async function account(execution: ScheduleExecutionRecord, eligible?: (schedule: ScheduleRecord) => boolean): Promise<boolean> {
+    for (;;) {
+      const schedule = await store.get(execution.scheduleId);
+      if (!schedule || (eligible && !eligible(schedule))) return false;
+      if (schedule.lastExecutionId === execution.executionId && !eligible) return true;
+      const receipt = await store.getExecution(execution.executionId);
+      if (!receipt || receipt.state !== 'claimed' || receipt.taskId !== execution.taskId || receipt.attempt !== execution.attempt) return false;
+      if (execution.attempt > 1 || schedule.lastExecutionId === execution.executionId) return true;
+      if (eligible && schedule.limits.maxRunsTotal !== undefined && schedule.runsTotal >= schedule.limits.maxRunsTotal) return false;
+      const at = iso();
+      const write = await store.update({ scheduleId: schedule.scheduleId, expectedVersion: schedule.version,
+        patch: { runsTotal: schedule.runsTotal + 1, lastExecutionId: execution.executionId, lastRunAt: at, updatedAt: at } });
+      if (write.applied) return true;
+    }
+  }
+
   function executionFor(plan: OccurrencePlan, fields: {
     executionId: string;
     state: ScheduleExecutionState;
@@ -236,6 +261,7 @@ export function createScheduleEngine(input: {
       trigger: plan.trigger,
       scheduledFor: plan.scheduledFor.toISOString(),
       state: fields.state,
+      ...(fields.state === 'refused' || fields.state === 'missed' ? { noticePending: true } : {}),
       attempt: fields.attempt,
       maxAttempts: plan.schedule.retry.maxAttempts,
       taskId: fields.taskId,
@@ -317,7 +343,10 @@ export function createScheduleEngine(input: {
     | { kind: 'skip'; detail: string }
     | { kind: 'refuse'; dispatch: ScheduleDispatch };
 
-  /** Enforces both resource ceilings before any Work is submitted. */
+  async function hasClaim(scheduleId: string, occurrenceKey: string | null): Promise<boolean> {
+    return (await store.listPending(scheduleId)).some(e => e.state === 'claimed' && e.occurrenceKey === occurrenceKey);
+  }
+
   async function admission(plan: OccurrencePlan, now: Date): Promise<Admission> {
     const { schedule } = plan;
     if (
@@ -351,6 +380,7 @@ export function createScheduleEngine(input: {
       RUN_EXECUTION_STATES,
     );
     if (used >= schedule.limits.maxRunsPerDay) {
+      if (await hasClaim(schedule.scheduleId, plan.occurrenceKey)) return { kind: 'skip', detail: 'This occurrence is already claimed.' };
       if (plan.advance) {
         // Park past the current UTC day. One refusal per day, not one per
         // recurrence: a one-second schedule must not create a receipt storm.
@@ -422,7 +452,7 @@ export function createScheduleEngine(input: {
         dispatch,
         created: dispatch !== null,
         submitted: false,
-        advanceHandled: false,
+        advanceHandled: await hasClaim(plan.schedule.scheduleId, plan.occurrenceKey),
       };
     }
 
@@ -444,7 +474,7 @@ export function createScheduleEngine(input: {
     const created = await store.claim(execution, settings.maxConcurrentRuns, false);
     if (!created) {
       const dispatch = await skipOccurrence(plan, 'The scheduled run capacity is occupied.');
-      return { dispatch, created: dispatch !== null, submitted: false, advanceHandled: false };
+      return { dispatch, created: dispatch !== null, submitted: false, advanceHandled: await hasClaim(plan.schedule.scheduleId, plan.occurrenceKey) };
     }
     if (!created.created) {
       // Another replica owns this occurrence. It also owns the schedule advance;
@@ -453,11 +483,12 @@ export function createScheduleEngine(input: {
         dispatch: toDispatch(created.execution, true),
         created: false,
         submitted: false,
-        advanceHandled: false,
+        advanceHandled: created.execution.state === 'claimed',
       };
     }
 
     const outcome = await port.dispatch({
+      executionId, accept: eligible => account(execution, eligible),
       schedule: plan.schedule,
       trigger: plan.trigger, selectedTimingRevision: plan.schedule.timingRevision ?? 0, occurrenceKey: plan.occurrenceKey,
       taskId,
@@ -465,17 +496,12 @@ export function createScheduleEngine(input: {
       attempt,
     });
     if (outcome.ok) {
+      await account(execution);
       const moved = await store.updateExecution({
-        executionId,
-        from: ONGOING_EXECUTION_STATES,
+        executionId, observed: execution,
+        from: ['claimed'],
         patch: { state: 'dispatched', updatedAt: iso() },
       });
-      await patchSchedule(plan.schedule.scheduleId, (current) => ({
-        runsTotal: current.runsTotal + 1,
-        lastRunAt: iso(),
-        lastExecutionId: executionId,
-        updatedAt: iso(),
-      }));
       return {
         dispatch: toDispatch(moved ?? execution, false),
         created: true,
@@ -491,22 +517,22 @@ export function createScheduleEngine(input: {
         dispatch: toDispatch(execution, false),
         created: true,
         submitted: false,
-        advanceHandled: false,
+        advanceHandled: true,
       };
     }
 
     const state: ScheduleExecutionState = outcome.reason === 'busy' ? 'skipped' : 'refused';
     const moved = await store.updateExecution({
-      executionId,
+      executionId, observed: execution,
       from: ['claimed'],
       patch: {
-        state,
+        state, noticePending: state === 'refused',
         detail: truncate(outcome.detail, FAILURE_DETAIL_LIMIT),
         updatedAt: iso(),
         finishedAt: iso(),
       },
     });
-    if (state === 'refused') {
+    if (moved && state === 'refused') {
       await recordNotice({
         noticeId: `ntc_${executionId}_refused`,
         schedule: plan.schedule,
@@ -549,6 +575,7 @@ export function createScheduleEngine(input: {
     now: Date,
     report: ScheduleTickReport,
   ): Promise<void> {
+    if (await hasClaim(schedule.scheduleId, schedule.nextRunAt)) return;
     const decision = decideDue({ schedule, now, missedGraceMs: settings.missedGraceMs });
     if (decision.kind === 'none') return;
 
@@ -566,6 +593,7 @@ export function createScheduleEngine(input: {
         state: 'missed',
         detail: `Missed by ${Math.round(decision.lateMs / 1_000)}s; the next occurrence will run instead of replaying a backlog.`,
       });
+      if (execution.state === 'claimed') return;
       if (execution.state === 'missed') {
         await recordNotice({
           noticeId: `ntc_${execution.executionId}_missed`,
@@ -619,10 +647,10 @@ export function createScheduleEngine(input: {
       if (age > settings.dispatchTimeoutMs * 5) {
         const schedule = await store.get(execution.scheduleId);
         const missed = await store.updateExecution({
-          executionId: execution.executionId,
+          executionId: execution.executionId, observed: execution,
           from: ['claimed'],
           patch: {
-            state: 'missed',
+            state: 'missed', noticePending: true,
             detail: 'Dispatch created no task before the recovery window closed.',
             updatedAt: iso(),
             finishedAt: iso(),
@@ -646,7 +674,7 @@ export function createScheduleEngine(input: {
       if (!schedule) return;
       if (schedule.state === 'cancelled') {
         await store.updateExecution({
-          executionId: execution.executionId,
+          executionId: execution.executionId, observed: execution,
           from: ['claimed'],
           patch: {
             state: 'cancelled',
@@ -658,6 +686,7 @@ export function createScheduleEngine(input: {
         return;
       }
       const outcome = await port.dispatch({
+        executionId: execution.executionId, accept: eligible => account(execution, eligible),
         schedule,
         trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: execution.occurrenceKey,
         selectedTimingRevision: execution.selectedTimingRevision ?? 0,
@@ -665,43 +694,36 @@ export function createScheduleEngine(input: {
         conversationId: execution.conversationId,
         attempt: execution.attempt,
       });
-      const account = async (): Promise<void> => {
-        // The original dispatch may have crashed after creating the task but
-        // before accounting. Recovery applies the same counter once, on the
-        // receipt transition that proves the task exists.
-        await patchSchedule(execution.scheduleId, (current) => ({
-          runsTotal: current.runsTotal + 1,
-          lastRunAt: iso(),
-          lastExecutionId: execution.executionId,
-          updatedAt: iso(),
-        }));
-      };
       if (outcome.ok) {
+        await account(execution);
         const moved = await store.updateExecution({
-          executionId: execution.executionId,
+          executionId: execution.executionId, observed: execution,
           from: ['claimed'],
           patch: { state: 'dispatched', updatedAt: iso() },
         });
         if (moved) {
-          await account();
           report.dispatched += 1;
         }
+      } else if (outcome.reason === 'refused') {
+        await refuseClaim(execution, schedule, outcome.detail, report);
       } else if (outcome.reason === 'duplicate') {
         const landed = await port.taskSnapshot(taskId);
-        if (landed) {
-          const moved = await store.updateExecution({
-            executionId: execution.executionId,
+        if (landed && !landed.admissionPending) {
+          await account(execution);
+          await store.updateExecution({
+            executionId: execution.executionId, observed: execution,
             from: ['claimed'],
             patch: { state: 'dispatched', updatedAt: iso() },
           });
-          if (moved) await account();
         }
       }
       return;
     }
-    if (execution.state === 'claimed') {
+    if (snapshot.admissionPending && snapshot.state === 'queued') return;
+    if (execution.state === 'claimed' && !snapshot.admissionPending) {
+      await account(execution);
       await store.updateExecution({
-        executionId: execution.executionId,
+        executionId: execution.executionId, observed: execution,
         from: ['claimed'],
         patch: { state: 'dispatched', updatedAt: iso() },
       });
@@ -716,7 +738,7 @@ export function createScheduleEngine(input: {
 
     if (snapshot.state === 'cancelled') {
       await store.updateExecution({
-        executionId: execution.executionId,
+        executionId: execution.executionId, observed: execution,
         from: ONGOING_EXECUTION_STATES,
         patch: { state: 'cancelled', detail: 'The Work task was cancelled.', updatedAt: iso(), finishedAt: iso() },
       });
@@ -739,7 +761,7 @@ export function createScheduleEngine(input: {
         });
       }
       const moved = await store.updateExecution({
-        executionId: execution.executionId,
+        executionId: execution.executionId, observed: execution,
         from: ONGOING_EXECUTION_STATES,
         patch: {
           state: 'completed',
@@ -768,7 +790,7 @@ export function createScheduleEngine(input: {
     if (retryable && execution.attempt < execution.maxAttempts) {
       const delayMs = schedule.retry.delaySeconds * 1_000;
       const moved = await store.updateExecution({
-        executionId: execution.executionId,
+        executionId: execution.executionId, observed: execution,
         from: ONGOING_EXECUTION_STATES,
         patch: {
           state: 'retry_wait',
@@ -788,10 +810,10 @@ export function createScheduleEngine(input: {
     }
 
     const moved = await store.updateExecution({
-      executionId: execution.executionId,
+      executionId: execution.executionId, observed: execution,
       from: ONGOING_EXECUTION_STATES,
       patch: {
-        state: 'failed',
+        state: 'failed', noticePending: true,
         detail: truncate(
           interrupted
             ? `Attempt ${execution.attempt} was interrupted and is resumable; it was not replayed as a new task.`
@@ -830,6 +852,19 @@ export function createScheduleEngine(input: {
     report.reconciled += 1;
   }
 
+  async function refuseClaim(execution: ScheduleExecutionRecord, schedule: ScheduleRecord, detail: string, report: ScheduleTickReport): Promise<void> {
+    const moved = await store.updateExecution({
+      executionId: execution.executionId, observed: execution, from: ['claimed'],
+      patch: { state: 'refused', noticePending: true, detail: truncate(detail, FAILURE_DETAIL_LIMIT),
+        updatedAt: iso(), finishedAt: iso() },
+    });
+    if (moved) {
+      await recordNotice({ noticeId: `ntc_${execution.executionId}_refused`, executionId: execution.executionId,
+        schedule, kind: 'refused', summary: detail });
+      report.refused++;
+    }
+  }
+
   /** A retry waits durably; it is admitted only when its backoff has elapsed. */
   async function dispatchRetries(now: Date, report: ScheduleTickReport): Promise<void> {
     const waiting = await store.listExecutionsByState(['retry_wait'], settings.batchSize);
@@ -840,7 +875,7 @@ export function createScheduleEngine(input: {
       if (!schedule) continue;
       if (schedule.state === 'cancelled') {
         await store.updateExecution({
-          executionId: execution.executionId,
+          executionId: execution.executionId, observed: execution,
           from: ['retry_wait'],
           patch: { state: 'cancelled', detail: 'The schedule was cancelled.', updatedAt: iso(), finishedAt: iso() },
         });
@@ -856,6 +891,7 @@ export function createScheduleEngine(input: {
       if (!claimed || !claimed.taskId) continue;
 
       const outcome = await port.dispatch({
+        executionId: execution.executionId, accept: eligible => account(execution, eligible),
         schedule,
         trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurrenceKey: execution.occurrenceKey,
         taskId: claimed.taskId,
@@ -864,7 +900,7 @@ export function createScheduleEngine(input: {
       });
       if (outcome.ok) {
         await store.updateExecution({
-          executionId: execution.executionId,
+          executionId: execution.executionId, observed: execution,
           from: ['claimed'],
           patch: { state: 'dispatched', updatedAt: iso() },
         });
@@ -872,9 +908,13 @@ export function createScheduleEngine(input: {
         continue;
       }
       if (outcome.reason === 'duplicate') continue;
+      if (outcome.reason === 'refused') {
+        await refuseClaim(claimed, schedule, outcome.detail, report);
+        continue;
+      }
       const delayMs = Math.max(schedule.retry.delaySeconds * 1_000, 5_000);
       await store.updateExecution({
-        executionId: execution.executionId,
+        executionId: execution.executionId, observed: execution,
         from: ['claimed'],
         patch: {
           state: 'retry_wait',
@@ -889,6 +929,16 @@ export function createScheduleEngine(input: {
   async function runTick(): Promise<ScheduleTickReport> {
     const report = emptyReport();
     const now = clock.now();
+
+    for (const receipt of await store.pendingNotices(settings.batchSize)) {
+      const kind = receipt.state;
+      if (kind !== 'failed' && kind !== 'refused' && kind !== 'missed') continue;
+      const schedule = await store.get(receipt.scheduleId);
+      if (schedule) await recordNotice({
+        noticeId: `ntc_${receipt.executionId}_${kind}`, executionId: receipt.executionId, schedule, kind,
+        summary: `Scheduled run "${schedule.name}" ${kind}: ${receipt.detail ?? ''}`,
+      });
+    }
 
     const ongoing = await store.listExecutionsByState(ONGOING_EXECUTION_STATES, settings.batchSize);
     for (const execution of ongoing) {
@@ -910,10 +960,10 @@ export function createScheduleEngine(input: {
 
   const engine: ScheduleEngine = {
     tick: async () => {
-      if (inTick) return emptyReport();
-      inTick = true;
+      if (current || stopping) return emptyReport();
+      current = runTick();
       try {
-        const report = await runTick();
+        const report = await current;
         lastTickAt = report.at;
         lastError = null;
         return report;
@@ -921,7 +971,7 @@ export function createScheduleEngine(input: {
         lastError = error instanceof Error ? error.message : 'scheduled tick failed';
         throw error;
       } finally {
-        inTick = false;
+        current = null;
       }
     },
 
@@ -948,20 +998,15 @@ export function createScheduleEngine(input: {
     },
 
     start: () => {
-      if (!settings.enabled || timer) return;
+      if (!settings.enabled || timer || stopping) return;
       timer = setInterval(() => {
-        if (current) return;
-        current = engine
-          .tick()
-          .catch(() => emptyReport())
-          .finally(() => {
-            current = null;
-          });
+        void engine.tick().catch(() => undefined);
       }, settings.tickMs);
       timer.unref();
     },
 
     stop: async () => {
+      stopping = true;
       if (timer) {
         clearInterval(timer);
         timer = null;
