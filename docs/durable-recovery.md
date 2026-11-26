@@ -133,3 +133,16 @@ Reverting the commit removes the durable log wiring and returns the bus to the
 in-process window. No migration is required: the event collections are additive
 and unused by the old code. A deployment can keep them for inspection or drop
 `<prefix>events` and `<prefix>event_heads`.
+
+## Follow-ups
+
+- Resume passes prior output as `resume.priorText` and keeps it out of the new
+  stream, so a later checkpoint captures only the post-resume text. Whether the
+  final transcript should contain the whole answer across generations is a
+  product decision, not settled by this change.
+- The stale-generation compensation in `append` is the only thing that removes
+  a provisional row. If that delete fails, `flush` reports the refusal but the
+  row stays in the collection; a real MongoDB transaction would remove the need
+  for compensation, and the port deliberately does not require one.
+- The prune sweep spends its bounded budget on protected rows, so a single pass
+  may collect less than the limit. It continues on the next start.
