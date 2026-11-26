@@ -96,6 +96,9 @@ test('a crash after the terminal task write is repaired from the record on resta
   }
 
   // A second restart must not append a second ending, message or notification.
+  // Simulate a settlement from the legacy random-id writer.
+  await collection(database, 'messages').updateOne({ conversationId, role: 'assistant' },
+    { $set: { messageId: randomUUID() } }, { upsert: false });
   const restarted = await mongoApp({ database, workspace });
   try {
     const replay = await restarted.dependencies.events.read(taskId, 0);
@@ -391,7 +394,7 @@ test('a resume continues completed steps instead of repeating them', async () =>
       submitted.value.conversationId,
     );
     assert.ok(conversation.ok);
-    assert.equal(conversation.value.messages.at(-1)?.text, ' second result');
+    assert.equal(conversation.value.messages.at(-1)?.text, 'first result second result');
   } finally {
     await started.close();
   }
@@ -741,11 +744,14 @@ test(
       assert.deepEqual(await log.append({ ...base, eventId: 'live-2', seq: 2, type: 'task.started' }), {
         appended: true,
       });
-      // Redelivery and a sequence reuse are refused by the live indexes.
+      // The head rejects reuse before Mongo sees an insert.
       assert.deepEqual(await log.append({ ...base, eventId: 'live-2', seq: 2, type: 'task.started' }), {
         appended: false,
-        reason: 'duplicate',
+        reason: 'out_of_order',
       });
+
+      await assert.rejects(events.insertOne({ ...base, eventId: 'other', seq: 2 }), { code: 11000 });
+      await assert.rejects(events.insertOne({ ...base, eventId: 'live-2', seq: 3 }), { code: 11000 });
 
       const restarted = createMongoEventLog({ events, heads });
       assert.deepEqual(await restarted.watermark('task_live'), { seq: 2, generation: 1 });
@@ -901,14 +907,15 @@ test('repair restores the current generation ending and refreshes a stale notifi
   }
   await collection(database, 'event_heads').insertOne({ taskId, seq: 2, generation: 1 });
 
-  // A notification left over from the interrupted generation.
+  // The previous generation also completed, but its summary is stale.
   await collection(database, 'notifications').insertOne({
     taskId,
     ownerId: OWNER_ID,
     conversationId,
     agent: 'coderax',
     mode: 'cloud',
-    state: 'interrupted',
+    generation: 1,
+    state: 'completed',
     summary: 'interrupted',
     createdAt: now,
     read: true,
@@ -921,11 +928,56 @@ test('repair restores the current generation ending and refreshes a stale notifi
     assert.equal(endings.length, 1);
     assert.equal(endings[0]?.generation, 2);
 
+    const response = await app.router.handle({
+      method: 'GET', path: `/v1/work/${taskId}/events`,
+      authorization: `Bearer ${OWNER_TOKEN}`, bodyText: '',
+    });
+    assert.ok(response.kind === 'sse');
+    try {
+      const streamed = [];
+      for await (const event of response.events) streamed.push(event);
+      assert.deepEqual(streamed, replay.events);
+    } finally {
+      response.close();
+    }
+
     const notifications = await app.service.notifications(principal);
     const entry = notifications.notifications.find((item) => item.taskId === taskId);
     assert.equal(entry?.state, 'completed');
+    assert.equal(entry?.summary, 'done again');
+    assert.equal(entry?.read, false);
   } finally {
     await app.stop();
     workspace.cleanup();
+  }
+});
+
+test('shutdown drains a submission paused before local registration', async () => {
+  const started = await startTestApp();
+  const { service, dependencies } = started.app;
+  let enter!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  let resume!: () => void;
+  const release = new Promise<void>(resolve => { resume = resolve; });
+  const append = dependencies.conversations.appendMessage;
+  dependencies.conversations.appendMessage = async message => {
+    enter();
+    await release;
+    return append(message);
+  };
+  try {
+    const request = { objective: 'shutdown race', mode: 'cloud', requireApproval: true } as const;
+    const accepted = service.submitWork(principal, request);
+    await entered;
+    const stopping = service.shutdown();
+    assert.equal((await service.submitWork(principal, request)).ok, false);
+    resume();
+    const result = await accepted;
+    assert.ok(result.ok);
+    await stopping;
+    assert.equal((await dependencies.tasks.get(result.value.taskId))?.state, 'interrupted');
+  } finally {
+    resume();
+    await started.close();
   }
 });

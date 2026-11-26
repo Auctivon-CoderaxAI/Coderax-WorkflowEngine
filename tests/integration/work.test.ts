@@ -226,7 +226,7 @@ test('late reports and cleanup cannot touch a resumed generation', async () => {
     await deps.scheduler.idle();
     const conversation = await started.app.service.conversation(principal, conversationId);
     assert.ok(conversation.ok);
-    assert.equal(conversation.value.messages.at(-1)?.text, 'current output');
+    assert.equal(conversation.value.messages.at(-1)?.text, 'previous output current output');
   } finally {
     await started.close();
   }

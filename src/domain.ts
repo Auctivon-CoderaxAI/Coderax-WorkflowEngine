@@ -203,6 +203,7 @@ export type MemoryRecord = {
 };
 
 export type NotificationRecord = {
+  generation?: number;
   taskId: string;
   ownerId: string;
   conversationId: string;

@@ -12,15 +12,12 @@ import type { EventAppendOutcome, EventLog, EventWatermark, StoredReplay } from 
  *   sequence number atomic, and a unique `(taskId, eventId)` index catches a
  *   redelivery. Insert-then-check is safe because the indexes are the arbiter,
  *   not an application read.
- * - `heads` holds the highest sequence and generation per task. `$max` advances
- *   it, so a delayed replica can never lower a watermark, and the generation in
- *   the head is what refuses a write from a superseded run.
+ * - `heads` records the last accepted sequence, generation and event identity.
+ *   A compare-and-set against that watermark fences concurrent appends.
  *
- * The head is advanced after the insert. A newer generation that commits in
- * between is detected by re-reading the head; the stale row is then removed by
- * its own identity, so a stale-generation write is never observable after the
- * call returns. That compensation is the one place this store deletes an event,
- * and it is why `append` reports `stale_generation` instead of throwing.
+ * A row starts provisional. The head names the accepted row before it is
+ * made visible. Readers and subsequent writers finish that transition after
+ * a crash; failed compensation therefore cannot expose a rejected row.
  */
 
 export type EventCollections = {
@@ -45,6 +42,7 @@ export async function ensureEventIndexes(input: EventCollections): Promise<void>
 function toEvent(document: Record<string, unknown>): ExecutionEvent {
   const copy = { ...document };
   delete copy._id;
+  delete copy.provisional;
   return copy as unknown as ExecutionEvent;
 }
 
@@ -58,63 +56,85 @@ function toWatermark(document: Record<string, unknown> | null): EventWatermark {
 export function createMongoEventLog(input: EventCollections): EventLog {
   const { events, heads } = input;
 
-  async function head(taskId: string): Promise<EventWatermark | null> {
-    return toWatermark(await heads.findOne({ taskId }));
+  // Existing installations stored committed events without a marker.
+  const committed = { provisional: { $nin: [true] } };
+
+  async function head(taskId: string): Promise<EventWatermark> {
+    const row = await heads.findOne({ taskId });
+    if (row && typeof row.eventId === 'string') {
+      await events.updateOne(
+        { taskId, seq: row.seq, eventId: row.eventId, provisional: true },
+        { $set: { provisional: false } }, { upsert: false },
+      );
+    }
+    return toWatermark(row);
   }
 
-  async function advance(event: ExecutionEvent): Promise<void> {
-    await heads.updateOne(
-      { taskId: event.taskId },
-      {
-        $max: { seq: event.seq, generation: event.generation },
-        $setOnInsert: { taskId: event.taskId },
-      },
-      { upsert: true },
-    );
+  async function reconcile(taskId: string): Promise<EventWatermark> {
+    const current = await head(taskId);
+    const rows = events.find({ taskId, ...committed });
+    const newest = (await rows.sort({ seq: -1 }).limit(1).toArray())[0];
+    // Committed generations and sequences advance together under the fence.
+    const stored = toWatermark(newest ?? null);
+    if (stored.seq > current.seq || stored.generation > current.generation) {
+      await heads.updateOne({ taskId }, {
+        $max: { seq: stored.seq, generation: stored.generation }, $setOnInsert: { taskId },
+      }, { upsert: true });
+      return head(taskId);
+    }
+    return current;
   }
 
   return {
     append: async (event): Promise<EventAppendOutcome> => {
-      const current = await head(event.taskId);
-      if (current && event.generation < current.generation) {
-        return { appended: false, reason: 'stale_generation' };
-      }
-      if (current && event.seq <= current.seq) {
-        return { appended: false, reason: 'out_of_order' };
-      }
+      const { taskId, eventId, seq, generation } = event;
+      let current = await reconcile(taskId);
+      if (generation < current.generation) return { appended: false, reason: 'stale_generation' };
+      if (seq <= current.seq) return { appended: false, reason: 'out_of_order' };
 
       try {
-        await events.insertOne({ ...event });
+        await events.insertOne({ ...event, provisional: true });
       } catch (error) {
         if (!isDuplicateKey(error)) throw error;
         // The sequence and the id are both unique: an existing row with this id
         // is the same event redelivered, anything else is a stale sequence.
         const sameId = await events.findOne({ taskId: event.taskId, eventId: event.eventId });
-        return { appended: false, reason: sameId ? 'duplicate' : 'out_of_order' };
+        return { appended: false, reason: sameId && sameId.provisional !== true ? 'duplicate' : 'out_of_order' };
       }
 
-      await advance(event);
-      const settled = await head(event.taskId);
-      if (settled && settled.generation > event.generation) {
-        // A newer generation committed between the insert and the head update.
-        await events
-          .deleteOne({ taskId: event.taskId, eventId: event.eventId })
-          .catch(() => undefined);
-        return { appended: false, reason: 'stale_generation' };
+      while (current.seq < seq && current.generation <= generation) {
+        // Compare both fields: the previous winner must be visible before its
+        // identity can be replaced. A racing writer forces another head read.
+        try {
+          const changed = await heads.updateOne({ taskId, ...current }, {
+            $set: { taskId, seq, generation, eventId },
+          }, { upsert: current.seq === 0 && current.generation === 0 });
+          if (changed.matchedCount || changed.upsertedCount) break;
+        } catch (error) {
+          if (!isDuplicateKey(error)) throw error;
+        }
+        current = await head(taskId);
       }
+      if (current.seq >= seq || current.generation > generation) {
+        await events.deleteOne({ taskId, eventId, provisional: true }).catch(() => undefined);
+        return { appended: false, reason: current.generation > generation ? 'stale_generation' : 'out_of_order' };
+      }
+      await events.updateOne({ taskId, eventId, provisional: true },
+        { $set: { provisional: false } }, { upsert: false });
       return { appended: true };
     },
 
     read: async ({ taskId, after, limit }): Promise<StoredReplay> => {
+      await head(taskId);
       const bounded = Math.max(1, Math.floor(limit));
       const documents = await events
-        .find({ taskId, seq: { $gt: after } })
+        .find({ taskId, ...committed, seq: { $gt: after } })
         .sort({ seq: 1 })
         .limit(bounded + 1)
         .toArray();
       const truncated = documents.length > bounded;
       const page = (truncated ? documents.slice(0, bounded) : documents).map(toEvent);
-      const first = await events.find({ taskId }).sort({ seq: 1 }).limit(1).toArray();
+      const first = await events.find({ taskId, ...committed }).sort({ seq: 1 }).limit(1).toArray();
       const oldest = first[0]?.seq;
       return {
         events: page,
@@ -124,22 +144,18 @@ export function createMongoEventLog(input: EventCollections): EventLog {
     },
 
     watermark: async (taskId) => {
-      const current = await head(taskId);
-      // A crash between the insert and the head update leaves a committed row
-      // above the head. The watermark is the maximum of the two, so a restart
-      // cannot reuse a sequence that already has a row.
-      const newest = await events.find({ taskId }).sort({ seq: -1 }).limit(1).toArray();
-      const persisted = typeof newest[0]?.seq === 'number' ? newest[0].seq : 0;
-      return {
-        seq: Math.max(current?.seq ?? 0, persisted),
-        generation: current?.generation ?? 0,
-      };
+      const current = await reconcile(taskId);
+      // Even an abandoned reservation occupies its unique seq. Skip the slot
+      // without accepting its generation or making it visible to readers.
+      const [reserved] = await events.find({ taskId }).sort({ seq: -1 }).limit(1).toArray();
+      return { ...current, seq: Math.max(current.seq, Number(reserved?.seq ?? 0)) };
     },
 
     latest: async (taskId, limit) => {
+      await head(taskId);
       const bounded = Math.max(1, Math.floor(limit));
       const documents = await events
-        .find({ taskId })
+        .find({ taskId, ...committed })
         .sort({ seq: -1 })
         .limit(bounded)
         .toArray();
@@ -148,37 +164,35 @@ export function createMongoEventLog(input: EventCollections): EventLog {
 
     prune: async ({ before, limit }) => {
       const bounded = Math.max(1, Math.floor(limit));
-      const candidates = await events
-        .find({ at: { $lt: before } })
-        .sort({ at: 1 })
-        .limit(bounded)
-        .toArray();
-      if (candidates.length === 0) return 0;
-
-      // Never remove the newest event of a task: the terminal record is what a
-      // reconnecting client replays. Retention trims history, not the ending.
-      const newestByTask = new Map<string, number>();
-      for (const taskId of new Set(candidates.map((document) => String(document.taskId)))) {
-        const latest = await events
-          .find({ taskId })
-          .sort({ seq: -1 })
-          .limit(1)
-          .toArray();
-        const seq = latest[0]?.seq;
-        if (typeof seq === 'number') newestByTask.set(taskId, seq);
-      }
-
+      // Housekeeping metadata has no taskId; event heads always have one.
+      const key = { kind: 'retention_cursor' };
+      const saved = await heads.findOne(key);
+      let scanTask = typeof saved?.scanTask === 'string' ? saved.scanTask : undefined;
+      let scanSeq = Number(saved?.scanSeq ?? 0);
+      const expired = { ...committed, at: { $lt: before } };
       let removed = 0;
-      for (const document of candidates) {
-        const taskId = String(document.taskId);
-        const seq = typeof document.seq === 'number' ? document.seq : 0;
-        if (newestByTask.get(taskId) === seq) continue;
-        const result = await events.deleteOne({
-          taskId,
-          eventId: String(document.eventId),
-        });
-        removed += result.deletedCount;
+      // Remember a stable (task, seq) position across bounded sweeps. A long
+      // prefix of protected endings cannot consume every sweep forever.
+      for (let scanned = 0; scanned < bounded * 2 && removed < bounded; scanned++) {
+        let [row] = scanTask === undefined ? [] : await events.find({
+          ...expired, taskId: scanTask, seq: { $gt: scanSeq },
+        }).sort({ seq: 1 }).limit(1).toArray();
+        if (!row) {
+          const [next] = await events.find({
+            ...expired, ...(scanTask === undefined ? {} : { taskId: { $gt: scanTask } }),
+          }).sort({ taskId: 1 }).limit(1).toArray();
+          if (!next) { scanTask = undefined; break; }
+          [row] = await events.find({ ...expired, taskId: next.taskId }).sort({ seq: 1 }).limit(1).toArray();
+          if (!row) continue;
+        }
+        scanTask = String(row.taskId);
+        scanSeq = Number(row.seq);
+        const newer = await events.findOne({ ...committed, taskId: scanTask, seq: { $gt: scanSeq } });
+        if (newer) removed += (await events.deleteOne({
+          ...committed, taskId: scanTask, seq: scanSeq, eventId: row.eventId,
+        })).deletedCount;
       }
+      await heads.updateOne(key, { $set: { ...key, scanTask: scanTask ?? null, scanSeq } }, { upsert: true });
       return removed;
     },
 

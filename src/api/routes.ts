@@ -17,8 +17,9 @@ function fromFailure(failure: ServiceFailure, requestId: string) {
   return problemResult(failure.code, failure.detail, requestId, failure.retryable);
 }
 
-function isTerminalPayload(value: unknown): boolean {
+function isTerminalPayload(value: unknown, generation: number): boolean {
   if (typeof value !== 'object' || value === null) return false;
+  if ((value as { generation?: unknown }).generation !== generation) return false;
   const type = (value as { type?: unknown }).type;
   return (
     type === 'task.completed' ||
@@ -42,6 +43,7 @@ function eventId(value: unknown): string {
  * disconnected client stops consuming without stopping the run.
  */
 async function* toEventStream(stream: {
+  generation: number;
   replay: { events: unknown[] };
   subscribe: (listener: (event: unknown) => void) => () => void;
   close: () => void;
@@ -52,7 +54,7 @@ async function* toEventStream(stream: {
     for (const event of stream.replay.events) {
       seen.add(eventId(event));
       yield event;
-      if (isTerminalPayload(event)) return;
+      if (isTerminalPayload(event, stream.generation)) return;
     }
 
     const pending: unknown[] = [];
@@ -69,7 +71,7 @@ async function* toEventStream(stream: {
       const next = pending.shift();
       if (next !== undefined) {
         yield next;
-        if (isTerminalPayload(next)) return;
+        if (isTerminalPayload(next, stream.generation)) return;
         continue;
       }
       const resolveWake = (): void => wake?.();
