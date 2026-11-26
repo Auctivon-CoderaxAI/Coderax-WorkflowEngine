@@ -33,7 +33,7 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | Future durable live coverage | `architecture` | `scripts/live-coverage.ts`, `tests/architecture/live-coverage.test.ts` |
 | Workflow integrity | `architecture` | `tests/architecture/workflow.test.ts` |
 | Durable scheduling | `unit` (current in-process scheduler) | `tests/unit/scheduler.test.ts`; the durable scheduler owner must add a live test when it lands |
-| Dependency vulnerabilities | `audit` | `dist/scripts/check-audit.js` (high and critical fail) |
+| Dependency vulnerabilities | `audit`, `unit` | `dist/scripts/check-audit.js` (high and critical fail) and `tests/unit/audit.test.ts` (every fail-closed path) |
 | Model cost policy | `adversarial`, `unit` | `tests/adversarial/cost-policy.test.ts`, `tests/unit/models.test.ts` |
 | Private/cloud isolation | `security` | `tests/security/isolation.test.ts`, `tests/security/regressions.test.ts` |
 | Generation fencing | `adversarial`, `unit` | `tests/adversarial/fencing.test.ts`, `tests/unit/fencing.test.ts` |
@@ -143,8 +143,13 @@ the ordered free route, discovery and the daily budget.
 
 ## Dependency vulnerability gate
 
-`npm audit --json` is parsed by `dist/scripts/check-audit.js`; high and critical
-advisories fail. The repository previously carried
+`npm audit --json` is parsed by the pure `auditFromResult` classifier in
+`dist/scripts/check-audit.js`; high and critical advisories fail, and an
+unstartable audit, unreadable or truncated JSON, a registry error or a report
+without npm's `metadata.vulnerabilities` block fails closed instead of passing.
+`tests/unit/audit.test.ts` pins all eight paths, including parsing past an npm
+notice and redacting a registry token from the diagnostic. The repository
+previously carried
 [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)
 (CVE-2023-54404) through zod 3; the advisory range is `<4.6.6` and the fixed
 version is `4.6.7`. The root, contracts and SDK now resolve one deduplicated

@@ -11,10 +11,11 @@
   required job (`verify`). No `scripts/gate/*` implementation survives.
 - The reconciliation on top of `d00156a` adds the competing branch's verified
   unique regression suites and the controls those suites proved missing. It does
-  not change the gate runner, manifest, workflow or required-job shape.
-  Reconciliation tree `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed its own
-  hosted run `45900429936` (single `verify` job, 23 steps); run `45888790260`
-  covers `d00156a` only.
+  not change the gate runner, manifest, workflow or required-job shape. Two
+  reconciliation rounds were merged: `821352f` (engine regressions) and its
+  post-adoption head `a1f2319` (fail-closed audit tests). The `821352f` tree
+  `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed hosted run `45900429936`
+  (single `verify` job, 23 steps); run `45888790260` covers `d00156a` only.
 
 ## Candidate integration head
 
@@ -23,20 +24,22 @@
 - Branch: `ci/permanent-quality-gates`
 - Compare: https://github.com/Auctivon-CoderaxAI/Coderax-WorkflowEngine/compare/main...ci/permanent-quality-gates
 - The surviving implementation is this branch. The parallel
-  `ci/permanent-quality-gate` branch was reconciled at its latest observed head
-  `821352f9002f6804cf7213e1cc09265aafcbba58`; it advanced through `21015a7`,
-  `07e7220`, `b8143a6` and `821352f` while this branch was being verified. Its
-  history is merged into this branch and it was never checked out over this
-  branch, force-pushed, deleted or rewritten.
+  `ci/permanent-quality-gate` branch was reconciled in two rounds at its last two
+  observed heads, `821352f9002f6804cf7213e1cc09265aafcbba58` and its
+  post-adoption head `a1f231900e619597a813e208cff06a38f870c3a6`; it had advanced
+  through `21015a7`, `07e7220` and `b8143a6` while this branch was being verified.
+  Both heads are merged into this branch and the branch was never checked out
+  over this one, force-pushed, deleted or rewritten.
 - Reconciliation was executed, not declared: every suite on that branch that
   exercises engine behaviour was compiled and run against this tree, and every
   passing case was preserved unless an existing test already covered it. The
-  preserved unique coverage is 35 tests in five whole files plus five cases
-  appended to existing suites. Those tests proved three controls this branch was
-  missing (below), which were ported. Its architecture suites depend on the
-  rejected `scripts/gate/*` module, so they were compared check-by-check against
-  this branch's stronger equivalents instead of copied. Its duplicate gate
-  implementation and its already-covered suites were rejected.
+  preserved unique coverage is 43 tests in six whole files plus five cases
+  appended to existing suites. Those tests proved three engine controls and one
+  gate fail-closed rule this branch was missing (below), which were ported. Its
+  architecture suites depend on the rejected `scripts/gate/*` module, so they
+  were compared check-by-check against this branch's stronger equivalents
+  instead of copied. Its duplicate gate implementation and its already-covered
+  suites were rejected.
 
 Verified integration head: `d00156a1597e5d908d21d3886272f5710a0df721`. The
 hosted `verify` job passed at this exact SHA in run `45888790260`, and the
@@ -55,7 +58,7 @@ files) in hosted run `45888790260`.
 
 | Gate | Tests (reconciliation tree) | Result |
 | --- | --- | --- |
-| unit | 91 | 91 passed |
+| unit | 99 | 99 passed |
 | integration (fake Mongo labelled) | 21 | 21 passed |
 | security | 37 | 37 passed |
 | adversarial | 30 | 30 passed |
@@ -67,7 +70,7 @@ files) in hosted run `45888790260`.
 | openapi | command | `openapi.json` matches contracts |
 | mongo-live (real database) | 8 | 8 passed, 0 skipped |
 
-Total: 256 tests across 11 gates. Gate manifest: 42 compiled test files
+Total: 264 tests across 11 gates. Gate manifest: 43 compiled test files
 assigned, none unclaimed. The live gate forces `CODERAX_REQUIRE_MONGO=1`; with no
 URI it exits 1 with eight explicit failures and zero skips.
 
@@ -109,10 +112,11 @@ base branch.
 
 Both remote branches were inspected at their exact heads. The competing branch
 advanced from `21015a7` to `07e7220`, `b8143a6` and finally
-`821352f9002f6804cf7213e1cc09265aafcbba58` during this work; the final
-reconciliation used `821352f`.
+`821352f9002f6804cf7213e1cc09265aafcbba58` during this work, then added the
+post-adoption audit commit `a1f231900e619597a813e208cff06a38f870c3a6`; both were
+reconciled.
 
-- `ci/permanent-quality-gate` at `821352f`: a modular `scripts/gate/*` runner
+- `ci/permanent-quality-gate` at `821352f`/`a1f2319`: a modular `scripts/gate/*` runner
   with eleven static checks, plus a `quality-gate` job, a sibling
   `database-regression` job and a `vulnerabilities` job.
 - `ci/permanent-quality-gates` (this branch): type-based capability and
@@ -128,7 +132,7 @@ second pipeline for the same gate rather than additional evidence.
 
 ### What was preserved from `821352f`
 
-Five whole suites (30 tests) were kept because every case passes on this tree and
+Six whole suites (38 tests) were kept because every case passes on this tree and
 none is replaced by an existing file:
 
 | Suite | Tests | Unique behaviour |
@@ -138,6 +142,7 @@ none is replaced by an existing file:
 | `tests/integration/fencing.test.ts` | 4 | stale generation resume/retry, pre-crash token, concurrent cancel, terminal task not rewritten |
 | `tests/integration/recovery.test.ts` | 3 | lease expiry → interrupted → resume, idempotent recovery, settlement survives lease-release failure |
 | `tests/integration/replay.test.ts` | 5 | SSE replay, close-on-terminal, unauthenticated stream, foreign-owner replay |
+| `tests/unit/audit.test.ts` | 8 | every fail-closed audit path: missing npm, unreadable/truncated JSON, registry error, absent metadata, notices before JSON, fatal high/critical, non-fatal moderate/low, token redaction (`a1f2319`) |
 
 Five further cases were appended to existing suites: `approval.required` grants
 nothing by itself, a pending request is listed and cannot be decided elsewhere,
@@ -146,18 +151,24 @@ service boundary, and an unknown model creates no task or conversation. The
 remaining cases in those two files duplicate existing coverage and were not
 copied.
 
-Three controls were ported because the preserved tests failed without them:
+Three engine controls and one gate rule were ported because the preserved tests
+failed without them:
 
 1. `isAgentOutcome` in `src/execution/runner.ts`: a malformed adapter value now
    settles as a typed `protocol_error` instead of an unread result.
 2. Run- and chat-failure detail is redacted before it is stored
    (`src/orchestration/service.ts`), not only when it is read back.
 3. Chat output is redacted before storage and before it is returned.
+4. `scripts/check-audit.ts` now exports a pure `auditFromResult` classifier and
+   requires npm's `metadata.vulnerabilities` block; a vulnerability map alone is
+   no longer accepted as proof the scan completed, npm notices before the JSON
+   are parsed, and registry tokens are redacted from the diagnostic.
 
-### What was rejected from `821352f`
+### What was rejected
 
 - `scripts/gate/*` and its `gate:*` npm scripts: a second runner and manifest for
-  the same gate. Nothing under `scripts/gate/` survives.
+  the same gate. Nothing under `scripts/gate/` survives; only the audit
+  classifier logic was ported into the existing `scripts/check-audit.ts`.
 - Its workflow: three jobs whose names are not the observed required context
   `verify`, with the live database in a sibling job the required check cannot
   see. This branch's single `verify` job is the one accepted.
