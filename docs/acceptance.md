@@ -1,5 +1,19 @@
 # Acceptance record — 2026-11-26
 
+## Final gate SHA
+
+- **Final consolidated quality-gate implementation:**
+  `d00156a1597e5d908d21d3886272f5710a0df721`
+- **Passing hosted run at that exact SHA:** `45888790260` (`verify`, all 23
+  steps successful, including the real-MongoDB step)
+- The gate has one runner (`scripts/run-gates.ts`), one manifest
+  (`scripts/gates.ts`), one workflow (`.github/workflows/verify.yml`) and one
+  required job (`verify`). No `scripts/gate/*` implementation survives.
+- The reconciliation on top of `d00156a` adds the competing branch's verified
+  unique regression suites and the controls those suites proved missing. It does
+  not change the gate runner, manifest, workflow or required-job shape, and it
+  needs its own hosted run; run `45888790260` covers `d00156a` only.
+
 ## Candidate integration head
 
 - Repository: `Auctivon-CoderaxAI/Coderax-WorkflowEngine`
@@ -7,35 +21,40 @@
 - Branch: `ci/permanent-quality-gates`
 - Compare: https://github.com/Auctivon-CoderaxAI/Coderax-WorkflowEngine/compare/main...ci/permanent-quality-gates
 - The surviving implementation is this branch. The parallel
-  `ci/permanent-quality-gate` branch was first compared at
-  `21015a7f7484dda8a6b9951e52782a8bd8921d01` and then advanced to
-  `07e7220ee786291098e9e8ccbb6db3787e7fc2dc` while this branch was being
-  verified. It was inspected, not overwritten. Its uniquely useful checks —
-  pinned action SHAs, disabled install lifecycle scripts, lockfile/manifest
-  integrity and the SDK/contract release range — were folded into this branch.
-  Its latest self-declared supersession is not accepted: its workflow's
-  protected-context shape is not the observed `verify` job, and its live database
-  lane is a sibling rather than part of that required job. One surviving
-  implementation remains; the other branch is a moving owner artifact and must
-  be closed by its owner, not force-overwritten here.
+  `ci/permanent-quality-gate` branch was reconciled at its latest observed head
+  `821352f9002f6804cf7213e1cc09265aafcbba58`; it advanced through `21015a7`,
+  `07e7220`, `b8143a6` and `821352f` while this branch was being verified. Its
+  history is merged into this branch and it was never checked out over this
+  branch, force-pushed, deleted or rewritten.
+- Reconciliation was executed, not declared: every suite on that branch that
+  exercises engine behaviour was compiled and run against this tree, and every
+  passing case was preserved unless an existing test already covered it. The
+  preserved unique coverage is 35 tests in five whole files plus five cases
+  appended to existing suites. Those tests proved three controls this branch was
+  missing (below), which were ported. Its architecture suites depend on the
+  rejected `scripts/gate/*` module, so they were compared check-by-check against
+  this branch's stronger equivalents instead of copied. Its duplicate gate
+  implementation and its already-covered suites were rejected.
 
-Verified integration head: `d6f877c283b64e8a243b862789b3b6e4e5fb6082`. The
-hosted `verify` job passed at this exact SHA. The final remote SHA is the
-branch head at publication and is restated in the handoff; a later docs-only
-record commit changes the review head but not the code tree.
+Verified integration head: `d00156a1597e5d908d21d3886272f5710a0df721`. The
+hosted `verify` job passed at this exact SHA in run `45888790260`, and the
+earlier run `45888499599` passed at `d6f877c283b64e8a243b862789b3b6e4e5fb6082`.
+A later record or reconciliation commit changes the review head but not the
+gate implementation accepted by that run.
 
 ## Exact-tree acceptance
 
 Command: `npm run verify` with `CODERAX_TEST_MONGO_URI` pointing at a disposable
-real MongoDB started for this run. Exit status: 0 at integration head
-`d6f877c283b64e8a243b862789b3b6e4e5fb6082`.
+real MongoDB started for this run. Exit status: 0 on the reconciliation tree
+recorded by this document. The same command passed at `d00156a` (221 tests, 37
+files) in hosted run `45888790260`.
 
-| Gate | Tests | Result |
+| Gate | Tests (reconciliation tree) | Result |
 | --- | --- | --- |
 | unit | 91 | 91 passed |
-| integration (fake Mongo labelled) | 9 | 9 passed |
-| security | 25 | 25 passed |
-| adversarial | 19 | 19 passed |
+| integration (fake Mongo labelled) | 21 | 21 passed |
+| security | 37 | 37 passed |
+| adversarial | 30 | 30 passed |
 | contract | 14 | 14 passed |
 | architecture | 42 | 42 passed |
 | artifacts | 10 | 10 passed |
@@ -44,7 +63,7 @@ real MongoDB started for this run. Exit status: 0 at integration head
 | openapi | command | `openapi.json` matches contracts |
 | mongo-live (real database) | 8 | 8 passed, 0 skipped |
 
-Total: 221 tests across 11 gates. Gate manifest: 37 compiled test files
+Total: 256 tests across 11 gates. Gate manifest: 42 compiled test files
 assigned, none unclaimed. The live gate forces `CODERAX_REQUIRE_MONGO=1`; with no
 URI it exits 1 with eight explicit failures and zero skips.
 
@@ -84,20 +103,74 @@ base branch.
 
 ## Consolidated quality-gate branch
 
-Both remote branches were inspected at their exact heads:
+Both remote branches were inspected at their exact heads. The competing branch
+advanced from `21015a7` to `07e7220`, `b8143a6` and finally
+`821352f9002f6804cf7213e1cc09265aafcbba58` during this work; the final
+reconciliation used `821352f`.
 
-- `ci/permanent-quality-gate` at `21015a7f7484dda8a6b9951e52782a8bd8921d01`:
-  one-commit gate with a `quality-gate` and a sibling `database-regression` job,
-  pinned action commits, dependency-manifest and release checks.
+- `ci/permanent-quality-gate` at `821352f`: a modular `scripts/gate/*` runner
+  with eleven static checks, plus a `quality-gate` job, a sibling
+  `database-regression` job and a `vulnerabilities` job.
 - `ci/permanent-quality-gates` (this branch): type-based capability and
   execution-boundary checks, semantic negative controls, mandatory live MongoDB
   inside the protected `verify` context, contract/SDK coverage, artifact
   determinism and the shutdown lifecycle.
 
 This branch survives because only it puts the real-database lane inside the
-required check and combines ownership enforcement with executable negative
-controls. The competing branch's unique checks were integrated as described
-above. It remains an untouched historical artifact.
+required check, publishes the protected context `verify`, and combines ownership
+enforcement with executable negative controls. Its workflow also runs the gate at
+its own `ci/**` head, so the extra `ci/permanent-quality-gate` workflow is a
+second pipeline for the same gate rather than additional evidence.
+
+### What was preserved from `821352f`
+
+Five whole suites (30 tests) were kept because every case passes on this tree and
+none is replaced by an existing file:
+
+| Suite | Tests | Unique behaviour |
+| --- | --- | --- |
+| `tests/security/findings.test.ts` | 12 | named SEC-1…SEC-10 regressions: pre-storage redaction, chat redaction, typed 413, TLS MongoDB, adapter throws, foreign-conversation injection |
+| `tests/adversarial/execution.test.ts` | 6 | malformed adapter outcome, oversized summary, resolve-after-cancel, late report, concurrent conversation submits, traversal id |
+| `tests/integration/fencing.test.ts` | 4 | stale generation resume/retry, pre-crash token, concurrent cancel, terminal task not rewritten |
+| `tests/integration/recovery.test.ts` | 3 | lease expiry → interrupted → resume, idempotent recovery, settlement survives lease-release failure |
+| `tests/integration/replay.test.ts` | 5 | SSE replay, close-on-terminal, unauthenticated stream, foreign-owner replay |
+
+Five further cases were appended to existing suites: `approval.required` grants
+nothing by itself, a pending request is listed and cannot be decided elsewhere,
+a paid model is refused in private mode, the request budget fails closed at the
+service boundary, and an unknown model creates no task or conversation. The
+remaining cases in those two files duplicate existing coverage and were not
+copied.
+
+Three controls were ported because the preserved tests failed without them:
+
+1. `isAgentOutcome` in `src/execution/runner.ts`: a malformed adapter value now
+   settles as a typed `protocol_error` instead of an unread result.
+2. Run- and chat-failure detail is redacted before it is stored
+   (`src/orchestration/service.ts`), not only when it is read back.
+3. Chat output is redacted before storage and before it is returned.
+
+### What was rejected from `821352f`
+
+- `scripts/gate/*` and its `gate:*` npm scripts: a second runner and manifest for
+  the same gate. Nothing under `scripts/gate/` survives.
+- Its workflow: three jobs whose names are not the observed required context
+  `verify`, with the live database in a sibling job the required check cannot
+  see. This branch's single `verify` job is the one accepted.
+- `tests/architecture/{authority,registration,release,sdk,structure}.test.ts`:
+  already covered by this branch's stronger negative controls
+  (`tests/architecture/graph.test.ts` and `capabilities.test.ts`),
+  `tests/contract/routes.test.ts`, `tests/artifacts/artifacts.test.ts`,
+  `tests/artifacts/dependencies.test.ts` and `tests/architecture/workflow.test.ts`.
+- `tests/integration/mongo-live.check.ts`: duplicates this branch's eight-test
+  live lane (`tests/live/mongo.test.ts`, `tests/live/shutdown.test.ts`).
+- Its SDK surface without `SDK_OPERATIONS`, its 413 body-drain variant, its
+  retry configuration keys and its `shutdown` shape: this branch already has a
+  stricter or verified equivalent, and the removed `retry` module makes its
+  retry keys inert.
+
+The competing branch remains an owner artifact. Its history is merged here, but
+it was not force-deleted or rewritten by this branch.
 
 ## API and SDK contract
 
@@ -120,12 +193,16 @@ update the version assertions and run this gate at that exact head before any
 
 ## Security regressions
 
-The typed HTTP 413 correction remains covered by `tests/security/auth.test.ts`,
+The typed HTTP 413 correction remains covered by `tests/security/auth.test.ts`
+and is independently re-asserted by `[SEC-6]` in `tests/security/findings.test.ts`,
 together with malformed payload validation, owner isolation, event replay,
 approval scope/expiry, stale-generation fencing, workspace symlink confinement
 and redaction. New tests in `tests/security/network.test.ts` reject plaintext
 provider URLs, URL credentials, loopback/private/link-local/metadata addresses,
-and force `redirect: 'error'` on provider requests.
+and force `redirect: 'error'` on provider requests. `[SEC-7]`/`[SEC-7b]` prove the
+Mongo connector refuses a remote plaintext URI before connecting and forces a
+direct loopback connection; `[SEC-1]`/`[SEC-1b]` prove failure and chat text is
+redacted before storage as well as on read.
 
 This is a static destination guard. DNS rebinding and an approved hostname that
 later resolves to a private address require a deployment egress allow-list or a
@@ -141,14 +218,16 @@ no shell-execution path is admitted outside the declared tool seam.
   `mongo-live` step, so the protected check cannot pass without real-database
   evidence. Actions are pinned to full commit SHAs and install lifecycle scripts
   are disabled.
-- There is no pull request for this branch. The workflow now also triggers on
+- There is no pull request for this branch. The workflow also triggers on
   pushes to `ci/**` so the gate branch can obtain exact-head hosted evidence;
-  this does not create a second pipeline. Run `45888499599` completed with
+  this does not create a second pipeline. Run `45888790260` completed with
   conclusion `success` at exact head
-  `d6f877c283b64e8a243b862789b3b6e4e5fb6082`; its single `verify` job executed
-  all 18 required steps, including `Real MongoDB integration tests (required,
-  no fake)`, and every step passed. The earlier run `45888302201` was cancelled
-  when the branch advanced; it is not counted as evidence.
+  `d00156a1597e5d908d21d3886272f5710a0df721`; its single `verify` job executed
+  all 23 steps, including `Real MongoDB integration tests (required, no fake)`,
+  and every step passed. Run `45888499599` passed earlier at
+  `d6f877c283b64e8a243b862789b3b6e4e5fb6082`; run `45888302201` was cancelled
+  when the branch advanced and is not counted. The reconciliation commit has no
+  hosted run yet.
 - Creating the PR requires an authorized GitHub write integration. This host has
   no `gh` binary and no GitHub write credential; the unauthenticated API cannot
   create a pull request. No PR, self-approval or independent review was

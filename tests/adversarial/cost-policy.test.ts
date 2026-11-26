@@ -115,6 +115,82 @@ test('the composed engine advertises allowPaid false and one zero-cost route', a
   }
 });
 
+// Reconciled from ci/permanent-quality-gate: private mode is not a paid bypass,
+// the request budget fails closed at the service boundary, and a refused model
+// creates neither a task nor a conversation.
+test('a paid model is not usable for private execution either', () => {
+  const paid = descriptor('openai', 'premium', 'paid');
+  const catalog = createModelCatalog({
+    descriptors: [paid],
+    route: [paid.ref],
+    allowPaid: false,
+  });
+  const requested = catalog.resolve(paid.ref, 'private');
+  assert.equal(requested.ok, false);
+  assert.equal(requested.ok === false && requested.code, 'paid_model_refused');
+  const routed = catalog.resolve(null, 'private');
+  assert.equal(routed.ok, false);
+});
+
+test('the daily request budget fails closed at the service boundary', async () => {
+  const started = await startTestApp({
+    config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        dailyRequestBudget: 1,
+      },
+    },
+  });
+  try {
+    const first = await started.app.service.submitWork(
+      { ownerId: 'owner-test', isOwner: true },
+      { objective: 'first request', mode: 'cloud', requireApproval: true },
+    );
+    assert.ok(first.ok);
+    const second = await started.app.service.submitWork(
+      { ownerId: 'owner-test', isOwner: true },
+      { objective: 'second request', mode: 'cloud', requireApproval: true },
+    );
+    assert.equal(second.ok, false);
+    assert.equal(second.ok === false && second.code, 'budget_exhausted');
+    await started.app.service.cancelTask(
+      { ownerId: 'owner-test', isOwner: true },
+      first.value.taskId,
+      'test cleanup',
+    );
+  } finally {
+    await started.close();
+  }
+});
+
+test('an unknown model is refused before a task or a conversation is created', async () => {
+  const started = await startTestApp();
+  try {
+    const submitted = await started.app.service.submitWork(
+      { ownerId: 'owner-test', isOwner: true },
+      {
+        objective: 'unknown model',
+        model: { providerId: 'paid', modelId: 'premium' },
+        mode: 'cloud',
+        requireApproval: true,
+      },
+    );
+    assert.equal(submitted.ok, false);
+    assert.equal(submitted.ok === false && submitted.code, 'engine_not_configured');
+    assert.equal(
+      (await started.app.dependencies.tasks.listByOwner('owner-test')).length,
+      0,
+    );
+    assert.equal(
+      (await started.app.service.conversations({ ownerId: 'owner-test', isOwner: true }))
+        .conversations.length,
+      0,
+    );
+  } finally {
+    await started.close();
+  }
+});
+
 test('no source path can switch paid routing on', () => {
   const offenders: string[] = [];
   function walk(directory: string): void {

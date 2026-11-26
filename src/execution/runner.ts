@@ -2,7 +2,7 @@ import type { EngineFailureCode, Usage } from '@coderax/contracts';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore, RunScope } from './lease.js';
 import { workRunKey } from './lease.js';
-import type { AgentAdapter, AgentReport, AgentRunRequest } from '../agents/types.js';
+import type { AgentAdapter, AgentReport, AgentRunOutcome, AgentRunRequest } from '../agents/types.js';
 
 export type RunOutcome =
   | { kind: 'completed'; summary: string; usage?: Usage }
@@ -19,6 +19,23 @@ export type RunResult = {
    */
   ownershipLost: boolean;
 };
+
+/**
+ * An adapter is another process's code. Its resolved value is untrusted input, so
+ * a malformed result must settle the task as a typed protocol failure instead of
+ * throwing or being read as a completion.
+ */
+function isAgentOutcome(value: unknown): value is AgentRunOutcome {
+  if (typeof value !== 'object' || value === null) return false;
+  const outcome = value as Record<string, unknown>;
+  if (outcome.ok === true) return typeof outcome.summary === 'string';
+  if (outcome.ok !== false) return false;
+  return (
+    typeof outcome.code === 'string' &&
+    typeof outcome.detail === 'string' &&
+    typeof outcome.retryable === 'boolean'
+  );
+}
 
 export type TaskRunner = {
   run: (input: {
@@ -176,6 +193,17 @@ export function createTaskRunner(input: {
         }
         if (cancelRequested || (!outcome.ok && outcome.code === 'cancelled')) {
           return { outcome: { kind: 'cancelled' }, ownershipLost: false };
+        }
+        if (!isAgentOutcome(outcome)) {
+          return {
+            outcome: {
+              kind: 'failed',
+              code: 'protocol_error',
+              detail: 'The agent returned an outcome the engine could not interpret.',
+              retryable: false,
+            },
+            ownershipLost: false,
+          };
         }
         if (outcome.ok) {
           return {

@@ -37,9 +37,9 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | Model cost policy | `adversarial`, `unit` | `tests/adversarial/cost-policy.test.ts`, `tests/unit/models.test.ts` |
 | Private/cloud isolation | `security` | `tests/security/isolation.test.ts`, `tests/security/regressions.test.ts` |
 | Generation fencing | `adversarial`, `unit` | `tests/adversarial/fencing.test.ts`, `tests/unit/fencing.test.ts` |
-| Crash recovery | `adversarial` | crash-to-interrupted-to-resume test in `tests/adversarial/fencing.test.ts` |
-| Event replay | `adversarial`, `unit` | `tests/adversarial/replay.test.ts`, `tests/unit/events.test.ts` |
-| Approval enforcement | `adversarial`, `security` | `tests/adversarial/approval.test.ts`, `[SEC-F5]` |
+| Crash recovery | `adversarial`, `integration` | `tests/adversarial/fencing.test.ts`, `tests/integration/recovery.test.ts` |
+| Event replay | `adversarial`, `integration`, `unit` | `tests/adversarial/replay.test.ts`, `tests/integration/replay.test.ts`, `tests/unit/events.test.ts` |
+| Approval enforcement | `adversarial`, `security` | `tests/adversarial/approval.test.ts` (including `approval.required` grants nothing), `tests/security/findings.test.ts`, `[SEC-F5]` |
 | Package artifact integrity | `artifacts` | `npm pack --dry-run`, entrypoints, reproducibility, no source/secrets |
 | Dependency and lockfile integrity | `artifacts` | `tests/artifacts/dependencies.test.ts` (reviewed direct deps, private workspaces, https + integrity hashes, script-free lockfile) |
 | Provider network safety | `security` | `tests/security/network.test.ts` (https-only, no URL credentials/private targets, redirects refused) |
@@ -173,14 +173,16 @@ The files most likely to need a rebase are
 sources.
 
 There is also a separate remote `ci/permanent-quality-gate` branch. It was
-inspected at `21015a7` and advanced to `07e7220` while this branch was being
-verified; it remains unmodified. Its pinned action SHAs, disabled install
-lifecycle scripts, dependency/lockfile integrity check and release-range check
-were integrated here; its sibling database job was not copied because it would
-not be visible to the protected `verify` context. Its docs now claim this branch
-is superseded, but its workflow still does not put the live database inside the
-observed required `verify` job, so that claim is rejected pending owner review.
-One surviving implementation remains, not two or three.
+reconciled at `821352f9002f6804cf7213e1cc09265aafcbba58`, its latest observed
+head; it remains unmodified. Its history is merged here and its verified unique
+suites are preserved (see [`acceptance.md`](acceptance.md#what-was-preserved-from-821352f)).
+Its pinned action SHAs, disabled install lifecycle scripts, dependency/lockfile
+integrity check and release-range check were integrated earlier; its
+`scripts/gate/*` runner, three-job workflow, architecture suites that duplicate
+this branch's negative controls, and `mongo-live.check.ts` duplicate were not
+copied. Its live database lane remains outside the context the protected
+`verify` check sees, so its self-declared supersession of this branch is still
+rejected. One surviving implementation remains, not two or three.
 Cross-repository release certification stays outside this repository gate: the
 release owner consumes the evidence from the exact `verify` head, while this
 repository enforces only its own architecture and tests.
@@ -261,8 +263,9 @@ The detailed protection endpoint (`/branches/main/protection`) requires
 authentication and returned HTTP 401 to this host. Required review counts,
 dismissal rules and the full settings were therefore not inspected, and no
 protection setting was changed. No pull request exists for
-`ci/permanent-quality-gates`; the workflow runs on pull requests and on pushes to
-`main`, so there is no hosted exact-head result to report before a PR is opened.
+`ci/permanent-quality-gates`. Run `45888790260` passed the single `verify` job at
+exact head `d00156a1597e5d908d21d3886272f5710a0df721`, including the real-MongoDB
+step; the reconciliation commit on top of that head has no hosted run yet.
 
 ## Zero-cost and hosted-CI state
 

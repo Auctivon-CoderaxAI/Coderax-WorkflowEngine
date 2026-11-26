@@ -291,7 +291,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               updatedAt: now,
               failure: {
                 code: outcome.code,
-                detail: outcome.detail,
+                // Provider text is redacted before it is stored, not only on read.
+                detail: redactText(outcome.detail, [], 1000),
                 retryable: outcome.retryable,
               },
             };
@@ -967,24 +968,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!outcome.ok) {
         return fail(
           outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          outcome.detail,
+          redactText(outcome.detail, [], 1000),
           outcome.retryable,
         );
       }
       deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+      // Chat output is adapter text too: scrub it before storage and before it is
+      // returned, so a provider echoing a credential cannot persist it.
+      const summary = redactContent(outcome.summary);
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
         conversationId,
         role: 'assistant',
-        text: outcome.summary,
+        text: summary,
         createdAt: deps.clock.iso(),
         agent: request.agent,
       });
       return ok({
         conversationId,
         messageId,
-        text: outcome.summary,
+        text: summary,
         agent: request.agent,
         model: model.value.ref,
         ...(outcome.usage ? { usage: outcome.usage } : {}),

@@ -4,6 +4,8 @@ import { createPermissionStore } from '../../src/permissions/store.js';
 import { createClock, createIdGenerator } from '../../src/support/clock.js';
 import { startTestApp } from '../helpers.js';
 
+const principal = { ownerId: 'owner-test', isOwner: true as const };
+
 test('a request is pending until the owner decides it, and a denial is final', async () => {
   const clock = createClock();
   const store = createPermissionStore({ clock, ids: createIdGenerator() });
@@ -75,6 +77,95 @@ test('a permission record cannot be decided through another task or owner', asyn
     decision: 'approved',
   });
   assert.equal(foreignTask.ok, false);
+});
+
+// Reconciliation from ci/permanent-quality-gate: the event is informational and
+// the service cannot decide a request that belongs to another task or owner.
+test('approval.required publishes a request but grants nothing by itself', async () => {
+  const started = await startTestApp();
+  try {
+    const agent = started.app.dependencies.agents.get('coderax');
+    assert.ok(agent);
+    agent.run = async (_request, report) => {
+      report({
+        type: 'approval.required',
+        requestId: 'request_pending',
+        tool: 'write',
+        description: 'Write the generated report',
+      });
+      return { ok: true, summary: 'awaiting owner authority' };
+    };
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'needs an approval',
+      mode: 'cloud',
+      requireApproval: true,
+    });
+    assert.ok(submitted.ok);
+    await started.app.dependencies.scheduler.idle();
+
+    const replay = started.app.dependencies.events.replay(submitted.value.taskId, 0);
+    assert.ok(replay.events.some((event) => event.type === 'approval.required'));
+
+    const listed = await started.app.service.permissions(principal, submitted.value.taskId);
+    assert.ok(listed.ok);
+    assert.deepEqual(listed.value.requests, []);
+    assert.equal(
+      await started.app.dependencies.permissions.isApproved(
+        submitted.value.taskId,
+        'workspace.write',
+        'the generated report',
+      ),
+      false,
+    );
+  } finally {
+    await started.close();
+  }
+});
+
+test('a pending request is listed for its own task and cannot be decided elsewhere', async () => {
+  const started = await startTestApp();
+  try {
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'pending request',
+      mode: 'cloud',
+      requireApproval: true,
+    });
+    assert.ok(submitted.ok);
+    await started.app.dependencies.scheduler.idle();
+
+    const store = started.app.dependencies.permissions;
+    const request = await store.request({
+      ownerId: principal.ownerId,
+      taskId: submitted.value.taskId,
+      agent: 'coderax',
+      scope: 'workspace.write',
+      description: 'Write a file',
+      resource: 'report.md',
+    });
+    const listed = await started.app.service.permissions(principal, submitted.value.taskId);
+    assert.ok(listed.ok);
+    assert.equal(
+      listed.value.requests.find((entry) => entry.requestId === request.requestId)?.decision,
+      'pending',
+    );
+
+    const unknown = await started.app.service.decidePermission(
+      principal,
+      submitted.value.taskId,
+      { requestId: 'request_missing', decision: 'approved' },
+    );
+    assert.equal(unknown.ok, false);
+    assert.equal(unknown.ok === false && unknown.code, 'not_found');
+
+    const foreign = await started.app.service.permissions(
+      { ownerId: 'someone-else', isOwner: true },
+      submitted.value.taskId,
+    );
+    assert.equal(foreign.ok, false);
+    assert.equal(foreign.ok === false && foreign.code, 'not_found');
+  } finally {
+    await started.close();
+  }
 });
 
 test('the HTTP permission routes are owner-scoped even with a valid task id', async () => {
