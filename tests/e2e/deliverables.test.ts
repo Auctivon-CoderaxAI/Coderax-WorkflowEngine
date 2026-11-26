@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';
 import { createFakeDatabase } from '../fakes/mongo.js';
-import { OWNER_TOKEN, startTestApp } from '../helpers.js';
+import { fakeGateway, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
 
 function client(url: string): CoderaxClient {
   return new CoderaxClient({ baseUrl: url, token: OWNER_TOKEN });
@@ -219,6 +219,46 @@ test('exhausting the artifact quota fails the deliverable and leaves nothing beh
     );
     const listed = await api.artifacts({ mode: 'cloud' });
     assert.equal(listed.artifacts.length, 0);
+  } finally {
+    await first.close();
+  }
+});
+
+test('a Work objective can request a deliverable and the task result lists its stored files', async () => {
+  const first = await startTestApp({
+    gateway: fakeGateway({ text: 'Prepared the memo.' }),
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database: createFakeDatabase() },
+  });
+  try {
+    const api = client(first.url);
+    const accepted = await api.submitWork({
+      objective: [
+        'Write and store a short memo.',
+        '```deliverable',
+        JSON.stringify({
+          kind: 'document',
+          mode: 'cloud',
+          filename: 'native-memo',
+          title: 'Native Memo',
+          blocks: [{ type: 'paragraph', text: 'Produced by a durable Work task.' }],
+          formats: ['docx', 'markdown'],
+        }),
+        '```',
+      ].join('\n'),
+      mode: 'cloud',
+      requireApproval: false,
+    });
+    const status = await waitFor(async () => {
+      const current = await api.task(accepted.taskId);
+      return current.state === 'completed' ? current : null;
+    });
+    const files = (status.result?.artifacts ?? []).map((artifact) => artifact.path).sort();
+    assert.deepEqual(files, ['native-memo.document.json', 'native-memo.docx', 'native-memo.md']);
+
+    const listed = await api.artifacts({ mode: 'cloud', taskId: accepted.taskId });
+    assert.equal(listed.artifacts.length, 3);
+    assert.ok(listed.artifacts.every((artifact) => artifact.taskId === accepted.taskId));
   } finally {
     await first.close();
   }
