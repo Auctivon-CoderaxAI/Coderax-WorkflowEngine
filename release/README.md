@@ -15,10 +15,10 @@ No production cutover has been performed and this tooling cannot perform one.
 It never deploys, never reads a production secret and has read-only permissions.
 
 The online run of `npm run release:verify -- --online` reports **7 PASS and 7
-FAIL with 57 explicit blockers**. Those blockers are listed below; the command
+FAIL with 56 explicit blockers**. Those blockers are listed below; the command
 reproduces them from the pinned commits.
 
-Last evaluated on 2026-11-26 at `87a765b73ade337917e463aa7ce785d7c900c195`:
+Last evaluated on 2026-11-26 at `2aa9540187bbbac0d1bc2a425b2d6eff8b47eee9`:
 
 | Component | Pinned commit | Version |
 | --- | --- | --- |

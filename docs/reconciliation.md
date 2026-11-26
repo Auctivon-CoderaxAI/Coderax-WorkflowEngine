@@ -148,20 +148,20 @@ What was verified here, and what was not:
 `npm run verify` at `9a386db` with `CODERAX_TEST_MONGODB_URI` set:
 
 ```text
-tests 177
-pass 177
+tests 183
+pass 183
 fail 0
 openapi.json matches the published contracts
 ```
 
-That run includes the ownership gate, the two-replica MongoDB suite, the gateway
-topology suite, the SDK package install/typecheck suite and the release-train
-suite. The committed log is
-`release/evidence/engine-verify-9a386db-merged.log`, pinned by SHA-256 in
+That run includes the ownership gate, the two-replica MongoDB suite (including
+cross-replica event replay), the gateway topology suite, the SDK package
+install/typecheck suite and the release-train suite. The committed log is
+`release/evidence/engine-verify-b793a20-merged.log`, pinned by SHA-256 in
 `release/train.json`.
 
-`npm run release:verify -- --online` at `87a765b` reports **BLOCKED, 7 PASS /
-7 FAIL, 55 blockers**: all engine rows pass; web, CLI, hosted checks, independent
+`npm run release:verify -- --online` at `2aa9540` reports **BLOCKED, 7 PASS /
+7 FAIL, 56 blockers**: all engine rows pass; web, CLI, hosted checks, independent
 review, deployment, unpublished branches and CI credential safety fail. The gate
 is the authority for those rows, not this document.
 
