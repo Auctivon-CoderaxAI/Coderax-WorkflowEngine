@@ -122,7 +122,8 @@ export function normalizeAnswer(text: string): string {
     .toLowerCase()
     .replace(/```[a-z]*\n?/g, '')
     .replace(/[`*_]/g, '')
-    .replace(/\s+/g, ' ');
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function numbersIn(text: string): number[] {
@@ -158,7 +159,9 @@ export function gradeTask(task: BenchmarkTask, output: { text: string; toolCalls
 
   if (task.kind === 'exact') {
     if (typeof task.expected !== 'string') return false;
-    return normalizeAnswer(output.text).includes(normalizeAnswer(task.expected));
+    // Exact means equal after normalization; substring matching would pass `122`
+    // for an expected `22` and promote a wrong answer in production ranking.
+    return normalizeAnswer(output.text) === normalizeAnswer(task.expected);
   }
 
   if (task.kind === 'contains') {

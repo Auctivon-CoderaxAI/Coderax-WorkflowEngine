@@ -77,6 +77,7 @@ async function main(): Promise<void> {
             ownerId: config.auth.ownerId,
             model: model.ref,
             mode: 'cloud',
+            operation: 'native_reasoning',
             routing: 'auto',
             allowFallback: false,
             system:

@@ -221,6 +221,28 @@ test('an unknown persistence driver in the environment names the field', () => {
   }
 });
 
+test('provider URLs must be secure and must not smuggle a query or fragment', () => {
+  const ws = workspace();
+  try {
+    const base = {
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+    };
+    const provider = (baseURL: string) => ({
+      models: {
+        providers: [{ id: 'p', baseURL, apiKeyEnv: 'P_API_KEY' }],
+      },
+    });
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('http://api.example.com/v1') }).success, false);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1?key=x') }).success, false);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1#fragment') }).success, false);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1') }).success, true);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('http://127.0.0.1:4096/v1') }).success, true);
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('a short owner token is refused instead of accepted as authentication', () => {
   const ws = workspace();
   try {

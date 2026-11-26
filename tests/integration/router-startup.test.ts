@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { composeApplication, StartupError } from '../../src/bootstrap/compose.js';
-import { baseConfig, createWorkspaces, OWNER_TOKEN } from '../helpers.js';
+import { baseConfig, createWorkspaces, OWNER_TOKEN, testProviderPolicy } from '../helpers.js';
 
 const PROVIDER = {
   id: 'fixture',
@@ -40,6 +40,7 @@ test('a configured provider with a zero price list starts and is routable', asyn
         models: {
           route: [{ providerId: 'fixture', modelId: 'fixture-model' }],
           providers: [PROVIDER],
+          policy: [testProviderPolicy('fixture')],
         },
       }),
       env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, FIXTURE_API_KEY: 'authenticated-but-not-free' },
@@ -68,6 +69,7 @@ test('an API key with no price and no attestation fails startup closed', async (
           config: baseConfig(workspace, {
             models: {
               providers: [PROVIDER],
+              policy: [testProviderPolicy('fixture')],
             },
           }),
           env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, FIXTURE_API_KEY: 'authenticated-but-not-free' },
@@ -93,6 +95,7 @@ test('an expired attestation does not rescue an unpriced provider at startup', a
           config: baseConfig(workspace, {
             models: {
               providers: [PROVIDER],
+              policy: [testProviderPolicy('fixture')],
               attestations: [
                 {
                   providerId: 'fixture',

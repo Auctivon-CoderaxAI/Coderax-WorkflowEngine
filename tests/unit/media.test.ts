@@ -40,6 +40,17 @@ test('animated images are refused rather than sampled silently', () => {
   const webp = sniffImage(animated, LIMITS);
   assert.equal(webp.ok, false);
   assert.equal(webp.ok === false && webp.code, 'media_unsupported');
+
+  const png = pngBytes(8, 8);
+  const actl = Buffer.alloc(20);
+  actl.writeUInt32BE(8, 0);
+  actl.write('acTL', 4, 'latin1');
+  actl.writeUInt32BE(2, 8);
+  actl.writeUInt32BE(0, 12);
+  const apng = Buffer.concat([png.subarray(0, 33), actl, png.subarray(33)]);
+  const animatedPng = sniffImage(apng, LIMITS);
+  assert.equal(animatedPng.ok, false);
+  assert.equal(animatedPng.ok === false && animatedPng.code, 'media_unsupported');
 });
 
 test('active and unsupported formats never become image input', () => {
@@ -58,6 +69,8 @@ test('active and unsupported formats never become image input', () => {
 test('a truncated or inconsistent header is invalid, not guessed', () => {
   const png = pngBytes(4, 4).subarray(0, 20);
   assert.equal(sniffImage(png, LIMITS).ok, false);
+  const unterminated = pngBytes(4, 4).subarray(0, 40);
+  assert.equal(sniffImage(unterminated, LIMITS).ok, false);
 
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x40, 0x08]);
   assert.equal(sniffImage(jpeg, LIMITS).ok, false);

@@ -6,6 +6,7 @@ import type {
   ProblemCode,
   Usage,
 } from '@coderax/contracts';
+import type { ProcessingOperation } from './policy.js';
 
 /**
  * Model routing is the only place that chooses an inference endpoint. These
@@ -242,6 +243,12 @@ export type GatewayRequest = {
   /** Already resolved by the catalogue; never a raw provider override. */
   model: ModelRef;
   mode: DataMode;
+  /**
+   * The exact processing operation. It is required: a request without a
+   * classification cannot prove it is authorized for one, so the router refuses
+   * rather than guessing.
+   */
+  operation: ProcessingOperation;
   routing?: RoutingMode;
   /** An explicitly named model is pinned; an automatic route may fall back. */
   allowFallback?: boolean;

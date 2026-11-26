@@ -6,7 +6,10 @@ import type {
   ToolCall,
 } from '../types.js';
 import { ProviderError } from '../types.js';
-import { providerErrorFromResponse, toProviderError } from './http.js';
+import { assertSecureBaseURL, providerErrorFromResponse, toProviderError } from './http.js';
+
+const MAX_SSE_BUFFER_BYTES = 1_048_576;
+const MAX_TOOL_ARGUMENT_BYTES = 4_194_304;
 
 /**
  * Google Gemini's native generateContent API.
@@ -22,6 +25,7 @@ export function createGeminiProvider(input: {
   apiKey: string;
   fetchImpl?: typeof fetch;
 }): ProviderAdapter {
+  assertSecureBaseURL(input.baseURL);
   const fetchImpl = input.fetchImpl ?? fetch;
   const base = input.baseURL.replace(/\/+$/, '');
   const headers = { 'x-goog-api-key': input.apiKey, accept: 'application/json' };
@@ -41,6 +45,7 @@ export function createGeminiProvider(input: {
           response = await fetchImpl(url.toString(), {
             method: 'GET',
             headers,
+            redirect: 'error',
             ...(signal ? { signal } : {}),
           });
         } catch (error) {
@@ -156,6 +161,8 @@ async function call(
   try {
     const response = await fetchImpl(endpoint, {
       method: 'POST',
+      // A redirect must never forward the API key or prompt to another origin.
+      redirect: 'error',
       headers: {
         'content-type': 'application/json',
         accept: stream ? 'text/event-stream' : 'application/json',
@@ -180,9 +187,7 @@ function toBody(request: ProviderCompletionRequest): unknown {
             role: message.role === 'assistant' ? 'model' : 'user',
             parts: [
               ...(message.text.length > 0 ? [{ text: message.text }] : []),
-              ...(message.images ?? []).map((url) => ({
-                fileData: { fileUri: url, mimeType: mimeTypeOf(url) },
-              })),
+              ...(message.images ?? []).map(imagePart),
             ],
           }))
       : [{ role: 'user', parts: [{ text: request.prompt }] }];
@@ -213,12 +218,30 @@ function toBody(request: ProviderCompletionRequest): unknown {
   };
 }
 
+function imagePart(url: string): Record<string, unknown> {
+  const data = url.match(/^data:([^;,]+);base64,(.*)$/s);
+  if (data) {
+    return { inlineData: { mimeType: data[1], data: data[2] } };
+  }
+  // Gemini accepts a data URL only as inline base64 data. A remote image stays
+  // a file reference that Gemini can fetch.
+  return { fileData: { fileUri: url, mimeType: mimeTypeOf(url) } };
+}
+
 function mimeTypeOf(url: string): string {
   const match = url.match(/^data:([^;,]+)[;,]/);
   if (match) return match[1];
   if (/\.png($|\?)/i.test(url)) return 'image/png';
   if (/\.webp($|\?)/i.test(url)) return 'image/webp';
   return 'image/jpeg';
+}
+
+/** Gemini reports thinking separately from visible candidate tokens. */
+function generationOutputTokens(metadata: Record<string, unknown> | null | undefined): number | undefined {
+  const candidates = positive(metadata?.candidatesTokenCount);
+  const thoughts = positive(metadata?.thoughtsTokenCount);
+  if (candidates === undefined && thoughts === undefined) return undefined;
+  return (candidates ?? 0) + (thoughts ?? 0);
 }
 
 /** Gemini rejects some JSON Schema keywords; keep the portable subset. */
@@ -270,7 +293,7 @@ export function parseCompletion(provider: string, body: unknown): {
   }
   const metadata = asRecord(root?.usageMetadata);
   const inputTokens = positive(metadata?.promptTokenCount);
-  const outputTokens = positive(metadata?.candidatesTokenCount);
+  const outputTokens = generationOutputTokens(metadata);
   return {
     text,
     toolCalls,
@@ -303,19 +326,28 @@ export async function* parseStream(
   let buffer = '';
   let usage: { inputTokens?: number; outputTokens?: number } | undefined;
   let finishReason: string | undefined;
-  const calls: ToolCall[] = [];
+  let toolCallCount = 0;
 
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      if (Buffer.byteLength(buffer, 'utf8') > MAX_SSE_BUFFER_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new ProviderError(
+          'invalid',
+          `${provider} sent an SSE frame larger than the safety limit.`,
+          { retryable: false },
+        );
+      }
       for (;;) {
-        const boundary = buffer.indexOf('\n\n');
-        if (boundary < 0) break;
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        for (const line of frame.split('\n')) {
+        // LF, CRLF and lone CR are all valid SSE line endings.
+        const delimiter = buffer.match(/\r\n\r\n|\n\n|\r\r/);
+        if (!delimiter || delimiter.index === undefined) break;
+        const frame = buffer.slice(0, delimiter.index);
+        buffer = buffer.slice(delimiter.index + delimiter[0].length);
+        for (const line of frame.split(/\r\n|\n|\r/)) {
           if (!line.startsWith('data:')) continue;
           const payload = line.slice(5).trim();
           if (payload.length === 0 || payload === '[DONE]') continue;
@@ -326,13 +358,34 @@ export async function* parseStream(
             continue;
           }
           const root = asRecord(parsed);
+          if (root?.error !== undefined && root?.error !== null) {
+            await reader.cancel().catch(() => undefined);
+            throw new ProviderError('server', `${provider} reported a stream error.`, {
+              retryable: true,
+            });
+          }
+          const feedback = asRecord(root?.promptFeedback);
+          if (typeof feedback?.blockReason === 'string') {
+            await reader.cancel().catch(() => undefined);
+            throw new ProviderError('invalid', `${provider} blocked the prompt.`, {
+              retryable: false,
+            });
+          }
           const metadata = asRecord(root?.usageMetadata);
           const inputTokens = positive(metadata?.promptTokenCount);
-          const outputTokens = positive(metadata?.candidatesTokenCount);
+          const outputTokens = generationOutputTokens(metadata);
           if (inputTokens !== undefined || outputTokens !== undefined) {
             usage = {
-              ...(inputTokens === undefined ? {} : { inputTokens }),
-              ...(outputTokens === undefined ? {} : { outputTokens }),
+              ...(inputTokens === undefined
+                ? usage?.inputTokens === undefined
+                  ? {}
+                  : { inputTokens: usage.inputTokens }
+                : { inputTokens }),
+              ...(outputTokens === undefined
+                ? usage?.outputTokens === undefined
+                  ? {}
+                  : { outputTokens: usage.outputTokens }
+                : { outputTokens }),
             };
           }
           const candidates = root?.candidates;
@@ -347,12 +400,21 @@ export async function* parseStream(
             }
             const call = asRecord(part?.functionCall);
             if (typeof call?.name === 'string' && call.name.length > 0) {
+              const args = call.args ?? {};
+              if (JSON.stringify(args).length > MAX_TOOL_ARGUMENT_BYTES) {
+                await reader.cancel().catch(() => undefined);
+                throw new ProviderError(
+                  'invalid',
+                  `${provider} returned a tool call larger than the safety limit.`,
+                  { retryable: false },
+                );
+              }
               const toolCall: ToolCall = {
-                id: `gemini_call_${calls.length}_${call.name}`.slice(0, 120),
+                id: `gemini_call_${toolCallCount}_${call.name}`.slice(0, 120),
                 name: call.name,
-                arguments: call.args ?? {},
+                arguments: args,
               };
-              calls.push(toolCall);
+              toolCallCount += 1;
               yield { type: 'tool', call: toolCall };
             }
           }

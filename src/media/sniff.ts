@@ -70,6 +70,34 @@ function sniffPng(bytes: Buffer, maxPixels: number): SniffResult {
   ) {
     return invalid('The PNG IHDR fields are not a supported image encoding.');
   }
+  // Walk the chunk stream without inflating it. This rejects a file that ends
+  // after IHDR, and an APNG is refused because its animation frames are not a
+  // still image even though the first frame would decode.
+  let offset = 33;
+  let chunks = 0;
+  let sawData = false;
+  let ended = false;
+  let animated = false;
+  while (offset + 12 <= bytes.length) {
+    chunks += 1;
+    if (chunks > 4_096) return invalid('The PNG has too many chunks to verify safely.');
+    const length = bytes.readUInt32BE(offset);
+    if (length > 0x7fffffff || offset + 12 + length > bytes.length) {
+      return invalid('The PNG chunk length is inconsistent with the file.');
+    }
+    const type = bytes.toString('latin1', offset + 4, offset + 8);
+    if (type === 'acTL') animated = true;
+    if (type === 'IDAT') sawData = true;
+    offset += 12 + length;
+    if (type === 'IEND') {
+      if (length !== 0) return invalid('The PNG IEND chunk is malformed.');
+      ended = true;
+      break;
+    }
+  }
+  if (!ended) return invalid('The PNG is truncated: it has no IEND chunk.');
+  if (!sawData) return invalid('The PNG has no image data.');
+  if (animated) return unsupported('Animated PNG is not accepted; attach a still image.');
   return { ok: true, mediaType: 'image/png', width, height };
 }
 

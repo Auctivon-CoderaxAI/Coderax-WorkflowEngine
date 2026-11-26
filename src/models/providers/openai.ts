@@ -7,7 +7,10 @@ import type {
   ToolCall,
 } from '../types.js';
 import { ProviderError } from '../types.js';
-import { providerErrorFromResponse, toProviderError } from './http.js';
+import { assertSecureBaseURL, providerErrorFromResponse, toProviderError } from './http.js';
+
+const MAX_SSE_BUFFER_BYTES = 1_048_576;
+const MAX_TOOL_ARGUMENT_BYTES = 4_194_304;
 
 /**
  * OpenAI-compatible discovery and chat completions.
@@ -24,6 +27,7 @@ export function createOpenAiProvider(input: {
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
 }): ProviderAdapter {
+  assertSecureBaseURL(input.baseURL);
   const fetchImpl = input.fetchImpl ?? fetch;
   const base = input.baseURL.replace(/\/+$/, '');
   const authHeaders = {
@@ -40,6 +44,7 @@ export function createOpenAiProvider(input: {
         response = await fetchImpl(`${base}/models`, {
           method: 'GET',
           headers: { accept: 'application/json', ...authHeaders },
+          redirect: 'error',
           ...(signal ? { signal } : {}),
         });
       } catch (error) {
@@ -79,6 +84,8 @@ async function call(
   try {
     const response = await fetchImpl(`${base}/chat/completions`, {
       method: 'POST',
+      // A redirect must never forward a prompt or key to another origin.
+      redirect: 'error',
       headers: {
         'content-type': 'application/json',
         accept: stream ? 'text/event-stream' : 'application/json',
@@ -178,7 +185,15 @@ export function parseModelList(providerId: string, body: unknown): DiscoveredMod
     const top = asRecord(model.top_provider);
     const context = firstPositive(model.context_length, top?.context_length, model.context_window);
     const maxOutput = firstPositive(top?.max_completion_tokens, model.max_completion_tokens);
-    const pricing = asRecord(model.pricing);
+    // An absent pricing object may be covered by an attestation. A present but
+    // malformed one is different: it is a published claim we cannot verify, so
+    // it must not silently fall through to the attestation path.
+    if (model.pricing !== undefined && model.pricing !== null && asRecord(model.pricing) === null) {
+      continue;
+    }
+    const pricing = model.pricing === undefined || model.pricing === null
+      ? null
+      : asRecord(model.pricing);
     const expiration = typeof model.expiration_date === 'string' ? Date.parse(model.expiration_date) : NaN;
     discovered.push({
       ref: { providerId, modelId: model.id },
@@ -340,12 +355,22 @@ export async function* parseStream(
       const { done: finished, value } = await reader.read();
       if (finished) break;
       buffer += decoder.decode(value, { stream: true });
+      if (Buffer.byteLength(buffer, 'utf8') > MAX_SSE_BUFFER_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new ProviderError(
+          'invalid',
+          `${provider} sent an SSE frame larger than the safety limit.`,
+          { retryable: false },
+        );
+      }
       for (;;) {
-        const boundary = buffer.indexOf('\n\n');
-        if (boundary < 0) break;
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        for (const line of frame.split('\n')) {
+        // LF, CRLF and lone CR are all valid SSE line endings. Do not split a
+        // delimiter that arrives across two reads.
+        const delimiter = buffer.match(/\r\n\r\n|\n\n|\r\r/);
+        if (!delimiter || delimiter.index === undefined) break;
+        const frame = buffer.slice(0, delimiter.index);
+        buffer = buffer.slice(delimiter.index + delimiter[0].length);
+        for (const line of frame.split(/\r\n|\n|\r/)) {
           if (!line.startsWith('data:')) continue;
           const payload = line.slice(5).trim();
           if (payload === '[DONE]') continue;
@@ -355,10 +380,43 @@ export async function* parseStream(
           } catch {
             continue;
           }
+          const root = asRecord(parsed);
+          if (root?.error !== undefined && root?.error !== null) {
+            await reader.cancel().catch(() => undefined);
+            throw new ProviderError('server', `${provider} reported a stream error.`, {
+              retryable: true,
+            });
+          }
+          const firstChoice = Array.isArray(root?.choices) ? asRecord(root.choices[0]) : null;
+          if (firstChoice?.finish_reason === 'error') {
+            await reader.cancel().catch(() => undefined);
+            throw new ProviderError('server', `${provider} reported a stream error.`, {
+              retryable: true,
+            });
+          }
           for (const event of normalizeChunk(parsed, calls)) {
-            if (event.type === 'usage') usage = event.usage;
-            if (event.type === 'done') finishReason = event.finishReason;
-            else yield event;
+            // Some servers send usage twice (a chunk and a final total); retain
+            // only the last total and emit it once at the end.
+            if (event.type === 'usage') {
+              usage = event.usage;
+              continue;
+            }
+            if (event.type === 'done') {
+              finishReason = event.finishReason;
+              continue;
+            }
+            yield event;
+          }
+          const oversized = [...calls.values()].some(
+            (call) => call.arguments.length > MAX_TOOL_ARGUMENT_BYTES || call.name.length > 4_096,
+          );
+          if (oversized) {
+            await reader.cancel().catch(() => undefined);
+            throw new ProviderError(
+              'invalid',
+              `${provider} accumulated a tool call larger than the safety limit.`,
+              { retryable: false },
+            );
           }
         }
       }

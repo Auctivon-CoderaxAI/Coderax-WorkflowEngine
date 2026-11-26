@@ -81,7 +81,23 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
   "workspaces": { "privateRoot": "/srv/coderax/private", "cloudRoot": "/srv/coderax/cloud" },
   "models": {
     "route": [{ "providerId": "openrouter", "modelId": "inclusionai/ling-3.2-flash:free" }],
-    "attestations": []
+    "attestations": [],
+    "policy": [
+      {
+        "providerId": "openrouter",
+        "retention": "transient",
+        "training": "prohibited",
+        "location": "eu",
+        "credentials": "deployment-managed",
+        "modes": ["cloud"],
+        "grants": [
+          { "operation": "chat", "mode": "cloud", "location": "eu" },
+          { "operation": "work", "mode": "cloud", "location": "eu" }
+        ],
+        "evidenceUrl": "https://openrouter.ai/docs/terms",
+        "verifiedAt": "2026-11-26T00:00:00.000Z"
+      }
+    ]
   },
   "engines": { "default": "native" }
 }
@@ -90,6 +106,10 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
 `models.route` is a preference order, not a free claim. The router discovers
 models, verifies zero cost from the provider price list or a time-bounded
 attestation, and refuses to start Native when no verified-free model is routable.
+`models.policy` is a separate requirement: a provider receives no traffic until an
+owner-approved record authorizes the exact processing operation and data mode.
+Private mode refuses hosted inference without an explicitly approved private
+grant, and fails closed rather than using local inference when none exists.
 Gemini, Groq and Cerebras publish no machine-readable price and therefore need an
 attestation per exact model. See [`docs/model-routing.md`](docs/model-routing.md)
 for the verification rules, routing modes, budgets, rate limits, circuits,
@@ -127,6 +147,10 @@ its own collaborators.
   cost is proven from provider pricing or an unexpired exact-model attestation;
   unknown cost is refused; and a reserved request/token budget fails closed.
 - **Cloud-only execution**: the engine runs on its host; clients execute nothing.
+- **Data-processing policy**: cost, capability, retention, training, location,
+  authorization, credential, quota and execution mode are separate eligibility
+  dimensions. Private mode never leaves the process without an exact, owner-approved
+  private grant, and fallback cannot widen that grant.
 - **Owner-only**: one principal, constant-time token comparison, no memberships.
 - **No silent substitution**: an unavailable agent is refused, never swapped.
 - **No private/cloud bleed**: memory and workspaces are partitioned by data mode.

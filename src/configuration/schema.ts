@@ -1,5 +1,12 @@
 import { z } from 'zod';
 import { CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
+import {
+  CREDENTIAL_SOURCES,
+  DATA_RETENTION,
+  PROCESSING_LOCATIONS,
+  PROCESSING_OPERATIONS,
+  TRAINING_USE,
+} from '../models/policy.js';
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -76,6 +83,22 @@ export const EnginesConfig = z
   })
   .strict();
 
+function isSecureProviderURL(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  const loopback =
+    url.hostname === 'localhost' ||
+    url.hostname === '127.0.0.1' ||
+    url.hostname === '[::1]' ||
+    url.hostname === '::1';
+  return url.protocol === 'http:' && loopback;
+}
+
 /**
  * A provider is configured by URL and the *name* of its credential variable.
  * The key is resolved from the environment at startup; no secret belongs in the
@@ -88,7 +111,20 @@ export const ModelProviderConfig = z
       .trim()
       .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'provider id must be lower-case letters, digits, - or _'),
     kind: z.enum(['openai', 'gemini']).default('openai'),
-    baseURL: z.string().url(),
+    baseURL: z
+      .string()
+      .url()
+      .refine(
+        (value) => isSecureProviderURL(value),
+        'baseURL must use HTTPS; cleartext HTTP is allowed only for loopback servers',
+      )
+      .refine(
+        (value) => {
+          const url = new URL(value);
+          return url.search === '' && url.hash === '';
+        },
+        'baseURL must not contain a query string or fragment',
+      ),
     apiKeyEnv: z
       .string()
       .trim()
@@ -115,6 +151,39 @@ export const FreeTierAttestationConfig = z
       .refine((value) => value.startsWith('https://'), 'evidenceUrl must be https'),
     verifiedAt: z.string().datetime({ offset: true }),
     expiresAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+/**
+ * One explicitly approved provider policy. Every field is recorded evidence, not
+ * a default: a provider without a record is refused, and a mode or operation
+ * that is not listed is not approved. Private grants additionally require no
+ * stored retention, prohibited training, a declared location and an
+ * owner-managed credential; the router enforces those at request time.
+ */
+export const ProviderPolicyGrantConfig = z
+  .object({
+    operation: z.enum(PROCESSING_OPERATIONS),
+    mode: z.enum(['private', 'cloud']),
+    location: z.enum(PROCESSING_LOCATIONS),
+  })
+  .strict();
+
+export const ProviderPolicyConfig = z
+  .object({
+    providerId: z.string().trim().min(1).max(64),
+    retention: z.enum(DATA_RETENTION),
+    training: z.enum(TRAINING_USE),
+    location: z.enum(PROCESSING_LOCATIONS),
+    credentials: z.enum(CREDENTIAL_SOURCES),
+    modes: z.array(z.enum(['private', 'cloud'])).min(1),
+    grants: z.array(ProviderPolicyGrantConfig).default([]),
+    evidenceUrl: z
+      .string()
+      .url()
+      .refine((value) => value.startsWith('https://'), 'evidenceUrl must be https'),
+    verifiedAt: z.string().datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
   })
   .strict();
 
@@ -145,6 +214,8 @@ export const ModelsConfig = z
     dailyTokenBudget: z.number().int().min(1).max(100_000_000).default(2_000_000),
     providers: z.array(ModelProviderConfig).default([]),
     attestations: z.array(FreeTierAttestationConfig).default([]),
+    /** Hosted inference requires an explicit owner-approved policy record. */
+    policy: z.array(ProviderPolicyConfig).default([]),
     routing: RoutingConfig.default({}),
     /** Optional results file produced by `npm run benchmark`. */
     benchmarkResultsPath: z.string().min(1).optional(),

@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ProviderAdapter, ProviderCompletionRequest } from '../src/models/types.js';
 import { ProviderError } from '../src/models/types.js';
+import type { ProviderPolicy } from '../src/models/policy.js';
+import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -31,12 +33,43 @@ export function createWorkspaces(): TestWorkspace {
   };
 }
 
+/**
+ * A policy that authorizes the fixture provider for every operation in cloud
+ * mode only. Private mode stays denied unless a test grants it explicitly, so a
+ * missing operation classification cannot pass by accident.
+ */
+export function testProviderPolicy(
+  providerId = 'free',
+  overrides: Partial<ProviderPolicy> = {},
+): ProviderPolicy {
+  return {
+    providerId,
+    retention: 'transient',
+    training: 'prohibited',
+    location: 'owner-region',
+    credentials: 'deployment-managed',
+    modes: ['cloud', 'private'],
+    grants: PROCESSING_OPERATIONS.map((operation) => ({
+      operation,
+      mode: 'cloud' as const,
+      location: 'owner-region' as const,
+    })),
+    evidenceUrl: 'https://provider.example/terms',
+    verifiedAt: '2026-01-01T00:00:00.000Z',
+    expiresAt: null,
+    ...overrides,
+  };
+}
+
 export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, unknown>): EngineConfig {
   return EngineConfigSchema.parse({
     server: { host: '127.0.0.1', port: 0 },
     auth: { ownerId: OWNER_ID },
     workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
-    models: { route: [{ providerId: 'free', modelId: 'coderax-small' }] },
+    models: {
+      route: [{ providerId: 'free', modelId: 'coderax-small' }],
+      policy: [testProviderPolicy()],
+    },
     execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
     ...(overrides ?? {}),
   });
@@ -179,18 +212,23 @@ export async function waitFor<T>(
 }
 
 export function pngBytes(width = 2, height = 2): Buffer {
-  const buffer = Buffer.alloc(33);
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
-  buffer.writeUInt32BE(13, 8);
-  buffer.write('IHDR', 12, 'latin1');
-  buffer.writeUInt32BE(width, 16);
-  buffer.writeUInt32BE(height, 20);
-  buffer[24] = 8;
-  buffer[25] = 2;
-  buffer[26] = 0;
-  buffer[27] = 0;
-  buffer[28] = 0;
-  return buffer;
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const header = Buffer.alloc(25);
+  header.writeUInt32BE(13, 0);
+  header.write('IHDR', 4, 'latin1');
+  header.writeUInt32BE(width, 8);
+  header.writeUInt32BE(height, 12);
+  header[16] = 8;
+  header[17] = 2;
+  const data = Buffer.alloc(16);
+  data.writeUInt32BE(4, 0);
+  data.write('IDAT', 4, 'latin1');
+  Buffer.from([0x78, 0x9c, 0x03, 0x00]).copy(data, 8);
+  const end = Buffer.alloc(12);
+  end.write('IEND', 4, 'latin1');
+  // The sniffer verifies chunk structure, not CRC values; these fixtures are
+  // not decodable images and never claim to be.
+  return Buffer.concat([signature, header, data, end]);
 }
 
 export function jpegBytes(width = 2, height = 2): Buffer {

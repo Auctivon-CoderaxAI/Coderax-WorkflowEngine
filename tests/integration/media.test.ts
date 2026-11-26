@@ -11,6 +11,7 @@ import {
   OWNER_ID,
   OWNER_TOKEN,
   pngBytes,
+  testProviderPolicy,
   startTestApp,
   waitFor,
 } from '../helpers.js';
@@ -130,6 +131,101 @@ test('a text-only route refuses image input and never falls through to paid infe
   }
 });
 
+test('a chat grant does not authorize image processing', async () => {
+  const provider = recordingProvider();
+  const started = await startTestApp({
+    provider,
+    config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [
+          testProviderPolicy('free', {
+            grants: [
+              { operation: 'chat', mode: 'cloud', location: 'owner-region' },
+              { operation: 'work', mode: 'cloud', location: 'owner-region' },
+            ],
+          }),
+        ],
+      },
+    },
+  });
+  const api = client(started.url);
+  try {
+    const upload = await api.uploadMedia({
+      mode: 'cloud',
+      data: pngBytes().toString('base64'),
+    });
+    await assert.rejects(
+      () =>
+        api.chat({
+          message: 'What is in this image?',
+          agent: 'coderax',
+          mode: 'cloud',
+          attachments: [upload.media.mediaId],
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof CoderaxApiError);
+        assert.equal(error.code, 'model_missing');
+        assert.match(error.message, /multimodal processing/);
+        return true;
+      },
+    );
+    assert.equal(provider.calls, 0);
+  } finally {
+    await started.close();
+  }
+});
+
+test('private media is refused when the provider credential is deployment-managed', async () => {
+  const provider = recordingProvider();
+  const started = await startTestApp({
+    provider,
+    config: {
+      media: { allowPrivateModeAttachments: true },
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [
+          testProviderPolicy('free', {
+            credentials: 'deployment-managed',
+            retention: 'transient',
+            training: 'prohibited',
+            location: 'owner-region',
+            grants: [
+              { operation: 'chat', mode: 'cloud', location: 'owner-region' },
+              { operation: 'multimodal', mode: 'private', location: 'owner-region' },
+            ],
+          }),
+        ],
+      },
+    },
+  });
+  const api = client(started.url);
+  try {
+    const upload = await api.uploadMedia({
+      mode: 'private',
+      data: pngBytes().toString('base64'),
+    });
+    await assert.rejects(
+      () =>
+        api.chat({
+          message: 'Read this private image',
+          agent: 'coderax',
+          mode: 'private',
+          attachments: [upload.media.mediaId],
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof CoderaxApiError);
+        assert.equal(error.code, 'model_missing');
+        assert.match(error.message, /owner-managed credential/);
+        return true;
+      },
+    );
+    assert.equal(provider.calls, 0);
+  } finally {
+    await started.close();
+  }
+});
+
 test('media is bound to its owner and its data mode', async () => {
   const provider = recordingProvider();
   const started = await startTestApp({ provider });
@@ -236,6 +332,7 @@ test('concurrent image requests cannot exceed the verified budget ceiling', asyn
     config: {
       models: {
         route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [testProviderPolicy()],
         dailyRequestBudget: 1,
         dailyTokenBudget: 2_000_000,
       },

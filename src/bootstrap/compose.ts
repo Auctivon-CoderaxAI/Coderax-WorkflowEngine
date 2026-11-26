@@ -13,6 +13,7 @@ import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js'
 import { createGeminiProvider } from '../models/providers/gemini.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
 import { createModelRouter, type ModelRouter } from '../models/router.js';
+import { createProviderPolicyRegistry, type ProviderPolicy } from '../models/policy.js';
 import type {
   BenchmarkScore,
   FreeTierAttestation,
@@ -75,6 +76,8 @@ export type ComposeInput = {
   providers?: InjectedProvider[];
   /** Benchmark scores for tests; production loads them from the configured file. */
   benchmarks?: BenchmarkScore[];
+  /** Provider policy records for fixtures; production reads `models.policy`. */
+  policies?: readonly ProviderPolicy[];
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
   fetchImpl?: typeof fetch;
   /**
@@ -300,8 +303,24 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     expiresAt: entry.expiresAt,
   }));
 
+  const policy = createProviderPolicyRegistry(input.policies ?? config.models.policy);
+  // A configured provider without a policy record cannot route. Failing startup
+  // is louder than a deployment that silently has no authorized inference.
+  const unauthorized = providerBuild.registrations
+    .map((registration) => registration.adapter.id)
+    .filter((providerId) => policy.get(providerId) === null);
+  if (unauthorized.length > 0) {
+    throw new StartupError(
+      unauthorized.map(
+        (providerId) =>
+          `models.policy has no owner-approved record for provider ${providerId}; hosted inference is refused until one exists`,
+      ),
+    );
+  }
+
   const models: ModelRouter = createModelRouter({
     providers: providerBuild.registrations,
+    policy,
     attestations,
     benchmarks,
     preferredRoute: config.models.route,

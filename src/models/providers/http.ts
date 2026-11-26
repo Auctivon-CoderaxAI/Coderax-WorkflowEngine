@@ -7,14 +7,93 @@ import { ProviderError, type RateLimitFacts } from '../types.js';
  * the payload.
  */
 
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000;
+const MAX_ERROR_BODY_BYTES = 64 * 1_024;
+
+/**
+ * A provider-controlled retry window is bounded. Without a ceiling, a hostile
+ * or broken header could park a free provider for years and make the router
+ * effectively unavailable.
+ */
 export function parseRetryAfter(headers: Headers): number | undefined {
   const raw = headers.get('retry-after');
   if (!raw) return undefined;
+  const bound = (milliseconds: number): number =>
+    Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.ceil(milliseconds)));
   const seconds = Number(raw);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  if (Number.isFinite(seconds) && seconds >= 0) return bound(seconds * 1000);
   const date = Date.parse(raw);
-  if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  if (Number.isFinite(date)) return bound(date - Date.now());
   return undefined;
+}
+
+/**
+ * Read at most a fixed prefix of an error body. A provider is untrusted; an
+ * unbounded `response.text()` can exhaust memory before the slice is applied.
+ */
+async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      const remaining = maxBytes - total;
+      const part = value.byteLength > remaining ? value.slice(0, remaining) : value;
+      chunks.push(part);
+      total += part.byteLength;
+      if (part.byteLength < value.byteLength) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  } catch {
+    // A failed or truncated error body is still a provider failure; the caller
+    // classifies it from the status and the bytes already read.
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // The reader may already be cancelled.
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Provider credentials must not be sent over cleartext transport. Loopback HTTP
+ * remains usable for a local OpenCode-compatible server.
+ */
+export function assertSecureBaseURL(baseURL: string): void {
+  let url: URL;
+  try {
+    url = new URL(baseURL);
+  } catch {
+    throw new ProviderError('invalid', 'The provider base URL is not a valid URL.', {
+      retryable: false,
+    });
+  }
+  if (url.protocol === 'https:') return;
+  const loopback =
+    url.hostname === 'localhost' ||
+    url.hostname === '127.0.0.1' ||
+    url.hostname === '[::1]' ||
+    url.hostname === '::1';
+  if (url.protocol === 'http:' && loopback) return;
+  throw new ProviderError(
+    'invalid',
+    'The provider base URL must use HTTPS; cleartext HTTP is allowed only for loopback servers.',
+    { retryable: false },
+  );
 }
 
 export function parseRateLimit(headers: Headers): RateLimitFacts {
@@ -89,18 +168,26 @@ export function parseErrorBody(text: string): ErrorHints {
   }
 }
 
-function quotaSignal(hints: ErrorHints, status: number): boolean {
+function quotaSignal(hints: ErrorHints, status: number, retryAfterMs?: number): boolean {
   if (status === 402) return true;
   const haystack = `${hints.code ?? ''} ${hints.type ?? ''} ${hints.status ?? ''} ${hints.message ?? ''}`.toLowerCase();
-  return (
+  const durable =
     haystack.includes('insufficient_quota') ||
-    haystack.includes('resource_exhausted') ||
     haystack.includes('per day') ||
     haystack.includes('perday') ||
     haystack.includes('daily limit') ||
     haystack.includes('quota exceeded') ||
-    haystack.includes('billing')
-  );
+    haystack.includes('billing') ||
+    haystack.includes('free allowance');
+  if (haystack.includes('resource_exhausted')) {
+    // Gemini uses RESOURCE_EXHAUSTED for both a per-minute throttle and a daily
+    // free-tier cap. Only a long published retry window or durable wording is
+    // evidence of exhaustion; a bare short-window token is an ordinary limit.
+    if (retryAfterMs !== undefined) return retryAfterMs >= 60_000 || durable;
+    const perMinute = /per.?minute|requests per minute|rate limit|retry in/.test(haystack);
+    return durable && !perMinute;
+  }
+  return durable;
 }
 
 export async function providerErrorFromResponse(input: {
@@ -108,12 +195,12 @@ export async function providerErrorFromResponse(input: {
   provider: string;
 }): Promise<ProviderError> {
   const status = input.response.status;
-  const text = await input.response.text().catch(() => '');
+  const text = await readBodyCapped(input.response, MAX_ERROR_BODY_BYTES);
   const hints = parseErrorBody(text.slice(0, 8_000));
   const rateLimit = parseRateLimit(input.response.headers);
   const retryAfterMs = rateLimit.retryAfterMs ?? hints.retryDelayMs;
   const exhausted =
-    quotaSignal(hints, status) ||
+    quotaSignal(hints, status, retryAfterMs) ||
     (status === 429 &&
       rateLimit.remainingRequests === 0 &&
       (rateLimit.resetRequestsMs ?? 0) > 60_000);

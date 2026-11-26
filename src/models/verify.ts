@@ -38,12 +38,12 @@ export function verifyFreeTier(input: {
     };
   }
 
-  const attestation = input.attestations.find(
+  const matches = input.attestations.filter(
     (entry) =>
       entry.providerId === input.model.ref.providerId &&
       entry.modelId === input.model.ref.modelId,
   );
-  if (!attestation) {
+  if (matches.length === 0) {
     return {
       costClass: 'paid',
       basis: 'none',
@@ -52,6 +52,21 @@ export function verifyFreeTier(input: {
     };
   }
 
+  // A stale attestation must not mask a later active one for the same model.
+  let failure: CostVerdict | null = null;
+  for (const attestation of matches) {
+    const verdict = verifyAttestation(attestation, input.now);
+    if (verdict.costClass === 'free') return verdict;
+    failure ??= verdict;
+  }
+  return failure ?? {
+    costClass: 'paid',
+    basis: 'none',
+    detail: 'No active free-tier attestation exists for this exact model.',
+  };
+}
+
+function verifyAttestation(attestation: FreeTierAttestation, now: Date): CostVerdict {
   const verifiedAt = Date.parse(attestation.verifiedAt);
   const expiresAt = Date.parse(attestation.expiresAt);
   if (!Number.isFinite(verifiedAt) || !Number.isFinite(expiresAt)) {
@@ -61,14 +76,14 @@ export function verifyFreeTier(input: {
       detail: 'The free-tier attestation has invalid dates and is not evidence.',
     };
   }
-  if (verifiedAt > input.now.getTime()) {
+  if (verifiedAt > now.getTime()) {
     return {
       costClass: 'paid',
       basis: 'none',
       detail: 'The free-tier attestation is dated in the future and is not evidence.',
     };
   }
-  if (expiresAt <= input.now.getTime()) {
+  if (expiresAt <= now.getTime()) {
     return {
       costClass: 'paid',
       basis: 'none',
@@ -82,7 +97,6 @@ export function verifyFreeTier(input: {
       detail: 'The free-tier attestation does not cite an https evidence URL.',
     };
   }
-
   return {
     costClass: 'free',
     basis: 'attestation',
@@ -127,14 +141,29 @@ function verifyPricing(pricing: Record<string, unknown>): { zero: boolean; detai
         detail: `The provider price field ${key} is not numeric.`,
       };
     }
-    if (value > 0) {
+    if (value !== 0 || !isExactZero(raw)) {
       return {
         zero: false,
-        detail: `The provider price field ${key} is above zero.`,
+        detail: `The provider price field ${key} is not exactly zero.`,
       };
     }
   }
   return { zero: true, detail: 'Every published price component is zero.' };
+}
+
+/**
+ * `Number('1e-400')` is `0`, but the published amount is not zero. For a string
+ * price, inspect the decimal mantissa so an underflowing nonzero value cannot
+ * be mistaken for a free tier. Numeric zero and zero-valued decimal strings are
+ * still accepted.
+ */
+function isExactZero(value: unknown): boolean {
+  if (typeof value === 'number') return value === 0;
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) return false;
+  const mantissa = trimmed.split(/[eE]/)[0] ?? '';
+  return !/[1-9]/.test(mantissa);
 }
 
 function numeric(value: unknown): number | null {

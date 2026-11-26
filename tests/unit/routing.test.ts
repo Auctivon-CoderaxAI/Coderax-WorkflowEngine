@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createBudgetLedger } from '../../src/models/budget.js';
+import { createCircuit } from '../../src/models/circuit.js';
 import { createModelRouter, inferRoutingMode, type ModelRouter } from '../../src/models/router.js';
+import { createProviderPolicyRegistry } from '../../src/models/policy.js';
+import { testProviderPolicy } from '../helpers.js';
 import type {
   BenchmarkScore,
   DiscoveredModel,
@@ -82,6 +85,7 @@ function router(input: {
       adapter: entry,
       settings: { ...SETTINGS, ...(input.settings ?? {}) },
     })),
+    policy: createProviderPolicyRegistry(input.adapters.map((entry) => testProviderPolicy(entry.id))),
     ...(input.attestations === undefined ? {} : { attestations: input.attestations }),
     ...(input.benchmarks === undefined ? {} : { benchmarks: input.benchmarks }),
     ...(input.preferredRoute === undefined ? {} : { preferredRoute: input.preferredRoute }),
@@ -111,6 +115,7 @@ const request = (modelId: string, prompt = 'hello', providerId = 'p') => ({
   ownerId: 'owner',
   model: { providerId, modelId },
   mode: 'cloud' as const,
+  operation: 'chat' as const,
   routing: 'auto' as const,
   allowFallback: false,
   system: 'system',
@@ -121,15 +126,17 @@ const request = (modelId: string, prompt = 'hello', providerId = 'p') => ({
 test('only a zero price list or a live attestation establishes free cost', async () => {
   const free = freeModel('free');
   const paid = freeModel('paid', { ref: { providerId: 'p', modelId: 'paid' }, pricing: { prompt: '0.000001', completion: '0.000002' } });
+  const negative = freeModel('negative', { ref: { providerId: 'p', modelId: 'negative' }, pricing: { prompt: '-1', completion: '0' } });
   const unknown = freeModel('unknown', { ref: { providerId: 'p', modelId: 'unknown' }, pricing: null });
   const engine = router({
-    adapters: [adapter({ models: [free, paid, unknown] })],
+    adapters: [adapter({ models: [free, paid, negative, unknown] })],
     preferredRoute: [paid.ref],
   });
   await engine.refresh();
   assert.deepEqual(engine.route(), [free.ref]);
-  assert.equal(engine.resolve(paid.ref, 'cloud').ok, false);
-  assert.equal(engine.resolve(unknown.ref, 'cloud').ok, false);
+  assert.equal(engine.resolve(paid.ref, 'cloud', { operation: 'chat' }).ok, false);
+  assert.equal(engine.resolve(negative.ref, 'cloud', { operation: 'chat' }).ok, false);
+  assert.equal(engine.resolve(unknown.ref, 'cloud', { operation: 'chat' }).ok, false);
 });
 
 test('a provider key is irrelevant: no price and no attestation fails closed', async () => {
@@ -137,7 +144,7 @@ test('a provider key is irrelevant: no price and no attestation fails closed', a
   const engine = router({ adapters: [adapter({ models: [model] })] });
   await engine.refresh();
   assert.deepEqual(engine.route(), []);
-  const resolved = engine.resolve(null, 'cloud');
+  const resolved = engine.resolve(null, 'cloud', { operation: 'chat' });
   assert.equal(resolved.ok, false);
   assert.equal(resolved.ok === false && resolved.code, 'model_missing');
   // An unknown cost is reported as paid, so an explicit request is refused by
@@ -199,7 +206,7 @@ test('an attestation expiry between refreshes stops routing immediately', async 
   now = new Date('2026-11-26T14:00:00.000Z');
   assert.equal(engine.route().length, 0);
   assert.equal(engine.hasVerifiedFreeRoute(), false);
-  const resolved = engine.resolve(null, 'cloud');
+  const resolved = engine.resolve(null, 'cloud', { operation: 'chat' });
   assert.equal(resolved.ok, false);
   if (!resolved.ok) assert.equal(resolved.code, 'model_missing');
 });
@@ -213,7 +220,7 @@ test('benchmark evidence upgrades coding and reasoning; unmeasured coding stays 
     preferredRoute: [measured.ref, unmeasured.ref],
   });
   await engine.refresh();
-  const plan = engine.plan({ mode: 'cloud', routing: 'complex' });
+  const plan = engine.plan({ mode: 'cloud', operation: 'chat', routing: 'complex' });
   assert.equal(plan.ok, true);
   if (!plan.ok) return;
   const byId = new Map(plan.value.candidates.map((entry) => [entry.model.ref.modelId, entry.model]));
@@ -270,6 +277,7 @@ test('an automatic preference that no longer fits falls back instead of failing'
     ownerId: 'owner',
     model: small.ref,
     mode: 'cloud',
+    operation: 'chat' as const,
     allowFallback: true,
     system: 's',
     prompt: 'x'.repeat(2_000),
@@ -294,6 +302,7 @@ test('context validation excludes a model that cannot hold the request and its o
   const longPrompt = 'x'.repeat(2_000);
   const planned = engine.plan({
     mode: 'cloud',
+    operation: 'chat' as const,
     routing: 'auto',
     estimatedInputTokens: 800,
     maxOutputTokens: 100,
@@ -302,6 +311,7 @@ test('context validation excludes a model that cannot hold the request and its o
   if (!planned.ok) return;
   assert.deepEqual(planned.value.candidates.map((entry) => entry.model.ref.modelId), ['large']);
   const rejected = engine.resolve(small.ref, 'cloud', {
+    operation: 'chat',
     estimatedInputTokens: 800,
     maxOutputTokens: 100,
   });
@@ -313,6 +323,7 @@ test('context validation excludes a model that cannot hold the request and its o
         ownerId: 'owner',
         model: small.ref,
         mode: 'cloud',
+        operation: 'chat' as const,
         allowFallback: false,
         system: 's',
         prompt: longPrompt,
@@ -459,7 +470,7 @@ test('refresh removes a model that is no longer free', async () => {
   pricing = { prompt: '0.00001', completion: '0.00001' };
   await engine.refresh();
   assert.equal(engine.route().length, 0);
-  const resolved = engine.resolve(model.ref, 'cloud');
+  const resolved = engine.resolve(model.ref, 'cloud', { operation: 'chat' });
   assert.equal(resolved.ok, false);
   assert.equal(resolved.ok === false && resolved.code, 'paid_model_refused');
 });
@@ -481,6 +492,7 @@ test('a discovery failure excludes every model from that provider', async () => 
   assert.equal(engine.hasVerifiedFreeRoute(), false);
   assert.equal(engine.route().length, 0);
   assert.equal(engine.health().providers[0]?.available, false);
+  assert.equal(engine.health().providers[0]?.verifiedFreeModels, 0);
 });
 
 test('the router normalizes a provider stream and records health', async () => {
@@ -510,6 +522,115 @@ test('the router normalizes a provider stream and records health', async () => {
   assert.equal(health.models[0]?.attempts, 1);
   assert.equal(health.models[0]?.successes, 1);
   assert.ok((health.models[0]?.latencyMs ?? 0) >= 0);
+});
+
+test('an abandoned half-open stream probe does not strand the circuit', async () => {
+  const model = freeModel('streamed');
+  let fail = true;
+  const provider = adapter({
+    models: [model],
+    complete: async () => {
+      if (fail) {
+        fail = false;
+        throw new ProviderError('server', 'first call fails', { retryable: true });
+      }
+      return { text: 'recovered', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+    },
+    stream: async function* () {
+      yield { type: 'text' as const, text: 'first' };
+      yield { type: 'text' as const, text: 'never read' };
+    },
+  });
+  let current = new Date('2026-11-26T12:00:00.000Z');
+  const engine = router({
+    adapters: [provider],
+    failureThreshold: 1,
+    cooldownMs: 1_000,
+    now: () => current,
+  });
+  await engine.refresh();
+
+  await assert.rejects(
+    () => engine.complete(request('streamed')),
+    (error: unknown) => error instanceof ModelRoutingError && error.code === 'engine_unavailable',
+  );
+  current = new Date(current.getTime() + 2_000);
+  for await (const event of engine.stream(request('streamed'))) {
+    if (event.type === 'text') break;
+  }
+  const recovered = await engine.complete(request('streamed'));
+  assert.equal(recovered.text, 'recovered');
+});
+
+test('stopping on the model event releases an unused reservation', async () => {
+  const model = freeModel('streamed');
+  const ledger = budget(1);
+  const provider = adapter({
+    models: [model],
+    stream: async function* () {
+      yield { type: 'text' as const, text: 'not reached' };
+    },
+  });
+  const engine = router({ adapters: [provider], ledger });
+  await engine.refresh();
+
+  for await (const event of engine.stream(request('streamed'))) {
+    if (event.type === 'model') break;
+  }
+
+  const completed = await engine.complete(request('streamed'));
+  assert.equal(completed.text, 'ok:streamed');
+  assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
+});
+
+test('stopping a stream early releases the provider slot, aborts upstream and settles', async () => {
+  const model = freeModel('streamed');
+  const ledger = budget();
+  let upstreamAborted = false;
+  const provider = adapter({
+    models: [model],
+    stream: async function* (incoming) {
+      incoming.signal.addEventListener('abort', () => {
+        upstreamAborted = true;
+      }, { once: true });
+      yield { type: 'text' as const, text: 'first' };
+      yield { type: 'text' as const, text: 'never read' };
+    },
+  });
+  const engine = router({
+    adapters: [provider],
+    ledger,
+    settings: { maxConcurrency: 1 },
+  });
+  await engine.refresh();
+
+  for await (const event of engine.stream(request('streamed'))) {
+    if (event.type === 'text') break;
+  }
+
+  // A leaked slot makes this fail with the local concurrency ceiling; a leaked
+  // reservation leaves the request count at one instead of two.
+  assert.equal(upstreamAborted, true);
+  const completed = await engine.complete(request('streamed'));
+  assert.equal(completed.text, 'ok:streamed');
+  assert.equal(ledger.snapshot('owner', new Date()).requests, 2);
+});
+
+test('a stale closed admission cannot release a newer half-open probe', () => {
+  const circuit = createCircuit({ failureThreshold: 1, cooldownMs: 1_000 });
+  const start = new Date('2026-11-26T12:00:00.000Z');
+  const stale = circuit.allow(start);
+  assert.equal(stale?.probe, false);
+  if (!stale) return;
+  circuit.failure(start, stale);
+  const later = new Date(start.getTime() + 1_001);
+  const probe = circuit.allow(later);
+  assert.equal(probe?.probe, true);
+  circuit.abandon(stale);
+  // The newer probe is still active, so no second admission is allowed.
+  assert.equal(circuit.allow(later), null);
+  if (probe) circuit.success(probe);
+  assert.equal(circuit.state(later), 'closed');
 });
 
 test('streaming fails over only before the first token', async () => {
@@ -544,6 +665,158 @@ test('streaming fails over only before the first token', async () => {
     allowFallback: true,
   })) events.push(event);
   assert.ok(events.some((event) => event.type === 'text' && event.text === 'from b'));
+});
+
+test('a token-refused candidate falls back to a smaller free cap without consuming provider rate', async () => {
+  const big = freeModel('big', { ref: { providerId: 'p', modelId: 'big' }, maxOutputTokens: 1_000 });
+  const small = freeModel('small', { ref: { providerId: 'p', modelId: 'small' }, maxOutputTokens: 100 });
+  const provider = adapter({ models: [big, small] });
+  const ledger = budget(10, 250);
+  const engine = router({
+    adapters: [provider],
+    preferredRoute: [big.ref, small.ref],
+    ledger,
+    settings: { requestsPerMinute: 1 },
+  });
+  await engine.refresh();
+  const completed = await engine.complete({ ...request('big'), allowFallback: true });
+  assert.deepEqual(completed.model, small.ref);
+  assert.equal(provider.calls, 1);
+  assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
+});
+
+test('readiness requires a candidate that fits the default route context', async () => {
+  const tiny = freeModel('tiny', { contextTokens: 500, maxOutputTokens: 4_096 });
+  const engine = router({ adapters: [adapter({ models: [tiny] })] });
+  await engine.refresh();
+  assert.deepEqual(engine.route(), []);
+  assert.equal(engine.hasVerifiedFreeRoute(), false);
+});
+
+test('a cancelled stream after output keeps the request charge', async () => {
+  const model = freeModel('streamed');
+  const ledger = budget();
+  const provider = adapter({
+    models: [model],
+    stream: async function* () {
+      yield { type: 'text' as const, text: 'partial' };
+      throw new ProviderError('cancelled', 'cancelled');
+    },
+  });
+  const engine = router({ adapters: [provider], ledger });
+  await engine.refresh();
+  await assert.rejects(
+    async () => {
+      for await (const _event of engine.stream(request('streamed'))) {
+        // consume until the provider fails
+      }
+    },
+    (error: unknown) => error instanceof ModelRoutingError && error.code === 'cancelled',
+  );
+  assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
+});
+
+test('a successful discovery does not close an open inference circuit', async () => {
+  const now = new Date('2026-11-26T12:00:00.000Z');
+  const provider = adapter({
+    models: [freeModel('only')],
+    complete: async () => {
+      throw new ProviderError('server', 'unavailable', { retryable: true });
+    },
+  });
+  const engine = router({
+    adapters: [provider],
+    now: () => now,
+    failureThreshold: 1,
+    cooldownMs: 5_000,
+  });
+  await engine.refresh();
+  await assert.rejects(() => engine.complete(request('only')));
+  assert.equal(engine.health().providers[0]?.circuit, 'open');
+  await engine.refresh();
+  assert.equal(engine.health().providers[0]?.circuit, 'open');
+});
+
+test('explicit resolution enforces vision and tool capabilities', async () => {
+  const textOnly = freeModel('text-only', {
+    capabilities: { vision: false, toolCalling: false, reasoning: false, streaming: true },
+  });
+  const engine = router({ adapters: [adapter({ models: [textOnly] })] });
+  await engine.refresh();
+  assert.equal(engine.resolve(textOnly.ref, 'cloud', { operation: 'chat', requireVision: true }).ok, false);
+  assert.equal(engine.resolve(textOnly.ref, 'cloud', { operation: 'chat', requireTools: true }).ok, false);
+  assert.equal(engine.resolve(textOnly.ref, 'cloud', { operation: 'chat' }).ok, true);
+});
+
+test('a stale attestation does not mask a later active attestation', async () => {
+  const now = new Date('2026-11-26T12:00:00.000Z');
+  const model = freeModel('attested', { pricing: null });
+  const engine = router({
+    adapters: [adapter({ models: [model] })],
+    attestations: [
+      {
+        providerId: 'p',
+        modelId: 'attested',
+        evidenceUrl: 'https://provider.example/old',
+        verifiedAt: '2026-10-01T00:00:00.000Z',
+        expiresAt: '2026-11-01T00:00:00.000Z',
+      },
+      {
+        providerId: 'p',
+        modelId: 'attested',
+        evidenceUrl: 'https://provider.example/current',
+        verifiedAt: '2026-11-20T00:00:00.000Z',
+        expiresAt: '2026-12-20T00:00:00.000Z',
+      },
+    ],
+    now: () => now,
+  });
+  await engine.refresh();
+  assert.deepEqual(engine.route(), [model.ref]);
+});
+
+test('an underflowing nonzero published price is not free', async () => {
+  const underflow = freeModel('underflow', { pricing: { prompt: '1e-400', completion: '0' } });
+  const engine = router({ adapters: [adapter({ models: [underflow] })] });
+  await engine.refresh();
+  assert.deepEqual(engine.route(), []);
+});
+
+test('streaming never falls back after the first output token', async () => {
+  let bStarted = false;
+  const a = adapter({
+    id: 'a',
+    models: [freeModel('a', { ref: { providerId: 'a', modelId: 'a' } })],
+    stream: async function* () {
+      yield { type: 'text' as const, text: 'partial' };
+      throw new ProviderError('server', 'stream broke', { retryable: true });
+    },
+  });
+  const b = adapter({
+    id: 'b',
+    models: [freeModel('b', { ref: { providerId: 'b', modelId: 'b' } })],
+    stream: async function* () {
+      bStarted = true;
+      yield { type: 'text' as const, text: 'duplicate' };
+    },
+  });
+  const engine = router({
+    adapters: [a, b],
+    preferredRoute: [
+      { providerId: 'a', modelId: 'a' },
+      { providerId: 'b', modelId: 'b' },
+    ],
+  });
+  await engine.refresh();
+  await assert.rejects(
+    async () => {
+      for await (const _event of engine.stream({ ...request('a', 'hello', 'a'), allowFallback: true })) {
+        // consume the partial stream
+      }
+    },
+    (error: unknown) => error instanceof ModelRoutingError && error.code === 'engine_unavailable',
+  );
+  assert.equal(bStarted, false);
 });
 
 test('routing mode inference treats code and long objectives as complex', () => {
