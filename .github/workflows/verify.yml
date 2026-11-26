@@ -7,7 +7,9 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    # The consolidation branch publishes hosted evidence before a pull request
+    # exists. Remove this branch once the pull request supplies its own runs.
+    branches: [main, integration/authoritative-runtime]
 
 permissions:
   contents: read
