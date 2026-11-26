@@ -118,6 +118,8 @@ export type ApplicationService = {
   budget: (principal: Principal) => BudgetState;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
+  /** Stops admitting new work; the drain itself is `shutdown`. */
+  beginShutdown: () => void;
   shutdown: () => Promise<void>;
 };
 
@@ -139,6 +141,9 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  // Set before the drain begins so a request that lands mid-shutdown cannot be
+  // admitted to a scheduler or persistence layer that is about to close.
+  let shuttingDown = false;
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -610,6 +615,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     models: () => deps.models.list(),
 
     submitWork: async (principal, request) => {
+      if (shuttingDown) {
+        return fail(
+          'not_ready',
+          'The engine is shutting down and is not accepting new work.',
+        );
+      }
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
@@ -1062,7 +1073,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return { interrupted };
     },
 
+    beginShutdown: () => {
+      shuttingDown = true;
+    },
+
     shutdown: async () => {
+      shuttingDown = true;
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();

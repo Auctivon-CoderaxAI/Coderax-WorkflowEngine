@@ -354,6 +354,25 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     port: config.server.port,
   });
 
+  // Shutdown is a single lifecycle: a second stop() joins the first instead of
+  // closing a listener and a database client that are already closed.
+  let stopPromise: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      service.beginShutdown();
+      const serverClosed = server.close();
+      await service.shutdown();
+      // Aborting controllers wakes running jobs; close persistence only after
+      // their final writes settle. Otherwise shutdown races a database write and
+      // surfaces a spurious closed-client error.
+      await scheduler.idle();
+      await serverClosed;
+      await persistence.close();
+    })();
+    return stopPromise;
+  };
+
   return {
     dependencies: finalContainer.dependencies,
     service,
@@ -367,15 +386,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       await service.recoverInterrupted();
       return { url };
     },
-    stop: async () => {
-      await service.shutdown();
-      // Aborting controllers wakes running jobs; close persistence only after
-      // their final writes settle. Otherwise shutdown races a database write and
-      // surfaces a spurious closed-client error.
-      await scheduler.idle();
-      await server.close();
-      await persistence.close();
-    },
+    stop,
   };
 }
 
