@@ -14,7 +14,7 @@
   },
   "engine": {
     "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
-    "commit": "9a386db9ff4970f59a300f5eb3d5f5b1627ef9b6",
+    "commit": "b793a205f22412ac660989d56e6719ee3d6ed2d8",
     "ref": "integration/v1.1-reconciliation",
     "version": "0.2.0",
     "apiContract": "1.1.0",
@@ -445,13 +445,13 @@
     },
     "localVerification": {
       "command": "npm run verify",
-      "headCommit": "9a386db9ff4970f59a300f5eb3d5f5b1627ef9b6",
+      "headCommit": "b793a205f22412ac660989d56e6719ee3d6ed2d8",
       "exitCode": 0,
-      "tests": 177,
+      "tests": 183,
       "failures": 0,
-      "ranAt": "2026-11-26T19:42:31Z",
-      "path": "release/evidence/engine-verify-9a386db-merged.log",
-      "outputSha256": "600a588875306d77bbe5ab96173ae1902f021d43a69d4f3694c717bd94f3f63a"
+      "ranAt": "2026-11-26T19:57:10Z",
+      "path": "release/evidence/engine-verify-b793a20-merged.log",
+      "outputSha256": "65a72f9ed25d3c90f6617e1e5b0bbe4b76b1702ea414b98649b4c4e93db1eaf8"
     }
   },
   "web": {

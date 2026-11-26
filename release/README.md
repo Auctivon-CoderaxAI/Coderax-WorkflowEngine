@@ -118,8 +118,8 @@ release until it is merged or an owner records an exclusion with a rationale.
 
 The engine has never had a successful hosted Actions run; the repository's
 `docs/governance.md` records the billing restriction. A local `npm run verify`
-run at `9a386db` passed 177 tests with zero failures against a real MongoDB; its
-log is committed at `release/evidence/engine-verify-9a386db-merged.log` and its
+run at `b793a20` passed 183 tests with zero failures against a real MongoDB; its
+log is committed at `release/evidence/engine-verify-b793a20-merged.log` and its
 SHA-256 is pinned in the manifest. A local run is evidence, not a substitute for the required hosted
 check. No independent reviewer is installed, and no component has an approval.
 The engine is not deployed. These are recorded as FAIL, not waived.
