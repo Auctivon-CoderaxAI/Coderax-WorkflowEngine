@@ -28,6 +28,7 @@ import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentReportEvent } from '../agents/types.js';
+import { redactText } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
@@ -142,8 +143,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       generation: task.generation,
       type,
       at: deps.clock.iso(),
-      ...(payload === undefined ? {} : { payload }),
+      ...(payload === undefined ? {} : { payload: scrub(type, payload) }),
     });
+  }
+
+  /** Failure text is written by an adapter or a provider, so it is scrubbed. */
+  function scrub(type: string, payload: unknown): unknown {
+    if (type !== 'task.failed' || typeof payload !== 'object' || payload === null) {
+      return payload;
+    }
+    const detail = (payload as { detail?: unknown }).detail;
+    if (typeof detail !== 'string') {
+      return payload;
+    }
+    return { ...(payload as Record<string, unknown>), detail: redactText(detail, [], 1000) };
   }
 
   function toStatus(task: TaskRecord): TaskStatus {
@@ -177,7 +190,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ? {
             failure: {
               code: task.failure.code,
-              ...(task.failure.detail ? { detail: task.failure.detail } : {}),
+              ...(task.failure.detail
+                ? { detail: redactText(task.failure.detail, [], 1000) }
+                : {}),
             },
           }
         : {}),
@@ -419,9 +434,48 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
         return;
       }
-      const text = textByTask.get(taskId) ?? '';
-      textByTask.set(taskId, text + event.text);
-      publish(started.task, 'text.delta', { text: event.text });
+      if (event.type === 'text.delta') {
+        const text = textByTask.get(taskId) ?? '';
+        textByTask.set(taskId, text + event.text);
+        publish(started.task, 'text.delta', { text: event.text });
+        return;
+      }
+      if (event.type === 'text.replace') {
+        textByTask.set(taskId, event.text);
+        publish(started.task, 'text.replace', { text: event.text });
+        return;
+      }
+      if (event.type === 'tool.call') {
+        publish(started.task, 'tool.call', {
+          callId: event.callId,
+          tool: event.tool,
+          ...(event.input === undefined ? {} : { input: event.input }),
+        });
+        return;
+      }
+      if (event.type === 'tool.result') {
+        publish(started.task, 'tool.result', {
+          callId: event.callId,
+          tool: event.tool,
+          ok: event.ok,
+          ...(event.output === undefined ? {} : { output: redactText(event.output) }),
+        });
+        return;
+      }
+      if (event.type === 'file.edit') {
+        publish(started.task, 'file.edit', { path: event.path });
+        return;
+      }
+      /**
+       * An approval is published, not granted: the permission store is the only
+       * authority that can approve a resource, and the adapter must have created
+       * that request before reporting it.
+       */
+      publish(started.task, 'approval.required', {
+        requestId: event.requestId,
+        tool: event.tool,
+        description: redactText(event.description, [], 2000),
+      });
     };
 
     const result = await deps.runner.run({

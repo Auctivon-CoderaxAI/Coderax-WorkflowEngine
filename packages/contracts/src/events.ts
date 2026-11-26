@@ -24,6 +24,7 @@ export const ExecutionEventType = z.enum([
   'text.replace',
   'tool.call',
   'tool.result',
+  'file.edit',
   'approval.required',
   'usage',
   'task.completed',
@@ -50,7 +51,18 @@ const stepPayload = z
 
 export const ExecutionEvent = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('task.queued') }).strict(),
-  z.object({ ...envelope, type: z.literal('task.started') }).strict(),
+  z
+    .object({
+      ...envelope,
+      type: z.literal('task.started'),
+      // The engine-side session id is optional: Native has none, a remote
+      // adapter reports the session it created so a client can correlate.
+      payload: z
+        .object({ sessionId: z.string().min(1).max(200).optional() })
+        .strict()
+        .optional(),
+    })
+    .strict(),
   z.object({ ...envelope, type: z.literal('step.started'), payload: stepPayload }).strict(),
   z
     .object({ ...envelope, type: z.literal('step.completed'), payload: stepPayload })
@@ -107,6 +119,13 @@ export const ExecutionEvent = z.discriminatedUnion('type', [
           description: z.string().max(2000),
         })
         .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...envelope,
+      type: z.literal('file.edit'),
+      payload: z.object({ path: z.string().min(1).max(1024) }).strict(),
     })
     .strict(),
   z.object({ ...envelope, type: z.literal('usage'), payload: Usage }).strict(),

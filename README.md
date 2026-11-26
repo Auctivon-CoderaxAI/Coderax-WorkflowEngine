@@ -33,14 +33,21 @@ are clients of the same versioned API.
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
+| Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
+| MongoDB lease table + index bootstrap | Implemented, not live-verified | `src/persistence/mongo.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
-| Durable lease persistence across replicas | Port + Mongo adapter, not wired | `src/persistence/work-runs.ts` |
+| Durable lease persistence across replicas | Table implemented; wiring needs a live database | `src/persistence/mongo.ts` |
+| Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
 | Cloud deployment of this engine | **Not done** | see `deploy/README.md` |
 | Migration of Coderax UI and CLI onto this API | **Not done** | see `docs/migration-plan.md` |
 
 Read the table literally. A green test suite here is not a claim that Coderax has
 been migrated, that the engine is deployed, or that the external agents work.
+
+`docs/parity-matrix.md` is the authoritative comparison against the engine
+Coderax runs today, and `docs/pr-1-review.md` records what is preserved, what is
+simplified and what is still missing.
 
 ## Quick start
 

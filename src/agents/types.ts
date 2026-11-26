@@ -36,7 +36,18 @@ export type AgentRunRequest = {
 export type AgentReportEvent =
   | { type: 'step.started'; stepId: string; title: string }
   | { type: 'step.completed'; stepId: string; title: string }
-  | { type: 'text.delta'; text: string };
+  | { type: 'text.delta'; text: string }
+  /** The agent replaced what it had streamed for this turn so far. */
+  | { type: 'text.replace'; text: string }
+  | { type: 'tool.call'; callId: string; tool: string; input?: unknown }
+  | { type: 'tool.result'; callId: string; tool: string; ok: boolean; output?: string }
+  | { type: 'file.edit'; path: string }
+  | {
+      type: 'approval.required';
+      requestId: string;
+      tool: string;
+      description: string;
+    };
 
 export type AgentReport = (event: AgentReportEvent) => void;
 
