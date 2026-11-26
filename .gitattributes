@@ -1,0 +1,5 @@
+# Normalize line endings so committed artifacts compare byte-for-byte on every host.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
