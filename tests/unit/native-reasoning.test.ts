@@ -178,6 +178,7 @@ test('complex plans run independent steps in parallel and dependent steps after 
         step('a'),
         step('b'),
         step('c', ['a', 'b']),
+        step('d'),
       ]),
     ],
   });
@@ -191,7 +192,8 @@ test('complex plans run independent steps in parallel and dependent steps after 
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
   assert.equal(outcome.verification?.passed, true);
-  assert.ok(gateway.maxActive >= 2, `expected parallel execution, saw ${gateway.maxActive}`);
+  // Three ready steps with a cap of two: an ignored cap would reach three.
+  assert.equal(gateway.maxActive, 2, `expected the cap to hold, saw ${gateway.maxActive}`);
 
   const starts = events
     .filter((event): event is Extract<AgentReportEvent, { type: 'step.started' }> =>
@@ -216,6 +218,7 @@ test('complex plans run independent steps in parallel and dependent steps after 
   assert.ok(verificationPrompt);
   assert.match(verificationPrompt, /OUTPUT a: result-a/);
   assert.match(verificationPrompt, /OUTPUT b: result-b/);
+  assert.match(verificationPrompt, /OUTPUT d: result-d/);
 });
 
 test('a long step result is preserved in the summary and streamed text', async () => {
@@ -242,16 +245,24 @@ test('a long step result is preserved in the summary and streamed text', async (
 test('an exhausted wave aborts and drains sibling actions before returning', async () => {
   let started = 0;
   let aborted = false;
+  let release: () => void = () => undefined;
+  const drained = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   const executor: ActionExecutor = {
     execute: ({ signal }) => {
       started += 1;
       return new Promise((resolve) => {
         const stop = (): void => {
           aborted = true;
-          resolve({
-            ok: false,
-            failure: { code: 'provider_error', detail: 'aborted', retryable: false },
-          });
+          // Stay pending after abort so the test can prove the wave waits for
+          // settlement instead of returning as soon as the failure is known.
+          void drained.then(() =>
+            resolve({
+              ok: false,
+              failure: { code: 'provider_error', detail: 'aborted', retryable: false },
+            }),
+          );
         };
         if (signal.aborted) {
           stop();
@@ -274,16 +285,27 @@ test('an exhausted wave aborts and drains sibling actions before returning', asy
     },
   });
 
-  const outcome = await agent.run(
-    runRequest({ plan: planOf([step('a'), step('b')]) }),
-    () => undefined,
-  );
+  let settled = false;
+  const run = agent
+    .run(runRequest({ plan: planOf([step('a'), step('b')]) }), () => undefined)
+    .then((result) => {
+      settled = true;
+      return result;
+    });
 
+  for (let tick = 0; tick < 50 && !aborted; tick += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+  }
+  assert.equal(aborted, true, 'the in-flight sibling action must be aborted');
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(settled, false, 'the run must wait for the aborted action to settle');
+
+  release();
+  const outcome = await run;
   assert.equal(outcome.ok, false);
   if (outcome.ok) return;
   assert.equal(outcome.code, 'iteration_exhausted');
   assert.equal(started, 1);
-  assert.equal(aborted, true, 'the in-flight sibling action must be aborted');
 });
 
 test('a failed step triggers a bounded replan and the revision runs', async () => {
