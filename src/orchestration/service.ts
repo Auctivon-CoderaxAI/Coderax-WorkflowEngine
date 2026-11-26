@@ -79,6 +79,7 @@ export type ApplicationServiceDeps = {
 export type EventStream = {
   replay: Replay;
   subscribe: (listener: (event: unknown) => void) => Unsubscribe;
+  close: () => void;
   lastSeq: number;
 };
 
@@ -148,6 +149,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
   // Runs this process accepted, whether queued or executing. Shutdown may only
   // reclaim these: another replica's live run has its own token, and writing an
   // interrupt under that token would stop work this process does not own.
+  const checkpointWrites = new Map<string, Promise<void>>();
   const localRuns = new Map<string, string>();
   /** Bounded repair window: the most recent settled tasks checked at startup. */
   const REPAIR_WINDOW = 100;
@@ -220,7 +222,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     attempt: number,
     policy: RetryPolicy,
   ): boolean {
-    if (outcome.kind !== 'failed') return false;
+    if (outcome.kind !== 'failed' || !outcome.adapterRetryableStart) return false;
     if (attempt >= policy.maxAttempts) return false;
     return isRetryableStartFailure({
       code: outcome.code,
@@ -452,6 +454,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
                 code: outcome.code,
                 detail: outcome.detail,
                 retryable: outcome.retryable,
+                adapterRetryableStart: outcome.adapterRetryableStart === true,
               },
             };
 
@@ -524,6 +527,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     try {
       await executeClaimed(taskId, token);
     } finally {
+      await checkpointWrites.get(token);
+      checkpointWrites.delete(token);
       if (localRuns.get(taskId) === token) localRuns.delete(taskId);
     }
   }
@@ -640,6 +645,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           await deps.tasks.updateFenced({ taskId, token, patch });
         })
         .catch(() => undefined);
+      checkpointWrites.set(token, checkpointChain);
     };
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
@@ -1146,6 +1152,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // `retryable` flag written by a provider after it accepted work is not
       // proof, which is why the code set is checked as well.
       if (
+        task.state !== 'failed' || !task.failure?.adapterRetryableStart ||
         !isRetryableStartFailure({
           code: task.failure?.code ?? '',
           retryable: task.failure?.retryable === true,
@@ -1394,6 +1401,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // another replica is running, is left untouched. Approval-suspended work
       // is left alone too; it is waiting for the owner, not for this process.
       for (const [taskId, token] of owned) {
+        await checkpointWrites.get(token);
         const task = await deps.tasks.get(taskId);
         if (!task || task.runToken !== token) continue;
         if (isTerminalState(task.state) || task.state === 'awaiting_approval') continue;

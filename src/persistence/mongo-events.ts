@@ -118,7 +118,8 @@ export function createMongoEventLog(input: EventCollections): EventLog {
       const oldest = first[0]?.seq;
       return {
         events: page,
-        truncated: truncated || (typeof oldest === 'number' && oldest > after + 1),
+        hasMore: truncated,
+        truncated: typeof oldest === 'number' && oldest > after + 1,
       };
     },
 

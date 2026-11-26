@@ -48,7 +48,7 @@ export type OpenedStream = {
  *
  * `seq` is assigned here and never by a caller, so two producers cannot create a
  * tie. It continues the durable watermark loaded by `hydrate`, so a restart does
- * not reset a client's cursor. Delivery to a live subscriber is synchronous;
+ * not reset a client's cursor. Durable delivery follows append commit; process-local delivery is synchronous;
  * `flush` is the durability barrier, and settlement awaits it before announcing
  * a terminal state.
  *
@@ -61,7 +61,7 @@ export type EventBus = {
   accept: (event: ExecutionEvent) => AcceptResult;
   /** In-process window; kept for synchronous inspection and existing callers. */
   replay: (taskId: string, after: number) => Replay;
-  /** Durable replay, merged with anything published while the read ran. */
+  /** One ordered replay page, starting immediately after the cursor. */
   read: (taskId: string, after: number, limit?: number) => Promise<Replay>;
   /** Replay plus a subscription established before the read, with no gap. */
   open: (taskId: string, after: number, limit?: number) => Promise<OpenedStream>;
@@ -93,6 +93,7 @@ type Stream = {
   seq: number;
   generation: number;
   seen: Set<string>;
+  pending: Set<string>;
   listeners: Set<Subscriber>;
   /** Serialized durable appends; the tail is the flush barrier. */
   appends: Promise<void>;
@@ -107,6 +108,7 @@ export function createEventBus(input: {
   iso: () => string;
   /** Absent means the bus is process-local; it is then never called durable. */
   log?: EventLog;
+  processLocal?: boolean;
 }): EventBus {
   const streams = new Map<string, Stream>();
 
@@ -118,6 +120,7 @@ export function createEventBus(input: {
       seq: 0,
       generation: 0,
       seen: new Set(),
+      pending: new Set(),
       listeners: new Set(),
       appends: Promise.resolve(),
       failure: null,
@@ -148,11 +151,16 @@ export function createEventBus(input: {
 
   function persist(state: Stream, event: ExecutionEvent): void {
     const log = input.log;
+    if (!log || input.processLocal) retain(state, event);
     if (!log) return;
+    state.pending.add(event.eventId);
     state.appends = state.appends
       .then(async () => {
         const outcome = await log.append(event);
-        if (outcome.appended) return;
+        if (outcome.appended) {
+          if (!input.processLocal) retain(state, event);
+          return;
+        }
         // A redelivery is already durable, so it is not a failure. Anything else
         // means this event will be missing from replay, and `flush` must report
         // it rather than let settlement announce a stream without its ending.
@@ -171,7 +179,7 @@ export function createEventBus(input: {
       })
       .catch((error: unknown) => {
         state.failure ??= error instanceof Error ? error : new Error(String(error));
-      });
+      }).finally(() => { state.pending.delete(event.eventId); });
   }
 
   async function hydrate(taskId: string, generation?: number): Promise<void> {
@@ -221,6 +229,7 @@ export function createEventBus(input: {
     let dropped = false;
     for (let pages = 0; ; pages += 1) {
       const page = await readDurable(taskId, cursor, pageSize);
+      dropped ||= page.truncated;
       const fresh = page.events.filter((event) => event.seq > cursor);
       if (fresh.length === 0) return { events, truncated: dropped || page.truncated };
       if (pages < MAX_REPLAY_PAGES) {
@@ -230,11 +239,11 @@ export function createEventBus(input: {
         events = [...events, ...fresh].slice(-pageSize);
       }
       cursor = fresh[fresh.length - 1]?.seq ?? cursor;
-      if (!page.truncated) return { events, truncated: dropped };
+      if (!page.hasMore) return { events, truncated: dropped };
     }
   }
 
-  async function readDurable(taskId: string, after: number, limit?: number): Promise<Replay> {
+  async function readDurable(taskId: string, after: number, limit?: number): Promise<StoredReplay> {
     const state = stream(taskId);
     await hydrate(taskId);
     if (!input.log) {
@@ -245,20 +254,12 @@ export function createEventBus(input: {
         truncated: state.events.length > 0 && oldest > after + 1,
       };
     }
-    const stored: StoredReplay = await input.log.read({
+    if (input.processLocal) await state.appends;
+    return input.log.read({
       taskId,
       after,
       limit: limit ?? input.bufferSize,
     });
-    // Anything published while the read was in flight is newer than the last
-    // stored event; appending it is what makes replay and tail one stream.
-    const local = state.events.filter((event) => event.seq > after);
-    const lastStored = stored.events[stored.events.length - 1]?.seq ?? after;
-    const extra = local.filter((event) => event.seq > lastStored);
-    return {
-      events: extra.length > 0 ? [...stored.events, ...extra] : stored.events,
-      truncated: stored.truncated,
-    };
   }
 
   return {
@@ -281,14 +282,13 @@ export function createEventBus(input: {
         type: draft.type,
         ...(draft.payload === undefined ? {} : { payload: draft.payload }),
       } as ExecutionEvent;
-      retain(state, event);
       persist(state, event);
       return event;
     },
 
     accept: (event) => {
       const state = stream(event.taskId);
-      if (state.seen.has(event.eventId)) {
+      if (state.pending.has(event.eventId) || state.seen.has(event.eventId)) {
         return { accepted: false, reason: 'duplicate' };
       }
       if (event.seq <= state.seq) {
@@ -299,7 +299,6 @@ export function createEventBus(input: {
       }
       state.seq = event.seq;
       state.generation = event.generation;
-      retain(state, event);
       persist(state, event);
       return { accepted: true, event };
     },
@@ -322,13 +321,11 @@ export function createEventBus(input: {
     open: async (taskId, after, limit) => {
       const state = stream(taskId);
       await hydrate(taskId);
-      // Subscribe before the read. `cursor` starts at what this process already
-      // knows, so only genuinely new events are buffered, and the replay covers
-      // everything at or below that point.
+      // Register at the client cursor: the local sequence may include pending appends.
       // The live cursor must never go below the cursor the client asked for: a
       // client that reconnected at 10 must not receive 6..9 from the tail.
       const subscriber: Subscriber = {
-        cursor: Math.max(after, state.seq),
+        cursor: after,
         listener: null,
         backlog: [],
       };
@@ -352,8 +349,7 @@ export function createEventBus(input: {
           // later page already replayed is skipped, so a sequence is delivered
           // exactly once.
           for (const event of subscriber.backlog) {
-            if (event.seq <= subscriber.cursor) continue;
-            subscriber.cursor = event.seq;
+            if (event.seq <= lastReplayed) continue;
             listener(event);
           }
           subscriber.backlog.length = 0;
