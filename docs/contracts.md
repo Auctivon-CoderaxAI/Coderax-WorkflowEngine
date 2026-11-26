@@ -67,6 +67,27 @@ Every event is an envelope plus a payload:
 - A bounded per-task buffer means an old cursor can be truncated; the replay
   response says so, and the client must re-read task state.
 
+## Browser operations
+
+`/v1/browser/*` is declared in the same catalogue and follows the same rules:
+
+- `browserCapabilities` reports truthful availability; a provider is operational
+  only after a versioned handshake with every feature and a free cost class.
+- Session creation takes an exact origin allowlist and always runs in cloud
+  infrastructure.
+- `browserAction` performs one navigation, inspection, screenshot, accessible
+  discovery, form, keyboard, mouse, tab, upload or download action.
+- Sensitive categories use the permission store with `browser.control` or
+  `browser.transfer`; a grant is single-use and bound to
+  `browser:<sessionId>:<category>`.
+- Screenshots, uploads and downloads are returned as artifacts whose SHA-256 is
+  computed by the engine; page observations carry `trust: "untrusted"`.
+- Receipts are a separate append-only record of what was attempted, refused or
+  performed. They are not execution events and do not enter a Work task stream.
+
+`docs/browser.md` documents the provider protocol, the safety model and the
+verification evidence required before the capability may be called operational.
+
 ## SDK rules
 
 `@coderax/sdk` is the only client. It:

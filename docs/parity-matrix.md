@@ -58,7 +58,7 @@ Status vocabulary:
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
 | 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
-| 45 | Cloud browser orchestration | none | none | Not started (both) |
+| 45 | Cloud browser orchestration | none | contract v1, fail-closed adapter, approvals, receipts, takeover; no verified provider | Contract only |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
 | 47 | Tool/plugin execution | Coderax tools | none | Missing |
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
@@ -74,7 +74,8 @@ Status vocabulary:
 | Simplified | 5 |
 | Missing | 10 |
 | Changed (deliberate) | 2 |
-| Not started (both) | 1 |
+| Contract only (no verified provider) | 1 |
+| Not started (both) | 0 |
 
 ## What this means
 
@@ -97,7 +98,8 @@ Dependency order for closing them:
    agent stack.
 4. Approvals bound to a resource (40), provider mode denial (36), caller-supplied
    workspace confinement (13).
-5. Schedules (44) and DeploymentPlatformAI (46).
+5. Schedules (44), DeploymentPlatformAI (46) and a verified zero-cost browser
+   provider for the contract in `docs/browser.md` (45).
 6. Only then Phase 5/6 client migration, Phase 8 deployment, Phase 9 removal.
 
 ## Verification status

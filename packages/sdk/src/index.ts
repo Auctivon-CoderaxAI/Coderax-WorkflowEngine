@@ -1,6 +1,13 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserCapabilities,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionList,
+  BrowserTakeoverResult,
   ChatReply,
   Conversation,
   ConversationList,
@@ -10,6 +17,7 @@ import {
   ModelList,
   NotificationList,
   PermissionList,
+  PermissionRequest,
   Problem,
   ReadinessReport,
   TaskAccepted,
@@ -17,6 +25,11 @@ import {
   TaskStatus,
 } from '@coderax/contracts';
 import type {
+  BrowserAction,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateRequest,
+  BrowserTakeoverRequest,
   ChatRequest,
   DataMode,
   PermissionDecisionRequest,
@@ -214,6 +227,115 @@ export class CoderaxClient {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
   }
 
+  browserCapabilities(): Promise<BrowserCapabilities> {
+    return this.request<BrowserCapabilities>(BrowserCapabilities, {
+      method: 'GET',
+      path: '/v1/browser/capabilities',
+    });
+  }
+
+  browserSessions(): Promise<BrowserSessionList> {
+    return this.request<BrowserSessionList>(BrowserSessionList, {
+      method: 'GET',
+      path: '/v1/browser/sessions',
+    });
+  }
+
+  browserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  createBrowserSession(request: BrowserSessionCreateRequest): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: '/v1/browser/sessions',
+      body: request,
+    });
+  }
+
+  browserAction(sessionId: string, action: BrowserAction): Promise<BrowserActionResult> {
+    return this.request<BrowserActionResult>(BrowserActionResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/actions`,
+      body: action,
+    });
+  }
+
+  pauseBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/pause`,
+    });
+  }
+
+  resumeBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/resume`,
+    });
+  }
+
+  takeoverBrowserSession(
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ): Promise<BrowserTakeoverResult> {
+    return this.request<BrowserTakeoverResult>(BrowserTakeoverResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/takeover`,
+      body: request,
+    });
+  }
+
+  closeBrowserSession(
+    sessionId: string,
+    request: BrowserCloseRequest = {},
+  ): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/close`,
+      body: request,
+    });
+  }
+
+  authorizeBrowserSession(
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ): Promise<PermissionRequest> {
+    return this.request<PermissionRequest>(PermissionRequest, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize`,
+      body: request,
+    });
+  }
+
+  decideBrowserAuthorization(
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize/decision`,
+      body: request,
+    });
+  }
+
+  browserReceipts(sessionId: string): Promise<BrowserReceiptList> {
+    return this.request<BrowserReceiptList>(BrowserReceiptList, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/receipts`,
+    });
+  }
+
+  browserArtifact(artifactId: string): Promise<BrowserArtifactContent> {
+    return this.request<BrowserArtifactContent>(BrowserArtifactContent, {
+      method: 'GET',
+      path: `/v1/browser/artifacts/${encodeURIComponent(artifactId)}`,
+    });
+  }
+
   chat(request: ChatRequest): Promise<ChatReply> {
     return this.request<ChatReply>(ChatReply, {
       method: 'POST',
@@ -337,4 +459,14 @@ export class CoderaxClient {
   }
 }
 
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };
+export type {
+  BrowserAction,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateRequest,
+  BrowserTakeoverRequest,
+  ChatRequest,
+  DataMode,
+  PermissionDecisionRequest,
+  WorkSubmitRequest,
+};

@@ -28,6 +28,12 @@ export type TaskId = z.infer<typeof TaskId>;
 export const MessageId = identifier('message identifier');
 export type MessageId = z.infer<typeof MessageId>;
 
+export const BrowserSessionId = identifier('browser session identifier');
+export type BrowserSessionId = z.infer<typeof BrowserSessionId>;
+
+export const BrowserArtifactId = identifier('browser artifact identifier');
+export type BrowserArtifactId = z.infer<typeof BrowserArtifactId>;
+
 export const RequestId = identifier('request correlation identifier');
 export type RequestId = z.infer<typeof RequestId>;
 
