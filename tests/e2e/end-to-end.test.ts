@@ -7,6 +7,11 @@ function client(url: string): CoderaxClient {
   return new CoderaxClient({ baseUrl: url, token: OWNER_TOKEN });
 }
 
+test('the SDK never sends the owner token to cleartext non-loopback HTTP', async () => {
+  const api = new CoderaxClient({ baseUrl: 'http://example.com', token: OWNER_TOKEN });
+  await assert.rejects(api.health(), /requires HTTPS/);
+});
+
 test('submit, stream, status, notifications and history complete end to end', async () => {
   const started = await startTestApp();
   const api = client(started.url);

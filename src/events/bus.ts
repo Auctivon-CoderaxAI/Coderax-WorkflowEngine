@@ -68,7 +68,8 @@ type Stream = {
   seen: Set<string>;
   listeners: Set<{ cursor: number; listener: (event: ExecutionEvent) => void }>;
   pending: ExecutionEvent[];
-  fenced: boolean;
+  /** The highest generation this process was told it no longer owns. */
+  fencedGeneration: number | null;
   hydrated: Promise<number> | null;
   /** Serializes flushes so a retry cannot interleave older and newer batches. */
   flushing: Promise<void> | null;
@@ -105,7 +106,7 @@ export function createEventBus(input: {
       seen: new Set(),
       listeners: new Set(),
       pending: [],
-      fenced: false,
+      fencedGeneration: null,
       hydrated: null,
       flushing: null,
     };
@@ -183,9 +184,11 @@ export function createEventBus(input: {
             throw error;
           }
           if (results.includes('stale_generation')) {
-            // This process no longer owns the task. Stop writing rather than
-            // interleaving a superseded generation into the newer stream.
-            state.fenced = true;
+            // This process no longer owns these generations. Fence exactly them,
+            // not the task forever: a resume in this process may legitimately
+            // publish the next generation.
+            const rejected = Math.max(...batch.map((event) => event.generation));
+            state.fencedGeneration = Math.max(state.fencedGeneration ?? 0, rejected);
             state.pending.length = 0;
             return;
           }
@@ -212,7 +215,11 @@ export function createEventBus(input: {
         type: draft.type,
         ...(draft.payload === undefined ? {} : { payload: draft.payload }),
       } as ExecutionEvent;
-      if (state.fenced) return event;
+      if (state.fencedGeneration !== null) {
+        if (draft.generation <= state.fencedGeneration) return event;
+        // A newer generation re-claims the stream in this process.
+        state.fencedGeneration = null;
+      }
       append(state, event);
       state.pending.push(event);
       while (state.pending.length > maxPending) {
@@ -229,6 +236,12 @@ export function createEventBus(input: {
       const state = stream(event.taskId);
       if (state.seen.has(event.eventId)) {
         return { accepted: false, reason: 'duplicate' };
+      }
+      if (state.fencedGeneration !== null) {
+        if (event.generation <= state.fencedGeneration) {
+          return { accepted: false, reason: 'out_of_order' };
+        }
+        state.fencedGeneration = null;
       }
       if (event.seq <= state.seq) {
         return { accepted: false, reason: 'out_of_order' };
@@ -282,7 +295,7 @@ export function createEventBus(input: {
     flush: async (taskId) => {
       await flush(taskId);
       const state = streams.get(taskId);
-      if (!state || !input.log || state.fenced) return;
+      if (!state || !input.log || state.fencedGeneration !== null) return;
       const last = state.events.at(-1);
       if (last && TERMINAL.has(last.type)) {
         await input.log.prune(taskId, retain).catch(() => 0);

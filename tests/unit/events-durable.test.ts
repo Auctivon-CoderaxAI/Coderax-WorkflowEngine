@@ -89,6 +89,40 @@ test('a failed durable append restores the batch and a retry preserves terminal 
   );
 });
 
+test('a stale-generation fence does not silence a newer generation in the same process', async () => {
+  const log = createMemoryEventLog();
+  let reject = true;
+  const staleOnce = {
+    ...log,
+    append: async (events: Parameters<typeof log.append>[0]) => {
+      if (reject) {
+        reject = false;
+        return events.map(() => 'stale_generation' as const);
+      }
+      return log.append(events);
+    },
+  };
+  const bus = busOver(staleOnce);
+  bus.publish({ taskId: 'task-fence', agent: 'coderax', generation: 1, type: 'task.queued' });
+  await bus.flush('task-fence');
+
+  bus.publish({
+    taskId: 'task-fence',
+    agent: 'coderax',
+    generation: 2,
+    type: 'task.completed',
+    payload: { summary: 'resumed' },
+  });
+  await bus.flush('task-fence');
+
+  const durable = await log.read('task-fence', 0, 100);
+  assert.deepEqual(
+    durable.map((event) => [event.generation, event.type]),
+    [[2, 'task.completed']],
+    'the rejected generation is dropped and the newer one is written',
+  );
+});
+
 test('a duplicate event is stored once and an out-of-order one is refused', async () => {
   const log = createMemoryEventLog();
   const bus = busOver(log);

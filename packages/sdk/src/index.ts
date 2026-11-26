@@ -145,7 +145,24 @@ export class CoderaxClient {
     };
   }
 
+  /**
+   * The owner bearer token is never attached to a cleartext non-loopback URL.
+   * Loopback HTTP stays available for local development and tests.
+   */
+  private assertSecureOrigin(): void {
+    const url = new URL(this.options.baseUrl);
+    const loopback =
+      url.hostname === 'localhost' ||
+      url.hostname === '127.0.0.1' ||
+      url.hostname === '[::1]' ||
+      url.hostname === '::1';
+    if (url.protocol !== 'https:' && !loopback) {
+      throw new Error('CoderaxClient requires HTTPS for a non-loopback base URL.');
+    }
+  }
+
   private async send(input: RequestInput): Promise<Response> {
+    this.assertSecureOrigin();
     return this.options.fetchImpl(
       joinUrl(this.options.baseUrl, input.path, input.query),
       {

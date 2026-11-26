@@ -91,6 +91,33 @@ test('two replicas share one durable quota and both limits fail closed', async (
   assert.equal((await replicaA.reserve('owner', now)).allowed, false);
 });
 
+test('a concurrent token settlement cannot slip a request past the ceiling', async () => {
+  const collection = createFakeDatabase().collection('quota');
+  const store = createMongoQuotaStore({ collection });
+  const ownerId = 'owner';
+  const day = '2026-11-26';
+  await store.reserve({ ownerId, day, maxRequests: 2, maxTokens: 100 });
+
+  // Simulate a second replica settling the whole token allowance between this
+  // replica's read and its compare-and-swap charge.
+  const original = collection.updateOne.bind(collection);
+  let injected = false;
+  collection.updateOne = async (filter, update, options) => {
+    if (!injected && filter._id === `${ownerId}:${day}` && update.$inc && 'requests' in update.$inc) {
+      injected = true;
+      await store.settle({
+        ownerId,
+        day,
+        usage: { requests: 0, inputTokens: 100, outputTokens: 0 },
+      });
+    }
+    return original(filter, update, options);
+  };
+
+  const second = await store.reserve({ ownerId, day, maxRequests: 2, maxTokens: 100 });
+  assert.equal(second.allowed, false, 'the token ceiling is part of the atomic charge');
+});
+
 test('a released reservation does not charge quota for work that never ran', async () => {
   const collection = createFakeDatabase().collection('quota');
   const ledger = createBudgetLedger({

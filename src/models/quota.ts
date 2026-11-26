@@ -126,8 +126,16 @@ export function createMongoQuotaStore(input: { collection: MongoCollectionLike }
         if (state.requests >= maxRequests || state.inputTokens + state.outputTokens >= maxTokens) {
           return { allowed: false, requests: state.requests };
         }
+        // The observed token counts are part of the compare-and-swap. A
+        // concurrent `settle` changes them, so the update misses and the retry
+        // re-checks the token ceiling instead of admitting past it.
         const result = await collection.updateOne(
-          { _id: id, requests: state.requests },
+          {
+            _id: id,
+            requests: state.requests,
+            inputTokens: state.inputTokens,
+            outputTokens: state.outputTokens,
+          },
           { $inc: { requests: 1 } },
           { upsert: false },
         );

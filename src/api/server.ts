@@ -83,6 +83,10 @@ export function createHttpServer(input: {
         });
         for await (const event of result.events) {
           if (response.destroyed || response.writableEnded) break;
+          // The SSE id is what lets EventSource resume with Last-Event-ID;
+          // JSON properties alone are invisible to the browser reconnect.
+          const seq = (event as { seq?: unknown }).seq;
+          if (typeof seq === 'number') response.write(`id: ${seq}\n`);
           response.write(`data: ${JSON.stringify(event)}\n\n`);
         }
         response.end();
