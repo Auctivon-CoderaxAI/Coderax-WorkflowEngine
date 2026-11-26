@@ -124,7 +124,15 @@ export function createMongoEventLog(input: EventCollections): EventLog {
 
     watermark: async (taskId) => {
       const current = await head(taskId);
-      return current ?? { seq: 0, generation: 0 };
+      // A crash between the insert and the head update leaves a committed row
+      // above the head. The watermark is the maximum of the two, so a restart
+      // cannot reuse a sequence that already has a row.
+      const newest = await events.find({ taskId }).sort({ seq: -1 }).limit(1).toArray();
+      const persisted = typeof newest[0]?.seq === 'number' ? newest[0].seq : 0;
+      return {
+        seq: Math.max(current?.seq ?? 0, persisted),
+        generation: current?.generation ?? 0,
+      };
     },
 
     latest: async (taskId, limit) => {

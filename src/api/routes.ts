@@ -44,25 +44,27 @@ function eventId(value: unknown): string {
 async function* toEventStream(stream: {
   replay: { events: unknown[] };
   subscribe: (listener: (event: unknown) => void) => () => void;
+  close?: () => void;
 }): AsyncIterable<unknown> {
   const seen = new Set<string>();
-  for (const event of stream.replay.events) {
-    seen.add(eventId(event));
-    yield event;
-    if (isTerminalPayload(event)) return;
-  }
-
-  const pending: unknown[] = [];
-  let wake: (() => void) | null = null;
-  const unsubscribe = stream.subscribe((event) => {
-    const id = eventId(event);
-    if (id && seen.has(id)) return;
-    if (id) seen.add(id);
-    pending.push(event);
-    wake?.();
-  });
-
+  let unsubscribe: (() => void) | null = null;
   try {
+    for (const event of stream.replay.events) {
+      seen.add(eventId(event));
+      yield event;
+      if (isTerminalPayload(event)) return;
+    }
+
+    const pending: unknown[] = [];
+    let wake: (() => void) | null = null;
+    unsubscribe = stream.subscribe((event) => {
+      const id = eventId(event);
+      if (id && seen.has(id)) return;
+      if (id) seen.add(id);
+      pending.push(event);
+      wake?.();
+    });
+
     for (;;) {
       const next = pending.shift();
       if (next !== undefined) {
@@ -78,7 +80,10 @@ async function* toEventStream(stream: {
       wake = null;
     }
   } finally {
-    unsubscribe();
+    // A replay that already ended the stream never calls `subscribe`; releasing
+    // the buffered subscription here keeps it from outliving the connection.
+    unsubscribe?.();
+    stream.close?.();
   }
 }
 

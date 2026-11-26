@@ -54,7 +54,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 139 tests + 1 opt-in live-DB check: unit, contract, integration, security, e2e
+npm test                          # 142 tests + 1 opt-in live-DB check: unit, contract, integration, security, e2e
 npm run openapi:check             # fails if the published contract drifted
 ```
 

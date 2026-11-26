@@ -840,3 +840,74 @@ test('a backlog larger than one page replays through the ending without duplicat
     workspace.cleanup();
   }
 });
+
+test('repair restores the current generation ending and refreshes a stale notification', async () => {
+  const database = createFakeDatabase();
+  const workspace = createWorkspaces();
+  const taskId = 'task_gen_repair';
+  const conversationId = 'conv_gen_repair';
+  const now = new Date().toISOString();
+  await seedConversation(database, conversationId);
+
+  // Generation 2 completed, but its ending never reached the log: the newest
+  // event belongs to generation 1.
+  await collection(database, 'tasks').insertOne({
+    ...taskRecord({
+      taskId,
+      conversationId,
+      state: 'completed',
+      runToken: 'run_g2',
+      generation: 2,
+      updatedAt: now,
+      result: { summary: 'done again', artifacts: [] },
+      checkpoint: { completedSteps: [], text: '' },
+    }),
+  });
+  for (const event of [
+    { seq: 1, type: 'task.queued', generation: 1, payload: {} },
+    {
+      seq: 2,
+      type: 'task.failed',
+      generation: 1,
+      payload: { code: 'provider_error', retryable: true },
+    },
+  ]) {
+    await collection(database, 'events').insertOne({
+      v: 1,
+      taskId,
+      eventId: `gen_${event.seq}`,
+      at: now,
+      agent: 'coderax',
+      ...event,
+    });
+  }
+  await collection(database, 'event_heads').insertOne({ taskId, seq: 2, generation: 1 });
+
+  // A notification left over from the interrupted generation.
+  await collection(database, 'notifications').insertOne({
+    taskId,
+    ownerId: OWNER_ID,
+    conversationId,
+    agent: 'coderax',
+    mode: 'cloud',
+    state: 'interrupted',
+    summary: 'interrupted',
+    createdAt: now,
+    read: true,
+  });
+
+  const app = await mongoApp({ database, workspace });
+  try {
+    const replay = await app.dependencies.events.read(taskId, 0, 10);
+    const endings = replay.events.filter((event) => event.type === 'task.completed');
+    assert.equal(endings.length, 1);
+    assert.equal(endings[0]?.generation, 2);
+
+    const notifications = await app.service.notifications(principal);
+    const entry = notifications.notifications.find((item) => item.taskId === taskId);
+    assert.equal(entry?.state, 'completed');
+  } finally {
+    await app.stop();
+    workspace.cleanup();
+  }
+});

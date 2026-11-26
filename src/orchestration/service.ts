@@ -288,7 +288,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       agent: task.agent,
       mode: task.mode,
       state,
-      ...(summary ? { summary: summary.slice(0, 500) } : {}),
+      // The summary can carry a provider or adapter detail, so it is scrubbed
+      // here for every caller rather than only on the settlement path.
+      ...(summary ? { summary: redactText(summary, [], 500) } : {}),
       createdAt: deps.clock.iso(),
       read: false,
     });
@@ -326,7 +328,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // The ending is the newest event. Inspecting the first page would miss a
       // terminal event on a stream longer than one page and append a duplicate.
       const existing = await deps.events.tail(task.taskId, 1);
-      if (!existing.some((event) => isTerminalEvent(event.type))) {
+      // The ending must belong to the current generation. An older generation's
+      // terminal event must not suppress repair after a resume.
+      if (
+        !existing.some(
+          (event) => isTerminalEvent(event.type) && event.generation === task.generation,
+        )
+      ) {
         const base = {
           taskId: task.taskId,
           agent: task.agent,
@@ -352,7 +360,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             type: 'task.failed',
             payload: {
               code: (task.failure?.code ?? 'provider_error') as EngineFailureCode,
-              ...(task.failure?.detail ? { detail: task.failure.detail } : {}),
+              // The repair path bypasses the settlement helper, so it applies
+              // the same scrubbing the live path does.
+              ...(task.failure?.detail
+                ? { detail: redactText(task.failure.detail, [], 1000) }
+                : {}),
               retryable: task.failure?.retryable === true,
             },
           });
@@ -391,7 +403,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     try {
       const listed = await deps.notifications.list(task.ownerId);
-      if (!listed.notifications.some((entry) => entry.taskId === task.taskId)) {
+      // A row with the wrong terminal state is stale: a task interrupted after a
+      // crash and later completed must not keep an `interrupted` blue dot.
+      const existingNotification = listed.notifications.find(
+        (entry) => entry.taskId === task.taskId,
+      );
+      if (!existingNotification || existingNotification.state !== terminal) {
         await notifyTerminal(
           task,
           terminal,
@@ -941,13 +958,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // submission refused as busy or duplicate therefore leaves no user turn in
       // a conversation that has no task to answer it. The id is derived from the
       // task, so a retried submit cannot duplicate the prompt either.
+      // Best effort: the task record is authoritative and already carries the
+      // objective, so a transcript failure must not strand a created task and
+      // its lease without ever scheduling it.
       await deps.conversations.appendMessage({
         messageId: `${created.task.taskId}:user`,
         conversationId,
         role: 'user',
         text: request.objective,
         createdAt: now,
-      });
+      }).catch(() => false);
 
       publish(created.task, 'task.queued');
       deps.audit.record({
@@ -1296,6 +1316,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         replay: opened.replay,
         subscribe: (listener) =>
           opened.subscribe(listener as (event: ExecutionEvent) => void),
+        close: opened.close,
         lastSeq: deps.events.lastSeq(taskId),
       });
     },
