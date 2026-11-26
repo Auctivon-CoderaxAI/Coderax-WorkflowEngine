@@ -8,6 +8,8 @@ import type { Usage } from '@coderax/contracts';
  */
 export type BudgetLedger = {
   reserve: (ownerId: string, at: Date) => { allowed: boolean; requests: number };
+  /** Gives back a reservation when the request was refused after reserving. */
+  release: (ownerId: string, at: Date) => void;
   consume: (ownerId: string, usage: Usage, at: Date) => void;
   snapshot: (ownerId: string, at: Date) => {
     requests: number;
@@ -44,6 +46,10 @@ export function createBudgetLedger(input: {
       }
       state.requests += 1;
       return { allowed: true, requests: state.requests };
+    },
+    release: (ownerId, at) => {
+      const state = day(ownerId, at);
+      if (state.requests > 0) state.requests -= 1;
     },
     consume: (ownerId, usage, at) => {
       const state = day(ownerId, at);

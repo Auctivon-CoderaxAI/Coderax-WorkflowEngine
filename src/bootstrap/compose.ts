@@ -13,10 +13,10 @@ import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionStore } from '../permissions/store.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
+import { createArtifactStorage } from '../artifacts/store.js';
 import { createTaskRunner } from '../execution/runner.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
@@ -192,14 +192,18 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     config,
     env,
     clock,
+    ids,
     ...(input.persistence ?? {}),
   });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = persistence.permissions;
   const notifications = persistence.notifications;
+  const schedules = persistence.schedules;
+  const artifacts = persistence.artifacts;
+  const artifactStorage = createArtifactStorage(workspaceRoots(config.workspaces));
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
@@ -301,6 +305,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    schedules,
+    artifacts,
+    artifactStorage,
     audit,
     events,
     runner,
@@ -361,6 +368,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     port: config.server.port,
   });
 
+  let scheduleTimer: NodeJS.Timeout | null = null;
+
   return {
     dependencies: finalContainer.dependencies,
     service,
@@ -372,9 +381,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      if (config.schedules.enabled) {
+        scheduleTimer = setInterval(() => {
+          void service.tickSchedules().catch(() => undefined);
+        }, config.schedules.tickIntervalMs);
+        scheduleTimer.unref();
+      }
       return { url };
     },
     stop: async () => {
+      if (scheduleTimer) {
+        clearInterval(scheduleTimer);
+        scheduleTimer = null;
+      }
       await service.shutdown();
       await server.close();
       await persistence.close();

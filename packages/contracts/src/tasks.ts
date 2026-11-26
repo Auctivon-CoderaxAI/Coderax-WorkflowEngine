@@ -4,6 +4,7 @@ import {
   AgentId,
   ConversationId,
   DataMode,
+  IdempotencyKey,
   IsoDateTime,
   MessageId,
   ModelRef,
@@ -52,6 +53,11 @@ export const WorkSubmitRequest = z
     budget: Budget.optional(),
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
+    /**
+     * A repeated submission with the same key returns the task the first one
+     * created. The key is scoped to the owner, so two owners can never collide.
+     */
+    idempotencyKey: IdempotencyKey.optional(),
   })
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
@@ -188,3 +194,39 @@ export type MemoryEntry = z.infer<typeof MemoryEntry>;
 
 export const MemoryList = z.object({ entries: z.array(MemoryEntry) }).strict();
 export type MemoryList = z.infer<typeof MemoryList>;
+
+/**
+ * Writing memory over HTTP is explicit and owner-scoped. It is not retrieval:
+ * the returned entry is exact key/value storage in one data mode, and the
+ * handshake reports retrieval augmentation as unavailable.
+ */
+export const MemoryPutRequest = z
+  .object({
+    key: z.string().trim().min(1).max(200),
+    value: z.string().max(20_000),
+    mode: DataMode.default('private'),
+  })
+  .strict();
+export type MemoryPutRequest = z.infer<typeof MemoryPutRequest>;
+
+/** The task read model. It is a projection, not a second task record. */
+export const TaskSummary = z
+  .object({
+    taskId: TaskId,
+    conversationId: ConversationId,
+    objective: z.string().min(1).max(200_000),
+    state: TaskState,
+    agent: AgentId,
+    mode: DataMode,
+    generation: z.number().int().nonnegative(),
+    createdAt: IsoDateTime,
+    updatedAt: IsoDateTime,
+    cancelRequested: z.boolean(),
+  })
+  .strict();
+export type TaskSummary = z.infer<typeof TaskSummary>;
+
+export const TaskList = z
+  .object({ tasks: z.array(TaskSummary), total: z.number().int().nonnegative() })
+  .strict();
+export type TaskList = z.infer<typeof TaskList>;

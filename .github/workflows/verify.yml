@@ -34,11 +34,25 @@ jobs:
       - name: Build (TypeScript project references)
         run: npm run build
 
+      - name: SDK distribution artifacts (deterministic)
+        run: node dist/scripts/pack-sdk.js
+
       - name: Tests (unit, contract, integration, security, e2e)
         run: node --test "dist/tests/**/*.test.js"
 
       - name: Contract drift gate
         run: npm run openapi:check
+
+      - name: Package checksums
+        working-directory: dist-artifacts
+        run: sha256sum -c SHA256SUMS
+
+      - name: Upload SDK distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: coderax-sdk-1.1.0
+          path: dist-artifacts/
+          if-no-files-found: error
 
       - name: Reject committed secrets and local paths
         run: |
