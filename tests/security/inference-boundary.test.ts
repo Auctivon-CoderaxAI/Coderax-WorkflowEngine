@@ -51,19 +51,44 @@ function offenders(pattern: RegExp, allowed: (path: string) => boolean): string[
 
 const isAdapter = (path: string): boolean => path.startsWith('models/providers/');
 
+/**
+ * Egress that is not inference. The external-agent transport, the MCP client and
+ * the embedding client each reach an endpoint the owner configured separately,
+ * under their own scope and origin checks; none of them can select or call an
+ * inference model, so none can bypass the router, its policy or its budget. They
+ * are named here rather than pattern-matched, so a new egress path still fails
+ * this guard until someone justifies it.
+ */
+const nonInferenceTransport = new Set([
+  'agents/adapters/opencode.ts',
+  'knowledge/store.ts',
+  'mcp/client.ts',
+]);
+
+const mayEgress = (path: string): boolean => isAdapter(path) || nonInferenceTransport.has(path);
+
+/**
+ * The one guarded outbound transport: scheme validation, DNS resolution, a
+ * refusal of every non-public address and a pinned connection. It is a security
+ * primitive shared by the non-inference transports above, not an inference
+ * client, and it never selects a model.
+ */
+const guardedTransport = 'security/network.ts';
+const mayOpenSocket = (path: string): boolean => isAdapter(path) || path === guardedTransport;
+
 test('only a provider adapter performs network I/O', () => {
   // The adapter receives `fetchImpl` from the composition root; it is the only
   // module allowed to invoke it. Nothing else reaches a provider directly.
   // `node:http` is excluded because the API server uses it for ingress, not egress.
   const egress = /\bfetchImpl\s*\(|\bfetch\s*\(/;
   assert.deepEqual(
-    offenders(egress, isAdapter),
+    offenders(egress, mayEgress),
     [],
     'network I/O outside src/models/providers bypasses the router, its policy and its budget',
   );
 
   const outboundTransport = /from\s+['"](?:node:https|node:net|node:tls|node:dns|undici|axios|node-fetch)['"]/;
-  assert.deepEqual(offenders(outboundTransport, isAdapter), []);
+  assert.deepEqual(offenders(outboundTransport, mayOpenSocket), []);
 });
 
 test('no vendor inference SDK is imported anywhere', () => {
