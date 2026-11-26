@@ -7,11 +7,17 @@
 - Branch: `ci/permanent-quality-gates`
 - Compare: https://github.com/Auctivon-CoderaxAI/Coderax-WorkflowEngine/compare/main...ci/permanent-quality-gates
 - The surviving implementation is this branch. The parallel
-  `ci/permanent-quality-gate` branch remains at
-  `21015a7f7484dda8a6b9951e52782a8bd8921d01`; it was inspected, not overwritten.
-  Its uniquely useful checks — pinned action SHAs, disabled install lifecycle
-  scripts, lockfile/manifest integrity and the SDK/contract release range — were
-  folded into this branch. There is one gate implementation, not three.
+  `ci/permanent-quality-gate` branch was first compared at
+  `21015a7f7484dda8a6b9951e52782a8bd8921d01` and then advanced to
+  `07e7220ee786291098e9e8ccbb6db3787e7fc2dc` while this branch was being
+  verified. It was inspected, not overwritten. Its uniquely useful checks —
+  pinned action SHAs, disabled install lifecycle scripts, lockfile/manifest
+  integrity and the SDK/contract release range — were folded into this branch.
+  Its latest self-declared supersession is not accepted: its workflow's
+  protected-context shape is not the observed `verify` job, and its live database
+  lane is a sibling rather than part of that required job. One surviving
+  implementation remains; the other branch is a moving owner artifact and must
+  be closed by its owner, not force-overwritten here.
 
 Verified code head: `3c7c0446026691bf34a67628d038b1fa7e549332`. The final
 remote SHA is the branch head at publication and is restated in the handoff.
@@ -136,8 +142,9 @@ no shell-execution path is admitted outside the declared tool seam.
   evidence. Actions are pinned to full commit SHAs and install lifecycle scripts
   are disabled.
 - There is no pull request for this branch. The read-only API found zero
-  workflow runs at the checked heads; GitHub Actions only runs this workflow on
-  pull requests and pushes to `main`.
+  workflow runs at the checked heads. The workflow now also triggers on pushes
+  to `ci/**` so the gate branch can obtain exact-head hosted evidence; this does
+  not create a second pipeline.
 - Creating the PR requires an authorized GitHub write integration. This host has
   no `gh` binary and no GitHub write credential; the unauthenticated API cannot
   create a pull request. No PR, self-approval or independent review was

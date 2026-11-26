@@ -172,13 +172,15 @@ The files most likely to need a rebase are
 `src/permissions/store.ts`, `src/models/router.ts` and `packages/contracts/`
 sources.
 
-There is also a separate remote `ci/permanent-quality-gate` branch with an
-earlier one-commit gate implementation at `21015a7`. It was inspected at that
-head and remains unmodified. Its pinned action SHAs, disabled install lifecycle
-scripts, dependency/lockfile integrity check and release-range check were
-integrated here; its sibling database job was not copied because it would not be
-visible to the protected `verify` context. One surviving implementation remains,
-not two or three.
+There is also a separate remote `ci/permanent-quality-gate` branch. It was
+inspected at `21015a7` and advanced to `07e7220` while this branch was being
+verified; it remains unmodified. Its pinned action SHAs, disabled install
+lifecycle scripts, dependency/lockfile integrity check and release-range check
+were integrated here; its sibling database job was not copied because it would
+not be visible to the protected `verify` context. Its docs now claim this branch
+is superseded, but its workflow still does not put the live database inside the
+observed required `verify` job, so that claim is rejected pending owner review.
+One surviving implementation remains, not two or three.
 Cross-repository release certification stays outside this repository gate: the
 release owner consumes the evidence from the exact `verify` head, while this
 repository enforces only its own architecture and tests.

@@ -12,7 +12,9 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    # A gate-branch push gets exact-head hosted evidence before the gate is
+    # allowed to reject anyone else's branch. This is still one workflow.
+    branches: [main, 'ci/**']
 
 permissions:
   contents: read

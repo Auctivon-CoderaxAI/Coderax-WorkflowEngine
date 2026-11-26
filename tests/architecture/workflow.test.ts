@@ -36,6 +36,11 @@ test('actions are pinned and install scripts cannot run in the required job', ()
   assert.match(text, /npm ci --ignore-scripts/);
 });
 
+test('a gate-branch push produces exact-head hosted evidence', () => {
+  const text = readFileSync(path.join(workflows, 'verify.yml'), 'utf8');
+  assert.match(text, /branches:\s*\[main,\s*'ci\/\*\*'\]/);
+});
+
 test('the live lane uses a pinned MongoDB service and fails without it', () => {
   const text = readFileSync(path.join(workflows, 'verify.yml'), 'utf8');
   assert.match(text, /image:\s*mongo:7\.0\.14/);
