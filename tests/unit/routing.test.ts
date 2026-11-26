@@ -123,6 +123,13 @@ const request = (modelId: string, prompt = 'hello', providerId = 'p') => ({
   signal: new AbortController().signal,
 });
 
+
+async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
+  const result: T[] = [];
+  for await (const event of events) result.push(event);
+  return result;
+}
+
 test('only a zero price list or a live attestation establishes free cost', async () => {
   const free = freeModel('free');
   const paid = freeModel('paid', { ref: { providerId: 'p', modelId: 'paid' }, pricing: { prompt: '0.000001', completion: '0.000002' } });
@@ -826,4 +833,81 @@ test('routing mode inference treats code and long objectives as complex', () => 
   assert.equal(inferRoutingMode({ objective: 'Summarize the release notes' }), 'fast');
   assert.equal(inferRoutingMode({ objective: 'Compare the release notes' }), 'auto');
   assert.equal(inferRoutingMode({ objective: 'Use the tool', toolCount: 1 }), 'complex');
+});
+
+test('a dispatch failure takes precedence over an earlier candidate token refusal', async () => {
+  for (const streaming of [false, true]) {
+    const big = freeModel('big', { maxOutputTokens: 1_000 });
+    const small = freeModel('small', { maxOutputTokens: 100 });
+    const provider = adapter({
+      models: [big, small],
+      complete: async () => { throw new ProviderError('server', 'fixture provider failed', { retryable: true }); },
+    });
+    const engine = router({ adapters: [provider], preferredRoute: [big.ref], ledger: budget(5, 250) });
+    await engine.refresh();
+    const input = { ...request('big'), allowFallback: true };
+    await assert.rejects(
+      () => streaming ? collect(engine.stream(input)) : engine.complete(input),
+      (error: unknown) => error instanceof ModelRoutingError &&
+        error.code === 'engine_unavailable' && error.retryable && /fixture provider failed/.test(error.message),
+    );
+    assert.equal(provider.calls, 1);
+  }
+});
+
+test('a refresh after stream metadata rechecks the prepared output, context and capabilities', async () => {
+  const original = freeModel('primary', {
+    capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
+  });
+  for (const update of [
+    { maxOutputTokens: 128 },
+    { contextTokens: 1_200 },
+    { capabilities: { ...original.capabilities, vision: false } },
+    { capabilities: { ...original.capabilities, toolCalling: false } },
+    { contextTokens: 32_000 },
+  ]) {
+    let primary = original;
+    const secondary = { ...original, ref: { providerId: 'p', modelId: 'secondary' } };
+    const provider = adapter({ models: () => [primary, secondary] });
+    const engine = router({
+      adapters: [provider],
+      preferredRoute: [original.ref],
+      ledger: budget(1),
+      settings: { requestsPerMinute: 1, maxConcurrency: 1 },
+    });
+    await engine.refresh();
+    const stream = engine.stream({
+      ...request('primary'),
+      allowFallback: true,
+      messages: [{ role: 'user', text: 'image', images: ['data:image/png;base64,YQ=='] }],
+      tools: [{ name: 'fixture', description: 'A fixture', parameters: {} }],
+    });
+    const iterator = stream[Symbol.asyncIterator]();
+    const first = (await iterator.next()).value;
+    assert.equal(first?.type, 'model');
+    assert.deepEqual(first.model, original.ref);
+    primary = { ...original, ...update };
+    await engine.refresh();
+    const events = await collect({ [Symbol.asyncIterator]: () => iterator });
+    assert.equal(provider.calls, 1);
+    const expected = update.contextTokens === 32_000 ? 'primary' : 'secondary';
+    assert.ok(events.some((event) => event.type === 'text' && event.text === `ok:${expected}`));
+  }
+});
+
+test('the longest active attestation keeps a route usable after the shorter grant expires', async () => {
+  let now = new Date('2026-11-26T12:00:00Z');
+  const model = freeModel('attested', { pricing: null });
+  const shorter = {
+    providerId: 'p', modelId: 'attested', evidenceUrl: 'https://provider.example/pricing',
+    verifiedAt: '2026-11-25T00:00:00Z', expiresAt: '2026-11-27T00:00:00Z',
+  };
+  const engine = router({
+    adapters: [adapter({ models: [model] })],
+    now: () => now,
+    attestations: [shorter, { ...shorter, expiresAt: '2026-11-29T00:00:00Z' }],
+  });
+  await engine.refresh();
+  now = new Date('2026-11-28T00:00:00Z');
+  assert.equal(engine.resolve(model.ref, 'cloud', { operation: 'chat' }).ok, true);
 });

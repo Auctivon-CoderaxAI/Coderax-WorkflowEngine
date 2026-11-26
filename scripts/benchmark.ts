@@ -71,6 +71,18 @@ async function main(): Promise<void> {
     for (const model of models) {
       const outcomes: TaskOutcome[] = [];
       for (const task of suite.tasks) {
+        const permission = app.providerPolicy.evaluate({
+          providerId: model.ref.providerId,
+          operation: 'native_reasoning',
+          mode: 'cloud',
+          at: app.dependencies.clock.now(),
+        });
+        if (!permission.allowed) {
+          process.stdout.write(
+            `${model.ref.providerId}/${model.ref.modelId}: skipping model: ${permission.detail}\n`,
+          );
+          break;
+        }
         const started = performance.now();
         try {
           const completion = await app.modelRouter.complete({
@@ -114,6 +126,7 @@ async function main(): Promise<void> {
           } as TaskOutcome);
         }
       }
+      if (outcomes.length !== suite.tasks.length) continue;
       const score = scoreOutcomes(outcomes);
       const latency =
         outcomes.reduce((total, outcome) => total + outcome.latencyMs, 0) / outcomes.length;
@@ -129,6 +142,11 @@ async function main(): Promise<void> {
       process.stdout.write(
         `${model.ref.providerId}/${model.ref.modelId}: coding=${score.coding.toFixed(2)} reasoning=${score.reasoning.toFixed(2)}${score.toolCalling === undefined ? '' : ` tools=${score.toolCalling.toFixed(2)}`}\n`,
       );
+    }
+
+    if (results.length === 0) {
+      process.stdout.write('No model completed the suite under the current policy; no artifact was written.\n');
+      return;
     }
 
     const artifact = buildArtifact({

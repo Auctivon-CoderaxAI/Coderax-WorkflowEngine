@@ -333,20 +333,20 @@ export async function* parseStream(
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      if (Buffer.byteLength(buffer, 'utf8') > MAX_SSE_BUFFER_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        throw new ProviderError(
-          'invalid',
-          `${provider} sent an SSE frame larger than the safety limit.`,
-          { retryable: false },
-        );
-      }
       for (;;) {
         // LF, CRLF and lone CR are all valid SSE line endings.
         const delimiter = buffer.match(/\r\n\r\n|\n\n|\r\r/);
         if (!delimiter || delimiter.index === undefined) break;
         const frame = buffer.slice(0, delimiter.index);
         buffer = buffer.slice(delimiter.index + delimiter[0].length);
+        if (Buffer.byteLength(frame, 'utf8') > MAX_SSE_BUFFER_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          throw new ProviderError(
+            'invalid',
+            `${provider} sent an SSE frame larger than the safety limit.`,
+            { retryable: false },
+          );
+        }
         for (const line of frame.split(/\r\n|\n|\r/)) {
           if (!line.startsWith('data:')) continue;
           const payload = line.slice(5).trim();
@@ -422,6 +422,14 @@ export async function* parseStream(
             finishReason = candidate.finishReason;
           }
         }
+      }
+      if (Buffer.byteLength(buffer, 'utf8') > MAX_SSE_BUFFER_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new ProviderError(
+          'invalid',
+          `${provider} sent an SSE frame larger than the safety limit.`,
+          { retryable: false },
+        );
       }
     }
   } catch (error) {

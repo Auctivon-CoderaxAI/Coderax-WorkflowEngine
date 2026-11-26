@@ -22,9 +22,9 @@ import type {
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskRecord } from '../domain.js';
+import type { ConversationRecord, TaskRecord } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
-import type { ConversationRepository } from '../persistence/conversations.js';
+import { ConversationModeConflict, type ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
@@ -41,6 +41,7 @@ import type { ModelCatalog } from '../models/catalog.js';
 import { inferRoutingMode } from '../models/router.js';
 import { estimateTokens } from '../models/verify.js';
 import type { BudgetLedger } from '../models/budget.js';
+import type { PolicyDecision } from '../models/policy.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -66,6 +67,7 @@ export type ApplicationServiceDeps = {
   agents: AgentRegistry;
   models: ModelCatalog;
   budget: BudgetLedger;
+  externalPolicy: (engine: Exclude<AgentAdapter['engine'], 'native'>, mode: DataMode) => PolicyDecision;
   lease: LeaseStore;
   tasks: TaskRepository;
   conversations: ConversationRepository;
@@ -156,6 +158,21 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+
+  function checkExternal(engine: AgentAdapter['engine'], mode: DataMode): ServiceResult<void> {
+    if (engine === 'native') return ok(undefined);
+    const decision = deps.externalPolicy(engine, mode);
+    return decision.allowed ? ok(undefined) : fail('model_missing', decision.detail);
+  }
+
+  async function ensureConversation(record: ConversationRecord): Promise<ServiceResult<ConversationRecord>> {
+    try {
+      return ok(await deps.conversations.ensure(record));
+    } catch (error) {
+      if (error instanceof ConversationModeConflict) return fail('conflict', error.message);
+      throw error;
+    }
+  }
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -403,6 +420,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
+    const external = checkExternal(adapter.value.engine, task.mode);
+    if (!external.ok) {
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'not_configured',
+        detail: external.detail,
+        retryable: false,
+      });
+      return;
+    }
+
     const routing = inferRoutingMode({ objective: task.objective });
     const pinned = task.modelPinned === true && task.model !== null;
     const model = deps.models.resolve(pinned ? task.model : null, task.mode, {
@@ -536,7 +564,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     };
 
-    const history = await historyFor(task.conversationId, task.objective);
+    const history = adapter.value.isolation.conversations === 'granted'
+      ? await historyFor(task.conversationId, task.objective)
+      : undefined;
     // External engines bypass the router, so their request slot is reserved here.
     const externalReservation =
       started.task.engine === 'native'
@@ -557,38 +587,46 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const held = externalReservation?.allowed ? externalReservation.reservation : null;
-    const result = await deps.runner.run({
-      scope: scopeOf(started.task),
-      token,
-      adapter: adapter.value as AgentAdapter,
-      request: {
-        taskId: task.taskId,
-        ownerId: task.ownerId,
-        tenantId: task.tenantId,
-        conversationId: task.conversationId,
-        objective: task.objective,
-        history,
-        model: model.value.ref,
-        routing,
-        allowFallback: !pinned,
-        mode: task.mode,
-        operation: 'work',
-        workspaceRoot: workspace.value.root,
-        maxSteps: deps.config.engines.native.maxSteps,
-        budget: task.budget,
-        signal: controller.signal,
-      },
-      report,
-    });
-    // Budget ownership is independent of task-ownership fences; release the
-    // reservation before any guard that can return early.
-    if (held) {
-      if (result.outcome.kind === 'completed') {
-        deps.budget.settle(held.id, result.outcome.usage ?? {});
-      } else {
-        // The external engine may have dispatched before failing; retain the
-        // request charge while returning its unused token allowance.
-        deps.budget.release(held.id, { dispatched: true });
+    let dispatched = false;
+    let result: Awaited<ReturnType<TaskRunner['run']>> | undefined;
+    try {
+      result = await deps.runner.run({
+        scope: scopeOf(started.task),
+        token,
+        adapter: adapter.value as AgentAdapter,
+        request: {
+          // Present for a durable Work run; Native uses it to gate artifacts.
+          taskId: task.taskId,
+          ownerId: task.ownerId,
+          tenantId: task.tenantId,
+          conversationId: task.conversationId,
+          objective: task.objective,
+          ...(history === undefined ? {} : { history }),
+          model: model.value.ref,
+          routing,
+          allowFallback: !pinned,
+          mode: task.mode,
+          operation: 'work',
+          workspaceRoot: workspace.value.root,
+          maxSteps: deps.config.engines.native.maxSteps,
+          budget: task.budget,
+          signal: controller.signal,
+        },
+        report,
+        admitDispatch: () => {
+          dispatched = !controller.signal.aborted && checkExternal(adapter.value.engine, task.mode).ok;
+          return dispatched;
+        },
+      });
+    } finally {
+      // Budget settlement does not depend on whether this generation still owns the task.
+      if (held) {
+        if (dispatched) {
+          const outcome = result?.outcome;
+          deps.budget.settle(held.id, outcome?.kind === 'completed' ? outcome.usage ?? {} : {});
+        } else {
+          deps.budget.release(held.id);
+        }
       }
     }
     if (controllers.get(taskId) !== controller) return;
@@ -702,6 +740,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
+      const external = checkExternal(adapter.value.engine, request.mode);
+      if (!external.ok) return external;
 
       const routing = inferRoutingMode({ objective: request.objective });
       const model = deps.models.resolve(request.model, request.mode, {
@@ -723,7 +763,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
-      await deps.conversations.ensure({
+      const conversation = await ensureConversation({
         conversationId,
         ownerId: principal.ownerId,
         tenantId: null,
@@ -734,6 +774,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
         updatedAt: now,
       });
+      if (!conversation.ok) return conversation;
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1029,6 +1070,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
+      const external = checkExternal(adapter.value.engine, request.mode);
+      if (!external.ok) return external;
       const routing = inferRoutingMode({ objective: request.message });
       const model = deps.models.resolve(request.model, request.mode, {
         operation: 'chat',
@@ -1048,7 +1091,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
-      const conversation = await deps.conversations.ensure({
+      const conversation = await ensureConversation({
         conversationId,
         ownerId: principal.ownerId,
         tenantId: null,
@@ -1058,6 +1101,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
         updatedAt: now,
       });
+      if (!conversation.ok) return conversation;
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1066,7 +1110,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
-      const history = await historyFor(conversationId, request.message);
+      const history = adapter.value.isolation.conversations === 'granted'
+        ? await historyFor(conversationId, request.message)
+        : undefined;
       const controller = new AbortController();
       // The router reserves internally. An external engine does not pass through
       // it, so hold one request/token slot before dispatch and settle afterward.
@@ -1083,15 +1129,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
       const held = reservation?.allowed ? reservation.reservation : null;
-      let outcome: AgentRunOutcome;
+      let dispatched = false;
+      let outcome: AgentRunOutcome | undefined;
       try {
         outcome = await adapter.value.run(
           {
             ownerId: principal.ownerId,
-            tenantId: conversation.tenantId,
+            tenantId: conversation.value.tenantId,
             conversationId,
             objective: request.message,
-            history,
+            ...(history === undefined ? {} : { history }),
             model: model.value.ref,
             routing,
             allowFallback: request.model === undefined,
@@ -1103,13 +1150,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             signal: controller.signal,
           },
           () => undefined,
+          () => {
+            dispatched = checkExternal(adapter.value.engine, request.mode).ok;
+            return dispatched;
+          },
         );
-      } catch (error) {
-        if (held) deps.budget.release(held.id, { dispatched: true });
-        throw error;
+      } finally {
+        if (held) {
+          if (dispatched) deps.budget.settle(held.id, outcome?.ok ? outcome.usage ?? {} : {});
+          else deps.budget.release(held.id);
+        }
       }
       if (!outcome.ok) {
-        if (held) deps.budget.release(held.id, { dispatched: true });
         return fail(
           outcome.code === 'cancelled'
             ? 'cancelled'
@@ -1121,7 +1173,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         );
       }
       const usedModel = outcome.model ?? model.value.ref;
-      if (held) deps.budget.settle(held.id, outcome.usage ?? {});
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,

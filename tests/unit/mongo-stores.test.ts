@@ -294,3 +294,12 @@ test('notifications are written once per task and marked read per owner', async 
   await notifications.markRead('owner-test', 'task_1');
   assert.equal((await notifications.list('owner-test')).unread, 0);
 });
+
+test('Mongo conversation IDs cannot be reused in another data mode', async () => {
+  const conversations = createMongoConversationRepository({
+    conversations: createFakeCollection(), messages: createFakeCollection(),
+  });
+  await conversations.ensure(conversation({ mode: 'private' }));
+  await assert.rejects(() => conversations.ensure(conversation({ mode: 'cloud' })), /different data mode/);
+  assert.equal((await conversations.get('owner-test', 'conv_1'))?.mode, 'private');
+});
