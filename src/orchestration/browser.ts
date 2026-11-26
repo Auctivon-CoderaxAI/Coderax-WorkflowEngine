@@ -157,27 +157,23 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
   const store = deps.store;
   const consumedApprovals = new Set<string>();
   const pendingCreates = new Map<string, number>();
-  // Creates whose provider answer was lost may still hold a remote browser.
-  // They are counted against the owner until the provider TTL has passed.
-  const unresolvedCreates = new Map<string, number[]>();
+  // Without a provider handle or lookup, a local timer cannot establish
+  // termination: the provider may allocate after the client has timed out.
+  const unresolvedCreates = new Map<string, string[]>();
   const sessionQueues = new Map<string, Promise<void>>();
   let closing = false;
 
-  function unresolvedCreateCount(ownerId: string): number {
-    const now = nowMs();
-    const retained = (unresolvedCreates.get(ownerId) ?? []).filter(
-      (expiresAt) => expiresAt > now,
+  function retainUnresolvedCreate(ownerId: string): void {
+    const reference = deps.ids.requestId();
+    const retained = unresolvedCreates.get(ownerId) ?? [];
+    retained.push(reference);
+    unresolvedCreates.set(ownerId, retained);
+    audit(
+      ownerId,
+      'browser.session.create.unresolved',
+      'failed',
+      `The provider did not confirm allocation; capacity retained. createRef=${reference}`,
     );
-    if (retained.length === 0) unresolvedCreates.delete(ownerId);
-    else unresolvedCreates.set(ownerId, retained);
-    return retained.length;
-  }
-
-  function retainUnresolvedCreate(ownerId: string, expiresAt: number): void {
-    unresolvedCreates.set(ownerId, [
-      ...(unresolvedCreates.get(ownerId) ?? []),
-      expiresAt,
-    ]);
   }
 
   async function serialize<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
@@ -582,7 +578,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         (record) => isLive(record.session) || record.session.state === 'quarantined',
       );
       const pending = pendingCreates.get(ownerId) ?? 0;
-      const unresolved = unresolvedCreateCount(ownerId);
+      const unresolved = unresolvedCreates.get(ownerId)?.length ?? 0;
       if (live.length + pending + unresolved >= deps.config.browsers.maxSessionsPerOwner) {
         return fail(
           'conflict',
@@ -611,7 +607,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
             ...(request.viewport ? { viewport: request.viewport } : {}),
           });
         } catch {
-          retainUnresolvedCreate(ownerId, nowMs() + ttlSeconds * 1000);
+          retainUnresolvedCreate(ownerId);
           audit(
             ownerId,
             'browser.session.create',
@@ -626,9 +622,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         }
         if (!created.ok) {
           if (created.outcomeUnknown !== false) {
-            // No provider session id means it cannot be closed or quarantined;
-            // allow the full provider TTL after the failure was observed.
-            retainUnresolvedCreate(ownerId, nowMs() + ttlSeconds * 1000);
+            retainUnresolvedCreate(ownerId);
           }
           audit(ownerId, 'browser.session.create', 'failed', created.detail);
           return providerFailure(created);

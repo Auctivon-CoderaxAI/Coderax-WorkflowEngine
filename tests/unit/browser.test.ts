@@ -904,17 +904,32 @@ test('the configured live-session limit is enforced', async () => {
   }
 });
 
-test('an unknown create outcome stays counted against the session limit', async () => {
-  const fake = fakeBrowserProvider();
-  const started = await startTestApp({
-    browser: fake,
-    config: { browsers: { enabled: true, maxSessionsPerOwner: 1 } },
-  });
+test('an unknown create outcome retains capacity and an audit reference past the provider TTL', async () => {
+  const workspace = createWorkspaces();
   try {
-    const create = () => started.app.service.createBrowserSession(principal, {
+    const config = baseConfig(workspace, { browsers: { enabled: true, maxSessionsPerOwner: 1 } });
+    const ids = createIdGenerator();
+    let current = new Date('2026-11-26T12:00:00.000Z');
+    const clock: Clock = {
+      now: () => new Date(current),
+      iso: () => current.toISOString(),
+    };
+    const audit = createAuditLog({ clock, ids });
+    const fake = fakeBrowserProvider();
+    const service = createBrowserService({
+      config,
+      clock,
+      ids,
+      permissions: createPermissionStore({ clock, ids }),
+      audit,
+      provider: fake,
+      store: createBrowserStore(),
+    });
+    const create = () => service.create(OWNER_ID, {
       label: 'Unresolved create',
       purpose: 'testing',
       origins: ['https://example.test'],
+      ttlSeconds: 60,
     });
     fake.failNextCreateUnknown();
     const lost = await create();
@@ -922,11 +937,16 @@ test('an unknown create outcome stays counted against the session limit', async 
     assert.equal(lost.ok === false && lost.code, 'browser_unavailable');
 
     const blocked = await create();
-    assert.equal(blocked.ok, false);
     assert.equal(blocked.ok === false && blocked.code, 'conflict');
+    current = new Date(current.getTime() + 61_000);
+    const stillBlocked = await create();
+    assert.equal(stillBlocked.ok === false && stillBlocked.code, 'conflict');
     assert.equal(fake.createInputs.length, 1);
+    const unresolved = audit.list().filter((entry) => entry.action === 'browser.session.create.unresolved');
+    assert.equal(unresolved.length, 1);
+    assert.match(unresolved[0]?.detail ?? '', /createRef=req_[0-9a-f-]{36}/);
   } finally {
-    await started.close();
+    workspace.cleanup();
   }
 });
 

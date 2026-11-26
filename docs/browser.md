@@ -80,17 +80,21 @@ The SDK exposes every operation on `CoderaxClient`.
   remote workload would be false.
 <!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:182443c2eed66a7db4cf704b45b75c1fd8e86770481e6e5b49f7ec7f9be709a5 -->
+<!-- coderabbit-ai-generated-section:v1:07ff538b951a2276db5c89ae9399b81d0c26293c026b2cc6ceed088d52e2449e -->
 
-- At most `maxSessionsPerOwner` slots exist per owner. Pending creates and
-  quarantined sessions occupy slots. A failed create releases its slot
-  immediately only if the provider confirms it made no allocation. The HTTP
-  adapter can confirm this for checks that stop the request before dispatch
-  and for credential rejections (HTTP 401 or 403). All other failures without
-  a confirmed outcome retain a slot for the full provider TTL after the
-  failure is observed, because no session handle is available to close.
-  Retry close to clean up a quarantined session. The engine retains the latest
-  128 confirmed terminal sessions and their receipt histories across owners.
+- At most `maxSessionsPerOwner` slots exist per owner. Pending creates,
+  unresolved creates and quarantined sessions occupy slots. A failed create
+  releases its slot immediately only if the provider confirms it made no
+  allocation. The HTTP adapter can confirm this for checks that stop the
+  request before dispatch and for credential rejections (HTTP 401 or 403).
+  An unconfirmed create without a session handle keeps its reservation for
+  the life of the engine process. The audit log records a local create
+  reference. Protocol v1 cannot look up an allocation by that reference, and
+  a local timer cannot confirm termination. A process restart loses this
+  bookkeeping; verify remote cleanup before restarting to recover capacity.
+  Retry close to clean up a quarantined session with a known handle. The
+  engine retains the latest 128 confirmed terminal sessions and their
+  receipt histories across owners.
 
 <!-- /coderabbit-ai-generated:v1 -->
 
