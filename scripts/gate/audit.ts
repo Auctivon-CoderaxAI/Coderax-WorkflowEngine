@@ -28,50 +28,73 @@ function describe(entry: { via?: AuditVia[] }): string {
     .join('; ');
 }
 
-export function checkAudit(): Report {
-  const result = spawnSync('npm', ['audit', '--json'], {
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-  });
+/** A registry read is retried; a vulnerability finding is never retried away. */
+const ATTEMPTS = 3;
 
-  if (result.error) {
-    return report([
-      {
+function safeDiagnostic(value: string): string {
+  return value
+    .replace(/\/\/[^\s]*:_authToken=[^\s]+/g, '[redacted]')
+    .replace(/npm_[A-Za-z0-9]{20,}/g, '[redacted]')
+    .split('\n')[0]
+    ?.slice(0, 240) ?? '';
+}
+
+/** npm can print a notice before the JSON report; the report starts at the first brace. */
+function parseReport(stdout: string): AuditReport | null {
+  const start = stdout.indexOf('{');
+  if (start < 0) return null;
+  try {
+    return JSON.parse(stdout.slice(start)) as AuditReport;
+  } catch {
+    return null;
+  }
+}
+
+export function checkAudit(): Report {
+  let last: { rule: string; detail: string } | null = null;
+  let parsed: AuditReport | null = null;
+
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+    const result = spawnSync('npm', ['audit', '--json'], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+
+    if (result.error) {
+      last = {
         rule: 'audit-unavailable',
         detail: `dependency audit could not start: ${result.error.message}`,
-      },
-    ]);
+      };
+    } else {
+      const candidate = parseReport(result.stdout || '');
+      if (!candidate) {
+        last = {
+          rule: 'audit-unreadable',
+          detail: `dependency audit produced unreadable JSON${result.stderr ? `: ${safeDiagnostic(result.stderr)}` : ''}; refusing to pass`,
+        };
+      } else if (candidate.error) {
+        last = {
+          rule: 'audit-registry',
+          detail: `dependency audit could not run: ${candidate.error.summary ?? 'unknown registry error'}`,
+        };
+      } else if (!candidate.metadata?.vulnerabilities && !candidate.vulnerabilities) {
+        last = {
+          rule: 'audit-no-metadata',
+          detail: 'dependency audit returned no vulnerability metadata; refusing to pass',
+        };
+      } else {
+        parsed = candidate;
+        break;
+      }
+    }
+
+    if (attempt < ATTEMPTS) {
+      // Transient registry reads are the common failure mode on hosted runners.
+      spawnSync('sleep', [String(attempt * 2)]);
+    }
   }
 
-  let parsed: AuditReport;
-  try {
-    parsed = JSON.parse(result.stdout || '{}') as AuditReport;
-  } catch {
-    return report([
-      {
-        rule: 'audit-unreadable',
-        detail: 'dependency audit produced unreadable JSON; refusing to pass',
-      },
-    ]);
-  }
-
-  if (parsed.error) {
-    return report([
-      {
-        rule: 'audit-registry',
-        detail: `dependency audit could not run: ${parsed.error.summary ?? 'unknown registry error'}`,
-      },
-    ]);
-  }
-
-  if (!parsed.metadata?.vulnerabilities && !parsed.vulnerabilities) {
-    return report([
-      {
-        rule: 'audit-no-metadata',
-        detail: 'dependency audit returned no vulnerability metadata; refusing to pass',
-      },
-    ]);
-  }
+  if (!parsed) return report([last ?? { rule: 'audit-unavailable', detail: 'no audit report' }]);
 
   const findings: Finding[] = [];
   const warnings: Finding[] = [];
