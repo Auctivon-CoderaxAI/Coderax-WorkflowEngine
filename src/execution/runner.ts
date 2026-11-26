@@ -27,6 +27,7 @@ export type TaskRunner = {
     adapter: AgentAdapter;
     request: AgentRunRequest;
     report: AgentReport;
+    admitDispatch?: () => boolean;
     /** The fencing generation this run belongs to (used when it is abandoned). */
     generation?: number;
     /** The directory the run may write, quarantined if the adapter is abandoned. */
@@ -75,6 +76,7 @@ export function createTaskRunner(input: {
       adapter,
       request,
       report,
+      admitDispatch,
       generation = 0,
       workspaceRoot = '',
     }) => {
@@ -152,7 +154,7 @@ export function createTaskRunner(input: {
           : { outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) }, ownershipLost: false };
 
       try {
-        const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
+        const running = adapter.run({ ...request, signal: controller.signal }, guardedReport, admitDispatch);
         const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
         if (settled === null) {
           // The adapter ignored the abort. Its eventual rejection must not become

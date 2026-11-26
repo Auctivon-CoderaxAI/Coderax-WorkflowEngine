@@ -15,15 +15,16 @@ const MAX_ERROR_BODY_BYTES = 64 * 1_024;
  * or broken header could park a free provider for years and make the router
  * effectively unavailable.
  */
+const boundRetryDelay = (milliseconds: number): number =>
+  Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.ceil(milliseconds)));
+
 export function parseRetryAfter(headers: Headers): number | undefined {
   const raw = headers.get('retry-after');
   if (!raw) return undefined;
-  const bound = (milliseconds: number): number =>
-    Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.ceil(milliseconds)));
   const seconds = Number(raw);
-  if (Number.isFinite(seconds) && seconds >= 0) return bound(seconds * 1000);
+  if (Number.isFinite(seconds) && seconds >= 0) return boundRetryDelay(seconds * 1000);
   const date = Date.parse(raw);
-  if (Number.isFinite(date)) return bound(date - Date.now());
+  if (Number.isFinite(date)) return boundRetryDelay(date - Date.now());
   return undefined;
 }
 
@@ -153,7 +154,7 @@ export function parseErrorBody(text: string): ErrorHints {
       const record = detail as Record<string, unknown>;
       if (typeof record.retryDelay === 'string') {
         const match = record.retryDelay.match(/^(\d+(?:\.\d+)?)s$/);
-        if (match) retryDelayMs = Math.ceil(Number(match[1]) * 1000);
+        if (match) retryDelayMs = boundRetryDelay(Number(match[1]) * 1000);
       }
     }
     return {

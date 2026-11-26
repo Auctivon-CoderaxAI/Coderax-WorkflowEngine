@@ -72,6 +72,10 @@ node -e "require('fs').mkdirSync('/srv/coderax/private',{recursive:true});requir
 CODERAX_ENGINE_CONFIG=./engine.json npm start
 ```
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:78e5dcd56f46b77f525d39cca554d8d596eb4a8cf8e8537f1990fb5bfa9dae29 -->
+
 `engine.json` carries the non-secret settings; environment variables win over it:
 
 ```json
@@ -81,22 +85,7 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
   "models": {
     "route": [{ "providerId": "openrouter", "modelId": "inclusionai/ling-3.2-flash:free" }],
     "attestations": [],
-    "policy": [
-      {
-        "providerId": "openrouter",
-        "retention": "transient",
-        "training": "prohibited",
-        "location": "eu",
-        "credentials": "deployment-managed",
-        "modes": ["cloud"],
-        "grants": [
-          { "operation": "chat", "mode": "cloud", "location": "eu" },
-          { "operation": "work", "mode": "cloud", "location": "eu" }
-        ],
-        "evidenceUrl": "https://openrouter.ai/docs/terms",
-        "verifiedAt": "2026-11-26T00:00:00.000Z"
-      }
-    ]
+    "policy": []
   },
   "engines": { "default": "native" }
 }
@@ -107,6 +96,14 @@ models, verifies zero cost from the provider price list or a time-bounded
 attestation, and refuses to start Native when no verified-free model is routable.
 `models.policy` is a separate requirement: a provider receives no traffic until an
 owner-approved record authorizes the exact processing operation and data mode.
+This sample leaves policy empty. Before starting Native, establish the actual
+retention, training terms, processing location and credential requirements for
+your configured endpoint, then add the corresponding policy and grants. The
+default OpenRouter URL does not establish regional processing. See
+[the policy guide](docs/model-routing.md#data-processing-policy) for the record format.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
 Private mode refuses hosted inference without an explicitly approved private
 grant, and fails closed rather than using local inference when none exists.
 Gemini, Groq and Cerebras publish no machine-readable price and therefore need an

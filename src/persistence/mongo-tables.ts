@@ -6,6 +6,7 @@ import type {
   StoredMessage,
   TaskRecord,
 } from '../domain.js';
+import { ConversationModeConflict } from './conversations.js';
 import type { ConversationRepository } from './conversations.js';
 import type { NotificationStore } from './notifications.js';
 import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
@@ -258,6 +259,7 @@ export function createMongoConversationRepository(input: {
     if (existing) {
       const found = toConversation(existing);
       if (found.ownerId !== record.ownerId) collision();
+      if (found.mode !== record.mode) throw new ConversationModeConflict();
       return found;
     }
     try {
@@ -270,6 +272,7 @@ export function createMongoConversationRepository(input: {
       if (!raced) throw error;
       const found = toConversation(raced);
       if (found.ownerId !== record.ownerId) collision();
+      if (found.mode !== record.mode) throw new ConversationModeConflict();
       return found;
     }
   }

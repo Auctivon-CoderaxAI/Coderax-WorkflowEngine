@@ -114,6 +114,8 @@ export function createNativeAgent(input: {
       const sections: string[] = [];
       let usageIn: number | undefined;
       let usageOut: number | undefined;
+      let budgetedInput = 0;
+      let budgetedOutput = 0;
       let actualModel: ModelRef | undefined;
 
       for (const step of steps) {
@@ -126,10 +128,10 @@ export function createNativeAgent(input: {
           completed,
           history,
         });
+        const promptTokens = estimateTokens([NATIVE_SYSTEM, stepPrompt]);
         if (request.budget) {
-          const inputLeft = request.budget.maxInputTokens - (usageIn ?? 0);
-          const outputLeft = request.budget.maxOutputTokens - (usageOut ?? 0);
-          const promptTokens = estimateTokens([NATIVE_SYSTEM, stepPrompt]);
+          const inputLeft = request.budget.maxInputTokens - budgetedInput;
+          const outputLeft = request.budget.maxOutputTokens - budgetedOutput;
           if (inputLeft <= 0 || outputLeft <= 0 || promptTokens > inputLeft) {
             return {
               ok: false,
@@ -140,18 +142,14 @@ export function createNativeAgent(input: {
           }
         }
         const maxOutputTokens = request.budget
-          ? Math.max(
-              1,
-              Math.min(
-                request.budget.maxOutputTokens - (usageOut ?? 0),
-                request.budget.maxOutputTokens,
-              ),
-            )
+          ? request.budget.maxOutputTokens - budgetedOutput
           : undefined;
 
         report({ type: 'step.started', stepId: step.id, title: step.title });
         try {
           let stepText = '';
+          let stepInput: number | undefined;
+          let stepOutput: number | undefined;
           if (gateway.stream) {
             for await (const event of gateway.stream({
               ownerId: request.ownerId,
@@ -170,10 +168,10 @@ export function createNativeAgent(input: {
                 report({ type: 'text.delta', text: event.text });
               } else if (event.type === 'usage') {
                 if (event.usage.inputTokens !== undefined) {
-                  usageIn = (usageIn ?? 0) + event.usage.inputTokens;
+                  stepInput = (stepInput ?? 0) + event.usage.inputTokens;
                 }
                 if (event.usage.outputTokens !== undefined) {
-                  usageOut = (usageOut ?? 0) + event.usage.outputTokens;
+                  stepOutput = (stepOutput ?? 0) + event.usage.outputTokens;
                 }
               } else if (event.type === 'model') {
                 actualModel = event.model;
@@ -194,14 +192,14 @@ export function createNativeAgent(input: {
             });
             stepText = completion.text;
             actualModel = completion.model;
-            if (completion.usage?.inputTokens !== undefined) {
-              usageIn = (usageIn ?? 0) + completion.usage.inputTokens;
-            }
-            if (completion.usage?.outputTokens !== undefined) {
-              usageOut = (usageOut ?? 0) + completion.usage.outputTokens;
-            }
+            stepInput = completion.usage?.inputTokens;
+            stepOutput = completion.usage?.outputTokens;
             report({ type: 'text.delta', text: completion.text });
           }
+          if (stepInput !== undefined) usageIn = (usageIn ?? 0) + stepInput;
+          if (stepOutput !== undefined) usageOut = (usageOut ?? 0) + stepOutput;
+          budgetedInput += stepInput ?? promptTokens;
+          budgetedOutput += stepOutput ?? maxOutputTokens ?? 0;
           sections.push(stepText);
           report({ type: 'step.completed', stepId: step.id, title: step.title });
           completed.push(step.id);

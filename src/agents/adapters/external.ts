@@ -97,7 +97,7 @@ export function createExternalAgentAdapter(options: ExternalAdapterOptions): Age
         return { ok: false, detail: probed.detail };
       }
     },
-    run: async (request, report) => {
+    run: async (request, report, admitDispatch) => {
       if (!options.enabled) {
         return {
           ok: false,
@@ -129,6 +129,17 @@ export function createExternalAgentAdapter(options: ExternalAdapterOptions): Age
           detail: probed.detail,
           // Nothing was dispatched, so replaying on this engine is safe.
           retryable: true,
+        };
+      }
+      if (request.signal.aborted) {
+        return { ok: false, code: 'cancelled', detail: 'The run was cancelled.', retryable: false };
+      }
+      if (!admitDispatch?.()) {
+        return {
+          ok: false,
+          code: 'not_configured',
+          detail: 'External agent dispatch requires a current owner grant for this data mode.',
+          retryable: false,
         };
       }
       return options.transport.run(request, report);
