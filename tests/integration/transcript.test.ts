@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ProviderAdapter, ProviderCompletionRequest } from '../../src/models/types.js';
 import { workRunKey } from '../../src/execution/lease.js';
-import { startTestApp, waitFor } from '../helpers.js';
+import { startTestApp, testProviderPolicy, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -134,5 +134,37 @@ test('a chat follow-up is prompted with the earlier exchange', async () => {
     assert.equal(prompt.split('Second question').length - 1, 1);
   } finally {
     await started.close();
+  }
+});
+
+test('a concurrent Chat rejected by the daily budget does not enter history', async () => {
+  const gateway = recordingGateway();
+  const { app, close } = await startTestApp({
+    provider: gateway,
+    config: { models: { dailyRequestBudget: 2, policy: [testProviderPolicy()] } },
+  });
+  try {
+    const first = await app.service.chat(principal, {
+      agent: 'coderax', mode: 'cloud', message: 'Earlier message',
+    });
+    assert.ok(first.ok);
+    const { conversationId } = first.value;
+    const messages = ['First competing message', 'Second competing message'];
+    const results = await Promise.all(messages.map((message) =>
+      app.service.chat(principal, { agent: 'coderax', mode: 'cloud', conversationId, message }),
+    ));
+    const rejected = results.findIndex((result) => !result.ok);
+    assert.notEqual(rejected, -1);
+    const refusal = results[rejected];
+    assert.ok(refusal && !refusal.ok && refusal.code === 'budget_exhausted');
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(gateway.prompts.length, 2);
+    const stored = await app.dependencies.conversations.messages(conversationId);
+    assert.deepEqual(stored.filter((entry) => entry.role === 'user').map((entry) => entry.text), [
+      'Earlier message',
+      messages[1 - rejected],
+    ]);
+  } finally {
+    await close();
   }
 });

@@ -911,3 +911,33 @@ test('the longest active attestation keeps a route usable after the shorter gran
   now = new Date('2026-11-28T00:00:00Z');
   assert.equal(engine.resolve(model.ref, 'cloud', { operation: 'chat' }).ok, true);
 });
+
+test('unknown usage after a failed dispatch cannot fund another completion or stream', async () => {
+  for (const streaming of [false, true]) {
+    let calls = 0;
+    const provider = adapter({
+      models: [freeModel('only', { maxOutputTokens: 100 })],
+      complete: async () => {
+        calls += 1;
+        throw new ProviderError('server', 'fixture failure');
+      },
+      stream: async function* () {
+        calls += 1;
+        throw new ProviderError('server', 'fixture failure before output');
+      },
+    });
+    const ledger = budget(10, 150);
+    const engine = router({ adapters: [provider], ledger });
+    await engine.refresh();
+    const dispatch = async () => {
+      if (!streaming) return engine.complete(request('only'));
+      for await (const _event of engine.stream(request('only'))) {
+        // Drain so the provider is dispatched.
+      }
+    };
+    await assert.rejects(dispatch, { code: 'engine_unavailable' });
+    await assert.rejects(dispatch, { code: 'budget_exhausted' });
+    assert.equal(calls, 1);
+    assert.equal(ledger.snapshot('owner', new Date()).outputTokens, 100);
+  }
+});

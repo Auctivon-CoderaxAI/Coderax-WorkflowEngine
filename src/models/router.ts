@@ -851,13 +851,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
 
       attempts.push(runtime.state.ref);
       const started = performance.now();
-      let dispatched = false;
       const signal = AbortSignal.any([
         request.signal,
         AbortSignal.timeout(provider.settings.requestTimeoutMs),
       ]);
       try {
-        dispatched = true;
         const completion = await provider.adapter.complete({
           model: runtime.state.ref,
           system: request.system,
@@ -885,9 +883,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         };
       } catch (error) {
         acquired.release();
-        // The provider may already have received this request. Charge the
-        // request slot, but return the token allowance that was not reported.
-        budget.release(reserved.reservation.id, { dispatched });
+        // Dispatch may have consumed tokens even though no usage was returned.
+        budget.settle(reserved.reservation.id, {});
         const providerError =
           error instanceof ProviderError
             ? error
@@ -1091,18 +1088,12 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             : new ProviderError('network', 'The inference provider stream failed.', {
                 retryable: true,
               });
+        // Output can have been generated upstream even before the first local
+        // event. Only a confirmed pre-dispatch exit can return the reservation.
+        if (providerStarted) budget.settle(reserved.reservation.id, usage ?? {});
+        else budget.release(reserved.reservation.id);
+        settled = true;
         if (providerError.kind === 'cancelled' || request.signal.aborted) {
-          if (emitted) {
-            budget.settle(
-              reserved.reservation.id,
-              usage ?? { inputTokens: estimated, outputTokens: output },
-            );
-          } else {
-            // The attempt may have reached the provider, so retain the request
-            // charge while returning the unused token allowance.
-            budget.release(reserved.reservation.id, { dispatched: providerStarted });
-          }
-          settled = true;
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
           throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
@@ -1115,19 +1106,12 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         );
         if (emitted) {
           // Output already reached the caller; switching models would duplicate it.
-          budget.settle(
-            reserved.reservation.id,
-            usage ?? { inputTokens: estimated, outputTokens: output },
-          );
-          settled = true;
           throw new ModelRoutingError(
             'engine_unavailable',
             'The provider stream failed after output started; it cannot be safely replaced.',
             false,
           );
         }
-        budget.release(reserved.reservation.id, { dispatched: providerStarted });
-        settled = true;
         lastDispatchFailure = providerError;
       } finally {
         // A consumer can stop iterating before the provider finishes. Release the
@@ -1141,10 +1125,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           provider.circuit.abandon(providerAdmission);
           acquired.release({ dispatched: providerStarted });
           if (providerStarted) {
-            budget.settle(
-              reserved.reservation.id,
-              usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 },
-            );
+            budget.settle(reserved.reservation.id, usage ?? {});
           } else {
             budget.release(reserved.reservation.id);
           }
@@ -1358,10 +1339,10 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     // and it must not require cloud authorization: a deployment approved only for
     // private processing is usable, while one with no authorized mode is not.
     const at = now();
-    const readiness = { operation: 'chat' as const, routing: 'auto' as const };
-    return (
-      eligible({ mode: 'cloud', ...readiness }, at).length > 0 ||
-      eligible({ mode: 'private', ...readiness }, at).length > 0
+    return (['chat', 'work'] as const).some((operation) =>
+      (['cloud', 'private'] as const).some((mode) =>
+        eligible({ mode, operation, routing: 'auto' }, at).length > 0,
+      ),
     );
   }
 

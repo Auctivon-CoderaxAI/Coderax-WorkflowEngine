@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { composeApplication, StartupError } from '../../src/bootstrap/compose.js';
-import { baseConfig, createWorkspaces, OWNER_TOKEN, testProviderPolicy } from '../helpers.js';
+import { baseConfig, createWorkspaces, fakeProvider, OWNER_ID, OWNER_TOKEN, testProviderPolicy } from '../helpers.js';
 
 const PROVIDER = {
   id: 'fixture',
@@ -139,6 +139,43 @@ test('a configured provider whose key variable is missing fails startup and name
         return true;
       },
     );
+  } finally {
+    workspace.cleanup();
+  }
+});
+
+test('a Work-only Native deployment starts without authorizing Chat', async () => {
+  const workspace = createWorkspaces();
+  try {
+    const provider = fakeProvider();
+    const app = await composeApplication({
+      config: baseConfig(workspace),
+      env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
+      providers: [{ adapter: provider }],
+      policies: [testProviderPolicy('free', {
+        credentials: 'owner-managed',
+        retention: 'none',
+        grants: [{ operation: 'work', mode: 'private', location: 'owner-region' }],
+      })],
+    });
+    try {
+      const principal = { ownerId: OWNER_ID, isOwner: true as const };
+      const chat = await app.service.chat(principal, {
+        agent: 'coderax', mode: 'private', message: 'Only Work is approved.',
+      });
+      assert.ok(!chat.ok && chat.code === 'model_missing');
+      assert.equal(provider.calls, 0);
+      const work = await app.service.submitWork(principal, {
+        agent: 'coderax', mode: 'private', objective: 'Explain the result', requireApproval: true,
+      });
+      assert.ok(work.ok);
+      await app.dependencies.scheduler.idle();
+      const task = await app.service.task(principal, work.value.taskId);
+      assert.ok(task.ok && task.value.state === 'completed');
+      assert.ok(provider.calls > 0);
+    } finally {
+      await app.stop();
+    }
   } finally {
     workspace.cleanup();
   }

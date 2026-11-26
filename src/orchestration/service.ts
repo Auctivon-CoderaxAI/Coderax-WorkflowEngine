@@ -165,11 +165,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    */
   async function historyFor(
     conversationId: string,
-    currentText: string,
+    currentText?: string,
   ): Promise<AgentHistoryTurn[]> {
     try {
       const messages = await deps.conversations.messages(conversationId);
-      return buildTranscript({ messages, currentText });
+      return buildTranscript(currentText === undefined ? { messages } : { messages, currentText });
     } catch {
       return [];
     }
@@ -1009,16 +1009,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         updatedAt: now,
       });
       if (!conversation.ok) return conversation;
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId,
-        role: 'user',
-        text: request.message,
-        createdAt: now,
-      });
-
       const history = adapter.value.isolation.conversations === 'granted'
-        ? await historyFor(conversationId, request.message)
+        ? await historyFor(conversationId)
         : undefined;
       const controller = new AbortController();
       // The router reserves internally. An external engine does not pass through
@@ -1068,13 +1060,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           else deps.budget.release(held.id);
         }
       }
+      // Native admits inside the router and external engines reserve above.
+      // Keep a budget-refused turn out of the conversation transcript.
+      if (!outcome.ok && outcome.code === 'budget_exhausted') {
+        return fail('budget_exhausted', outcome.detail, outcome.retryable);
+      }
+      await deps.conversations.appendMessage({
+        messageId: deps.ids.messageId(),
+        conversationId,
+        role: 'user',
+        text: request.message,
+        createdAt: now,
+      });
+
       if (!outcome.ok) {
         return fail(
-          outcome.code === 'cancelled'
-            ? 'cancelled'
-            : outcome.code === 'budget_exhausted'
-              ? 'budget_exhausted'
-              : 'engine_unavailable',
+          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
           outcome.detail,
           outcome.retryable,
         );
