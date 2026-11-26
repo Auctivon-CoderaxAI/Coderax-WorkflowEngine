@@ -12,6 +12,13 @@ export type LimiterOutcome =
 export type ProviderLimiter = {
   acquire: (input: { tokens: number; now: Date }) => LimiterOutcome;
   inFlight: () => number;
+  /**
+   * Requests admitted for dispatch in the last minute, per provider. A request
+   * counts when it takes a request token and stops counting if it is refunded
+   * because nothing left the process. This is the number the routing report
+   * publishes; it is not the configured ceiling and not a placeholder.
+   */
+  dispatchedThisMinute: (now: Date) => number;
 };
 
 export function createProviderLimiter(input: {
@@ -25,6 +32,15 @@ export function createProviderLimiter(input: {
   let tokenTokens = tokenCapacity;
   let updatedAt: number | null = null;
   let inFlight = 0;
+  const dispatched = new Map<number, number>();
+  let dispatchSeq = 0;
+  const windowMs = 60_000;
+
+  function pruneDispatched(at: number): void {
+    for (const [id, dispatchedAt] of dispatched) {
+      if (at - dispatchedAt >= windowMs) dispatched.delete(id);
+    }
+  }
 
   function refill(now: number): void {
     if (updatedAt === null) {
@@ -45,6 +61,10 @@ export function createProviderLimiter(input: {
 
   return {
     inFlight: () => inFlight,
+    dispatchedThisMinute: (now) => {
+      pruneDispatched(now.getTime());
+      return dispatched.size;
+    },
     acquire: ({ tokens, now }) => {
       refill(now.getTime());
       if (inFlight >= input.maxConcurrency) {
@@ -75,6 +95,8 @@ export function createProviderLimiter(input: {
       requestTokens -= 1;
       tokenTokens -= wanted;
       inFlight += 1;
+      const dispatchId = (dispatchSeq += 1);
+      dispatched.set(dispatchId, now.getTime());
       let released = false;
       return {
         allowed: true,
@@ -85,6 +107,7 @@ export function createProviderLimiter(input: {
           if (options?.dispatched === false) {
             requestTokens = Math.min(requestCapacity, requestTokens + 1);
             tokenTokens = Math.min(tokenCapacity, tokenTokens + wanted);
+            dispatched.delete(dispatchId);
           }
         },
       };

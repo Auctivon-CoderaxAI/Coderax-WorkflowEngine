@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createRouterCatalog } from '../../src/models/catalog.js';
 import { createCircuit } from '../../src/models/circuit.js';
+import { createProviderLimiter } from '../../src/models/rate.js';
 import { createModelRouter, inferRoutingMode, type ModelRouter } from '../../src/models/router.js';
 import { createProviderPolicyRegistry } from '../../src/models/policy.js';
 import type { FreeTierAttestation } from '../../src/models/types.js';
@@ -932,4 +934,44 @@ test('unknown usage after a failed dispatch cannot fund another completion or st
     assert.equal(calls, 1);
     assert.equal((await ledger.snapshot('owner', new Date())).outputTokens, 100);
   }
+});
+
+test('the routing report counts real dispatches instead of a fabricated zero', async () => {
+  const provider = adapter({ models: [freeModel('only')] });
+  const engine = router({ adapters: [provider] });
+  await engine.refresh();
+  assert.equal(engine.health().providers[0]?.requestsThisMinute, 0);
+
+  await engine.complete(request('only'));
+  assert.equal(provider.calls, 1);
+  assert.equal(engine.health().providers[0]?.requestsThisMinute, 1);
+  await engine.complete(request('only'));
+  assert.equal(engine.health().providers[0]?.requestsThisMinute, 2);
+
+  // This is the value /v1/routing publishes through the catalogue projection.
+  const catalog = createRouterCatalog({
+    router: engine,
+    quotas: new Map([['p', { requestsPerMinute: 100, requestsPerDay: 100, tokensPerDay: 1_000_000 }]]),
+    usage: async () => ({ requests: 2, tokens: 20 }),
+  });
+  const report = await catalog.report('auto');
+  assert.equal(report.providers[0]?.used.requestsThisMinute, 2);
+
+  // A pre-dispatch refund never reached the provider, so it is not counted, and
+  // the window is a real minute rather than a lifetime total.
+  const at = new Date('2026-11-26T12:00:00.000Z');
+  const limiter = createProviderLimiter({
+    requestsPerMinute: 10,
+    tokensPerMinute: 100,
+    maxConcurrency: 2,
+  });
+  const refunded = limiter.acquire({ tokens: 10, now: at });
+  assert.ok(refunded.allowed);
+  assert.equal(limiter.dispatchedThisMinute(at), 1);
+  refunded.release({ dispatched: false });
+  assert.equal(limiter.dispatchedThisMinute(at), 0);
+
+  const dispatched = limiter.acquire({ tokens: 10, now: at });
+  assert.ok(dispatched.allowed);
+  assert.equal(limiter.dispatchedThisMinute(new Date(at.getTime() + 60_000)), 0);
 });
