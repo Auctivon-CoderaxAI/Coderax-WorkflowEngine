@@ -24,7 +24,7 @@ Status vocabulary:
 | 8 | One settlement per run | `run.ts` | `src/execution/runner.ts` | Preserved |
 | 9 | Stream ending without a terminal event is a failure | `run.ts` (`protocol_error`) | `runner.ts` | Preserved |
 | 10 | Bounded cancellation cleanup (5 s) | `run.ts` | `src/execution/runner.ts` `cancelGraceMs` (5 s default) | Preserved |
-| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Preserved |
+| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Removed — the helper had no runtime caller; owner-triggered `retry` remains on the service |
 | 12 | Workspace confinement, symlink-resolved, mode-partitioned, Windows-safe | `workspace.ts` | `src/execution/workspace.ts` | Preserved |
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |

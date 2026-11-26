@@ -65,9 +65,11 @@ export const EnginesConfig = z
      * external dependency, so an unconfigured deployment still has one engine.
      */
     default: EngineId.default('native'),
-    native: NativeConfig.default({}),
-    opencode: OpenCodeConfig.default({}),
-    freebuff: FreebuffConfig.default({}),
+    // `prefault` applies the empty object before nested defaults are parsed.
+    // Zod 4's `default` requires the fully-populated output shape as its input.
+    native: NativeConfig.prefault({}),
+    opencode: OpenCodeConfig.prefault({}),
+    freebuff: FreebuffConfig.prefault({}),
   })
   .strict();
 
@@ -87,9 +89,6 @@ export const ExecutionConfig = z
     /** A run holds its lease only while it heartbeats inside this window. */
     leaseTtlMs: z.number().int().min(3_000).max(600_000).default(30_000),
     heartbeatIntervalMs: z.number().int().min(500).max(60_000).default(10_000),
-    /** Total attempts, including the first. 1 disables retry. */
-    maxAttempts: z.number().int().min(1).max(5).default(1),
-    retryDelayMs: z.number().int().min(0).max(1_000).default(250),
     maxConcurrentTasks: z.number().int().min(1).max(64).default(4),
     /** Events retained per task for replay; older events require a new query. */
     eventBufferSize: z.number().int().min(16).max(100_000).default(2_000),
@@ -126,13 +125,13 @@ export const PersistenceConfig = z
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
-    server: ServerConfig.default({}),
+    server: ServerConfig.prefault({}),
     auth: AuthConfig,
     workspaces: WorkspacesConfig,
-    engines: EnginesConfig.default({}),
+    engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
-    execution: ExecutionConfig.default({}),
-    persistence: PersistenceConfig.default({}),
+    execution: ExecutionConfig.prefault({}),
+    persistence: PersistenceConfig.prefault({}),
   })
   .strict();
 

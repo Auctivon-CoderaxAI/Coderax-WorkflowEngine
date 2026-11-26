@@ -4,6 +4,9 @@
   "private": true,
   "description": "Versioned Coderax execution contracts: HTTP payloads and execution events.",
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,6 +19,6 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "zod": "^3.25.67"
+    "zod": "^4.6.7"
   }
 }

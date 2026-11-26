@@ -69,6 +69,36 @@ export type CoderaxClientOptions = {
   timeoutMs?: number;
 };
 
+/**
+ * Every operation the SDK implements, keyed by the contract operation id.
+ *
+ * The route-completeness gate compares this map with the route catalogue: a new
+ * HTTP operation is not complete until a client can call it, and removing a
+ * client method without removing the route fails the same check. The map is
+ * also checked against the class at runtime so a renamed method cannot hide.
+ */
+export const SDK_OPERATIONS = Object.freeze({
+  getHealth: 'health',
+  getReadiness: 'readiness',
+  listAgents: 'agents',
+  listModels: 'models',
+  submitChat: 'chat',
+  submitWork: 'submitWork',
+  getTask: 'task',
+  cancelTask: 'cancel',
+  resumeTask: 'resume',
+  retryTask: 'retry',
+  streamTaskEvents: 'events',
+  listConversations: 'conversations',
+  getConversation: 'conversation',
+  listMemory: 'memory',
+  listPermissions: 'permissions',
+  decidePermission: 'decidePermission',
+  listNotifications: 'notifications',
+} as const);
+
+export type SdkOperationId = keyof typeof SDK_OPERATIONS;
+
 type RequestInput = {
   method: 'GET' | 'POST';
   path: string;
