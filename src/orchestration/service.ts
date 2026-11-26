@@ -383,6 +383,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const routing = inferRoutingMode({ objective: task.objective });
     const pinned = task.modelPinned === true && task.model !== null;
     const model = deps.models.resolve(pinned ? task.model : null, task.mode, {
+      operation: 'work',
       routing,
       estimatedInputTokens: estimateTokens([task.objective]),
       ...(task.budget === null ? {} : { maxOutputTokens: task.budget.maxOutputTokens }),
@@ -547,6 +548,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         routing,
         allowFallback: !pinned,
         mode: task.mode,
+        operation: 'work',
         workspaceRoot: workspace.value.root,
         maxSteps: deps.config.engines.native.maxSteps,
         budget: task.budget,
@@ -632,6 +634,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const routing = inferRoutingMode({ objective: request.objective });
       const model = deps.models.resolve(request.model, request.mode, {
+        operation: 'work',
         routing,
         estimatedInputTokens: estimateTokens([request.objective]),
         ...(request.budget === undefined
@@ -936,6 +939,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!adapter.ok) return adapter;
       const routing = inferRoutingMode({ objective: request.message });
       const model = deps.models.resolve(request.model, request.mode, {
+        operation: 'chat',
         routing,
         estimatedInputTokens: estimateTokens([request.message]),
       });
@@ -1000,6 +1004,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             routing,
             allowFallback: request.model === undefined,
             mode: request.mode,
+            operation: 'chat',
             workspaceRoot: workspace.value.root,
             maxSteps: 1,
             budget: null,

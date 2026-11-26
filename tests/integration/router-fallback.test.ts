@@ -7,7 +7,13 @@ import type {
 } from '../../src/models/types.js';
 import { ProviderError } from '../../src/models/types.js';
 import { composeApplication } from '../../src/bootstrap/compose.js';
-import { baseConfig, createWorkspaces, fakeProvider, OWNER_TOKEN } from '../helpers.js';
+import {
+  baseConfig,
+  createWorkspaces,
+  fakeProvider,
+  OWNER_TOKEN,
+  testProviderPolicy,
+} from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -41,6 +47,7 @@ test('a durable automatic task records the fallback model that actually served i
           { providerId: 'a', modelId: 'a' },
           { providerId: 'b', modelId: 'b' },
         ],
+        policy: [testProviderPolicy('a'), testProviderPolicy('b')],
       },
     }),
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },

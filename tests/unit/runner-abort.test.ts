@@ -23,6 +23,7 @@ function request(signal: AbortSignal): AgentRunRequest {
     routing: 'auto',
     allowFallback: true,
     mode: 'cloud',
+    operation: 'chat' as const,
     workspaceRoot: '/tmp',
     maxSteps: 1,
     budget: null,

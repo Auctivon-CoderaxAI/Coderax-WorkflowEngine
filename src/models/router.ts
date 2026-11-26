@@ -9,6 +9,11 @@ import type {
 import { modelKey } from '@coderax/contracts';
 import type { BudgetLedger } from './budget.js';
 import { createCircuit, type Circuit, type CircuitAdmission } from './circuit.js';
+import type {
+  PolicyDecision,
+  ProcessingOperation,
+  ProviderPolicyRegistry,
+} from './policy.js';
 import { createProviderLimiter, type ProviderLimiter } from './rate.js';
 import type {
   BenchmarkScore,
@@ -44,6 +49,8 @@ import { classifyCapabilities, estimateMessageTokens, estimateTokens, scoreFor, 
  */
 
 export type ResolveOptions = {
+  /** The exact processing operation; authorization is granted per operation. */
+  operation: ProcessingOperation;
   routing?: RoutingMode;
   estimatedInputTokens?: number;
   maxOutputTokens?: number;
@@ -83,6 +90,8 @@ export type ModelRouterOptions = {
   benchmarks?: readonly BenchmarkScore[];
   preferredRoute?: readonly ModelRef[];
   budget: BudgetLedger;
+  /** The only authority on whether a provider may process a request. */
+  policy: ProviderPolicyRegistry;
   maxCandidates?: number;
   maxFallbacks?: number;
   failureThreshold?: number;
@@ -102,7 +111,7 @@ export type ModelRouter = ModelGateway & {
   resolve: (
     requested: ModelRef | null | undefined,
     mode: DataMode,
-    options?: ResolveOptions,
+    options: ResolveOptions,
   ) => { ok: true; value: ModelDescriptor } | { ok: false; code: ProblemCode; detail: string; retryable: boolean };
   plan: (input: PlanningInput) => { ok: true; value: RoutePlan } | { ok: false; code: ProblemCode; detail: string; retryable: boolean };
   refresh: () => Promise<RefreshReport>;
@@ -211,6 +220,12 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
   const benchmarks = [...(options.benchmarks ?? [])];
   const preferred = [...(options.preferredRoute ?? [])];
   const budget = options.budget;
+  const policy = options.policy;
+  if (!policy || typeof policy.evaluate !== 'function') {
+    // A router without a policy registry would authorize every provider by
+    // omission. Refuse construction instead of routing unprotected.
+    throw new Error('A provider policy registry is required to construct the model router.');
+  }
 
   const providers = new Map<string, ProviderRuntime>();
   for (const registration of options.providers) {
@@ -317,6 +332,16 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     for (const runtime of models.values()) {
       const state = runtime.state;
       if (!state.supported || state.costClass !== 'free') continue;
+      // Cost, capability and policy are independent dimensions. A provider that
+      // is free and capable is still excluded unless this exact operation is
+      // approved for this data mode.
+      const permission = policy.evaluate({
+        providerId: state.ref.providerId,
+        operation: input.operation,
+        mode: input.mode,
+        at,
+      });
+      if (!permission.allowed) continue;
       const availability = modelAvailability(runtime, at);
       if (!availability.available) continue;
       if (runtime.circuit.state(at) === 'open') continue;
@@ -384,6 +409,43 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     return `No verified zero-cost model is available for ${mode} routing.`;
   }
 
+  function policyRefusal(
+    mode: DataMode,
+    operation: ProcessingOperation,
+    decision: Extract<PolicyDecision, { allowed: false }>,
+  ): string {
+    const detail = `External ${operation} processing was refused in ${mode} mode: ${decision.detail}`;
+    return mode === 'private'
+      ? `${detail} The engine fails closed; it does not substitute local inference.`
+      : detail;
+  }
+
+  /**
+   * A refusal detail that names the blocking policy dimension, without leaking a
+   * provider endpoint or payload. It only inspects a model that is already free,
+   * available and supported, so cost and health failures keep their own message.
+   */
+  function refusalDetail(
+    routing: RoutingMode,
+    input: { mode: DataMode; operation: ProcessingOperation },
+    at: Date,
+  ): string {
+    const probe = [...models.values()].find(
+      (runtime) =>
+        runtime.state.supported &&
+        runtime.state.costClass === 'free' &&
+        modelAvailability(runtime, at).available,
+    );
+    if (!probe) return failureDetail(routing);
+    const decision = policy.evaluate({
+      providerId: probe.state.ref.providerId,
+      operation: input.operation,
+      mode: input.mode,
+      at,
+    });
+    return decision.allowed ? failureDetail(routing) : policyRefusal(input.mode, input.operation, decision);
+  }
+
   function plan(input: PlanningInput): { ok: true; value: RoutePlan } | {
     ok: false;
     code: ProblemCode;
@@ -413,9 +475,17 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         };
       } else {
         const availability = modelAvailability(runtime, at);
+        const permission = policy.evaluate({
+          providerId: runtime.state.ref.providerId,
+          operation: input.operation,
+          mode: input.mode,
+          at,
+        });
         const rejection = !availability.available
           ? availability.detail
-          : input.requireVision && !runtime.state.capabilities.vision
+          : !permission.allowed
+            ? policyRefusal(input.mode, input.operation, permission)
+            : input.requireVision && !runtime.state.capabilities.vision
             ? 'That model does not declare image input support.'
             : input.requireTools && !runtime.state.capabilities.toolCalling
               ? 'That model does not declare tool-calling support.'
@@ -470,7 +540,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       return {
         ok: false,
         code: 'model_missing',
-        detail: failureDetail(mode),
+        detail: refusalDetail(mode, input, at),
         retryable: false,
       };
     }
@@ -483,7 +553,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
   function resolve(
     requested: ModelRef | null | undefined,
     mode: DataMode,
-    resolveOptions: ResolveOptions = {},
+    resolveOptions: ResolveOptions,
   ): { ok: true; value: ModelDescriptor } | {
     ok: false;
     code: ProblemCode;
@@ -507,6 +577,20 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           ok: false,
           code: 'paid_model_refused',
           detail: 'Coderax does not route to paid models; choose a verified zero-cost model.',
+          retryable: false,
+        };
+      }
+      const permission = policy.evaluate({
+        providerId: runtime.state.ref.providerId,
+        operation: resolveOptions.operation,
+        mode,
+        at,
+      });
+      if (!permission.allowed) {
+        return {
+          ok: false,
+          code: 'model_missing',
+          detail: policyRefusal(mode, resolveOptions.operation, permission),
           retryable: false,
         };
       }
@@ -558,6 +642,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
 
     const planned = plan({
       mode: dataMode,
+      operation: resolveOptions.operation,
       routing: resolveOptions.routing ?? 'auto',
       ...(resolveOptions.estimatedInputTokens === undefined
         ? {}
@@ -604,7 +689,12 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
 
   function route(mode: RoutingMode = 'auto'): ModelRef[] {
     const at = now();
-    return eligible({ mode: 'cloud', routing: mode }, at).map((entry) => entry.model.ref);
+    // A discovery view, not an authorization. Execution always names its own
+    // data mode and operation; this cloud/chat list is what the API publishes as
+    // the default zero-cost route.
+    return eligible({ mode: 'cloud', operation: 'chat', routing: mode }, at).map(
+      (entry) => entry.model.ref,
+    );
   }
 
   function recordSuccess(
@@ -696,6 +786,15 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       if (!provider) continue;
       const at = now();
       if (!modelAvailability(runtime, at).available) continue;
+      // Revalidate policy at dispatch, not only at planning: a grant can expire
+      // or be withdrawn between the two, and fallback must never widen it.
+      const permission = policy.evaluate({
+        providerId: runtime.state.ref.providerId,
+        operation: request.operation,
+        mode: request.mode,
+        at,
+      });
+      if (!permission.allowed) continue;
 
       const estimated = estimateRequest(request);
       const output = outputBudget(request, runtime.state);
@@ -842,6 +941,13 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       if (!provider) continue;
       const at = now();
       if (!modelAvailability(runtime, at).available) continue;
+      const permission = policy.evaluate({
+        providerId: runtime.state.ref.providerId,
+        operation: request.operation,
+        mode: request.mode,
+        at,
+      });
+      if (!permission.allowed) continue;
 
       const estimated = estimateRequest(request);
       const output = outputBudget(request, runtime.state);
@@ -917,7 +1023,22 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         // The metadata yield suspends the generator; a discovery refresh can run
         // before the provider call. Revalidate eligibility at the last moment.
         const revalidated = models.get(modelKey(runtime.state.ref));
-        if (!revalidated || !modelAvailability(revalidated, now()).available) {
+        const revalidatedAt = now();
+        const revalidatedPolicy =
+          revalidated === undefined
+            ? null
+            : policy.evaluate({
+                providerId: revalidated.state.ref.providerId,
+                operation: request.operation,
+                mode: request.mode,
+                at: revalidatedAt,
+              });
+        if (
+          !revalidated ||
+          !modelAvailability(revalidated, revalidatedAt).available ||
+          revalidatedPolicy === null ||
+          !revalidatedPolicy.allowed
+        ) {
           acquired.release();
           budget.release(reserved.reservation.id);
           runtime.circuit.abandon(runtimeAdmission);
@@ -1250,6 +1371,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       const planned = plan({
         requested: request.model,
         mode: request.mode,
+        operation: request.operation,
         routing: request.routing ?? 'auto',
         estimatedInputTokens: estimated,
         ...(request.maxOutputTokens === undefined ? {} : { maxOutputTokens: request.maxOutputTokens }),
@@ -1269,6 +1391,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       const planned = plan({
         requested: request.model,
         mode: request.mode,
+        operation: request.operation,
         routing: request.routing ?? 'auto',
         estimatedInputTokens: estimated,
         ...(request.maxOutputTokens === undefined ? {} : { maxOutputTokens: request.maxOutputTokens }),

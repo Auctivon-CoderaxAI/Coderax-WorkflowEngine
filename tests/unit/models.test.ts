@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { ModelRef } from '@coderax/contracts';
 import { createBudgetLedger } from '../../src/models/budget.js';
 import { createModelRouter } from '../../src/models/router.js';
+import { createProviderPolicyRegistry, PROCESSING_OPERATIONS } from '../../src/models/policy.js';
 import type { DiscoveredModel, ProviderAdapter } from '../../src/models/types.js';
 import { ProviderError } from '../../src/models/types.js';
 
@@ -40,6 +41,27 @@ function budget() {
   return createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 100_000 });
 }
 
+function policy(providerId = 'free') {
+  return createProviderPolicyRegistry([
+    {
+      providerId,
+      retention: 'transient',
+      training: 'prohibited',
+      location: 'owner-region',
+      credentials: 'deployment-managed',
+      modes: ['cloud', 'private'],
+      grants: PROCESSING_OPERATIONS.map((operation) => ({
+        operation,
+        mode: 'cloud' as const,
+        location: 'owner-region' as const,
+      })),
+      evidenceUrl: 'https://provider.example/terms',
+      verifiedAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: null,
+    },
+  ]);
+}
+
 const freeRef = { providerId: 'free', modelId: 'coderax:free' };
 const paidRef = { providerId: 'paid', modelId: 'gpt-premium' };
 
@@ -48,9 +70,10 @@ test('the route selects the first available verified-free candidate', async () =
     providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
     preferredRoute: [freeRef],
     budget: budget(),
+    policy: policy(),
   });
   await router.refresh();
-  const chosen = router.resolve(null, 'cloud');
+  const chosen = router.resolve(null, 'cloud', { operation: 'chat' });
   assert.equal(chosen.ok, true);
   assert.deepEqual(chosen.ok && chosen.value.ref, freeRef);
   assert.equal(router.list().allowPaid, false);
@@ -64,9 +87,10 @@ test('a paid model is refused, not silently replaced', async () => {
     ]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
     preferredRoute: [paidRef, freeRef],
     budget: budget(),
+    policy: policy(),
   });
   await router.refresh();
-  const chosen = router.resolve(paidRef, 'cloud');
+  const chosen = router.resolve(paidRef, 'cloud', { operation: 'chat' });
   assert.equal(chosen.ok, false);
   assert.equal(chosen.ok === false && chosen.code, 'paid_model_refused');
   assert.deepEqual(router.route(), [freeRef]);
@@ -74,11 +98,14 @@ test('a paid model is refused, not silently replaced', async () => {
 
 test('an unknown model is refused with a configuration error', async () => {
   const router = createModelRouter({
-    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
+    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })    ]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
     budget: budget(),
+    policy: policy(),
   });
   await router.refresh();
-  const chosen = router.resolve({ providerId: 'unknown', modelId: 'x' }, 'cloud');
+  const chosen = router.resolve({ providerId: 'unknown', modelId: 'x' }, 'cloud', {
+    operation: 'chat',
+  });
   assert.equal(chosen.ok, false);
   assert.equal(chosen.ok === false && chosen.code, 'engine_not_configured');
 });
@@ -87,6 +114,7 @@ test('discovery never advertises paid routing', async () => {
   const router = createModelRouter({
     providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
     budget: budget(),
+    policy: policy(),
   });
   await router.refresh();
   assert.equal(router.list().allowPaid, false);

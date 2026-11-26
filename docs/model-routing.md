@@ -118,6 +118,68 @@ Token estimation is deliberately conservative: `ceil(characters / 3) + 4` per
 message, plus 1,024 tokens per image, plus the system prompt. Unknown context
 windows are excluded rather than guessed.
 
+## Data-processing policy
+
+Cost and privacy are separate decisions. `src/models/policy.ts` is the only
+provider policy registry, and the router consults it at planning time, for an
+explicitly pinned model, and again immediately before dispatch. A provider without
+a record is refused; free inference is never treated as privacy-preserving.
+
+Eligibility is evaluated as independent dimensions:
+
+| Dimension | Enforced from |
+| --- | --- |
+| Verified cost | provider price list or unexpired exact-model attestation |
+| Supported capabilities | provider metadata and benchmark evidence |
+| Data retention | `retention` on the policy record |
+| Training usage | `training` |
+| Processing location | `location`; the grant must name the same location |
+| Owner authorization | an exact `grants[]` entry for the operation and mode |
+| Credential requirements | private grants require an `owner-managed` credential |
+| Available quota | local provider ceiling plus provider cooldown |
+| Supported execution modes | `modes` on the record and the request's data mode |
+
+Operations are `chat`, `work`, `native_reasoning`, `multi_agent`, `memory`, `rag`,
+`document`, `multimodal`, `mcp` and `external_agent`. There is no wildcard: a grant
+for `chat` does not authorize retrieval, memory, images, documents, MCP output,
+external-agent content or subagent delegation.
+
+Private mode refuses external inference unless an exact grant exists and the
+record shows no stored retention, prohibited training, a declared non-global
+location and an owner-managed credential. A zero price says nothing about
+retention, training or location. When nothing qualifies, routing returns
+`model_missing` and the request does not leave the process. The engine does not
+substitute local inference, Ollama or the owner's PC.
+
+Fallback is not a separate permission. Every fallback candidate is re-evaluated
+against the same mode, operation and policy immediately before it is tried, so a
+failure can never move private content to a provider approved only for cloud use.
+
+Retrieval chunks, conversation history, artifacts, tool results and credentials are
+part of the request body; because an unauthorized provider is refused before
+dispatch, none of them cross the boundary. The gateway never receives a credential
+value. Cloud mode also requires an explicit policy record for the operation.
+
+```json
+"policy": [
+  {
+    "providerId": "openrouter",
+    "retention": "transient",
+    "training": "prohibited",
+    "location": "eu",
+    "credentials": "deployment-managed",
+    "modes": ["cloud"],
+    "grants": [
+      { "operation": "chat", "mode": "cloud", "location": "eu" },
+      { "operation": "work", "mode": "cloud", "location": "eu" }
+    ],
+    "evidenceUrl": "https://openrouter.ai/docs/terms",
+    "verifiedAt": "2026-11-26T00:00:00.000Z",
+    "expiresAt": "2027-02-24T00:00:00.000Z"
+  }
+]
+```
+
 ## Budgets and provider limits
 
 The daily ledger reserves before the call:
@@ -212,6 +274,23 @@ an operator-run OpenCode server's OpenAI-compatible endpoint:
       }
     ],
     "attestations": [],
+    "policy": [
+      {
+        "providerId": "openrouter",
+        "retention": "transient",
+        "training": "prohibited",
+        "location": "eu",
+        "credentials": "deployment-managed",
+        "modes": ["cloud"],
+        "grants": [
+          { "operation": "chat", "mode": "cloud", "location": "eu" },
+          { "operation": "work", "mode": "cloud", "location": "eu" }
+        ],
+        "evidenceUrl": "https://openrouter.ai/docs/terms",
+        "verifiedAt": "2026-11-26T00:00:00.000Z",
+        "expiresAt": "2027-02-24T00:00:00.000Z"
+      }
+    ],
     "routing": {
       "maxCandidates": 4,
       "maxFallbacks": 2,
@@ -273,3 +352,6 @@ tests, and the command is documented.
 - The router cannot prove a provider will not change its price mid-day; it
   re-verifies on the configured interval and on every free-tier credential check it
   can observe.
+- The policy record records what the owner established about a provider. The router
+  enforces the record; it does not audit the provider's actual behavior after the
+  request.

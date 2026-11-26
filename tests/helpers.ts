@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ProviderAdapter, ProviderCompletionRequest } from '../src/models/types.js';
 import { ProviderError } from '../src/models/types.js';
+import type { ProviderPolicy } from '../src/models/policy.js';
+import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -31,12 +33,43 @@ export function createWorkspaces(): TestWorkspace {
   };
 }
 
+/**
+ * A policy that authorizes the fixture provider for every operation in cloud
+ * mode only. Private mode stays denied unless a test grants it explicitly, so a
+ * missing operation classification cannot pass by accident.
+ */
+export function testProviderPolicy(
+  providerId = 'free',
+  overrides: Partial<ProviderPolicy> = {},
+): ProviderPolicy {
+  return {
+    providerId,
+    retention: 'transient',
+    training: 'prohibited',
+    location: 'owner-region',
+    credentials: 'deployment-managed',
+    modes: ['cloud', 'private'],
+    grants: PROCESSING_OPERATIONS.map((operation) => ({
+      operation,
+      mode: 'cloud' as const,
+      location: 'owner-region' as const,
+    })),
+    evidenceUrl: 'https://provider.example/terms',
+    verifiedAt: '2026-01-01T00:00:00.000Z',
+    expiresAt: null,
+    ...overrides,
+  };
+}
+
 export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, unknown>): EngineConfig {
   return EngineConfigSchema.parse({
     server: { host: '127.0.0.1', port: 0 },
     auth: { ownerId: OWNER_ID },
     workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
-    models: { route: [{ providerId: 'free', modelId: 'coderax-small' }] },
+    models: {
+      route: [{ providerId: 'free', modelId: 'coderax-small' }],
+      policy: [testProviderPolicy()],
+    },
     execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
     ...(overrides ?? {}),
   });

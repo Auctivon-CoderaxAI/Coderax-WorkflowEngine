@@ -10,6 +10,7 @@ import type {
   ModelRef,
   Usage,
 } from '@coderax/contracts';
+import type { ProcessingOperation } from '../models/policy.js';
 import type { RoutingMode } from '../models/types.js';
 
 /**
@@ -46,6 +47,8 @@ export type AgentRunRequest = {
   /** False pins the owner's explicit model; a route-chosen model may fall back. */
   allowFallback: boolean;
   mode: DataMode;
+  /** The exact processing operation this run performs through the gateway. */
+  operation: ProcessingOperation;
   workspaceRoot: string;
   maxSteps: number;
   budget: Budget | null;
