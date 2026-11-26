@@ -41,6 +41,9 @@ export type AgentContext = {
   memory?: { list: () => Promise<string[]> };
   knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
   /** Persisted plan and finished steps, so a resume does not re-plan or re-run. */
+  pendingAction?: { stepId: string; json: string } | null;
+  savePendingAction?: (action: { stepId: string; json: string } | null) => Promise<boolean>;
+  savePlan?: (steps: Array<{ id: string; title: string }>) => Promise<boolean>;
   plannedSteps?: Array<{ id: string; title: string }>;
   completedSteps?: string[];
   priorText?: string;

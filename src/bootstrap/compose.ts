@@ -279,7 +279,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = createPermissionStore({ clock, ids, ...(persistence.permissionCollection ? { collection: persistence.permissionCollection } : {}) });
   const notifications = persistence.notifications;
 
   const mcp = await attachMcpServers(config.mcp.servers);

@@ -148,7 +148,7 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
           const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
           for (const entry of entries) {
             if (matches.length >= 50 || scanned >= options.maxSearchFiles) return;
-            if (entry.name.startsWith('.')) continue;
+            if (entry.name.startsWith('.') || (!entry.isDirectory() && !entry.isFile())) continue;
             if (entry.isDirectory()) {
               if (!SKIP_DIRECTORIES.has(entry.name)) await walk(path.join(directory, entry.name));
               continue;

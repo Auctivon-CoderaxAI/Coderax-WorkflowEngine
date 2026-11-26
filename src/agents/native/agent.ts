@@ -160,6 +160,7 @@ export function createNativeAgent(input: {
                     }
                   : {}),
               });
+        if (context.savePlan && !(await context.savePlan(steps))) return cancelled();
       }
 
       const completed = new Set(context.completedSteps ?? []);
@@ -191,6 +192,7 @@ export function createNativeAgent(input: {
       }
 
       const toolCatalogue = tools?.runtime.catalogue() ?? '';
+      let pending = context.pendingAction;
       let callIndex = 0;
 
       for (const step of steps) {
@@ -206,9 +208,10 @@ export function createNativeAgent(input: {
         while (stepText.length === 0 && actions < MAX_TOOL_CALLS_PER_STEP) {
           if (request.signal.aborted) return cancelled();
 
+          const replay = pending?.stepId === step.id ? pending : null;
           let completion;
           try {
-            completion = await gateway.complete({
+            completion = replay ? { text: replay.json, usage: undefined } : await gateway.complete({
               model: request.model,
               system: NATIVE_ACTION_SYSTEM,
               prompt: buildActionPrompt({
@@ -250,11 +253,6 @@ export function createNativeAgent(input: {
           const action = parseAction(completion.text);
           if (action.kind === 'final') {
             stepText = action.text.trim();
-            if (stepText.length === 0) {
-              invalidAnswers += 1;
-              observations.push('Your final answer was empty. Return the concrete result.');
-              continue;
-            }
             break;
           }
 
@@ -305,6 +303,10 @@ export function createNativeAgent(input: {
             signal: request.signal,
             callId,
           };
+          if (replay) {
+            if (context.savePendingAction && !(await context.savePendingAction(null))) return cancelled();
+            pending = null;
+          }
           const outcome = await tools.runtime.call({
             name: action.tool,
             arguments: action.input,
@@ -321,6 +323,9 @@ export function createNativeAgent(input: {
           });
 
           if (outcome.approval === 'pending') {
+            if (context.savePendingAction && !(await context.savePendingAction({
+              stepId: step.id, json: JSON.stringify({ tool: action.tool, input: action.input }),
+            }))) return cancelled();
             report({
               type: 'approval.required',
               requestId: outcome.requestId ?? callId,
@@ -332,7 +337,7 @@ export function createNativeAgent(input: {
             });
             // Persist what was produced so far, then suspend: the owner decides,
             // and resume continues this task from its checkpoint.
-            if (sections.length > 0) report({ type: 'text.delta', text: sections.join('\n\n') });
+            if (sections.length > 0) report({ type: 'text.replace', text: sections.join('\n\n') });
             return {
               ok: false,
               code: 'approval_required',

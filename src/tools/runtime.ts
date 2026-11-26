@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ToolDescriptor } from '@coderax/contracts';
 import type {
   ApprovalGate,
@@ -68,6 +69,8 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
           resource,
           description: tool.description,
           tool: tool.name,
+          binding: createHash('sha256').update(JSON.stringify([tool.name, request.context.mode, parsed.data])).digest('hex'),
+          consume: tool.approval === 'always',
         });
         if (decision.decision === 'pending') {
           return {

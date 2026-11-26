@@ -53,6 +53,7 @@ export type TaskRecord = {
   generation: number;
   runToken: string | null;
   steps: TaskStep[];
+  pendingAction?: { stepId: string; json: string } | null;
   checkpoint: TaskCheckpoint;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
@@ -70,6 +71,7 @@ export type TaskPatch = Partial<
     TaskRecord,
     | 'state'
     | 'steps'
+    | 'pendingAction'
     | 'checkpoint'
     | 'updatedAt'
     | 'leaseExpiresAt'

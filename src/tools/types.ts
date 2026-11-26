@@ -58,6 +58,8 @@ export type ApprovalGate = {
     resource: string;
     description: string;
     tool: string;
+    binding: string;
+    consume: boolean;
   }) => Promise<{ decision: ApprovalDecision; requestId?: string }>;
 };
 

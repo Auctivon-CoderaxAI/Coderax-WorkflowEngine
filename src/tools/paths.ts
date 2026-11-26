@@ -1,4 +1,4 @@
-import { realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 /**
@@ -42,22 +42,25 @@ export async function confinePath(workspaceRoot: string, requested: string): Pro
   // Resolve the existing part. A write target may not exist yet, so its parent is
   // what must be inside the workspace after symlink resolution.
   let existing = candidate;
-  for (let depth = 0; depth < 64; depth += 1) {
+  for (;;) {
     const resolved = await realpath(existing).catch(() => null);
     if (resolved) {
       if (!isInside(resolved, rootReal)) {
         return { ok: false, detail: 'That path resolves outside the workspace.' };
       }
-      break;
+      return {
+        ok: true,
+        path: path.resolve(resolved, path.relative(existing, candidate)),
+        relative: path.relative(rootReal, candidate).split(path.sep).join('/') || '.',
+      };
     }
+    // An unresolved symlink is not a missing write target.
+    const missing = await lstat(existing).then(() => false, (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+    if (!missing) break;
     const parent = path.dirname(existing);
     if (parent === existing) break;
     existing = parent;
   }
 
-  return {
-    ok: true,
-    path: candidate,
-    relative: path.relative(rootReal, candidate).split(path.sep).join('/') || '.',
-  };
+  return { ok: false, detail: 'That path cannot be resolved safely.' };
 }

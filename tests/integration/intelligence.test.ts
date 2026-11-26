@@ -20,8 +20,9 @@ function scriptedGateway() {
     complete: async (request: ModelCompletionRequest) => {
       calls.push(request.prompt);
       if (request.prompt.includes('Return ONLY a JSON array')) {
-        return { text: '["Write the report"]', usage: { inputTokens: 5, outputTokens: 5 } };
+        return { text: '["Write the report", "Confirm completion"]', usage: { inputTokens: 5, outputTokens: 5 } };
       }
+      if (request.prompt.includes('Current step (step-2):')) return { text: '{"final":"Confirmed."}' };
       if (!request.prompt.includes('Tool fs.write succeeded')) {
         return {
           text: JSON.stringify({
@@ -84,7 +85,8 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
       const status = await started.app.service.task(principal, submitted.value.taskId);
       return status.ok && status.value.state === 'completed' ? status.value : null;
     });
-    assert.equal(completed.result?.summary, 'Wrote report.txt.');
+    assert.ok(completed.result?.summary?.includes('Confirmed.'));
+    assert.deepEqual(completed.steps.map(step => step.state), ['completed', 'completed']);
 
     const content = await readFile(
       path.join(started.workspace.cloudRoot, 'report.txt'),
@@ -142,6 +144,27 @@ test('tools, routing and retrieval are substantive and zero-cost', async () => {
       'private',
     );
     assert.deepEqual(privateOnly.hits, []);
+  } finally {
+    await started.close();
+  }
+});
+
+test('the owner can cancel a suspended task without executing its pending action', async () => {
+  const started = await startTestApp({ gateway: scriptedGateway() });
+  try {
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'Write the report', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(submitted.ok);
+    const { taskId } = submitted.value;
+    await waitFor(async () => {
+      const task = await started.app.service.task(principal, taskId);
+      return task.ok && task.value.state === 'awaiting_approval' ? task.value : null;
+    });
+    const cancelled = await started.app.service.cancelTask(principal, taskId);
+    assert.ok(cancelled.ok);
+    assert.equal(cancelled.value.state, 'cancelled');
+    await assert.rejects(readFile(path.join(started.workspace.cloudRoot, 'report.txt')), { code: 'ENOENT' });
   } finally {
     await started.close();
   }

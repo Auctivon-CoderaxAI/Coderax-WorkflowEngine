@@ -19,6 +19,7 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 
 export type EmbeddingProvider = {
   id: string;
+  cloudOnly?: boolean;
   embed: (texts: string[]) => Promise<number[][]>;
 };
 
@@ -75,9 +76,10 @@ export function chunkText(text: string, size = 1200, overlap = 150): string[] {
     current = current.length > 0 ? `${current}\n\n${paragraph}` : paragraph;
     // A single paragraph can exceed the target; split it on sentence/word edges.
     while (current.length > size * 2) {
-      const cut = current.lastIndexOf('. ', size) + 2 || size;
+      const boundary = current.lastIndexOf('. ', size - 2);
+      const cut = boundary >= overlap ? boundary + 2 : size;
       chunks.push(current.slice(0, cut).trim());
-      current = current.slice(Math.max(0, cut - overlap));
+      current = current.slice(Math.max(1, cut - overlap));
     }
   }
   if (current.trim().length > 0) chunks.push(current.trim());
@@ -126,7 +128,7 @@ export function createKnowledgeStore(input: {
       }
 
       let vectors: number[][] | null = null;
-      if (input.embeddings) {
+      if (input.embeddings && !(mode === 'private' && input.embeddings.cloudOnly)) {
         try {
           vectors = await input.embeddings.embed(pieces);
           if (vectors.length !== pieces.length) vectors = null;
@@ -164,7 +166,7 @@ export function createKnowledgeStore(input: {
       if (scoped.length === 0) return { hits: [], embedding: 'lexical' };
 
       let queryVector: number[] | null = null;
-      if (input.embeddings) {
+      if (input.embeddings && !(mode === 'private' && input.embeddings.cloudOnly)) {
         try {
           const embedded = await input.embeddings.embed([query]);
           queryVector = embedded[0] ?? null;
@@ -250,12 +252,14 @@ export function createOpenAiEmbeddingProvider(input: {
   const timeoutMs = input.timeoutMs ?? 20_000;
   return {
     id: 'openai-compatible',
+    cloudOnly: true,
     embed: async (texts) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetchImpl(`${input.baseURL.replace(/\/+$/, '')}/embeddings`, {
           method: 'POST',
+          redirect: 'error',
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${input.apiKey}`,

@@ -194,26 +194,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     requireApproval: boolean;
   }): ApprovalGate {
     return {
-      ensure: async ({ scope, resource, description, tool }) => {
+      ensure: async ({ scope, resource, description, tool, binding, consume }) => {
         if (input.taskId === null) return { decision: 'denied' as const };
-        if (await deps.permissions.isApproved(input.taskId, scope, resource)) {
-          return { decision: 'granted' as const };
-        }
-        if (!input.requireApproval) return { decision: 'denied' as const };
-        const existing = await deps.permissions.list(input.ownerId, input.taskId);
-        const pending = existing.requests.find(
-          (request) =>
-            request.decision === 'pending' &&
-            request.scope === scope &&
-            request.resource === resource,
-        );
-        if (pending) {
-          return { decision: 'pending' as const, requestId: pending.requestId };
-        }
+        if (!input.requireApproval) return { decision: 'denied' };
+        const prior = await deps.permissions.lookup({
+          ownerId: input.ownerId, taskId: input.taskId, scope, resource, binding, consume,
+        });
+        if (prior) return prior;
         const created = await deps.permissions.request({
           ownerId: input.ownerId,
           taskId: input.taskId,
           agent: 'coderax',
+          binding,
           scope,
           resource,
           description: `${tool}: ${description}`.slice(0, 2000),
@@ -648,7 +640,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     };
 
-    const history = await historyFor(task.conversationId, task.objective);
+    const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
     const result = await deps.runner.run({
       scope: scopeOf(started.task),
       token,
@@ -667,11 +659,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         signal: controller.signal,
         ...(started.task.agent === 'coderax'
           ? {
-              context: await nativeContext({
-                ownerId: task.ownerId,
-                mode: task.mode,
-                task: started.task,
-              }),
+              context: {
+                ...await nativeContext({ ownerId: task.ownerId, mode: task.mode, task: started.task }),
+                pendingAction: started.task.pendingAction ?? null,
+                savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
+                  taskId, token, patch: { pendingAction },
+                })).applied,
+                savePlan: async (plan) => {
+                  const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
+                  const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
+                  if (saved.applied) steps.splice(0, steps.length, ...planned);
+                  return saved.applied;
+                },
+              },
             }
           : {}),
       },
@@ -891,6 +891,24 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
+      if (task.state === 'awaiting_approval') {
+        const token = deps.ids.runToken();
+        const now = deps.clock.now();
+        const expiresAt = new Date(now.getTime() + deps.config.execution.leaseTtlMs);
+        if (!await deps.lease.claim({ key: workRunKey(scopeOf(task)), owner: task.ownerId, token, now, expiresAt })) {
+          return fail('busy', 'Another run holds this conversation.');
+        }
+        const claimed = await deps.tasks.reissue({
+          taskId, token, expected: { state: task.state, generation: task.generation },
+          now: now.toISOString(), leaseExpiresAt: expiresAt.toISOString(),
+        });
+        if (!claimed.applied) {
+          await releaseLease(task, token);
+          return fail('conflict', 'The suspended task changed before cancellation.');
+        }
+        await settle(claimed.task, token, { kind: 'cancelled' });
+        return ok({ taskId, state: 'cancelled', generation: claimed.task.generation, outcome: 'accepted' });
+      }
       const outcome = await deps.lease.cancel({
         key: workRunKey(scopeOf(task)),
         now: deps.clock.now(),
@@ -980,12 +998,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
       const applied = await deps.tasks.reissue({
+        expected: { state: task.state, generation },
         taskId,
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be resumed.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -1029,12 +1051,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
       const applied = await deps.tasks.reissue({
+        expected: { state: task.state, generation },
         taskId,
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be retried.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -1082,7 +1108,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
-      const history = await historyFor(conversationId, request.message);
+      const history = request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
       const controller = new AbortController();
       const outcome = await adapter.value.run(
         {

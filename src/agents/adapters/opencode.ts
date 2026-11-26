@@ -92,6 +92,7 @@ export function createOpenCodeHttpTransport(input: {
         await fetchImpl(`${base}/session/${encodeURIComponent(sessionId)}`, {
           method: 'DELETE',
           headers: headers(),
+          redirect: 'error',
           signal: AbortSignal.timeout(5_000),
         }).catch(() => undefined);
       };
@@ -100,7 +101,8 @@ export function createOpenCodeHttpTransport(input: {
         const created = await fetchImpl(`${base}/session`, {
           method: 'POST',
           headers: headers(),
-          body: JSON.stringify({ title: `Coderax ${run.conversationId}`.slice(0, 200) }),
+          redirect: 'error',
+          body: JSON.stringify({ title: 'Coderax task' }),
           signal: controller.signal,
         });
         if (!created.ok) {
@@ -124,11 +126,7 @@ export function createOpenCodeHttpTransport(input: {
         report({ type: 'step.started', stepId: 'opencode-1', title: 'Execute with OpenCode' });
 
         const model = input.model ?? { providerId: run.model.providerId, modelId: run.model.modelId };
-        const history = (run.history ?? [])
-          .map((turn) => `${turn.role === 'user' ? 'Owner' : 'Assistant'}: ${turn.text}`)
-          .join('\n\n');
         const prompt = [
-          ...(history.length > 0 ? [`Earlier in this conversation:\n${history}`, ''] : []),
           `Objective:\n${run.objective}`,
           '',
           'Execute the objective and return the concrete result. Do not ask a question unless you are blocked.',
@@ -137,6 +135,7 @@ export function createOpenCodeHttpTransport(input: {
         const response = await fetchImpl(`${base}/session/${encodeURIComponent(sessionId)}/message`, {
           method: 'POST',
           headers: headers(),
+          redirect: 'error',
           body: JSON.stringify({
             model: { providerID: model.providerId, modelID: model.modelId },
             parts: [{ type: 'text', text: prompt }],
@@ -213,7 +212,6 @@ export function createOpenCodeHttpTransport(input: {
         return { ok: true, summary: text.trim() };
       } catch {
         if (run.signal.aborted) {
-          await cleanup();
           return { ok: false, code: 'cancelled', detail: 'The run was cancelled.', retryable: false };
         }
         return {

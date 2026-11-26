@@ -193,11 +193,12 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
-    reissue: async ({ taskId, token, now, leaseExpiresAt }): Promise<FencedWriteResult> => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, expected }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
       const task = toTask(current);
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if ((expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
+          (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
       // Generation and state are part of the filter: two replicas resuming the
@@ -208,7 +209,8 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
           $set: {
             state: 'queued',
             generation: task.generation + 1,
-            checkpoint: { ...task.checkpoint, text: '' },
+            checkpoint: expected?.state === 'awaiting_approval'
+              ? task.checkpoint : { ...task.checkpoint, text: '' },
             runToken: token,
             updatedAt: now,
             leaseExpiresAt,

@@ -27,6 +27,7 @@ test('the OpenCode transport creates a session, sends the objective and reads it
         : input instanceof URL
           ? input.toString()
           : (input as { url: string }).url;
+    assert.ok(!String(init?.body).includes('earlier private message'));
     calls.push(`${init?.method ?? 'GET'} ${url}`);
     if (url.endsWith('/app')) return new Response('ok', { status: 200 });
     if (url.endsWith('/session')) {
@@ -51,7 +52,7 @@ test('the OpenCode transport creates a session, sends the objective and reads it
   await transport.probe();
 
   const events: AgentReportEvent[] = [];
-  const outcome = await transport.run(request(), (event) => events.push(event));
+  const outcome = await transport.run({ ...request(), history: [{ role: 'user', text: 'earlier private message' }] }, (event) => events.push(event));
   assert.equal(outcome.ok, true);
   assert.equal(outcome.ok && outcome.summary, 'OpenCode result.');
   assert.deepEqual(

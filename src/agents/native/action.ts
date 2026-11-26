@@ -38,7 +38,7 @@ export function parseAction(raw: string): ModelAction {
 
   const final = action.final ?? action.answer;
   if (typeof final === 'string') {
-    return { kind: 'final', text: final, thought };
+    return final.trim() ? { kind: 'final', text: final, thought } : { kind: 'invalid', reason: 'The final answer was empty.' };
   }
 
   const tool = action.tool ?? action.name;

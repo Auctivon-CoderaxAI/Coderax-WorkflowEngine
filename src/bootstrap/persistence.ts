@@ -28,6 +28,7 @@ import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
+  permissionCollection?: MongoCollectionLike;
   lease: LeaseStore;
   tasks: TaskRepository;
   conversations: ConversationRepository;
@@ -111,7 +112,10 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const memory = database.collection(collectionName(config, 'memory'));
   const notifications = database.collection(collectionName(config, 'notifications'));
 
+  const permissionCollection = database.collection(collectionName(config, 'permissions'));
   try {
+    await permissionCollection.createIndex({ requestId: 1 }, { unique: true, name: 'permission_request' });
+    await permissionCollection.createIndex({ ownerId: 1, taskId: 1 }, { name: 'permission_task' });
     await ensureWorkRunIndexes(workRuns);
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
@@ -126,6 +130,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   return {
     driver: 'mongo',
+    permissionCollection,
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
     conversations: createMongoConversationRepository({ conversations, messages }),
