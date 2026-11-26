@@ -78,7 +78,10 @@ The SDK exposes every operation on `CoderaxClient`.
   confirmed close marks the record `expired`; an unconfirmed close marks it
   `quarantined`, because reporting a clean expiry without terminating the
   remote workload would be false.
-- At most `maxSessionsPerOwner` live sessions exist per owner.
+- At most `maxSessionsPerOwner` slots exist per owner. Pending creates and quarantined sessions
+  occupy slots until creation fails or termination is confirmed. Retry close to
+  clean up a quarantined session. The engine retains the latest 128 confirmed
+  terminal sessions and their receipt histories across owners.
 - States are `ready`, `paused`, `owner_controlled`, `closed`, `expired`,
   `failed` and `quarantined`. An action on any state other than `ready` is
   refused with a receipt. `quarantined` means remote termination was **not**
@@ -137,7 +140,7 @@ Fail-closed defaults:
   `Space` and every other key can commit a form and need approval.
 - Mouse `move` and `wheel` are non-committing. Mouse `down` and `up` need an
   approval. `tab.close` needs an approval. `upload` and `download` need a
-  `file_transfer` approval.
+  `file_transfer` approval regardless of the declared intent.
 - Filling a non-password field with `form_input` is non-committing. Filling an
   element the provider identified as a password field is upgraded to
   `authentication`, even if the caller declared `form_input`.

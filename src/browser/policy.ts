@@ -77,14 +77,14 @@ export function sensitivityFor(
   action: BrowserAction,
   context: { passwordTarget: boolean; targetRole?: string },
 ): Sensitivity | null {
+  if (action.type === 'upload' || action.type === 'download') {
+    return sensitivity('file_transfer');
+  }
   const declared = 'intent' in action ? action.intent?.category : undefined;
   if (declared && SENSITIVE_CATEGORIES.includes(declared as BrowserSensitiveCategory)) {
     return sensitivity(declared as BrowserSensitiveCategory);
   }
 
-  if (action.type === 'upload' || action.type === 'download') {
-    return sensitivity('file_transfer');
-  }
   if (
     action.type === 'fill' &&
     context.passwordTarget &&

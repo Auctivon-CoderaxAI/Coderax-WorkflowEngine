@@ -152,6 +152,7 @@ function toContract(record: StoredBrowserSession): BrowserSession {
 
 export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
   const store = createBrowserStore();
+  const pendingCreates = new Map<string, number>();
   const consumedApprovals = new Set<string>();
 
   function nowMs(): number {
@@ -468,72 +469,71 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       }
 
       await sweep(ownerId);
-      const live = store.sessions(ownerId).filter((record) => isLive(record.session));
-      if (live.length >= deps.config.browsers.maxSessionsPerOwner) {
+      const live = store.sessions(ownerId).filter((record) => isLive(record.session) || record.session.state === 'quarantined');
+      const pending = pendingCreates.get(ownerId) ?? 0;
+      if (pending + live.length >= deps.config.browsers.maxSessionsPerOwner) {
         return fail(
           'conflict',
           'The owner already has the maximum number of live browser sessions.',
         );
       }
 
-      const configuredTtl = Math.floor(deps.config.browsers.sessionTtlMs / 1000);
-      const ttlSeconds = Math.min(request.ttlSeconds ?? configuredTtl, configuredTtl);
-      const started = nowMs();
-      const created = await deps.provider.create({
-        ttlSeconds,
-        allowedOrigins: origins,
-        label: request.label,
-        purpose: request.purpose,
-        ...(request.viewport ? { viewport: request.viewport } : {}),
-      });
-      if (!created.ok) {
-        audit(ownerId, 'browser.session.create', 'failed', created.detail);
-        return providerFailure(created);
-      }
-
-      const url = sanitizePageUrl(created.value.url);
-      const tabs = sanitizeTabs(created.value.tabs);
-      if (!url || !tabs || !tabsWithinOrigins(tabs, origins)) {
-        try {
-          await deps.provider.close(created.value.providerSessionId);
-        } catch {
-          // The provider never produced a usable session; nothing to keep.
+      pendingCreates.set(ownerId, pending + 1);
+      try {
+        const configuredTtl = Math.floor(deps.config.browsers.sessionTtlMs / 1000);
+        const ttlSeconds = Math.min(request.ttlSeconds ?? configuredTtl, configuredTtl);
+        const started = nowMs();
+        const created = await deps.provider.create({
+          ttlSeconds,
+          allowedOrigins: origins,
+          label: request.label,
+          purpose: request.purpose,
+          ...(request.viewport ? { viewport: request.viewport } : {}),
+        });
+        if (!created.ok) {
+          audit(ownerId, 'browser.session.create', 'failed', created.detail);
+          return providerFailure(created);
         }
-        audit(ownerId, 'browser.session.create', 'failed', 'protocol');
-        return fail(
-          'protocol_error',
-          'The browser provider returned an unusable session or tab list.',
-        );
-      }
 
-      const now = deps.clock.iso();
-      const session: BrowserSession = {
-        sessionId: deps.ids.browserSessionId(),
-        label: request.label,
-        purpose: request.purpose,
-        state: 'ready',
-        environment: 'cloud',
-        provider: deps.provider.kind,
-        url,
-        title: sanitizeLabel(created.value.title, 300),
-        tabs,
-        allowedOrigins: origins,
-        createdAt: now,
-        updatedAt: now,
-        // The provider's TTL starts at creation, so anchoring here is earlier
-        // than the provider's own expiry and can never keep a dead session.
-        expiresAt: new Date(started + ttlSeconds * 1000).toISOString(),
-      };
-      const record: StoredBrowserSession = {
-        ownerId,
-        providerSessionId: created.value.providerSessionId,
-        session,
-        lastElements: [],
-      };
-      store.putSession(record);
-      addReceipt({ record, action: 'session.create', outcome: 'succeeded', started });
-      audit(ownerId, 'browser.session.created', 'accepted', 'provider');
-      return ok(toContract(record));
+        const url = sanitizePageUrl(created.value.url);
+        const tabs = sanitizeTabs(created.value.tabs);
+        const usable = url !== null && tabs !== null && tabsWithinOrigins(tabs, origins);
+        const now = deps.clock.iso();
+        const session: BrowserSession = {
+          sessionId: deps.ids.browserSessionId(),
+          label: request.label,
+          purpose: request.purpose,
+          state: usable ? 'ready' : 'quarantined',
+          environment: 'cloud',
+          provider: deps.provider.kind,
+          url: url ?? 'about:blank',
+          title: sanitizeLabel(created.value.title, 300),
+          tabs: usable ? tabs : [],
+          allowedOrigins: origins,
+          createdAt: now,
+          updatedAt: now,
+          // The provider's TTL starts at creation, so anchoring here is earlier
+          // than the provider's own expiry and can never keep a dead session.
+          expiresAt: new Date(started + ttlSeconds * 1000).toISOString(),
+        };
+        const record: StoredBrowserSession = {
+          ownerId,
+          providerSessionId: created.value.providerSessionId,
+          session,
+          lastElements: [],
+        };
+        store.putSession(record);
+        if (!usable) {
+          return protocolViolation(record, 'session.create', 'The browser provider returned an unusable session or tab list.', started);
+        }
+        addReceipt({ record, action: 'session.create', outcome: 'succeeded', started });
+        audit(ownerId, 'browser.session.created', 'accepted', 'provider');
+        return ok(toContract(record));
+      } finally {
+        const remaining = pendingCreates.get(ownerId)! - 1;
+        if (remaining) pendingCreates.set(ownerId, remaining);
+        else pendingCreates.delete(ownerId);
+      }
     },
 
     act: async (ownerId, sessionId, action) => {
@@ -994,7 +994,7 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       const found = await owned(ownerId, sessionId);
       if (!found.ok) return found;
       const record = found.value;
-      if (record.session.state === 'closed' || record.session.state === 'quarantined') {
+      if (record.session.state === 'closed') {
         return ok(toContract(record));
       }
 

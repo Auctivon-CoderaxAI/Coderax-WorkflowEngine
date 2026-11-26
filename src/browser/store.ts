@@ -45,12 +45,15 @@ export type BrowserStore = {
 
 export function createBrowserStore(input: {
   maxReceiptsPerSession?: number;
+  maxTerminalSessions?: number;
   maxArtifacts?: number;
   maxArtifactBytes?: number;
 } = {}): BrowserStore {
   const sessions = new Map<string, StoredBrowserSession>();
   const receipts = new Map<string, BrowserReceipt[]>();
   const artifacts = new Map<string, StoredBrowserArtifact>();
+  const terminal = new Set<string>();
+  const maxTerminal = Math.max(1, input.maxTerminalSessions ?? 128);
   const maxReceipts = input.maxReceiptsPerSession ?? 500;
   const maxArtifacts = input.maxArtifacts ?? 256;
   const maxArtifactBytes = input.maxArtifactBytes ?? 64 * 1024 * 1024;
@@ -81,7 +84,20 @@ export function createBrowserStore(input: {
     sessions: (ownerId) =>
       [...sessions.values()].filter((record) => record.ownerId === ownerId),
     updateSession: (record) => {
-      sessions.set(record.session.sessionId, record);
+      const { sessionId, state } = record.session;
+      if (!sessions.has(sessionId)) return;
+      sessions.set(sessionId, record);
+      if (state === 'closed' || state === 'expired' || state === 'failed') {
+        terminal.add(sessionId);
+        if (terminal.size > maxTerminal) {
+          const oldest = terminal.values().next().value!;
+          terminal.delete(oldest);
+          receipts.delete(receiptKey(sessions.get(oldest)!.ownerId, oldest));
+          sessions.delete(oldest);
+        }
+      } else {
+        terminal.delete(sessionId);
+      }
     },
     liveSessions: () =>
       [...sessions.values()].filter(
@@ -92,6 +108,7 @@ export function createBrowserStore(input: {
           record.session.state === 'creating',
       ),
     addReceipt: ({ ownerId, receipt }) => {
+      if (!sessions.has(receipt.sessionId)) return;
       const key = receiptKey(ownerId, receipt.sessionId);
       const list = receipts.get(key) ?? [];
       list.push(receipt);

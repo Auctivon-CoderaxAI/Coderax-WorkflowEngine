@@ -141,19 +141,34 @@ export function createHttpBrowserProvider(input: {
 
       const length = Number(response.headers.get('content-length') ?? '0');
       if (Number.isFinite(length) && length > MAX_PROVIDER_RESPONSE) {
+        controller.abort();
         return {
           ok: false,
           code: 'protocol_error',
           detail: 'The browser provider response exceeded the protocol limit.',
         };
       }
-      const text = await response.text();
-      if (text.length > MAX_PROVIDER_RESPONSE) {
-        return {
-          ok: false,
-          code: 'protocol_error',
-          detail: 'The browser provider response exceeded the protocol limit.',
-        };
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let bytes = 0;
+      let text = '';
+      if (reader) {
+        try {
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            bytes += chunk.value.byteLength;
+            if (bytes > MAX_PROVIDER_RESPONSE) {
+              controller.abort();
+              void reader.cancel().catch(() => {});
+              return { ok: false, code: 'protocol_error', detail: 'The browser provider response exceeded the protocol limit.' };
+            }
+            text += decoder.decode(chunk.value, { stream: true });
+          }
+          text += decoder.decode();
+        } finally {
+          reader.releaseLock();
+        }
       }
       let json: unknown;
       try {
@@ -331,6 +346,10 @@ export function createHttpBrowserProvider(input: {
     if (!gate.ok) return gate;
     const missing = requireFeature(gate.value, feature);
     if (missing) return missing;
+    return acknowledge(path);
+  }
+
+  async function acknowledge(path: string): Promise<ProviderResult<void>> {
     const result = await request(path, 'POST', {}, ProviderOkResponse);
     if (!result.ok) return result;
     return { ok: true, value: undefined };
@@ -437,7 +456,11 @@ export function createHttpBrowserProvider(input: {
     release: (providerSessionId) =>
       okOnly(`/v1/sessions/${encodeURIComponent(providerSessionId)}/release`, 'takeover'),
 
-    close: (providerSessionId) =>
-      okOnly(`/v1/sessions/${encodeURIComponent(providerSessionId)}/close`, 'sessions'),
+    close: async (providerSessionId) => {
+      if (!input.trusted) {
+        return { ok: false, code: 'not_configured', detail: 'The browser endpoint is not owner-attested.' };
+      }
+      return acknowledge(`/v1/sessions/${encodeURIComponent(providerSessionId)}/close`);
+    },
   };
 }

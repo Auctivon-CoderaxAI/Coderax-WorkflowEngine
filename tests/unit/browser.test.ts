@@ -534,12 +534,13 @@ test('file upload and retrieval require a transfer approval and keep exact bytes
     const upload = {
       type: 'upload',
       target: { elementId: 'el-email' },
+      intent: { category: 'purchase', description: 'Transfer' },
       filename: 'notes.txt',
       contentType: 'text/plain',
       dataBase64: content.toString('base64'),
     };
 
-    const refused = await act(started, session.sessionId, upload);
+    const refused = await act(started, session.sessionId, { ...upload, approvalId: await approve(started, session.sessionId, 'purchase') });
     assert.equal(refused.ok, false);
     assert.equal(refused.ok === false && refused.code, 'permission_required');
 
@@ -580,6 +581,7 @@ test('file upload and retrieval require a transfer approval and keep exact bytes
       act(started, session.sessionId, {
         type: 'download',
         target: { elementId: 'el-report' },
+        intent: { category: 'purchase', description: 'Transfer' },
         approvalId: downloadApproval,
       }),
     );
@@ -760,14 +762,18 @@ test('the configured live-session limit is enforced', async () => {
     config: { browsers: { enabled: true, maxSessionsPerOwner: 1 } },
   });
   try {
-    await open(started);
-    const second = await started.app.service.createBrowserSession(principal, {
-      label: 'Second session',
+    const create = () => started.app.service.createBrowserSession(principal, {
+      label: 'Concurrent session',
       purpose: 'testing',
       origins: ['https://example.test'],
     });
-    assert.equal(second.ok, false);
-    assert.equal(second.ok === false && second.code, 'conflict');
+    const allocate = fake.create;
+    fake.create = async () => ({ ok: false, code: 'unavailable', detail: 'No allocation.' });
+    assert.equal((await create()).ok, false);
+    fake.create = allocate;
+    const results = await Promise.all([create(), create()]);
+    assert.equal(results.filter(result => result.ok).length, 1);
+    assert.equal(results.filter(result => !result.ok && result.code === 'conflict').length, 1);
     assert.equal(fake.createInputs.length, 1);
   } finally {
     await started.close();
@@ -901,5 +907,29 @@ test('an expired session is retired and its cloud browser is released', async ()
     assert.ok(receipts.receipts.some((receipt) => receipt.outcome === 'failed'));
   } finally {
     workspace.cleanup();
+  }
+});
+
+test('terminal history eviction preserves live and unconfirmed sessions', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({ browser: fake, config: { browsers: { enabled: true } } });
+  try {
+    const live = await open(started);
+    const quarantined = await open(started);
+    const close = (id: string) => must(started.app.service.closeBrowserSession(principal, id, {}));
+    fake.failNextClose();
+    assert.equal((await close(quarantined.sessionId)).state, 'quarantined');
+    const oldest = await open(started);
+    await close(oldest.sessionId);
+    for (let i = 0; i < 128; i++) await close((await open(started)).sessionId);
+    const listed = (await started.app.service.browserSessions(principal)).sessions;
+    assert.equal(listed.length, 130);
+    assert.ok(listed.some(s => s.sessionId === live.sessionId));
+    assert.ok(listed.some(s => s.sessionId === quarantined.sessionId));
+    assert.ok(!listed.some(s => s.sessionId === oldest.sessionId));
+    assert.equal((await started.app.service.browserReceipts(principal, oldest.sessionId)).ok, false);
+    assert.equal((await close(quarantined.sessionId)).state, 'closed');
+  } finally {
+    await started.close();
   }
 });

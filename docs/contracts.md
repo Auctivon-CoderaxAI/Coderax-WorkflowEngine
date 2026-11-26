@@ -33,6 +33,9 @@ the successful response; failures use the shared `Problem` body.
 | Execution events | `EVENT_SCHEMA_VERSION = 1` | `events.ts` |
 | SDK | matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
 
+The version literal in the `/v1/health` response remains `1.0.0` so clients
+using the original v1 schema can still parse it.
+
 Rules:
 
 - Adding an optional request field or a new operation is backward compatible.

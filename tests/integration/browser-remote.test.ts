@@ -3,7 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { test } from 'node:test';
 import type { BrowserAction, BrowserSessionCreateRequest } from '@coderax/contracts';
 import { startTestApp } from '../helpers.js';
-import { PNG_1X1 } from '../fakes/browser.js';
+import { createHttpBrowserProvider } from '../../src/browser/remote.js';
+import { fakeBrowserProvider, PNG_1X1 } from '../fakes/browser.js';
 
 /**
  * The remote adapter is exercised against a local server that implements
@@ -404,4 +405,46 @@ test('remote take over returns a live view without persisting it', async () => {
     await started.close();
     await provider.close();
   }
+});
+
+test('cleanup requires attestation and an explicit acknowledgement, independent of readiness', async () => {
+  const limits = (await fakeBrowserProvider().describe()).limits;
+  const paths: string[] = [];
+  let acknowledged = false;
+  const adapter = (trusted: boolean) => createHttpBrowserProvider({
+    trusted, limits, token: TOKEN, baseURL: 'https://provider.test', timeoutMs: 1000,
+    fetchImpl: async (url) => {
+      const path = new URL(String(url)).pathname;
+      paths.push(path);
+      return path.endsWith('/close') ? Response.json({ ok: acknowledged }) : new Response(null, { status: 503 });
+    },
+  });
+  assert.equal((await adapter(false).close('existing')).ok, false);
+  assert.deepEqual(paths, []);
+  const trusted = adapter(true);
+  assert.equal((await trusted.describe()).operational, false);
+  assert.equal((await trusted.close('existing')).ok, false);
+  acknowledged = true;
+  assert.equal((await trusted.close('existing')).ok, true);
+  assert.deepEqual(paths, ['/v1/capabilities', '/v1/sessions/existing/close', '/v1/sessions/existing/close']);
+});
+
+test('oversized streamed responses are cancelled before EOF', async () => {
+  let cancelled = false;
+  const chunk = new Uint8Array(1_000_000);
+  let remaining = 20;
+  const provider = createHttpBrowserProvider({
+    trusted: true, limits: (await fakeBrowserProvider().describe()).limits,
+    token: TOKEN, baseURL: 'https://provider.test', timeoutMs: 1000,
+    fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (remaining-- > 0) controller.enqueue(chunk);
+        else controller.close();
+      },
+      cancel() { cancelled = true; },
+    })),
+  });
+  const result = await provider.describe();
+  assert.equal(result.reason, 'protocol_error');
+  assert.equal(cancelled, true);
 });

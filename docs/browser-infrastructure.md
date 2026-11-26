@@ -150,8 +150,8 @@ allowance and has explicitly approved provisioning:
    origin and a second owner.
 6. Measure RSS, CPU, disk and egress at idle and under one active session.
 7. Kill the engine process, restart it, and prove the remote session is either
-   recovered through the registry or terminated/quarantined. A TTL alone is not
-   restart recovery.
+   recovered through the registry or confirmed terminated by the provider. If
+   termination is unconfirmed, quarantine the session and fail this check.
 8. Record the receipt ids, artifact digests and termination evidence. If any
    step is missing, the capability remains non-operational.
 
