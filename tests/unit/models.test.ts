@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import type { ModelDescriptor } from '@coderax/contracts';
 import { createModelCatalog } from '../../src/models/catalog.js';
 import { createBudgetLedger } from '../../src/models/budget.js';
+import { createMongoQuotaStore } from '../../src/models/quota.js';
+import { createFakeDatabase } from '../fakes/mongo.js';
 
 const ready = { available: true as const, reason: 'ready' as const, detail: 'ready' };
 
@@ -54,11 +56,52 @@ test('discovery never advertises paid routing', () => {
   assert.equal(catalog.list().allowPaid, false);
 });
 
-test('an exhausted daily budget fails closed', () => {
+test('an exhausted daily budget fails closed', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 100 });
   const now = new Date('2026-11-26T10:00:00.000Z');
-  assert.equal(ledger.reserve('owner', now).allowed, true);
-  assert.equal(ledger.reserve('owner', now).allowed, false);
+  assert.equal((await ledger.reserve('owner', now)).allowed, true);
+  assert.equal((await ledger.reserve('owner', now)).allowed, false);
   const nextDay = new Date('2026-11-27T10:00:00.000Z');
-  assert.equal(ledger.reserve('owner', nextDay).allowed, true);
+  assert.equal((await ledger.reserve('owner', nextDay)).allowed, true);
+});
+
+test('two replicas share one durable quota and both limits fail closed', async () => {
+  const collection = createFakeDatabase().collection('quota');
+  const replicaA = createBudgetLedger({
+    maxRequestsPerDay: 2,
+    maxTokensPerDay: 100,
+    store: createMongoQuotaStore({ collection }),
+  });
+  const replicaB = createBudgetLedger({
+    maxRequestsPerDay: 2,
+    maxTokensPerDay: 100,
+    store: createMongoQuotaStore({ collection }),
+  });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+
+  // The second replica sees the first replica's reservation, so the ceiling is
+  // global rather than one budget per process.
+  assert.equal((await replicaA.reserve('owner', now)).allowed, true);
+  assert.equal((await replicaB.reserve('owner', now)).allowed, true);
+  assert.equal((await replicaB.reserve('owner', now)).allowed, false);
+  assert.equal((await replicaA.snapshot('owner', now)).requests, 2);
+
+  await replicaB.consume('owner', { inputTokens: 60, outputTokens: 50 }, now);
+  assert.equal(await replicaA.available('owner', now), false);
+  assert.equal((await replicaA.reserve('owner', now)).allowed, false);
+});
+
+test('a released reservation does not charge quota for work that never ran', async () => {
+  const collection = createFakeDatabase().collection('quota');
+  const ledger = createBudgetLedger({
+    maxRequestsPerDay: 2,
+    maxTokensPerDay: 100,
+    store: createMongoQuotaStore({ collection }),
+  });
+  const now = new Date('2026-11-26T10:00:00.000Z');
+  assert.equal((await ledger.reserve('owner', now)).allowed, true);
+  assert.equal((await ledger.reserve('owner', now)).allowed, true);
+  assert.equal((await ledger.reserve('owner', now)).allowed, false);
+  await ledger.release('owner', 1, now);
+  assert.equal((await ledger.reserve('owner', now)).allowed, true);
 });

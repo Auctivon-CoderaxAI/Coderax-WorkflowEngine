@@ -13,7 +13,12 @@ import type { TerminationRecord } from './termination.js';
  * still receives an identity: a Chat turn that can call tools must be revocable
  * for the same reasons a Work run is.
  */
-export type ExecutionKind = 'work' | 'chat';
+/**
+ * `team` names a supervised team-member attempt. It has no task lease of its
+ * own; the team snapshot is the durable record, and the member still gets a
+ * revocable execution identity like every other tool-capable run.
+ */
+export type ExecutionKind = 'work' | 'chat' | 'team';
 
 export type ExecutionPhase = 'starting' | 'running' | 'finished';
 

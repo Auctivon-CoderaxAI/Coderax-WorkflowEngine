@@ -33,6 +33,13 @@ import {
 } from './tasks.js';
 import { z as zod } from 'zod';
 import { ConversationId, TaskId } from './primitives.js';
+import {
+  TeamAccepted,
+  TeamControlResult,
+  TeamId,
+  TeamStatus,
+  TeamSubmitRequest,
+} from './team.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -64,6 +71,7 @@ export type RouteSpec = {
 };
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
+const TeamParams = zod.object({ teamId: TeamId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
@@ -283,6 +291,69 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['permissions'],
     auth: 'owner',
     params: TaskParams,
+    body: PermissionDecisionRequest,
+    response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'submitTeam',
+    method: 'POST',
+    path: '/v1/teams',
+    summary: 'Submit a bounded multi-agent team with a dependency graph.',
+    tags: ['teams'],
+    auth: 'owner',
+    body: TeamSubmitRequest,
+    response: { status: 202, description: 'Team accepted', schema: TeamAccepted },
+  },
+  {
+    operationId: 'getTeam',
+    method: 'GET',
+    path: '/v1/teams/{teamId}',
+    summary: 'Authoritative team snapshot, members and evidence verification.',
+    tags: ['teams'],
+    auth: 'owner',
+    params: TeamParams,
+    response: { status: 200, description: 'Team status', schema: TeamStatus },
+  },
+  {
+    operationId: 'cancelTeam',
+    method: 'POST',
+    path: '/v1/teams/{teamId}/cancel',
+    summary: 'Cancel every member of a team; durable across replicas.',
+    tags: ['teams'],
+    auth: 'owner',
+    params: TeamParams,
+    body: CancelRequest,
+    response: { status: 200, description: 'Cancellation outcome', schema: TeamControlResult },
+  },
+  {
+    operationId: 'resumeTeam',
+    method: 'POST',
+    path: '/v1/teams/{teamId}/resume',
+    summary: 'Resume an interrupted or approval-suspended team from its snapshot.',
+    tags: ['teams'],
+    auth: 'owner',
+    params: TeamParams,
+    body: ResumeRequest,
+    response: { status: 200, description: 'Resume outcome', schema: TeamControlResult },
+  },
+  {
+    operationId: 'listTeamPermissions',
+    method: 'GET',
+    path: '/v1/teams/{teamId}/permissions',
+    summary: 'Scoped permission requests for the team and its members.',
+    tags: ['teams', 'permissions'],
+    auth: 'owner',
+    params: TeamParams,
+    response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'decideTeamPermission',
+    method: 'POST',
+    path: '/v1/teams/{teamId}/permissions',
+    summary: 'Approve or deny one member-scoped resource grant.',
+    tags: ['teams', 'permissions'],
+    auth: 'owner',
+    params: TeamParams,
     body: PermissionDecisionRequest,
     response: { status: 200, description: 'Permission list', schema: PermissionList },
   },

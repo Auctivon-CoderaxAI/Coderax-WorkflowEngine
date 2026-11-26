@@ -44,6 +44,8 @@ export type MongoCollectionLike = {
     update: {
       $set?: Record<string, unknown>;
       $setOnInsert?: Record<string, unknown>;
+      /** Atomic additive update used by quota counters. */
+      $inc?: Record<string, number>;
       /** Monotonic update used by the event head; never lowers a value. */
       $max?: Record<string, unknown>;
     },

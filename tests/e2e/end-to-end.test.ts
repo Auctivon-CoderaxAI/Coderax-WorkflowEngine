@@ -123,3 +123,53 @@ test('a failed task can be retried on the same agent with a new generation', asy
     await started.close();
   }
 });
+
+test('a bounded team is admitted, evidence-verified and observable through the SDK', async () => {
+  const gateway = {
+    id: 'e2e-team-gateway',
+    complete: async () => ({
+      text: JSON.stringify({ final: 'Read the assigned resource and reported back.' }),
+      usage: { inputTokens: 4, outputTokens: 5 },
+    }),
+  };
+  const started = await startTestApp({
+    gateway,
+    config: { teams: { maxMembers: 2, maxParallel: 2, maxStepsPerMember: 1 } },
+  });
+  const api = client(started.url);
+  try {
+    const accepted = await api.submitTeam({
+      objective: 'One bounded member with objective evidence',
+      mode: 'cloud',
+      members: [
+        {
+          memberId: 'reader',
+          agent: 'coderax',
+          objective: 'Read the spec and report the result',
+          dependsOn: [],
+          resources: [],
+        },
+      ],
+      checks: [{ kind: 'evidence', memberId: 'reader' }],
+    });
+    assert.equal(accepted.state, 'running');
+
+    const completed = await waitFor(async () => {
+      const status = await api.team(accepted.teamId);
+      return status.state === 'completed' ? status : null;
+    });
+    assert.equal(completed.members[0]?.state, 'completed');
+    assert.equal(completed.verification?.passed, true);
+    assert.deepEqual(
+      completed.verification?.checks.map((check) => [check.kind, check.passed]),
+      [
+        ['evidence', true],
+        ['evidence', true],
+      ],
+    );
+    const permissions = await api.teamPermissions(accepted.teamId);
+    assert.deepEqual(permissions.requests, []);
+  } finally {
+    await started.close();
+  }
+});

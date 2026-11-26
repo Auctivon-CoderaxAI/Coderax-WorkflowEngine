@@ -14,6 +14,7 @@ import { createAgentRegistry } from '../agents/registry.js';
 import { probeAgents } from '../agents/probe.js';
 import { createRouterCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
+import { createMongoQuotaStore } from '../models/quota.js';
 import { createRouter as createModelRouter, type ProviderDescriptor } from '../models/router.js';
 import { createRoutedGateway } from '../models/routed.js';
 import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
@@ -30,6 +31,8 @@ import { createExecutionSupervisor } from '../execution/supervisor.js';
 import { createCapabilityBroker } from '../execution/capabilities.js';
 import { createUnavailableIsolationProvider } from '../execution/termination.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
+import { createTeamService } from '../orchestration/team.js';
+import { createMemoryResourceLockStore, createMongoResourceLockStore } from '../execution/locks.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
@@ -267,16 +270,21 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const models = createRouterCatalog(modelRouter);
 
-  const budget = createBudgetLedger({
-    maxRequestsPerDay: config.models.dailyRequestBudget,
-    maxTokensPerDay: config.models.dailyTokenBudget,
-  });
-
   const persistence = await buildPersistence({
     config,
     env,
     clock,
     ...(input.persistence ?? {}),
+  });
+  // The quota store is chosen by the persistence driver: mongo shares one
+  // durable account per owner and day across replicas, memory is the explicit
+  // single-process mode.
+  const budget = createBudgetLedger({
+    maxRequestsPerDay: config.models.dailyRequestBudget,
+    maxTokensPerDay: config.models.dailyTokenBudget,
+    ...(persistence.quotaCollection
+      ? { store: createMongoQuotaStore({ collection: persistence.quotaCollection }) }
+      : {}),
   });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
@@ -350,6 +358,24 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     containmentHoldMs: config.execution.containmentHoldMs,
     shutdownGraceMs: config.execution.cancelGraceMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
+  });
+
+  const locks = persistence.lockCollection
+    ? createMongoResourceLockStore({ collection: persistence.lockCollection })
+    : createMemoryResourceLockStore();
+  const teams = createTeamService({
+    config,
+    clock,
+    ids,
+    agents,
+    models,
+    budget,
+    permissions,
+    events,
+    supervisor,
+    scheduler,
+    teams: persistence.teams,
+    locks,
   });
 
   const health = createHealthService({
@@ -461,6 +487,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     supervisor,
     scheduler,
+    teams,
     health,
     tools,
     knowledge,
@@ -531,9 +558,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // A team owned by a replica that stopped is marked interrupted, never left
+      // running forever. It stays resumable from its snapshot.
+      await teams.reconcile();
       return { url };
     },
     stop: async () => {
+      await teams.shutdown();
       await service.shutdown();
       await mcp.close();
       await server.close();

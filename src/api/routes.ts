@@ -247,6 +247,51 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('submitTeam', async (context) => {
+    const result = await service.submitTeam(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('getTeam', async (context) => {
+    const result = await service.team(context.principal, context.params.teamId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('cancelTeam', async (context) => {
+    const result = await service.cancelTeam(context.principal, context.params.teamId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('resumeTeam', async (context) => {
+    const body = context.body as { generation: number };
+    const result = await service.resumeTeam(
+      context.principal,
+      context.params.teamId ?? '',
+      body.generation,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listTeamPermissions', async (context) => {
+    const result = await service.teamPermissions(context.principal, context.params.teamId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('decideTeamPermission', async (context) => {
+    const result = await service.decideTeamPermission(
+      context.principal,
+      context.params.teamId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('listNotifications', async (context) => ({
     kind: 'json',
     status: 200,

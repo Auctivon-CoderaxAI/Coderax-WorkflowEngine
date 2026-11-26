@@ -33,6 +33,13 @@ import {
   ensureNotificationIndexes,
   ensureTaskIndexes,
 } from '../persistence/mongo-tables.js';
+import {
+  createMongoTeamRepository,
+  createTeamRepository,
+  ensureTeamIndexes,
+} from '../persistence/teams.js';
+import type { TeamRepository } from '../persistence/teams.js';
+import { ensureResourceLockIndexes } from '../execution/locks.js';
 import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
@@ -46,6 +53,12 @@ export type PersistenceStores = {
   notifications: NotificationStore;
   /** Durable execution events; the payload side of the event stream. */
   events: EventLog;
+  /** Durable team snapshots; resumable across a process restart. */
+  teams: TeamRepository;
+  /** Present in mongo mode so the distributed resource locks share the database. */
+  lockCollection?: MongoCollectionLike;
+  /** Present in mongo mode so the daily quota is shared across replicas. */
+  quotaCollection?: MongoCollectionLike;
   close: () => Promise<void>;
 };
 
@@ -114,6 +127,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       notifications: createNotificationStore(),
       events: createMemoryEventLog(),
+      teams: createTeamRepository(),
       close: NO_CLOSE,
     };
   }
@@ -130,6 +144,9 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const eventHeads = database.collection(collectionName(config, 'event_heads'));
 
   const permissionCollection = database.collection(collectionName(config, 'permissions'));
+  const teamCollection = database.collection(collectionName(config, 'teams'));
+  const lockCollection = database.collection(collectionName(config, 'resource_locks'));
+  const quotaCollection = database.collection(collectionName(config, 'quota'));
   try {
     await permissionCollection.createIndex({ requestId: 1 }, { unique: true, name: 'permission_request' });
     await permissionCollection.createIndex({ ownerId: 1, taskId: 1 }, { name: 'permission_task' });
@@ -140,6 +157,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
     await ensureEventIndexes({ events, heads: eventHeads });
+    await ensureTeamIndexes({ collection: teamCollection });
+    await ensureResourceLockIndexes({ collection: lockCollection });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -161,6 +180,9 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     }),
     notifications: createMongoNotificationStore(notifications),
     events: createMongoEventLog({ events, heads: eventHeads }),
+    teams: createMongoTeamRepository({ collection: teamCollection }),
+    lockCollection,
+    quotaCollection,
     close: database.close,
   };
 }

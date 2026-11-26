@@ -142,6 +142,9 @@ export function createFakeCollection(): FakeCollection {
     updateOne: async (filter, update, options) => {
       const apply = (document: Document): Document => {
         const next = { ...document, ...update.$set };
+        for (const [field, value] of Object.entries(update.$inc ?? {})) {
+          next[field] = (typeof next[field] === 'number' ? next[field] : 0) + value;
+        }
         // `$max` is monotonic under concurrency, which is exactly what the event
         // head and the generation guard rely on.
         for (const [field, value] of Object.entries(update.$max ?? {})) {

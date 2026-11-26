@@ -7,6 +7,7 @@ export * from './tasks.js';
 export * from './events.js';
 export * from './permissions.js';
 export * from './intelligence.js';
+export * from './team.js';
 export * from './routes.js';
 export * from './json-schema.js';
 export * from './openapi.js';

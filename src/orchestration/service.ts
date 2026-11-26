@@ -24,6 +24,10 @@ import type {
   RoutingReport,
   ToolList,
   PermissionScope,
+  TeamAccepted,
+  TeamControlResult,
+  TeamStatus,
+  TeamSubmitRequest,
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
@@ -46,6 +50,7 @@ import type {
 } from '../agents/types.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
+import type { TeamService } from './team.js';
 import type { Router as ModelRouter } from '../models/router.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
@@ -86,6 +91,7 @@ export type ApplicationServiceDeps = {
   tools: ToolRuntime;
   knowledge: KnowledgeStore;
   modelRouter: ModelRouter;
+  teams: TeamService;
 };
 
 export type EventStream = {
@@ -145,6 +151,23 @@ export type ApplicationService = {
     taskId: string,
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
+  submitTeam: (
+    principal: Principal,
+    request: TeamSubmitRequest,
+  ) => Promise<ServiceResult<TeamAccepted>>;
+  team: (principal: Principal, teamId: string) => Promise<ServiceResult<TeamStatus>>;
+  cancelTeam: (principal: Principal, teamId: string) => Promise<ServiceResult<TeamControlResult>>;
+  resumeTeam: (
+    principal: Principal,
+    teamId: string,
+    generation: number,
+  ) => Promise<ServiceResult<TeamControlResult>>;
+  teamPermissions: (principal: Principal, teamId: string) => Promise<ServiceResult<PermissionList>>;
+  decideTeamPermission: (
+    principal: Principal,
+    teamId: string,
+    body: PermissionDecisionRequest,
+  ) => Promise<ServiceResult<PermissionList>>;
   notifications: (principal: Principal) => Promise<NotificationList>;
   markNotificationsRead: (
     principal: Principal,
@@ -155,7 +178,7 @@ export type ApplicationService = {
     taskId: string,
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
-  budget: (principal: Principal) => BudgetState;
+  budget: (principal: Principal) => Promise<BudgetState>;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
   shutdown: () => Promise<void>;
@@ -907,7 +930,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail(
           'budget_exhausted',
@@ -1231,7 +1254,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
@@ -1347,7 +1370,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome.kind === 'failed' ? outcome.retryable : false,
         );
       }
-      deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+      await deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
@@ -1384,6 +1407,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return ok(await deps.permissions.list(principal.ownerId, taskId));
     },
 
+    submitTeam: async (principal, request) => deps.teams.submit(principal, request),
+    team: async (principal, teamId) => deps.teams.status(principal, teamId),
+    cancelTeam: async (principal, teamId) => deps.teams.cancel(principal, teamId),
+    resumeTeam: async (principal, teamId, generation) =>
+      deps.teams.resume(principal, teamId, generation),
+    teamPermissions: async (principal, teamId) => deps.teams.permissions(principal, teamId),
+    decideTeamPermission: async (principal, teamId, body) =>
+      deps.teams.decidePermission(principal, teamId, body),
+
     decidePermission: async (principal, taskId, body) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
@@ -1418,8 +1450,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    budget: (principal) => {
-      const used = deps.budget.snapshot(principal.ownerId, deps.clock.now());
+    budget: async (principal) => {
+      const used = await deps.budget.snapshot(principal.ownerId, deps.clock.now());
       const budget = {
         maxRequests: deps.config.models.dailyRequestBudget,
         maxInputTokens: deps.config.models.dailyTokenBudget,

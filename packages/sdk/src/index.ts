@@ -15,6 +15,10 @@ import {
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
+  TeamAccepted,
+  TeamControlResult,
+  TeamStatus,
+  TeamSubmitRequest,
 } from '@coderax/contracts';
 import type {
   ChatRequest,
@@ -297,6 +301,55 @@ export class CoderaxClient {
     return this.request<PermissionList>(PermissionList, {
       method: 'POST',
       path: `/v1/work/${encodeURIComponent(taskId)}/permissions`,
+      body: request,
+    });
+  }
+
+  submitTeam(request: TeamSubmitRequest): Promise<TeamAccepted> {
+    return this.request<TeamAccepted>(TeamAccepted, {
+      method: 'POST',
+      path: '/v1/teams',
+      body: request,
+    });
+  }
+
+  team(teamId: string): Promise<TeamStatus> {
+    return this.request<TeamStatus>(TeamStatus, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}`,
+    });
+  }
+
+  cancelTeam(teamId: string): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/cancel`,
+      body: {},
+    });
+  }
+
+  resumeTeam(teamId: string, generation: number): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/resume`,
+      body: { generation },
+    });
+  }
+
+  teamPermissions(teamId: string): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
+    });
+  }
+
+  decideTeamPermission(
+    teamId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
       body: request,
     });
   }

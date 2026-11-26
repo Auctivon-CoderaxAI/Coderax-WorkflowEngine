@@ -210,6 +210,26 @@ export const PersistenceConfig = z
   })
   .strict();
 
+/**
+ * Teams are bounded by configuration, not by the model's willingness to stop.
+ * Every limit is enforced by the orchestrator; a request above a bound is
+ * refused at submission.
+ */
+export const TeamConfig = z
+  .object({
+    maxMembers: z.number().int().min(1).max(64).default(8),
+    maxParallel: z.number().int().min(1).max(16).default(3),
+    maxDurationMs: z.number().int().min(1_000).max(86_400_000).default(900_000),
+    maxStepsPerMember: z.number().int().min(1).max(64).default(8),
+    maxEvidenceChars: z.number().int().min(100).max(100_000).default(4_000),
+    maxArtifactBytes: z.number().int().min(1_024).max(50_000_000).default(1_000_000),
+    /** Bound on waiting for a cancelled adapter before authority is revoked. */
+    cancelGraceMs: z.number().int().min(100).max(30_000).default(2_000),
+    /** A replica that stops heartbeating leaves an interrupted, resumable team. */
+    staleAfterMs: z.number().int().min(1_000).max(3_600_000).default(60_000),
+  })
+  .strict();
+
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
@@ -224,6 +244,7 @@ export const EngineConfigSchema = z
     knowledge: KnowledgeConfig.default({}),
     mcp: McpConfig.default({}),
     routing: RoutingConfig.default({}),
+    teams: TeamConfig.default({}),
   })
   .strict();
 
