@@ -3,6 +3,7 @@ export * from './errors.js';
 export * from './capabilities.js';
 export * from './models.js';
 export * from './health.js';
+export * from './artifacts.js';
 export * from './tasks.js';
 export * from './events.js';
 export * from './permissions.js';

@@ -1,4 +1,11 @@
-import type { ModelRef, Usage } from '@coderax/contracts';
+import type {
+  Artifact,
+  DataMode,
+  DeliverableRequest,
+  EngineFailureCode,
+  ModelRef,
+  Usage,
+} from '@coderax/contracts';
 
 export type ModelCompletionRequest = {
   model: ModelRef;
@@ -26,3 +33,18 @@ export type PlanStep = {
 export type Planner = {
   plan: (input: { objective: string; maxSteps: number }) => PlanStep[];
 };
+
+/**
+ * The artifact toolkit, seen from the agent. The port keeps `src/agents` free of
+ * filesystem, persistence and permission wiring: the composition root supplies a
+ * confined implementation that records its own receipts.
+ */
+export type DeliverableTool = (input: {
+  request: DeliverableRequest;
+  workspaceRoot: string;
+  mode: DataMode;
+  signal: AbortSignal;
+}) => Promise<
+  | { ok: true; artifacts: Artifact[]; summary: string }
+  | { ok: false; code: EngineFailureCode; detail: string }
+>;

@@ -1,11 +1,11 @@
-import type { EngineFailureCode, Usage } from '@coderax/contracts';
+import type { Artifact, EngineFailureCode, Usage } from '@coderax/contracts';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore, RunScope } from './lease.js';
 import { workRunKey } from './lease.js';
 import type { AgentAdapter, AgentReport, AgentRunRequest } from '../agents/types.js';
 
 export type RunOutcome =
-  | { kind: 'completed'; summary: string; usage?: Usage }
+  | { kind: 'completed'; summary: string; usage?: Usage; artifacts?: Artifact[] }
   | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
@@ -183,6 +183,9 @@ export function createTaskRunner(input: {
               kind: 'completed',
               summary: outcome.summary,
               ...(outcome.usage ? { usage: outcome.usage } : {}),
+              ...(outcome.artifacts && outcome.artifacts.length > 0
+                ? { artifacts: outcome.artifacts }
+                : {}),
             },
             ownershipLost: false,
           };

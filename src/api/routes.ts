@@ -107,6 +107,18 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     body: service.models(),
   }));
 
+  registry.register('listCapabilities', async () => ({
+    kind: 'json',
+    status: 200,
+    body: service.capabilities(),
+  }));
+
+  registry.register('generateDeliverable', async (context) => {
+    const result = await service.deliver(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
   registry.register('submitChat', async (context) => {
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);

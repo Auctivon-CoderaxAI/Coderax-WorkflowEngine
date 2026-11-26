@@ -20,6 +20,11 @@ import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
+import { createArtifactToolkit } from '../artifacts/toolkit.js';
+import type { DeliverableTool } from '../agents/native/types.js';
+import type { EngineFailureCode, ProblemCode } from '@coderax/contracts';
+import { existsSync } from 'node:fs';
+import { resolveInside } from '../artifacts/file.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
@@ -67,6 +72,35 @@ export type ComposeInput = {
     connect?: MongoConnector;
   };
 };
+
+function engineCode(code: ProblemCode): EngineFailureCode {
+  switch (code) {
+    case 'workspace_denied':
+      return 'workspace_denied';
+    case 'budget_exhausted':
+      return 'budget_exhausted';
+    case 'paid_model_refused':
+      return 'paid_model_refused';
+    case 'validation_failed':
+      return 'validation_failed';
+    case 'permission_required':
+      return 'permission_required';
+    case 'cancelled':
+      return 'cancelled';
+    case 'not_found':
+    case 'conflict':
+    case 'busy':
+    case 'protocol_error':
+    case 'internal_error':
+    case 'not_ready':
+    case 'engine_unavailable':
+    case 'engine_not_configured':
+    case 'model_missing':
+    case 'forbidden':
+    case 'unauthorized':
+      return 'protocol_error';
+  }
+}
 
 const EXTERNAL_CAPABILITIES: EngineCapabilities = {
   streaming: true,
@@ -143,7 +177,56 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
 
   const gateway = buildGateway(input);
-  const native = createNativeAgent({ enabled: config.engines.native.enabled, gateway });
+  const permissions = createPermissionStore({ clock, ids });
+  const audit = createAuditLog({ clock, ids });
+  const artifacts = createArtifactToolkit();
+
+  /**
+   * The Native deliverable port. It writes only inside the run's confined
+   * workspace, refuses to overwrite an existing deliverable folder (that needs a
+   * wider grant than a run has), and records a receipt either way.
+   */
+  const deliverableTool: DeliverableTool = async ({ request, workspaceRoot, mode }) => {
+    const result = await artifacts.produce({
+      request,
+      context: {
+        mode,
+        root: workspaceRoot,
+        clock,
+        ids,
+        authorize: ({ relativePath }) => {
+          try {
+            return !existsSync(resolveInside(workspaceRoot, relativePath));
+          } catch {
+            return false;
+          }
+        },
+        receipts: (entry) => {
+          const record = audit.record({
+            actor: 'coderax',
+            action: entry.action,
+            outcome: entry.outcome === 'completed' ? 'completed' : 'refused',
+            detail: entry.detail.slice(0, 500),
+          });
+          return { receipt: record.receipt, at: record.at };
+        },
+      },
+    });
+    if (result.ok) {
+      return {
+        ok: true,
+        artifacts: result.value.artifacts,
+        summary: `${result.value.title}: ${result.value.summary}`,
+      };
+    }
+    return { ok: false, code: engineCode(result.code), detail: result.detail };
+  };
+
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway,
+    deliverable: deliverableTool,
+  });
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
@@ -198,9 +281,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
-  const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -306,6 +387,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     scheduler,
     health,
+    artifacts,
   });
   if (!container.dependencies) {
     throw new StartupError(
