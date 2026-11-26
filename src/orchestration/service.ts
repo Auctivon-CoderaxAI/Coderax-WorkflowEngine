@@ -1095,7 +1095,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         deps.budget.charge(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       }
       const messageId = deps.ids.messageId();
-      const chatCreative = deps.creative.extract(outcome.summary);
+      // A model can echo a credential into generated markup; the same redaction
+      // that covers the summary also covers what becomes a renderable artifact.
+      const chatCreative = deps.creative.extract(redactContent(outcome.summary));
       await deps.conversations.appendMessage({
         messageId,
         conversationId,
