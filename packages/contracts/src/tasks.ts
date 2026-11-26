@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Budget } from './models.js';
+import { CreativeArtifact, MEDIA_MAX_ATTACHMENTS, MediaId } from './media.js';
 import {
   AgentId,
   ConversationId,
@@ -19,6 +20,8 @@ export const ChatRequest = z
     agent: AgentId.default('coderax'),
     model: ModelRef.optional(),
     mode: DataMode.default('private'),
+    /** Owner-scoped media ids, resolved in the request's data mode. */
+    attachments: z.array(MediaId).max(MEDIA_MAX_ATTACHMENTS).optional(),
   })
   .strict();
 export type ChatRequest = z.infer<typeof ChatRequest>;
@@ -31,6 +34,7 @@ export const ChatReply = z
     agent: AgentId,
     model: ModelRef,
     usage: Usage.optional(),
+    creative: z.array(CreativeArtifact).max(4).optional(),
     createdAt: IsoDateTime,
   })
   .strict();
@@ -52,6 +56,8 @@ export const WorkSubmitRequest = z
     budget: Budget.optional(),
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
+    /** Owner-scoped media ids, resolved in the request's data mode. */
+    attachments: z.array(MediaId).max(MEDIA_MAX_ATTACHMENTS).optional(),
   })
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
@@ -86,6 +92,7 @@ export const TaskStatus = z
       .object({
         summary: z.string().max(20_000).optional(),
         artifacts: z.array(Artifact),
+        creative: z.array(CreativeArtifact).max(4).optional(),
       })
       .strict()
       .optional(),
@@ -142,6 +149,8 @@ export const Message = z
     createdAt: IsoDateTime,
     unfinished: z.boolean().optional(),
     agent: AgentId.optional(),
+    /** Media ids the turn was submitted with; fetch them from `/v1/media`. */
+    attachments: z.array(MediaId).max(MEDIA_MAX_ATTACHMENTS).optional(),
   })
   .strict();
 export type Message = z.infer<typeof Message>;

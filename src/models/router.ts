@@ -287,6 +287,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       ...(state.contextTokens === null ? {} : { contextTokens: state.contextTokens }),
       toolCalling: state.capabilities.toolCalling,
       streaming: state.capabilities.streaming,
+      inputModalities: state.capabilities.vision ? ['text', 'image'] : ['text'],
       availability: modelAvailability(runtime, at),
     };
   }
@@ -515,6 +516,24 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           ok: false,
           code: 'model_missing',
           detail: availability.detail,
+          retryable: false,
+        };
+      }
+      // An explicitly pinned model is never substituted, but it still has to
+      // support the request: media must not be sent to a text-only endpoint.
+      if (resolveOptions.requireVision && !runtime.state.capabilities.vision) {
+        return {
+          ok: false,
+          code: 'model_missing',
+          detail: 'That model does not declare image input support.',
+          retryable: false,
+        };
+      }
+      if (resolveOptions.requireTools && !runtime.state.capabilities.toolCalling) {
+        return {
+          ok: false,
+          code: 'model_missing',
+          detail: 'That model does not declare tool-calling support.',
           retryable: false,
         };
       }

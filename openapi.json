@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Coderax WorkflowEngine API",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Authoritative HTTP surface for Coderax Native intelligence, agent orchestration and durable Work execution. Every operation is generated from the versioned route catalogue."
   },
   "servers": [
@@ -53,6 +53,9 @@
               "workspace_denied",
               "budget_exhausted",
               "paid_model_refused",
+              "media_invalid",
+              "media_too_large",
+              "media_unsupported",
               "permission_required",
               "cancelled",
               "protocol_error",
@@ -109,7 +112,7 @@
                       ]
                     },
                     "contractVersion": {
-                      "const": "1.0.0"
+                      "const": "1.1.0"
                     },
                     "startedAt": {
                       "type": "string",
@@ -626,6 +629,16 @@
                           "streaming": {
                             "type": "boolean"
                           },
+                          "inputModalities": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "text",
+                                "image"
+                              ]
+                            }
+                          },
                           "availability": {
                             "type": "object",
                             "properties": {
@@ -729,6 +742,667 @@
         }
       }
     },
+    "/v1/media/capabilities": {
+      "get": {
+        "operationId": "getMediaCapabilities",
+        "summary": "What image, audio, video, document and creative handling is actually available.",
+        "tags": [
+          "media"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "inputs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "image",
+                              "audio",
+                              "video",
+                              "document"
+                            ]
+                          },
+                          "available": {
+                            "type": "boolean"
+                          },
+                          "mediaTypes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 120
+                            }
+                          },
+                          "maxBytes": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "maxPixels": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "reason": {
+                            "type": "object",
+                            "properties": {
+                              "available": {
+                                "type": "boolean"
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "ready",
+                                  "disabled",
+                                  "not_configured",
+                                  "sdk_unavailable",
+                                  "server_unavailable",
+                                  "model_missing",
+                                  "forbidden",
+                                  "not_ready"
+                                ]
+                              },
+                              "detail": {
+                                "type": "string",
+                                "maxLength": 500
+                              }
+                            },
+                            "required": [
+                              "available",
+                              "reason",
+                              "detail"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "available",
+                          "mediaTypes",
+                          "maxBytes",
+                          "maxPixels",
+                          "reason"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "creative": {
+                      "type": "object",
+                      "properties": {
+                        "available": {
+                          "type": "boolean"
+                        },
+                        "formats": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "svg",
+                              "html"
+                            ]
+                          }
+                        },
+                        "maxBytes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "sandbox": {
+                          "const": "required"
+                        },
+                        "scripts": {
+                          "const": false
+                        },
+                        "externalResources": {
+                          "const": false
+                        },
+                        "reason": {
+                          "type": "object",
+                          "properties": {
+                            "available": {
+                              "type": "boolean"
+                            },
+                            "reason": {
+                              "type": "string",
+                              "enum": [
+                                "ready",
+                                "disabled",
+                                "not_configured",
+                                "sdk_unavailable",
+                                "server_unavailable",
+                                "model_missing",
+                                "forbidden",
+                                "not_ready"
+                              ]
+                            },
+                            "detail": {
+                              "type": "string",
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "available",
+                            "reason",
+                            "detail"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "available",
+                        "formats",
+                        "maxBytes",
+                        "sandbox",
+                        "scripts",
+                        "externalResources",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "maxAttachments": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 8
+                    },
+                    "privateModeAttachments": {
+                      "type": "object",
+                      "properties": {
+                        "available": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": "string",
+                          "enum": [
+                            "ready",
+                            "disabled",
+                            "not_configured",
+                            "sdk_unavailable",
+                            "server_unavailable",
+                            "model_missing",
+                            "forbidden",
+                            "not_ready"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "available",
+                        "reason",
+                        "detail"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "inputs",
+                    "creative",
+                    "maxAttachments",
+                    "privateModeAttachments"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media": {
+      "post": {
+        "operationId": "uploadMedia",
+        "summary": "Upload one owner-scoped image; the format is identified from its header.",
+        "tags": [
+          "media"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored media",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "media": {
+                      "type": "object",
+                      "properties": {
+                        "mediaId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "const": "image"
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "image/png",
+                            "image/jpeg",
+                            "image/webp",
+                            "image/gif"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 5242880
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "height": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "cloud"
+                          ]
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "mediaId",
+                        "kind",
+                        "mediaType",
+                        "bytes",
+                        "sha256",
+                        "width",
+                        "height",
+                        "mode",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "media"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ]
+                  },
+                  "data": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 7200000
+                  },
+                  "declaredType": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "data"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/{mediaId}": {
+      "get": {
+        "operationId": "getMedia",
+        "summary": "Read one owner-scoped media item and its canonical base64 bytes.",
+        "tags": [
+          "media"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "media": {
+                      "type": "object",
+                      "properties": {
+                        "mediaId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "const": "image"
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "enum": [
+                            "image/png",
+                            "image/jpeg",
+                            "image/webp",
+                            "image/gif"
+                          ]
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 5242880
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "width": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "height": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "private",
+                            "cloud"
+                          ]
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "mediaId",
+                        "kind",
+                        "mediaType",
+                        "bytes",
+                        "sha256",
+                        "width",
+                        "height",
+                        "mode",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "data": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 7200000
+                    }
+                  },
+                  "required": [
+                    "media",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "mediaId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/creative/validate": {
+      "post": {
+        "operationId": "validateCreative",
+        "summary": "Validate a generated SVG or HTML draft against the sandboxed-render allowlist.",
+        "tags": [
+          "creative"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "format": {
+                      "type": "string",
+                      "enum": [
+                        "svg",
+                        "html"
+                      ]
+                    },
+                    "safe": {
+                      "type": "boolean"
+                    },
+                    "findings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "script",
+                              "event_handler",
+                              "external_reference",
+                              "embedded_object",
+                              "entity",
+                              "style",
+                              "unsupported_element",
+                              "unsupported_attribute",
+                              "oversize",
+                              "malformed",
+                              "control_character"
+                            ]
+                          },
+                          "detail": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "detail"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 262144
+                    },
+                    "sha256": {
+                      "type": "string"
+                    },
+                    "sandbox": {
+                      "const": "required"
+                    }
+                  },
+                  "required": [
+                    "format",
+                    "safe",
+                    "findings",
+                    "bytes",
+                    "sha256",
+                    "sandbox"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "svg",
+                      "html"
+                    ]
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 262144
+                  }
+                },
+                "required": [
+                  "format",
+                  "content"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/chat": {
       "post": {
         "operationId": "submitChat",
@@ -824,6 +1498,14 @@
                       "private",
                       "cloud"
                     ]
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    }
                   }
                 },
                 "required": [
@@ -1001,6 +1683,14 @@
                   },
                   "requireApproval": {
                     "type": "boolean"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    }
                   }
                 },
                 "required": [
@@ -1173,6 +1863,84 @@
                             },
                             "required": [
                               "path"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "creative": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "artifactId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                              },
+                              "format": {
+                                "type": "string",
+                                "enum": [
+                                  "svg",
+                                  "html"
+                                ]
+                              },
+                              "safe": {
+                                "type": "boolean"
+                              },
+                              "content": {
+                                "type": "string",
+                                "maxLength": 262144
+                              },
+                              "sha256": {
+                                "type": "string"
+                              },
+                              "bytes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 262144
+                              },
+                              "findings": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "code": {
+                                      "type": "string",
+                                      "enum": [
+                                        "script",
+                                        "event_handler",
+                                        "external_reference",
+                                        "embedded_object",
+                                        "entity",
+                                        "style",
+                                        "unsupported_element",
+                                        "unsupported_attribute",
+                                        "oversize",
+                                        "malformed",
+                                        "control_character"
+                                      ]
+                                    },
+                                    "detail": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 300
+                                    }
+                                  },
+                                  "required": [
+                                    "code",
+                                    "detail"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              }
+                            },
+                            "required": [
+                              "artifactId",
+                              "format",
+                              "safe",
+                              "sha256",
+                              "bytes",
+                              "findings"
                             ],
                             "additionalProperties": false
                           }
@@ -1889,6 +2657,14 @@
                               "opencode",
                               "freebuff"
                             ]
+                          },
+                          "attachments": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            }
                           }
                         },
                         "required": [

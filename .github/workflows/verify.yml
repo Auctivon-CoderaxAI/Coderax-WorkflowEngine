@@ -3,11 +3,14 @@ name: verify
 # The acceptance gate. A passing run at an earlier head is not a pass, so the
 # workflow runs on every push to a pull request and on main after merge.
 
+# The multimodal layer is stacked on the authoritative router branch, so the
+# same gate must run for that base and for the stacked branch's own pushes until
+# the router lands on main. Remove both stack-scoped entries when it does.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, feat/zero-cost-model-router]
   push:
-    branches: [main]
+    branches: [main, feat/multimodal-creative-intelligence]
 
 permissions:
   contents: read

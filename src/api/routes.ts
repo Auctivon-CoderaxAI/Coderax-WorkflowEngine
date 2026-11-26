@@ -107,6 +107,30 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     body: service.models(),
   }));
 
+  registry.register('getMediaCapabilities', async () => ({
+    kind: 'json',
+    status: 200,
+    body: service.mediaCapabilities(),
+  }));
+
+  registry.register('uploadMedia', async (context) => {
+    const result = await service.uploadMedia(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('getMedia', async (context) => {
+    const result = await service.mediaItem(context.principal, context.params.mediaId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('validateCreative', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.validateCreative(context.principal, context.body as never),
+  }));
+
   registry.register('submitChat', async (context) => {
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);

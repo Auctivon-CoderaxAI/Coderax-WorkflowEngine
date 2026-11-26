@@ -4,8 +4,12 @@ import {
   ChatReply,
   Conversation,
   ConversationList,
+  CreativeValidation,
   ExecutionEvent,
   HealthReport,
+  MediaCapabilities,
+  MediaDownload,
+  MediaUploadResult,
   MemoryList,
   ModelList,
   NotificationList,
@@ -18,7 +22,9 @@ import {
 } from '@coderax/contracts';
 import type {
   ChatRequest,
+  CreativeValidationRequest,
   DataMode,
+  MediaUploadRequest,
   PermissionDecisionRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
@@ -308,6 +314,36 @@ export class CoderaxClient {
     });
   }
 
+  mediaCapabilities(): Promise<MediaCapabilities> {
+    return this.request<MediaCapabilities>(MediaCapabilities, {
+      method: 'GET',
+      path: '/v1/media/capabilities',
+    });
+  }
+
+  uploadMedia(request: MediaUploadRequest): Promise<MediaUploadResult> {
+    return this.request<MediaUploadResult>(MediaUploadResult, {
+      method: 'POST',
+      path: '/v1/media',
+      body: request,
+    });
+  }
+
+  media(mediaId: string): Promise<MediaDownload> {
+    return this.request<MediaDownload>(MediaDownload, {
+      method: 'GET',
+      path: `/v1/media/${encodeURIComponent(mediaId)}`,
+    });
+  }
+
+  validateCreative(request: CreativeValidationRequest): Promise<CreativeValidation> {
+    return this.request<CreativeValidation>(CreativeValidation, {
+      method: 'POST',
+      path: '/v1/creative/validate',
+      body: request,
+    });
+  }
+
   /** Replays and tails execution events from a sequence cursor. */
   async *events(
     taskId: string,
@@ -337,4 +373,11 @@ export class CoderaxClient {
   }
 }
 
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };
+export type {
+  ChatRequest,
+  CreativeValidationRequest,
+  DataMode,
+  MediaUploadRequest,
+  PermissionDecisionRequest,
+  WorkSubmitRequest,
+};

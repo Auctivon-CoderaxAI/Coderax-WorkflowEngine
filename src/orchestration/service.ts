@@ -6,7 +6,14 @@ import type {
   ChatRequest,
   Conversation,
   ConversationList,
+  CreativeArtifact,
+  CreativeValidation,
+  CreativeValidationRequest,
   DataMode,
+  MediaCapabilities,
+  MediaDownload,
+  MediaUploadRequest,
+  MediaUploadResult,
   MemoryList,
   ModelList,
   NotificationList,
@@ -34,6 +41,8 @@ import { inferRoutingMode } from '../models/router.js';
 import { estimateTokens } from '../models/verify.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
+import type { MediaService } from '../media/service.js';
+import type { CreativeService } from '../creative/service.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
@@ -59,6 +68,8 @@ export type ApplicationServiceDeps = {
   conversations: ConversationRepository;
   memory: MemoryStore;
   permissions: PermissionStore;
+  media: MediaService;
+  creative: CreativeService;
   notifications: NotificationStore;
   audit: AuditLog;
   events: EventBus;
@@ -112,6 +123,16 @@ export type ApplicationService = {
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
   notifications: (principal: Principal) => Promise<NotificationList>;
+  mediaCapabilities: () => MediaCapabilities;
+  uploadMedia: (
+    principal: Principal,
+    request: MediaUploadRequest,
+  ) => Promise<ServiceResult<MediaUploadResult>>;
+  mediaItem: (principal: Principal, mediaId: string) => Promise<ServiceResult<MediaDownload>>;
+  validateCreative: (
+    principal: Principal,
+    request: CreativeValidationRequest,
+  ) => Promise<CreativeValidation>;
   events: (
     principal: Principal,
     taskId: string,
@@ -203,6 +224,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             result: {
               ...(task.result.summary ? { summary: task.result.summary } : {}),
               artifacts: task.result.artifacts,
+              ...(task.result.creative ? { creative: task.result.creative } : {}),
             },
           }
         : {}),
@@ -218,6 +240,38 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           }
         : {}),
     };
+  }
+
+  /**
+   * Media is resolved at the point of use, under the request's data mode and the
+   * owner's identity. External agents are denied outright rather than handed
+   * owner content: their isolation contract is `conversations: none` and
+   * `memory: none`, so media would widen it silently.
+   */
+  async function resolveAttachments(input: {
+    principal: Principal;
+    mode: DataMode;
+    agent: AgentId;
+    mediaIds: readonly string[] | undefined;
+  }): Promise<ServiceResult<{ mediaIds: string[]; images: string[] }>> {
+    const ids = input.mediaIds ?? [];
+    if (ids.length === 0) return ok({ mediaIds: [], images: [] });
+    if (input.agent !== 'coderax') {
+      return fail(
+        'forbidden',
+        'External agents never receive owner media; attachments are available only to Coderax Native.',
+      );
+    }
+    const resolved = await deps.media.resolve({
+      ownerId: input.principal.ownerId,
+      mode: input.mode,
+      mediaIds: ids,
+    });
+    if (!resolved.ok) return resolved;
+    return ok({
+      mediaIds: [...ids],
+      images: resolved.value.map((entry) => entry.dataUrl),
+    });
   }
 
   function ownedTask(task: TaskRecord | null, principal: Principal): ServiceResult<TaskRecord> {
@@ -261,6 +315,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     token: string,
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
+    creative?: CreativeArtifact[],
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       return;
@@ -274,6 +329,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             result: {
               summary: outcome.summary.slice(0, 20_000),
               artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+              ...(creative && creative.length > 0 ? { creative } : {}),
             },
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           }
@@ -374,11 +430,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    const routing = inferRoutingMode({ objective: task.objective });
+    const attachments = await deps.media.resolve({
+      ownerId: task.ownerId,
+      mode: task.mode,
+      mediaIds: task.attachments ?? [],
+    });
+    if (!attachments.ok) {
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'media_unsupported',
+        detail: attachments.detail,
+        retryable: false,
+      });
+      return;
+    }
+    const images = attachments.value.map((entry) => entry.dataUrl);
+
+    const routing = inferRoutingMode({
+      objective: task.objective,
+      ...(images.length > 0 ? { imageCount: images.length } : {}),
+    });
     const pinned = task.modelPinned === true && task.model !== null;
     const model = deps.models.resolve(pinned ? task.model : null, task.mode, {
       routing,
-      estimatedInputTokens: estimateTokens([task.objective]),
+      estimatedInputTokens: estimateTokens([task.objective]) + images.length * 1_024,
+      requireVision: images.length > 0,
       ...(task.budget === null ? {} : { maxOutputTokens: task.budget.maxOutputTokens }),
     });
     if (!model.ok) {
@@ -516,6 +592,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         tenantId: task.tenantId,
         conversationId: task.conversationId,
         objective: task.objective,
+        ...(images.length > 0 ? { images } : {}),
         history,
         model: model.value.ref,
         routing,
@@ -550,7 +627,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outcome = result.outcome.kind === 'completed'
       ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
       : result.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    const creative = outcome.kind === 'completed' ? deps.creative.extract(outcome.summary) : [];
+    await settle(
+      started.task,
+      token,
+      outcome,
+      { completedSteps: completed, text: safeText },
+      creative.length > 0 ? creative : undefined,
+    );
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
@@ -602,10 +686,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
 
-      const routing = inferRoutingMode({ objective: request.objective });
+      const attachments = await resolveAttachments({
+        principal,
+        mode: request.mode,
+        agent: agentId,
+        mediaIds: request.attachments,
+      });
+      if (!attachments.ok) return attachments;
+      const images = attachments.value.images;
+
+      const routing = inferRoutingMode({
+        objective: request.objective,
+        ...(images.length > 0 ? { imageCount: images.length } : {}),
+      });
       const model = deps.models.resolve(request.model, request.mode, {
         routing,
-        estimatedInputTokens: estimateTokens([request.objective]),
+        estimatedInputTokens: estimateTokens([request.objective]) + images.length * 1_024,
+        requireVision: images.length > 0,
         ...(request.budget === undefined
           ? {}
           : { maxOutputTokens: request.budget.maxOutputTokens }),
@@ -638,6 +735,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         role: 'user',
         text: request.objective,
         createdAt: now,
+        ...(attachments.value.mediaIds.length > 0
+          ? { attachments: attachments.value.mediaIds }
+          : {}),
       });
 
       const task: TaskRecord = {
@@ -649,6 +749,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         engine: adapter.value.engine,
         mode: request.mode,
         objective: request.objective,
+        attachments: attachments.value.mediaIds,
         // An automatic route stores no model until execution ranks it; an explicit
         // request stays pinned so a fallback can never replace the owner's choice.
         model: request.model === undefined ? null : model.value.ref,
@@ -906,10 +1007,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
-      const routing = inferRoutingMode({ objective: request.message });
+      const attachments = await resolveAttachments({
+        principal,
+        mode: request.mode,
+        agent: request.agent,
+        mediaIds: request.attachments,
+      });
+      if (!attachments.ok) return attachments;
+      const images = attachments.value.images;
+      const routing = inferRoutingMode({
+        objective: request.message,
+        ...(images.length > 0 ? { imageCount: images.length } : {}),
+      });
       const model = deps.models.resolve(request.model, request.mode, {
         routing,
-        estimatedInputTokens: estimateTokens([request.message]),
+        estimatedInputTokens: estimateTokens([request.message]) + images.length * 1_024,
+        requireVision: images.length > 0,
       });
       if (!model.ok) return model;
 
@@ -940,6 +1053,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         role: 'user',
         text: request.message,
         createdAt: now,
+        ...(attachments.value.mediaIds.length > 0
+          ? { attachments: attachments.value.mediaIds }
+          : {}),
       });
 
       const history = await historyFor(conversationId, request.message);
@@ -950,6 +1066,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           tenantId: conversation.tenantId,
           conversationId,
           objective: request.message,
+          ...(images.length > 0 ? { images } : {}),
           history,
           model: model.value.ref,
           routing,
@@ -978,6 +1095,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         deps.budget.charge(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       }
       const messageId = deps.ids.messageId();
+      const chatCreative = deps.creative.extract(outcome.summary);
       await deps.conversations.appendMessage({
         messageId,
         conversationId,
@@ -993,6 +1111,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         agent: request.agent,
         model: usedModel,
         ...(outcome.usage ? { usage: outcome.usage } : {}),
+        ...(chatCreative.length > 0 ? { creative: chatCreative } : {}),
         createdAt: deps.clock.iso(),
       });
     },
@@ -1026,6 +1145,36 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     notifications: (principal) => deps.notifications.list(principal.ownerId),
+
+    mediaCapabilities: () => {
+      const vision = deps.models
+        .list()
+        .models.find(
+          (model) =>
+            model.costClass === 'free' &&
+            model.availability.available &&
+            model.inputModalities?.includes('image') === true,
+        );
+      return deps.media.capabilities(
+        vision
+          ? {
+              available: true,
+              detail: 'A verified zero-cost model with image input is routable.',
+            }
+          : {
+              available: false,
+              detail:
+                'No verified zero-cost model with image input is currently routable; image requests are refused rather than sent to a text-only or paid endpoint.',
+            },
+      );
+    },
+
+    uploadMedia: (principal, request) => deps.media.upload(principal.ownerId, request),
+
+    mediaItem: (principal, mediaId) => deps.media.get(principal.ownerId, mediaId),
+
+    validateCreative: async (_principal, request) =>
+      deps.creative.validate({ format: request.format, content: request.content }),
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);

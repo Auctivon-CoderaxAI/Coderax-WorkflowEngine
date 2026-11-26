@@ -1,6 +1,7 @@
 import type {
   AgentId,
   Budget,
+  CreativeArtifact,
   DataMode,
   EngineId,
   IsoDateTime,
@@ -25,6 +26,8 @@ export type TaskCheckpoint = {
 export type TaskResult = {
   summary?: string;
   artifacts: Array<{ path: string; bytes?: number; digest?: string }>;
+  /** Validated or explicitly withheld SVG/HTML fragments from the agent output. */
+  creative?: CreativeArtifact[];
 };
 
 export type TaskFailure = {
@@ -48,6 +51,8 @@ export type TaskRecord = {
   engine: EngineId;
   mode: DataMode;
   objective: string;
+  /** Owner-scoped media attached at submission; re-resolved under this task's mode. */
+  attachments: string[];
   model: ModelRef | null;
   /**
    * True only when the owner named the model. A route-chosen model stays
@@ -107,6 +112,7 @@ export type StoredMessage = {
   createdAt: IsoDateTime;
   unfinished?: boolean;
   agent?: AgentId;
+  attachments?: string[];
 };
 
 export type MemoryRecord = {

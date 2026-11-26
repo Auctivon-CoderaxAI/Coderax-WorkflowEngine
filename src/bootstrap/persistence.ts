@@ -14,6 +14,9 @@ import { createTaskRepository } from '../persistence/tasks.js';
 import { createConversationRepository } from '../persistence/conversations.js';
 import { createNotificationStore } from '../persistence/notifications.js';
 import { createMemoryStore } from '../memory/store.js';
+import { createMediaStore } from '../media/store.js';
+import type { MediaStore } from '../media/store.js';
+import { createMongoMediaStore, ensureMediaIndexes } from '../persistence/mongo-media.js';
 import {
   createMongoConversationRepository,
   createMongoMemoryStore,
@@ -33,6 +36,7 @@ export type PersistenceStores = {
   conversations: ConversationRepository;
   memory: MemoryStore;
   notifications: NotificationStore;
+  media: MediaStore;
   close: () => Promise<void>;
 };
 
@@ -99,6 +103,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       notifications: createNotificationStore(),
+      media: createMediaStore(),
       close: NO_CLOSE,
     };
   }
@@ -110,6 +115,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
   const notifications = database.collection(collectionName(config, 'notifications'));
+  const media = database.collection(collectionName(config, 'media'));
 
   try {
     await ensureWorkRunIndexes(workRuns);
@@ -117,6 +123,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
     await ensureNotificationIndexes(notifications);
+    await ensureMediaIndexes(media);
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -135,6 +142,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       maxValueLength: MEMORY_VALUE_LIMIT,
     }),
     notifications: createMongoNotificationStore(notifications),
+    media: createMongoMediaStore(media),
     close: database.close,
   };
 }

@@ -3,6 +3,15 @@ import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
+import {
+  CreativeValidation,
+  CreativeValidationRequest,
+  MediaCapabilities,
+  MediaDownload,
+  MediaId,
+  MediaUploadRequest,
+  MediaUploadResult,
+} from './media.js';
 import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
 import {
   CancelRequest,
@@ -52,6 +61,7 @@ export type RouteSpec = {
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
+const MediaParams = zod.object({ mediaId: MediaId }).strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
@@ -89,6 +99,45 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['discovery'],
     auth: 'owner',
     response: { status: 200, description: 'Model list', schema: ModelList },
+  },
+  {
+    operationId: 'getMediaCapabilities',
+    method: 'GET',
+    path: '/v1/media/capabilities',
+    summary: 'What image, audio, video, document and creative handling is actually available.',
+    tags: ['media'],
+    auth: 'owner',
+    response: { status: 200, description: 'Media capabilities', schema: MediaCapabilities },
+  },
+  {
+    operationId: 'uploadMedia',
+    method: 'POST',
+    path: '/v1/media',
+    summary: 'Upload one owner-scoped image; the format is identified from its header.',
+    tags: ['media'],
+    auth: 'owner',
+    body: MediaUploadRequest,
+    response: { status: 201, description: 'Stored media', schema: MediaUploadResult },
+  },
+  {
+    operationId: 'getMedia',
+    method: 'GET',
+    path: '/v1/media/{mediaId}',
+    summary: 'Read one owner-scoped media item and its canonical base64 bytes.',
+    tags: ['media'],
+    auth: 'owner',
+    params: MediaParams,
+    response: { status: 200, description: 'Media bytes', schema: MediaDownload },
+  },
+  {
+    operationId: 'validateCreative',
+    method: 'POST',
+    path: '/v1/creative/validate',
+    summary: 'Validate a generated SVG or HTML draft against the sandboxed-render allowlist.',
+    tags: ['creative'],
+    auth: 'owner',
+    body: CreativeValidationRequest,
+    response: { status: 200, description: 'Validation result', schema: CreativeValidation },
   },
   {
     operationId: 'submitChat',

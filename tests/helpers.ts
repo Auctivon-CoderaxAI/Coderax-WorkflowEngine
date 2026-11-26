@@ -51,6 +51,7 @@ export function fakeProvider(input: {
   text?: string;
   beforeReturn?: () => Promise<void>;
   modelId?: string;
+  vision?: boolean;
 } = {}): ProviderAdapter & { calls: number } {
   const provider = {
     id: 'free',
@@ -62,7 +63,12 @@ export function fakeProvider(input: {
         label: 'Free test model',
         contextTokens: 32_768,
         maxOutputTokens: 4_096,
-        capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
+        capabilities: {
+          vision: input.vision ?? true,
+          toolCalling: true,
+          reasoning: true,
+          streaming: true,
+        },
         pricing: { prompt: '0', completion: '0', request: '0' },
       },
     ],
@@ -130,6 +136,7 @@ export function slowProvider(delayMs: number): ProviderAdapter & { calls: number
 export async function startTestApp(options: {
   provider?: ProviderAdapter;
   config?: Record<string, unknown>;
+  externals?: Parameters<typeof composeApplication>[0]['externals'];
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -142,6 +149,7 @@ export async function startTestApp(options: {
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
     providers: [{ adapter: options.provider ?? fakeProvider() }],
+    ...(options.externals ? { externals: options.externals } : {}),
   });
   const { url } = await app.start();
   return {
@@ -170,6 +178,68 @@ export async function waitFor<T>(
   }
 }
 
+export function pngBytes(width = 2, height = 2): Buffer {
+  const buffer = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
+  buffer.writeUInt32BE(13, 8);
+  buffer.write('IHDR', 12, 'latin1');
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+  buffer[24] = 8;
+  buffer[25] = 2;
+  buffer[26] = 0;
+  buffer[27] = 0;
+  buffer[28] = 0;
+  return buffer;
+}
+
+export function jpegBytes(width = 2, height = 2): Buffer {
+  return Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xc0, 0x00, 0x0b, 0x08,
+    (height >> 8) & 0xff, height & 0xff,
+    (width >> 8) & 0xff, width & 0xff,
+    0x01, 0x01, 0x11, 0x00,
+    0xff, 0xd9,
+  ]);
+}
+
+export function webpBytes(width = 2, height = 2, animated = false): Buffer {
+  const chunk = Buffer.alloc(10);
+  chunk[0] = animated ? 0x02 : 0x00;
+  chunk.writeUIntLE(width - 1, 4, 3);
+  chunk.writeUIntLE(height - 1, 7, 3);
+  const header = Buffer.alloc(12);
+  header.write('RIFF', 0, 'latin1');
+  header.writeUInt32LE(4 + 8 + chunk.length, 4);
+  header.write('WEBP', 8, 'latin1');
+  const metadata = Buffer.alloc(8);
+  metadata.write('VP8X', 0, 'latin1');
+  metadata.writeUInt32LE(chunk.length, 4);
+  return Buffer.concat([header, metadata, chunk]);
+}
+
+export function gifBytes(width = 2, height = 2, frames = 1): Buffer {
+  const header = Buffer.alloc(13);
+  header.write('GIF89a', 0, 'latin1');
+  header.writeUInt16LE(width, 6);
+  header.writeUInt16LE(height, 8);
+  const parts: Buffer[] = [header];
+  for (let frame = 0; frame < frames; frame += 1) {
+    parts.push(
+      Buffer.from([
+        0x2c, 0x00, 0x00, 0x00, 0x00,
+        width & 0xff, (width >> 8) & 0xff,
+        height & 0xff, (height >> 8) & 0xff,
+        0x00,
+        0x02, 0x02, 0x44, 0x01, 0x00,
+      ]),
+    );
+  }
+  parts.push(Buffer.from([0x3b]));
+  return Buffer.concat(parts);
+}
+
 export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
   const now = new Date().toISOString();
   return {
@@ -181,6 +251,7 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     engine: 'native',
     mode: 'cloud',
     objective: 'Do the thing',
+    attachments: [],
     model: { providerId: 'free', modelId: 'coderax-small' },
     modelPinned: false,
     state: 'queued',

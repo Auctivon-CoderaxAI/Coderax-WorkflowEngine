@@ -34,6 +34,8 @@ export type AgentRunRequest = {
   tenantId: string | null;
   conversationId: string;
   objective: string;
+  /** Owner media resolved for this run, as data URLs. Never logged or persisted. */
+  images?: string[];
   /**
    * Earlier turns, oldest first. The current objective is not repeated here: it
    * is passed separately so an agent never answers the same message twice.

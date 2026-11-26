@@ -1,15 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Router } from './router.js';
 
-const MAX_BODY_BYTES = 1_048_576;
-
-function readBody(request: IncomingMessage): Promise<string> {
+function readBody(request: IncomingMessage, maxBodyBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBodyBytes) {
         reject(new Error('request body is too large'));
         request.destroy();
         return;
@@ -40,13 +38,14 @@ export function createHttpServer(input: {
   router: Router;
   host: string;
   port: number;
+  maxBodyBytes: number;
 }): HttpServer {
   const server: Server = createServer((request, response) => {
     void (async () => {
       let bodyText = '';
       try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          bodyText = await readBody(request);
+          bodyText = await readBody(request, input.maxBodyBytes);
         }
       } catch {
         sendJson(response, 413, {

@@ -22,6 +22,8 @@ import type {
 } from '../models/types.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionStore } from '../permissions/store.js';
+import { createMediaService } from '../media/service.js';
+import { createCreativeService } from '../creative/service.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
@@ -370,6 +372,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const memory = persistence.memory;
   const permissions = createPermissionStore({ clock, ids });
   const notifications = persistence.notifications;
+  const media = createMediaService({
+    store: persistence.media,
+    clock,
+    limits: config.media,
+  });
+  const creative = createCreativeService({ maxBytes: config.media.creativeMaxBytes });
   const audit = createAuditLog({ clock, ids });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
@@ -487,6 +495,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     conversations,
     memory,
     permissions,
+    media,
+    creative,
     notifications,
     audit,
     events,
@@ -546,6 +556,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     router,
     host: config.server.host,
     port: config.server.port,
+    maxBodyBytes: config.server.maxBodyBytes,
   });
 
   return {

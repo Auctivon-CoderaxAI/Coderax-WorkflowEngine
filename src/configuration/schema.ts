@@ -13,6 +13,11 @@ export const ServerConfig = z
     host: z.string().min(1).default('127.0.0.1'),
     /** 0 asks the operating system for a free port, which tests rely on. */
     port: z.number().int().min(0).max(65535).default(8788),
+    /**
+     * Bounded so a media upload fits its canonical base64 envelope while a
+     * malformed client still cannot make the process buffer without limit.
+     */
+    maxBodyBytes: z.number().int().min(1_048_576).max(16_777_216).default(8_388_608),
   })
   .strict();
 
@@ -146,6 +151,27 @@ export const ModelsConfig = z
   })
   .strict();
 
+/**
+ * Media limits are enforced before a byte is decoded and before a provider is
+ * called. `maxBytes` is also bounded by the transport body limit, so an upload
+ * that passes validation cannot be larger than the server is willing to read.
+ */
+export const MediaConfig = z
+  .object({
+    enabled: z.boolean().default(true),
+    maxBytes: z.number().int().min(1_024).max(5_242_880).default(4_194_304),
+    maxPixels: z.number().int().min(10_000).max(100_000_000).default(40_000_000),
+    maxAttachments: z.number().int().min(1).max(4).default(4),
+    creativeMaxBytes: z.number().int().min(4_096).max(1_048_576).default(262_144),
+    /**
+     * Private mode is a storage partition, not a local inference guarantee. An
+     * attachment would be sent to the verified-free provider, so exporting one
+     * from a private conversation requires an explicit operator decision.
+     */
+    allowPrivateModeAttachments: z.boolean().default(false),
+  })
+  .strict();
+
 export const ExecutionConfig = z
   .object({
     /** A run holds its lease only while it heartbeats inside this window. */
@@ -195,6 +221,7 @@ export const EngineConfigSchema = z
     workspaces: WorkspacesConfig,
     engines: EnginesConfig.default({}),
     models: ModelsConfig,
+    media: MediaConfig.default({}),
     execution: ExecutionConfig.default({}),
     persistence: PersistenceConfig.default({}),
   })

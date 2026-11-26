@@ -10,6 +10,8 @@ import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
+import type { MediaService } from '../media/service.js';
+import type { CreativeService } from '../creative/service.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
@@ -39,6 +41,8 @@ export type InfrastructureDependencies = {
   conversations: ConversationRepository;
   memory: MemoryStore;
   permissions: PermissionStore;
+  media: MediaService;
+  creative: CreativeService;
   notifications: NotificationStore;
   audit: AuditLog;
   events: EventBus;
@@ -60,6 +64,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'conversations',
   'memory',
   'permissions',
+  'media',
+  'creative',
   'notifications',
   'audit',
   'events',

@@ -139,6 +139,13 @@ export function createNativeAgent(input: {
           : undefined;
 
         report({ type: 'step.started', stepId: step.id, title: step.title });
+        const images = request.images ?? [];
+        const stepPrompt = buildStepPrompt({
+          objective: request.objective,
+          step,
+          completed,
+          history,
+        });
         try {
           let stepText = '';
           if (gateway.stream) {
@@ -150,12 +157,10 @@ export function createNativeAgent(input: {
               allowFallback: request.allowFallback,
               system:
                 'You are Coderax Native, the owner’s private execution agent. Answer with the concrete result for the requested step only.',
-              prompt: buildStepPrompt({
-                objective: request.objective,
-                step,
-                completed,
-                history,
-              }),
+              prompt: stepPrompt,
+              ...(images.length > 0
+                ? { messages: [{ role: 'user' as const, text: stepPrompt, images }] }
+                : {}),
               signal: request.signal,
               ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
             })) {
@@ -182,12 +187,10 @@ export function createNativeAgent(input: {
               allowFallback: request.allowFallback,
               system:
                 'You are Coderax Native, the owner’s private execution agent. Answer with the concrete result for the requested step only.',
-              prompt: buildStepPrompt({
-                objective: request.objective,
-                step,
-                completed,
-                history,
-              }),
+              prompt: stepPrompt,
+              ...(images.length > 0
+                ? { messages: [{ role: 'user' as const, text: stepPrompt, images }] }
+                : {}),
               signal: request.signal,
               ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
             });
