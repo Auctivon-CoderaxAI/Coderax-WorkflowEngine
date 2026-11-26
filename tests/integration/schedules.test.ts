@@ -12,6 +12,7 @@ import {
   OWNER_TOKEN,
   slowGateway,
   startTestApp,
+  taskRecord,
   waitFor,
 } from '../helpers.js';
 
@@ -259,14 +260,16 @@ test('cancelling a schedule cancels the Work task it started', async () => {
     await assert.rejects(api.cancelSchedule(created.scheduleId), CoderaxApiError);
     assert.equal((await api.schedule(created.scheduleId)).state, 'cancelled');
     store.listPending = list;
-    const cancelled = await api.cancelSchedule(created.scheduleId);
-    assert.equal(cancelled.state, 'cancelled');
-
     const task = await waitFor(async () => {
       const current = await api.task(taskId);
       return current.state === 'cancelled' ? current : null;
     });
     assert.equal(task.state, 'cancelled');
+
+    const cancelled = await api.cancelSchedule(created.scheduleId);
+    assert.equal(cancelled.state, 'cancelled');
+
+
 
     const receipt = await waitFor(async () => {
       const history = await api.scheduleExecutions(created.scheduleId);
@@ -548,5 +551,25 @@ test('append acknowledgement loss leaves a recoverable claim without a task or c
     assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
     assert.equal((await conversations.messages(receipt.conversationId)).filter(m => m.role === 'user').length, 1);
     assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+  } finally { await started.close(); }
+});
+
+test('interrupted scheduled Work without completed admission cannot resume or retry', async () => {
+  const started = await startTestApp();
+  try {
+    const api = client(started.url);
+    const rule = await api.createSchedule({ name: 'Monitor', objective: 'Check status', timing: { kind: 'event', event: 'monitor' } });
+    const task = taskRecord({ state: 'interrupted', scheduleAdmission: {
+      scheduleId: rule.scheduleId, executionId: 'exe_pending', complete: false,
+    } });
+    const { tasks } = started.app.dependencies;
+    await tasks.create(task);
+    const owner = { ownerId: OWNER_ID, isOwner: true as const };
+    for (const control of [started.app.service.resumeTask, started.app.service.retryTask]) {
+      const result = await control(owner, task.taskId, task.generation);
+      assert.equal(!result.ok && result.code, 'conflict');
+    }
+    assert.equal((await tasks.get(task.taskId))?.generation, task.generation);
+    assert.equal(started.app.service.budget(owner).used.requests, 0);
   } finally { await started.close(); }
 });

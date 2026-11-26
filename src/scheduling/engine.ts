@@ -867,7 +867,7 @@ export function createScheduleEngine(input: {
 
   /** A retry waits durably; it is admitted only when its backoff has elapsed. */
   async function dispatchRetries(now: Date, report: ScheduleTickReport): Promise<void> {
-    const waiting = await store.listExecutionsByState(['retry_wait'], settings.batchSize);
+    const waiting = await store.dueRetries(now.toISOString(), settings.batchSize);
     for (const execution of waiting) {
       if (!execution.nextAttemptAt) continue;
       if (new Date(execution.nextAttemptAt).getTime() > now.getTime()) continue;

@@ -1016,3 +1016,16 @@ test('reconciliation accounts landed Work once and refuses stale attempt writes'
     assert.equal((await store.getExecution(receipt.executionId))?.state, 'dispatched');
   }
 });
+
+test('future backoffs cannot crowd a due retry out of the batch', async () => {
+  const collections = { schedules: createFakeCollection(), executions: createFakeCollection(), notices: createFakeCollection() };
+  await ensureScheduleIndexes(collections);
+  for (const store of [createScheduleRepository(), createMongoScheduleRepository(collections)]) {
+    for (const [key, nextAttemptAt] of [['future', '2099-01-01T00:00:00.000Z'], ['due', NOW]] as const) {
+      await store.createExecution(executionRecord(scheduleRecord(), {
+        executionKey: key, executionId: key, state: 'retry_wait', nextAttemptAt,
+      }));
+    }
+    assert.deepEqual((await store.dueRetries(NOW, 1)).map(record => record.executionId), ['due']);
+  }
+});

@@ -59,6 +59,7 @@ export type ScheduleRepository = {
     from: readonly ScheduleExecutionState[];
     patch: ScheduleExecutionPatch;
   }) => Promise<ScheduleExecutionRecord | null>;
+  dueRetries: (now: string, limit: number) => Promise<ScheduleExecutionRecord[]>;
   pendingNotices: (limit: number) => Promise<ScheduleExecutionRecord[]>;
   listPending: (scheduleId: string) => Promise<ScheduleExecutionRecord[]>;
   listExecutions: (scheduleId: string, limit: number) => Promise<ScheduleExecutionRecord[]>;
@@ -213,6 +214,10 @@ export function createScheduleRepository(): ScheduleRepository {
       return clone(next);
     },
 
+    dueRetries: async (now, limit) => [...executions.values()]
+      .filter(e => e.state === 'retry_wait' && e.nextAttemptAt !== null && e.nextAttemptAt <= now)
+      .sort((a, b) => a.nextAttemptAt!.localeCompare(b.nextAttemptAt!))
+      .slice(0, limit).map(clone),
     pendingNotices: async limit => [...executions.values()].filter(e => e.noticePending).slice(0, limit).map(clone),
     listPending: async (scheduleId) => [...executions.values()].filter(e => e.scheduleId === scheduleId && ['retry_wait', 'claimed', 'dispatched'].includes(e.state)).map(clone),
 

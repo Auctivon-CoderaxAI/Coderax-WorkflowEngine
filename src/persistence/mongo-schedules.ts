@@ -104,6 +104,7 @@ export async function ensureScheduleIndexes(input: {
     { state: 1, createdAt: 1 },
     { name: 'execution_state_created' },
   );
+  await input.executions.createIndex({ state: 1, nextAttemptAt: 1 }, { name: 'execution_due_retry' });
   await input.executions.createIndex({ noticePending: 1 }, {
     name: 'execution_pending_notice', partialFilterExpression: { noticePending: true },
   });
@@ -240,6 +241,9 @@ export function createMongoScheduleRepository(input: {
       return updated ? toExecution(updated) : null;
     },
 
+    dueRetries: async (now, limit) => (await executions.find({
+      state: 'retry_wait', nextAttemptAt: { $lte: now },
+    }).sort({ nextAttemptAt: 1 }).limit(limit).toArray()).map(toExecution),
     pendingNotices: async limit => (await executions.find({ noticePending: true }).limit(limit).toArray()).map(toExecution),
     listPending: async (scheduleId) => (await executions.find({
       scheduleId, state: { $in: ['retry_wait', 'claimed', 'dispatched'] },

@@ -1,3 +1,4 @@
+import { scheduledConversationId } from '../scheduling/identity.js';
 import type {
   AgentId,
   AgentList,
@@ -416,6 +417,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
   }
 
+  // Earlier tasks have no explicit marker. Their accounting write or persisted
+  // execution steps are evidence of admission; an interrupted claim alone is not.
+  async function canRunScheduled(task: TaskRecord): Promise<boolean> {
+    const admission = task.scheduleAdmission;
+    if (!admission) {
+      if (!/^task_sched_[0-9a-f]{40}$/.test(task.taskId)) return true;
+      // Older scheduled retry tasks had no schedule pointer. Their conversation
+      // still identifies the schedule; never reissue an unproven interrupted run.
+      const schedules = await deps.schedules.listByOwner(task.ownerId);
+      const legacy = schedules.find(record => scheduledConversationId(record.scheduleId) === task.conversationId);
+      return !!legacy && legacy.state !== 'cancelled' && task.steps.length > 0;
+    }
+    const schedule = await deps.schedules.get(admission.scheduleId);
+    if (!schedule || schedule.state === 'cancelled') return false;
+    return admission.complete ?? (schedule.lastExecutionId === admission.executionId || task.steps.length > 0);
+  }
+
   async function execute(taskId: string, token: string): Promise<void> {
     const task = await deps.tasks.get(taskId);
     if (!task || task.runToken !== token) return;
@@ -430,7 +448,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       return;
     }
-    if (lease.cancelRequested) {
+    if (lease.cancelRequested || !(await canRunScheduled(task))) {
       await settle(task, token, { kind: 'cancelled' });
       return;
     }
@@ -577,6 +595,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const history = await historyFor(task.conversationId, task.objective);
     const result = await deps.runner.run({
       scope: scopeOf(started.task),
+      ...((task.scheduleAdmission || task.taskId.startsWith('task_sched_')) && { cancellationRequested: async () => !(await canRunScheduled(task)) }),
       token,
       adapter: adapter.value as AgentAdapter,
       request: {
@@ -809,6 +828,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await settle(created.task, token, { kind: 'cancelled' });
         return fail('validation_failed', 'That occurrence is no longer eligible.');
       }
+      if (options.scheduleAdmission) {
+        const marked = await deps.tasks.updateFenced({
+          taskId: task.taskId, token,
+          patch: { scheduleAdmission: { ...options.scheduleAdmission, complete: true } },
+        });
+        if (!marked.applied) {
+          reservation.release();
+          return fail('validation_failed', 'Scheduled Work lost ownership before enqueue.');
+        }
+      }
     }
 
     publish(created.task, 'task.queued');
@@ -875,7 +904,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           requireApproval: true,
           conversationId,
         },
-        { taskId, conversationId, ...(trigger !== 'retry' && { scheduleAdmission: { scheduleId: current.scheduleId, executionId } }), eligible: () => accept(eligible) },
+        { taskId, conversationId, scheduleAdmission: { scheduleId: current.scheduleId, executionId, complete: false }, eligible: () => accept(eligible) },
       );
       if (accepted.ok) return { ok: true };
       if (accepted.code === 'busy') {
@@ -896,7 +925,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const reconciled = await reconcile(task);
       return {
         ...(task.scheduleAdmission && { admissionPending:
-          (await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId !== task.scheduleAdmission.executionId }),
+          !(task.scheduleAdmission.complete ??
+            ((await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId === task.scheduleAdmission.executionId || task.steps.length > 0)) }),
         state: reconciled.state,
         summary: reconciled.result?.summary ?? null,
         failure: reconciled.failure
@@ -1093,6 +1123,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'already_terminal',
         });
       }
+      if (!(await canRunScheduled(task))) {
+        return fail('conflict', 'Scheduled Work was not admitted or its schedule was cancelled.');
+      }
       const token = deps.ids.runToken();
       const now = deps.clock.now();
       const claimed = await deps.lease.claim({
@@ -1141,6 +1174,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           generation: task.generation,
           outcome: 'already_terminal',
         });
+      }
+      if (!(await canRunScheduled(task))) {
+        return fail('conflict', 'Scheduled Work was not admitted or its schedule was cancelled.');
       }
       const token = deps.ids.runToken();
       const now = deps.clock.now();

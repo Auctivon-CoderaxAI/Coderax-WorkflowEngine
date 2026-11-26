@@ -50,7 +50,7 @@ export type TaskFailure = {
  * newer one.
  */
 export type TaskRecord = {
-  scheduleAdmission?: { scheduleId: string; executionId: string };
+  scheduleAdmission?: { scheduleId: string; executionId: string; complete?: boolean };
   taskId: string;
   ownerId: string;
   tenantId: string | null;
@@ -80,6 +80,7 @@ export type TaskPatch = Partial<
   Pick<
     TaskRecord,
     | 'state'
+    | 'scheduleAdmission'
     | 'steps'
     | 'checkpoint'
     | 'updatedAt'
