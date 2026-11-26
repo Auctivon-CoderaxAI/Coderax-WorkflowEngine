@@ -49,6 +49,7 @@ import {
   type DataTable,
 } from './data.js';
 import { buildSoftware, PermissionError } from './software.js';
+import { manifestFor } from './tree.js';
 import { inspectImage } from './image.js';
 
 /**
@@ -714,22 +715,53 @@ async function produceSoftware(
     authorize: async (relative) => context.authorize({ mode: context.mode, relativePath: relative }),
   });
 
-  // Durable filenames are flat. A source tree is stored as one artifact per
-  // file with the directory separators folded into the name, rather than as an
-  // archive this engine would have to open again to serve.
-  const artifacts: ArtifactDescriptor[] = [];
+  // A source tree is a project: every file keeps its validated relativePath and
+  // shares one projectId, so the durable service can reconstruct it by artifact
+  // identity without ever seeing a workspace path.
+  const projectId = `proj_${context.ids.artifactId()}`;
+  const relativeOf = (filePath: string): string => filePath.slice(folder.length + 1);
+  const treeFiles: Array<{ relativePath: string; descriptor: ArtifactDescriptor }> = [];
   for (const file of build.files) {
+    const relativePath = relativeOf(file.path);
+    // The manifest is regenerated after every descriptor exists.
+    if (relativePath === 'MANIFEST.json') continue;
     const content = await readArtifact({ root: context.root, relative: file.path, limit: 2 * 1024 * 1024 });
-    artifacts.push(
-      await context.persist({
-        filename: file.path.split('/').join('__'),
-        mediaType: file.path.endsWith('.json') ? 'application/json' : 'text/plain',
-        data: content,
-        title: file.path.slice(folder.length + 1),
-        sha256: file.digest,
-      }),
-    );
+    const descriptor = await context.persist({
+      filename: relativePath.split('/').at(-1) as string,
+      relativePath,
+      projectId,
+      mediaType: relativePath.endsWith('.json')
+        ? 'application/json'
+        : relativePath.endsWith('.md')
+          ? 'text/markdown'
+          : 'text/plain',
+      kind: 'software',
+      data: content,
+      title: relativePath,
+      sha256: file.digest,
+    });
+    treeFiles.push({ relativePath, descriptor });
   }
+  const manifest = manifestFor({
+    projectId,
+    name: request.name,
+    entry: relativeOf(build.entry),
+    createdAt: context.clock.iso(),
+    artifacts: treeFiles,
+  });
+  const manifestDescriptor = await context.persist({
+    filename: 'MANIFEST.json',
+    relativePath: 'MANIFEST.json',
+    projectId,
+    mediaType: 'application/json',
+    kind: 'software',
+    data: `${JSON.stringify(manifest, null, 2)}\n`,
+    title: `${request.name} tree manifest`,
+  });
+  const artifacts: ArtifactDescriptor[] = [
+    ...treeFiles.map((entry) => entry.descriptor),
+    manifestDescriptor,
+  ];
 
   const checks: CheckList = build.checks;
   const syntaxChecks = checks.filter((check) => check.name.startsWith('syntax:'));

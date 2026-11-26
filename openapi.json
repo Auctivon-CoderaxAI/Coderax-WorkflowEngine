@@ -951,8 +951,8 @@
                         "visualization",
                         "execution",
                         "data",
-                        "dataset",
                         "software",
+                        "dataset",
                         "other"
                       ]
                     },
@@ -992,8 +992,8 @@
                               "visualization",
                               "execution",
                               "data",
-                              "dataset",
                               "software",
+                              "dataset",
                               "other"
                             ]
                           },
@@ -1001,6 +1001,11 @@
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 200
+                          },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
                           },
                           "mediaType": {
                             "type": "string",
@@ -4682,8 +4687,8 @@
                               "visualization",
                               "execution",
                               "data",
-                              "dataset",
                               "software",
+                              "dataset",
                               "other"
                             ]
                           },
@@ -4691,6 +4696,11 @@
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 200
+                          },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
                           },
                           "mediaType": {
                             "type": "string",
@@ -4885,8 +4895,8 @@
                 "visualization",
                 "execution",
                 "data",
-                "dataset",
                 "software",
+                "dataset",
                 "other"
               ]
             }
@@ -4976,8 +4986,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },
@@ -4985,6 +4995,11 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -5103,6 +5118,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -5149,8 +5169,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },
@@ -5226,6 +5246,11 @@
                     "minLength": 1,
                     "maxLength": 200
                   },
+                  "relativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
                   "mediaType": {
                     "type": "string",
                     "enum": [
@@ -5280,8 +5305,8 @@
                       "visualization",
                       "execution",
                       "data",
-                      "dataset",
                       "software",
+                      "dataset",
                       "other"
                     ]
                   },
@@ -5456,8 +5481,8 @@
                         "visualization",
                         "execution",
                         "data",
-                        "dataset",
                         "software",
+                        "dataset",
                         "other"
                       ]
                     },
@@ -5465,6 +5490,11 @@
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 200
+                    },
+                    "relativePath": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
                     },
                     "mediaType": {
                       "type": "string",
@@ -5660,8 +5690,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },
@@ -5669,6 +5699,11 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -5787,6 +5822,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -5833,8 +5873,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },
@@ -5922,6 +5962,11 @@
                     "minLength": 1,
                     "maxLength": 200
                   },
+                  "relativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
                   "mediaType": {
                     "type": "string",
                     "enum": [
@@ -5976,8 +6021,8 @@
                       "visualization",
                       "execution",
                       "data",
-                      "dataset",
                       "software",
+                      "dataset",
                       "other"
                     ]
                   },
@@ -6052,6 +6097,11 @@
                             "minLength": 1,
                             "maxLength": 200
                           },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
                           "mediaType": {
                             "type": "string",
                             "enum": [
@@ -6098,8 +6148,8 @@
                               "visualization",
                               "execution",
                               "data",
-                              "dataset",
                               "software",
+                              "dataset",
                               "other"
                             ]
                           },
@@ -6234,8 +6284,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },
@@ -6243,6 +6293,11 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -6361,6 +6416,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -6407,8 +6467,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },
@@ -6556,8 +6616,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },
@@ -6565,6 +6625,11 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200
+                        },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
                         },
                         "mediaType": {
                           "type": "string",
@@ -6685,6 +6750,11 @@
                             "minLength": 1,
                             "maxLength": 200
                           },
+                          "relativePath": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
                           "mediaType": {
                             "type": "string",
                             "enum": [
@@ -6731,8 +6801,8 @@
                               "visualization",
                               "execution",
                               "data",
-                              "dataset",
                               "software",
+                              "dataset",
                               "other"
                             ]
                           },
@@ -6783,6 +6853,11 @@
                           "minLength": 1,
                           "maxLength": 200
                         },
+                        "relativePath": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1024
+                        },
                         "mediaType": {
                           "type": "string",
                           "enum": [
@@ -6829,8 +6904,8 @@
                             "visualization",
                             "execution",
                             "data",
-                            "dataset",
                             "software",
+                            "dataset",
                             "other"
                           ]
                         },

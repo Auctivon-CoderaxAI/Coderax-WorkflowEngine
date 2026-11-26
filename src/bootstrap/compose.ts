@@ -431,6 +431,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
                 ...(generated.title === undefined
                   ? {}
                   : { note: generated.title.slice(0, 500) }),
+                ...(generated.relativePath === undefined
+                  ? {}
+                  : { relativePath: generated.relativePath }),
+                ...(generated.projectId === undefined
+                  ? {}
+                  : { projectId: generated.projectId }),
               },
             );
             if (!uploaded.ok) throw new ArtifactPersistError(uploaded.detail);

@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { CoderaxClient } from '@coderax/sdk';
 import { createFakeDatabase } from '../fakes/mongo.js';
+import { restoreTree, type TreeManifest } from '../../src/artifacts/tree.js';
 import { OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
 
 function client(url: string): CoderaxClient {
@@ -161,6 +165,57 @@ test('an unparseable deliverable directive fails the task instead of being ignor
     assert.equal(failed.failure?.code, 'validation_failed');
     assert.match(failed.failure?.detail ?? '', /not valid JSON/i);
   } finally {
+    await started.close();
+  }
+});
+
+test('a generated source tree is durable, manifest-linked and restorable by artifact identity', async () => {
+  const started = await startDurable();
+  const api = client(started.url);
+  const root = mkdtempSync(path.join(tmpdir(), 'coderax-restore-'));
+  try {
+    const deliverable = await api.deliver({
+      kind: 'software',
+      mode: 'cloud',
+      name: 'tree-app',
+      description: 'A service scaffold with a nested source tree.',
+      template: 'service',
+      language: 'javascript',
+      files: [],
+    });
+    assert.equal(deliverable.verification.ok, true);
+
+    const manifestDescriptor = deliverable.artifacts.find(
+      (artifact) => artifact.filename === 'MANIFEST.json',
+    );
+    assert.ok(manifestDescriptor?.projectId, 'the tree must carry one project identity');
+    assert.ok(manifestDescriptor.relativePath === 'MANIFEST.json');
+
+    const listed = await api.artifacts({ mode: 'cloud', projectId: manifestDescriptor.projectId, limit: 100 });
+    assert.equal(listed.artifacts.length, deliverable.artifacts.length);
+
+    const manifestBytes = await api.downloadArtifact(manifestDescriptor.artifactId, { mode: 'cloud' });
+    const manifest = JSON.parse(
+      Buffer.from(manifestBytes.contentBase64, 'base64').toString('utf8'),
+    ) as TreeManifest;
+    assert.equal(manifest.projectId, manifestDescriptor.projectId);
+    assert.ok(manifest.files.some((file) => file.relativePath.includes('/')));
+    assert.equal(manifest.files.find((file) => file.relativePath === 'MANIFEST.json'), undefined);
+
+    const restored = await restoreTree({
+      root,
+      manifest,
+      read: async (artifactId, version) =>
+        Buffer.from(
+          (await api.downloadArtifact(artifactId, { mode: 'cloud', version })).contentBase64,
+          'base64',
+        ),
+    });
+    assert.equal(restored.files, manifest.files.length);
+    assert.equal(existsSync(path.join(root, 'package.json')), true);
+    assert.equal(existsSync(path.join(root, manifest.entry)), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
     await started.close();
   }
 });

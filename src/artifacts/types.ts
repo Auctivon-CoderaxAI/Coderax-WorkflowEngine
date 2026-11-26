@@ -44,6 +44,10 @@ export type PersistArtifact = (input: {
   kind?: ArtifactKind;
   data: Buffer | string;
   title?: string;
+  /** Validated project-relative path for a file inside a source tree. */
+  relativePath?: string;
+  /** Groups every file of one generated tree. */
+  projectId?: string;
   /** The digest the toolkit verified locally; the service re-checks it. */
   sha256?: string;
 }) => Promise<ArtifactDescriptor>;

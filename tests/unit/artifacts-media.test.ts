@@ -7,6 +7,7 @@ import {
   digestOf,
   validateContent,
   validateFilename,
+  validateRelativePath,
 } from '../../src/artifacts/media.js';
 import {
   codeBytes,
@@ -334,6 +335,60 @@ test('every advertised media type is accepted with a matching signature', () => 
       assert.equal(result.value.sha256, digestOf(entry.content));
     }
   }
+});
+
+test('relative paths are metadata only and cannot traverse or spoof a leaf', () => {
+  for (const path of ['src/index.ts', 'test/index.test.ts', 'package.json']) {
+    const filename = path.split('/').at(-1) ?? '';
+    const result = validateRelativePath({ path, filename });
+    assert.equal(result.ok, true, path);
+  }
+
+  const rejected = [
+    '../escape.txt',
+    '/abs/escape.txt',
+    'src/../../escape.txt',
+    'src\\index.ts',
+    'C:/src/index.ts',
+    '.hidden/index.ts',
+    'src/ index.ts',
+    'src/index.ts ',
+    'CON/index.ts',
+    'src/COM1.txt',
+    'src//index.ts',
+    'src/./index.ts',
+  ];
+  for (const path of rejected) {
+    const filename = path.split('/').at(-1) ?? '';
+    assert.equal(validateRelativePath({ path, filename }).ok, false, path);
+  }
+  assert.equal(validateRelativePath({ path: 'src/index.ts', filename: 'other.ts' }).ok, false);
+});
+
+test('deliverable kinds are compatible with their real media types', () => {
+  const source = validateContent({
+    filename: 'index.ts',
+    mediaType: 'text/plain',
+    content: codeBytes(),
+    requestedKind: 'software',
+  });
+  assert.equal(source.ok, true);
+
+  const dataset = validateContent({
+    filename: 'rows.csv',
+    mediaType: 'text/csv',
+    content: textBytes('a,b\n1,2'),
+    requestedKind: 'dataset',
+  });
+  assert.equal(dataset.ok, true);
+
+  const other = validateContent({
+    filename: 'report.pdf',
+    mediaType: 'application/pdf',
+    content: pdfBytes(),
+    requestedKind: 'other',
+  });
+  assert.equal(other.ok, true);
 });
 
 test('source code and spreadsheets resolve to distinct kinds', () => {

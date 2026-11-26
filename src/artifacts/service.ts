@@ -29,7 +29,7 @@ import type { Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
-import { decodeContent, validateContent } from './media.js';
+import { decodeContent, validateContent, validateRelativePath } from './media.js';
 
 /**
  * Durable artifacts.
@@ -53,6 +53,8 @@ import { decodeContent, validateContent } from './media.js';
 const DEFAULT_LIST_LIMIT = 200;
 const MAX_LIST_LIMIT = 500;
 const SWEEP_LIMIT = 500;
+/** A download reads in-process, so a minute is ample; a crash releases by expiry. */
+const READ_LEASE_TTL_MS = 60_000;
 
 export type ArtifactService = {
   /** True only when the configured backend can survive a restart. */
@@ -152,6 +154,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       artifactId: record.artifactId,
       kind: record.kind,
       filename: record.filename,
+      ...(record.relativePath ? { relativePath: record.relativePath } : {}),
       mediaType: record.mediaType,
       bytes: record.bytes,
       sha256: record.sha256,
@@ -173,6 +176,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       artifactId: record.artifactId,
       version: record.version,
       filename: record.filename,
+      ...(record.relativePath ? { relativePath: record.relativePath } : {}),
       mediaType: record.mediaType,
       kind: record.kind,
       bytes: record.bytes,
@@ -246,6 +250,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
   async function prepare(input: {
     filename: string;
+    relativePath?: string;
     mediaType: ArtifactMediaType;
     contentBase64: string;
     sha256?: string;
@@ -253,6 +258,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     projectId?: string;
   }): Promise<ServiceResult<{
     filename: string;
+    relativePath: string | null;
     mediaType: ArtifactMediaType;
     kind: ArtifactKind;
     bytes: Buffer;
@@ -270,6 +276,16 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     });
     if (!validated.ok) return fail(validated.code, validated.detail);
 
+    let relativePath: string | null = null;
+    if (input.relativePath !== undefined) {
+      const relative = validateRelativePath({
+        path: input.relativePath,
+        filename: validated.value.filename,
+      });
+      if (!relative.ok) return fail(relative.code, relative.detail);
+      relativePath = relative.value;
+    }
+
     if (validated.value.bytes.length > settings.maxBytesPerArtifact) {
       return fail(
         'payload_too_large',
@@ -282,7 +298,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         'A project or game artifact must name the projectId it belongs to.',
       );
     }
-    return ok(validated.value);
+    return ok({ ...validated.value, relativePath });
   }
 
   /** One version owns one reference; releasing it can delete only at zero. */
@@ -488,6 +504,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
         const prepared = await prepare({
           filename: request.filename,
+          ...(request.relativePath ? { relativePath: request.relativePath } : {}),
           mediaType: request.mediaType,
           contentBase64: request.contentBase64,
           ...(request.sha256 ? { sha256: request.sha256 } : {}),
@@ -527,12 +544,20 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         if (!reservation.ok) return reservation;
 
         const ref = { ownerId: principal.ownerId, mode: request.mode, sha256 };
-        if (!(await retainBytes(ref, prepared.value.bytes))) {
+        try {
+          if (!(await retainBytes(ref, prepared.value.bytes))) {
+            await deps.capacity.release(reservation.value).catch(() => undefined);
+            return fail(
+              'storage_unavailable',
+              'The artifact bytes could not be written durably, so no quota was kept.',
+            );
+          }
+        } catch (error) {
+          // The bytes were never retained; the admission must not outlive the
+          // failure. The reservation would expire anyway, but returning it now
+          // keeps a failed upload from reducing another upload's headroom.
           await deps.capacity.release(reservation.value).catch(() => undefined);
-          return fail(
-            'storage_unavailable',
-            'The artifact bytes could not be written durably, so no quota was kept.',
-          );
+          throw error;
         }
 
         const artifact: ArtifactRecord = {
@@ -542,6 +567,9 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           mode: request.mode,
           kind: prepared.value.kind,
           filename: prepared.value.filename,
+          ...(prepared.value.relativePath
+            ? { relativePath: prepared.value.relativePath }
+            : {}),
           mediaType: prepared.value.mediaType,
           bytes,
           sha256,
@@ -560,6 +588,9 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           artifactId,
           version: 1,
           filename: prepared.value.filename,
+          ...(prepared.value.relativePath
+            ? { relativePath: prepared.value.relativePath }
+            : {}),
           mediaType: prepared.value.mediaType,
           kind: prepared.value.kind,
           bytes,
@@ -568,7 +599,16 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           createdAt,
         };
 
-        const created = await deps.artifacts.create({ artifact, version });
+        const created = await deps.artifacts.create({ artifact, version }).catch(
+          async (error: unknown) => {
+            // A thrown create is the crash-equivalent window: the reference was
+            // taken but no version row owns it. Return both now instead of
+            // waiting for a sweep that cannot know about this reference.
+            await releaseDigest(ref).catch(() => undefined);
+            await deps.capacity.release(reservation.value).catch(() => undefined);
+            throw error;
+          },
+        );
         if (!created.ok) {
           await releaseDigest(ref).catch(() => undefined);
           await deps.capacity.release(reservation.value).catch(() => undefined);
@@ -601,6 +641,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
           const prepared = await prepare({
             filename: request.filename,
+            ...(request.relativePath ? { relativePath: request.relativePath } : {}),
             mediaType: request.mediaType,
             contentBase64: request.contentBase64,
             ...(request.sha256 ? { sha256: request.sha256 } : {}),
@@ -630,16 +671,24 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           if (!reservation.ok) return reservation;
 
           const ref = { ownerId: principal.ownerId, mode: request.mode, sha256 };
-          if (!(await retainBytes(ref, prepared.value.bytes))) {
+          try {
+            if (!(await retainBytes(ref, prepared.value.bytes))) {
+              await deps.capacity.release(reservation.value).catch(() => undefined);
+              return fail(
+                'storage_unavailable',
+                'The artifact bytes could not be written durably, so no quota was kept.',
+              );
+            }
+          } catch (error) {
             await deps.capacity.release(reservation.value).catch(() => undefined);
-            return fail(
-              'storage_unavailable',
-              'The artifact bytes could not be written durably, so no quota was kept.',
-            );
+            throw error;
           }
 
           const updated: ArtifactRecord = {
             ...current,
+            ...(prepared.value.relativePath
+              ? { relativePath: prepared.value.relativePath }
+              : {}),
             kind: prepared.value.kind,
             filename: prepared.value.filename,
             mediaType: prepared.value.mediaType,
@@ -656,6 +705,9 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             artifactId,
             version: nextVersion,
             filename: prepared.value.filename,
+            ...(prepared.value.relativePath
+              ? { relativePath: prepared.value.relativePath }
+              : {}),
             mediaType: prepared.value.mediaType,
             kind: prepared.value.kind,
             bytes,
@@ -664,11 +716,17 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             createdAt: now.toISOString(),
           };
 
-          const appended = await deps.artifacts.appendVersion({
-            artifact: updated,
-            expectedVersion: current.version,
-            version,
-          });
+          const appended = await deps.artifacts
+            .appendVersion({
+              artifact: updated,
+              expectedVersion: current.version,
+              version,
+            })
+            .catch(async (error: unknown) => {
+              await releaseDigest(ref).catch(() => undefined);
+              await deps.capacity.release(reservation.value).catch(() => undefined);
+              throw error;
+            });
           if (!appended.ok) {
             await releaseDigest(ref).catch(() => undefined);
             await deps.capacity.release(reservation.value).catch(() => undefined);
@@ -681,7 +739,10 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           // The version row exists, so this admission is committed usage. A
           // lost commit is resolved by the expiry sweep against that row.
           await deps.capacity.commit(reservation.value).catch(() => undefined);
-          const released = await pruneVersions(key, nextVersion);
+          // The version is durable; a failed prune is a retained old version,
+          // not a failed upload, so it must not turn a committed write into an
+          // error response the client would retry as a second version.
+          const released = await pruneVersions(key, nextVersion).catch(() => 0);
 
           audit({
             ownerId: principal.ownerId,
@@ -711,7 +772,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const version = await deps.artifacts.version({ ...key, version: versionNumber });
         if (!version) return fail('not_found', 'That artifact version does not exist.');
         const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
-        if (!(await deps.blobs.acquire(ref))) {
+        const leaseId = await deps.blobs.lease({ ref, ttlMs: READ_LEASE_TTL_MS });
+        if (!leaseId) {
           return fail(
             'storage_unavailable',
             'The stored bytes are unavailable; the artifact was not reconstructed from memory.',
@@ -732,10 +794,10 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             contentBase64: Buffer.from(content).toString('base64'),
           });
         } finally {
-          // A temporary reference keeps a concurrent delete from removing the
-          // chunks between the first and the last chunk read.
-          await deps.blobs.release(ref).catch(() => undefined);
-          await deps.blobs.deleteIfUnreferenced(ref).catch(() => undefined);
+          // The lease, not a permanent reference, keeps a concurrent delete from
+          // removing chunks mid-read. If this process dies the lease expires and
+          // the maintenance sweep reclaims it, so no blob is pinned forever.
+          await deps.blobs.releaseLease({ ref, leaseId }).catch(() => undefined);
         }
       }),
 
@@ -750,7 +812,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const version = rows.find((row) => row.version === versionNumber);
         if (!version) return fail('not_found', 'That artifact version does not exist.');
         const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
-        if (!(await deps.blobs.acquire(ref))) {
+        const leaseId = await deps.blobs.lease({ ref, ttlMs: READ_LEASE_TTL_MS });
+        if (!leaseId) {
           return fail(
             'storage_unavailable',
             'The stored bytes are unavailable; the export was not fabricated.',
@@ -773,8 +836,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             exportedAt: deps.clock.iso(),
           });
         } finally {
-          await deps.blobs.release(ref).catch(() => undefined);
-          await deps.blobs.deleteIfUnreferenced(ref).catch(() => undefined);
+          await deps.blobs.releaseLease({ ref, leaseId }).catch(() => undefined);
         }
       }),
 
@@ -866,6 +928,14 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       // Reclaim abandoned chunks and old zero-reference blobs, then resolve
       // admissions whose process died. Both are bounded so startup stays fast.
       await deps.blobs.maintain({ graceMs: 86_400_000, limit: 200 });
+      // A process can die after its metadata rows are removed but before every
+      // reference is released. Such a blob has an old reference timestamp and
+      // no version row, so it is a leak rather than a live artifact.
+      await deps.blobs.reclaimLeaked({
+        graceMs: 86_400_000,
+        limit: 200,
+        referenced: (ref) => deps.artifacts.referenced(ref),
+      });
       await sweepReservations(at);
       const expired = await deps.artifacts.listExpired({ now: at, limit: SWEEP_LIMIT });
       let releasedBytes = 0;

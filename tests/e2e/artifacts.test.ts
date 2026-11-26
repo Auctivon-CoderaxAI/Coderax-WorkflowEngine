@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';
 import { createFakeDatabase } from '../fakes/mongo.js';
-import { base64, pngBytes, textBytes } from '../fixtures/artifacts.js';
+import { artifactSettings, base64, pngBytes, textBytes } from '../fixtures/artifacts.js';
 import { fakeGateway, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
 
 function client(url: string): CoderaxClient {
@@ -46,17 +46,19 @@ test('artifacts, versions and task links survive an engine restart and a new cli
 
     const second = await api.uploadArtifactVersion(artifactId, {
       filename: 'chart-v2.png',
+      relativePath: 'charts/chart-v2.png',
       mediaType: 'image/png',
       contentBase64: base64(pngBytes('version-two')),
       mode: 'cloud',
       note: 'refined palette',
     });
     assert.equal(second.artifact.version, 2);
+    assert.equal(second.version.relativePath, 'charts/chart-v2.png');
 
     const status = await api.task(accepted.taskId);
     assert.deepEqual(
       status.result?.artifacts.map((entry) => entry.path),
-      ['chart-v2.png'],
+      ['charts/chart-v2.png'],
     );
     assert.equal(status.result?.artifacts[0]?.digest, second.version.sha256);
 
@@ -105,6 +107,136 @@ test('artifacts, versions and task links survive an engine restart and a new cli
     assert.equal((await api.artifacts({ mode: 'cloud' })).artifacts.length, 0);
   } finally {
     await second.close();
+  }
+});
+
+test('a generated source tree is persisted file by file and listed as a manifest', async () => {
+  const database = createFakeDatabase();
+  const started = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database },
+  });
+  try {
+    const api = client(started.url);
+    const files = [
+      {
+        filename: 'package.json',
+        relativePath: 'package.json',
+        mediaType: 'application/json' as const,
+        contentBase64: base64(textBytes('{"name":"demo","private":true}')),
+        kind: 'software' as const,
+      },
+      {
+        filename: 'index.ts',
+        relativePath: 'src/index.ts',
+        mediaType: 'text/plain' as const,
+        contentBase64: base64(textBytes('export const answer = 42;\n')),
+        kind: 'software' as const,
+      },
+      {
+        filename: 'index.test.ts',
+        relativePath: 'test/index.test.ts',
+        mediaType: 'text/plain' as const,
+        contentBase64: base64(textBytes('import { answer } from "../src/index.ts";\n')),
+        kind: 'software' as const,
+      },
+    ];
+    const uploaded = [];
+    for (const file of files) {
+      const result = await api.uploadArtifact({
+        ...file,
+        mode: 'cloud',
+        projectId: 'proj_source_tree',
+      });
+      uploaded.push(result);
+    }
+
+    const listed = await api.artifacts({ mode: 'cloud', projectId: 'proj_source_tree' });
+    assert.deepEqual(
+      listed.artifacts.map((entry) => entry.relativePath).sort(),
+      ['package.json', 'src/index.ts', 'test/index.test.ts'],
+    );
+    assert.deepEqual(
+      listed.artifacts.map((entry) => entry.filename).sort(),
+      ['index.test.ts', 'index.ts', 'package.json'],
+    );
+
+    const source = uploaded.find((entry) => entry.version.relativePath === 'src/index.ts');
+    assert.ok(source);
+    const downloaded = await api.downloadArtifact(source.artifact.artifactId, {
+      mode: 'cloud',
+    });
+    assert.equal(downloaded.contentBase64, base64(textBytes('export const answer = 42;\n')));
+
+    await assert.rejects(
+      () =>
+        api.uploadArtifact({
+          filename: 'escape.txt',
+          relativePath: '../escape.txt',
+          mediaType: 'text/plain',
+          contentBase64: base64(textBytes('escape')),
+          mode: 'cloud',
+        }),
+      (error: unknown) =>
+        error instanceof CoderaxApiError && error.code === 'validation_failed',
+    );
+  } finally {
+    await started.close();
+  }
+});
+
+test('a failed metadata write releases the reference, the admission and the rows', async () => {
+  const database = createFakeDatabase();
+  const started = await startTestApp({
+    config: { persistence: { driver: 'mongo' } },
+    persistence: { database },
+  });
+  try {
+    const api = client(started.url);
+    const content = pngBytes('injected-failure');
+    const artifacts = database.collection('artifacts');
+    const versions = database.collection('artifact_versions');
+    const capacity = () => database.collection('artifact_capacity').findOne({ mode: 'cloud' });
+
+    const upload = () =>
+      api.uploadArtifact({
+        filename: 'lost.png',
+        mediaType: 'image/png',
+        contentBase64: base64(content),
+        mode: 'cloud',
+      });
+    const storageFailure = (error: unknown) =>
+      error instanceof CoderaxApiError && error.code === 'storage_unavailable';
+    const assertNothingKept = async () => {
+      assert.equal((await database.collection('artifact_blobs').find({}).toArray()).length, 0);
+      assert.equal((await database.collection('artifact_chunks').find({}).toArray()).length, 0);
+      assert.equal((await versions.find({}).toArray()).length, 0);
+      assert.equal((await artifacts.find({}).toArray()).length, 0);
+      assert.equal((await capacity())?.availableBytes, artifactSettings().maxBytesPerOwner);
+      assert.equal((await capacity())?.availableArtifacts, artifactSettings().maxArtifactsPerOwner);
+    };
+
+    const artifactInsert = artifacts.insertOne;
+    artifacts.insertOne = async () => {
+      throw new Error('injected artifact metadata failure');
+    };
+    await assert.rejects(upload, storageFailure);
+    artifacts.insertOne = artifactInsert;
+    await assertNothingKept();
+
+    const versionInsert = versions.insertOne;
+    versions.insertOne = async () => {
+      throw new Error('injected version metadata failure');
+    };
+    await assert.rejects(upload, storageFailure);
+    versions.insertOne = versionInsert;
+    await assertNothingKept();
+
+    const retried = await upload();
+    const downloaded = await api.downloadArtifact(retried.artifact.artifactId, { mode: 'cloud' });
+    assert.equal(downloaded.contentBase64, base64(content));
+  } finally {
+    await started.close();
   }
 });
 

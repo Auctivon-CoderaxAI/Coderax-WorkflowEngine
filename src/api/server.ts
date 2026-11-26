@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Router } from './router.js';
 
-const MAX_BODY_BYTES = 1_048_576;
+/** Six MiB covers one base64 media upload within the decoded 4 MiB bound. */
+const MAX_BODY_BYTES = 6 * 1024 * 1024;
 
 function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -60,6 +62,7 @@ export function createHttpServer(input: {
           status: 413,
           code: 'payload_too_large',
           detail: 'The request body is too large.',
+          requestId: randomUUID(),
           retryable: false,
         });
         return;

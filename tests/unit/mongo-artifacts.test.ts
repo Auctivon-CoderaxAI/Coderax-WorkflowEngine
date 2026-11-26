@@ -269,6 +269,73 @@ test('maintenance reclaims orphaned chunks and old zero-reference blobs', async 
   assert.ok(await blobs.get(keptRef));
 });
 
+test('an abandoned read lease expires and cannot pin a blob forever', async () => {
+  const { collections } = setup();
+  await ensureArtifactIndexes(collections);
+  const clock = mutableClock();
+  const blobs = createMongoBlobStore({
+    collections: { blobs: collections.blobs, chunks: collections.chunks },
+    clock,
+    chunkBytes: 65_536,
+  });
+  const content = Buffer.from('leased bytes');
+  const sha256 = digestOf(content);
+  const ref = { ownerId: OWNER_ID, mode: 'cloud' as const, sha256 };
+  await blobs.put({ ...ref, bytes: content.length, content });
+  await blobs.acquire(ref);
+  await blobs.release(ref);
+
+  const leaseId = await blobs.lease({ ref, ttlMs: 1_000 });
+  assert.ok(leaseId);
+  assert.equal(await blobs.deleteIfUnreferenced(ref), false);
+  clock.advance(1_001);
+  assert.equal(await blobs.deleteIfUnreferenced(ref), true);
+  assert.equal(await blobs.get(ref), null);
+
+  const again = Buffer.from('explicitly released');
+  const againSha = digestOf(again);
+  const againRef = { ownerId: OWNER_ID, mode: 'private' as const, sha256: againSha };
+  await blobs.put({ ...againRef, bytes: again.length, content: again });
+  const live = await blobs.lease({ ref: againRef, ttlMs: 60_000 });
+  assert.ok(live);
+  await blobs.releaseLease({ ref: againRef, leaseId: live });
+  assert.equal(await blobs.deleteIfUnreferenced(againRef), true);
+});
+
+test('a reference leaked by a failed release is reclaimed only after the grace period', async () => {
+  const { collections } = setup();
+  await ensureArtifactIndexes(collections);
+  const clock = mutableClock();
+  const blobs = createMongoBlobStore({
+    collections: { blobs: collections.blobs, chunks: collections.chunks },
+    clock,
+    chunkBytes: 65_536,
+  });
+  const content = Buffer.from('leaked reference');
+  const sha256 = digestOf(content);
+  const ref = { ownerId: OWNER_ID, mode: 'cloud' as const, sha256 };
+  await blobs.put({ ...ref, bytes: content.length, content });
+  await blobs.acquire(ref);
+
+  assert.equal(
+    await blobs.reclaimLeaked({ graceMs: 3_600_000, limit: 10, referenced: async () => false }),
+    0,
+  );
+  clock.advance(3_600_001);
+  // A version row still claims it: it is a live artifact, not a leak.
+  assert.equal(
+    await blobs.reclaimLeaked({ graceMs: 3_600_000, limit: 10, referenced: async () => true }),
+    0,
+  );
+  const removed = await blobs.reclaimLeaked({
+    graceMs: 3_600_000,
+    limit: 10,
+    referenced: async () => false,
+  });
+  assert.equal(removed, 1);
+  assert.equal(await blobs.get(ref), null);
+});
+
 test('identical content is stored once and is idempotent', async () => {
   const { collections } = setup();
   await ensureArtifactIndexes(collections);
