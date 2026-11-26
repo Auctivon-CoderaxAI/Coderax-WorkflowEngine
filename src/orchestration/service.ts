@@ -880,9 +880,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       observations: {},
       executed: [],
     };
+    // `resumeText` is the output a previous generation had already produced. A
+    // resumed turn reports the whole answer, not only its own delta.
+    const priorText = started.task.checkpoint.resumeText ?? '';
+    const turnText = (body: string): string =>
+      // A native run re-emits the prior output into the stream (`text.replace`),
+      // so the visible text already starts with it. A resumed generation that
+      // does not re-emit still has to report the finished work.
+      priorText.length > 0 && !body.startsWith(priorText) ? priorText + body : body;
     const checkpointNow = (): TaskRecord['checkpoint'] => ({
       completedSteps: [...completed],
-      text: visible,
+      text: turnText(visible),
       outputs: [...outputs],
       plan,
       stepResults: [...stepResults],
@@ -942,7 +950,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         // back only because a later delta could still complete a credential.
         // `resumeText` survives the `text: ''` a reissue writes, so a resumed
         // generation can report the finished work without re-streaming it.
-        const stepText = redactContent(text);
+        const stepText = redactContent(turnText(text));
         persistCheckpoint({
           steps: structuredClone(steps),
           checkpoint: { ...checkpointNow(), text: stepText, resumeText: stepText },

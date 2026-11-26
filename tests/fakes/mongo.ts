@@ -28,8 +28,8 @@ function matches(document: Document, filter: MongoFilter): boolean {
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
       if ('$lt' in operators) {
-        const bound = operators.$lt as number;
-        if (typeof value !== 'number' || !(value < bound)) return false;
+        const order = compare(value, operators.$lt);
+        if (order === null || order >= 0) return false;
       }
       if ('$lte' in operators) {
         const order = compare(value, operators.$lte);

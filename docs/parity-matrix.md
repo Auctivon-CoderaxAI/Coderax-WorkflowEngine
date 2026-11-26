@@ -102,14 +102,15 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the head of `feat/durable-recovery`: 134 passed, 0 failed,
-  1 skipped (the opt-in live-MongoDB check), OpenAPI drift clean. See
+- `npm run verify` on this branch (the `feat/intelligence-core` head plus this
+  work): 301 tests, 301 passed, 0 failed, 0 skipped, OpenAPI drift clean. The
+  live-MongoDB tier ran against a local `mongod` 8.0.4 and runs in CI against a
+  `mongo:8.0` service container. See
   [`durable-recovery.md`](durable-recovery.md) for the per-defect evidence.
-- Durable stores are verified against a semantics-faithful collection fake that
-  enforces unique indexes and cursor semantics, and the recovery tests restart a
-  whole application over the same fake database. **No live MongoDB has been
-  contacted**; "durable" here means the adapter, the wiring and the restart path
-  are proven, not that a real server has stored a row. The live-MongoDB test is
-  skipped unless `CODERAX_MONGODB_URI` names an authorized database.
+- Durable stores are verified three ways, and the tiers are not interchangeable:
+  an in-memory log, a semantics-faithful collection fake that enforces unique
+  indexes and cursor operators, and a real server. The real server is a single
+  standalone `mongod`; no replica set, failover or secondary-read behaviour is
+  claimed.
 - Hosted CI is reported at the exact pushed head in the pull request; a local run
   is the only evidence until that run exists.
