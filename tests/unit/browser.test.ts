@@ -807,6 +807,32 @@ test('the configured live-session limit is enforced', async () => {
   }
 });
 
+test('an unknown create outcome stays counted against the session limit', async () => {
+  const fake = fakeBrowserProvider();
+  const started = await startTestApp({
+    browser: fake,
+    config: { browsers: { enabled: true, maxSessionsPerOwner: 1 } },
+  });
+  try {
+    const create = () => started.app.service.createBrowserSession(principal, {
+      label: 'Unresolved create',
+      purpose: 'testing',
+      origins: ['https://example.test'],
+    });
+    fake.failNextCreateUnknown();
+    const lost = await create();
+    assert.equal(lost.ok, false);
+    assert.equal(lost.ok === false && lost.code, 'browser_unavailable');
+
+    const blocked = await create();
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.ok === false && blocked.code, 'conflict');
+    assert.equal(fake.createInputs.length, 1);
+  } finally {
+    await started.close();
+  }
+});
+
 test('concurrent creations cannot exceed the configured live-session limit', async () => {
   const fake = fakeBrowserProvider();
   const started = await startTestApp({

@@ -78,10 +78,12 @@ The SDK exposes every operation on `CoderaxClient`.
   confirmed close marks the record `expired`; an unconfirmed close marks it
   `quarantined`, because reporting a clean expiry without terminating the
   remote workload would be false.
-- At most `maxSessionsPerOwner` slots exist per owner. Pending creates and quarantined sessions
-  occupy slots until creation fails or termination is confirmed. Retry close to
-  clean up a quarantined session. The engine retains the latest 128 confirmed
-  terminal sessions and their receipt histories across owners.
+- At most `maxSessionsPerOwner` slots exist per owner. Pending creates,
+  quarantined sessions and creates whose provider answer was lost occupy slots;
+  an unresolved create remains counted until the provider TTL has passed because
+  no session handle exists to close. Retry close to clean up a quarantined
+  session. The engine retains the latest 128 confirmed terminal sessions and
+  their receipt histories across owners.
 - States are `ready`, `paused`, `owner_controlled`, `closed`, `expired`,
   `failed` and `quarantined`. An action on any state other than `ready` is
   refused with a receipt. `quarantined` means remote termination was **not**

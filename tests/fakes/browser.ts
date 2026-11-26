@@ -52,6 +52,7 @@ export type FakeBrowserProvider = BrowserProvider & {
   setScreenshot: (data: Buffer, contentType?: string) => void;
   setDownload: (data: Buffer, contentType?: string) => void;
   failNextAct: () => void;
+  failNextCreateUnknown: () => void;
   failNextClose: () => void;
 };
 
@@ -112,6 +113,7 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
   let pauseGate: Promise<void> | null = null;
   let releasePauseGate: (() => void) | null = null;
   let failNext = false;
+  let failNextCreateUnknownFlag = false;
   let failNextClose = false;
   let tabCounter = 1;
 
@@ -171,12 +173,24 @@ export function fakeBrowserProvider(): FakeBrowserProvider {
     failNextAct: () => {
       failNext = true;
     },
+    failNextCreateUnknown: () => {
+      failNextCreateUnknownFlag = true;
+    },
     failNextClose: () => {
       failNextClose = true;
     },
 
     create: async (input) => {
       fake.createInputs.push(input);
+      if (failNextCreateUnknownFlag) {
+        failNextCreateUnknownFlag = false;
+        return {
+          ok: false,
+          code: 'unavailable',
+          detail: 'The fake provider lost the create response.',
+          outcomeUnknown: true,
+        };
+      }
       const providerSessionId = `ps_${fake.createInputs.length}`;
       const tabs: BrowserTab[] = [
         { tabId: 'tab-1', url: initialUrl, title: '', active: true },

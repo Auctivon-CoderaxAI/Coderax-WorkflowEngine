@@ -30,7 +30,12 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceFailure, ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { redactText } from '../observability/redact.js';
-import type { BrowserProvider, ProviderFailure } from '../browser/types.js';
+import type {
+  BrowserProvider,
+  ProviderFailure,
+  ProviderResult,
+  ProviderSession,
+} from '../browser/types.js';
 import type { BrowserStore, StoredBrowserSession } from '../browser/store.js';
 import { unavailableCapabilities } from '../browser/capabilities.js';
 import {
@@ -152,8 +157,28 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
   const store = deps.store;
   const consumedApprovals = new Set<string>();
   const pendingCreates = new Map<string, number>();
+  // Creates whose provider answer was lost may still hold a remote browser.
+  // They are counted against the owner until the provider TTL has passed.
+  const unresolvedCreates = new Map<string, number[]>();
   const sessionQueues = new Map<string, Promise<void>>();
   let closing = false;
+
+  function unresolvedCreateCount(ownerId: string): number {
+    const now = nowMs();
+    const retained = (unresolvedCreates.get(ownerId) ?? []).filter(
+      (expiresAt) => expiresAt > now,
+    );
+    if (retained.length === 0) unresolvedCreates.delete(ownerId);
+    else unresolvedCreates.set(ownerId, retained);
+    return retained.length;
+  }
+
+  function retainUnresolvedCreate(ownerId: string, expiresAt: number): void {
+    unresolvedCreates.set(ownerId, [
+      ...(unresolvedCreates.get(ownerId) ?? []),
+      expiresAt,
+    ]);
+  }
 
   async function serialize<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
     const previous = sessionQueues.get(sessionId) ?? Promise.resolve();
@@ -509,7 +534,8 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
         (record) => isLive(record.session) || record.session.state === 'quarantined',
       );
       const pending = pendingCreates.get(ownerId) ?? 0;
-      if (live.length + pending >= deps.config.browsers.maxSessionsPerOwner) {
+      const unresolved = unresolvedCreateCount(ownerId);
+      if (live.length + pending + unresolved >= deps.config.browsers.maxSessionsPerOwner) {
         return fail(
           'conflict',
           'The owner already has the maximum number of live browser sessions.',
@@ -527,14 +553,35 @@ export function createBrowserService(deps: BrowserServiceDeps): BrowserService {
       const started = nowMs();
       reserveCreate(ownerId);
       try {
-        const created = await deps.provider.create({
-          ttlSeconds,
-          allowedOrigins: origins,
-          label: request.label,
-          purpose: request.purpose,
-          ...(request.viewport ? { viewport: request.viewport } : {}),
-        });
+        let created: ProviderResult<ProviderSession>;
+        try {
+          created = await deps.provider.create({
+            ttlSeconds,
+            allowedOrigins: origins,
+            label: request.label,
+            purpose: request.purpose,
+            ...(request.viewport ? { viewport: request.viewport } : {}),
+          });
+        } catch {
+          retainUnresolvedCreate(ownerId, started + ttlSeconds * 1000);
+          audit(
+            ownerId,
+            'browser.session.create',
+            'failed',
+            'The provider threw without confirming whether a session exists.',
+          );
+          return fail(
+            'browser_unavailable',
+            'The browser provider did not confirm whether a session was created.',
+            true,
+          );
+        }
         if (!created.ok) {
+          if (created.outcomeUnknown) {
+            // No provider session id means it cannot be closed or quarantined;
+            // retain the slot until the remote TTL has certainly passed.
+            retainUnresolvedCreate(ownerId, started + ttlSeconds * 1000);
+          }
           audit(ownerId, 'browser.session.create', 'failed', created.detail);
           return providerFailure(created);
         }
