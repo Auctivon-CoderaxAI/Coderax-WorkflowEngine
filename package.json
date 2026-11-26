@@ -21,6 +21,7 @@
     "test:integration": "npm run build && node --test \"dist/tests/integration/*.test.js\"",
     "test:security": "npm run build && node --test \"dist/tests/security/*.test.js\"",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
+    "game:evidence": "npm run build && node dist/scripts/write-game-evidence.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
     "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
   },

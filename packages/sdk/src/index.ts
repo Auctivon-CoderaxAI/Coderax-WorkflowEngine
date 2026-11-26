@@ -5,6 +5,17 @@ import {
   Conversation,
   ConversationList,
   ExecutionEvent,
+  GameBuild,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
   HealthReport,
   MemoryList,
   ModelList,
@@ -17,9 +28,15 @@ import {
   TaskStatus,
 } from '@coderax/contracts';
 import type {
+  BuildGameRequest,
   ChatRequest,
+  CreateGameRequest,
+  CreateGameSessionRequest,
   DataMode,
+  GameSessionControlRequest,
+  IterateGameRequest,
   PermissionDecisionRequest,
+  SaveGameSpecRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 
@@ -305,6 +322,139 @@ export class CoderaxClient {
     return this.request<NotificationList>(NotificationList, {
       method: 'GET',
       path: '/v1/notifications',
+    });
+  }
+
+  gameCapabilities(): Promise<GameCapabilityReport> {
+    return this.request<GameCapabilityReport>(GameCapabilityReport, {
+      method: 'GET',
+      path: '/v1/games/capabilities',
+    });
+  }
+
+  games(query: { cursor?: string; limit?: number } = {}): Promise<GameProjectList> {
+    return this.request<GameProjectList>(GameProjectList, {
+      method: 'GET',
+      path: '/v1/games',
+      query: { ...query },
+    });
+  }
+
+  createGame(request: CreateGameRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: '/v1/games',
+      body: request,
+    });
+  }
+
+  game(gameId: string): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}`,
+    });
+  }
+
+  saveGameSpec(gameId: string, request: SaveGameSpecRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/spec`,
+      body: request,
+    });
+  }
+
+  buildGame(gameId: string, request: BuildGameRequest = {}): Promise<GameBuild> {
+    return this.request<GameBuild>(GameBuild, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/build`,
+      body: request,
+    });
+  }
+
+  iterateGame(gameId: string, request: IterateGameRequest): Promise<GameIteration> {
+    return this.request<GameIteration>(GameIteration, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/iterate`,
+      body: request,
+    });
+  }
+
+  /** The playable preview is HTML, not JSON; it is checked to be the declared type. */
+  async gamePreview(gameId: string): Promise<string> {
+    const path = `/v1/games/${encodeURIComponent(gameId)}/preview`;
+    const response = await this.send({ method: 'GET', path });
+    if (!response.ok) {
+      await this.parse(GameProject, response, path);
+      throw new CoderaxContractError('the preview request failed without a problem document');
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/html')) {
+      throw new CoderaxContractError('the preview was not served as HTML');
+    }
+    return response.text();
+  }
+
+  exportGame(gameId: string): Promise<GameExport> {
+    return this.request<GameExport>(GameExport, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/export`,
+    });
+  }
+
+  createGameSession(
+    gameId: string,
+    request: CreateGameSessionRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/sessions`,
+      body: request,
+    });
+  }
+
+  gameSessions(): Promise<GameSessionList> {
+    return this.request<GameSessionList>(GameSessionList, {
+      method: 'GET',
+      path: '/v1/game-sessions',
+    });
+  }
+
+  gameSession(sessionId: string): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  observeGameSession(sessionId: string): Promise<GameObservation> {
+    return this.request<GameObservation>(GameObservation, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/observation`,
+    });
+  }
+
+  controlGameSession(
+    sessionId: string,
+    request: GameSessionControlRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/control`,
+      body: request,
+    });
+  }
+
+  gameSessionLogs(sessionId: string): Promise<GameSessionLogs> {
+    return this.request<GameSessionLogs>(GameSessionLogs, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/logs`,
+    });
+  }
+
+  gameSessionVerification(sessionId: string): Promise<GameSessionVerification> {
+    return this.request<GameSessionVerification>(GameSessionVerification, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/verification`,
     });
   }
 

@@ -79,7 +79,7 @@ export function createNativeAgent(input: {
         };
       }
       const gateway = input.gateway;
-      if (!gateway) {
+      if (!gateway || !request.model) {
         return {
           ok: false,
           code: 'not_configured',

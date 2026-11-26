@@ -24,6 +24,8 @@ function request(signal: AbortSignal): AgentRunRequest {
     ownerId: 'owner',
     tenantId: null,
     conversationId: 'conv',
+    workload: 'work',
+    game: null,
     objective: 'Do the work',
     model: { providerId: 'free', modelId: 'coderax-small' },
     mode: 'cloud',

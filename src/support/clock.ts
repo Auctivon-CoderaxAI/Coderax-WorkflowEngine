@@ -21,6 +21,10 @@ export type IdGenerator = {
   runToken: () => string;
   requestId: () => string;
   receipt: () => string;
+  /** A persistent game project identity; URL-safe and unguessable. */
+  gameId: () => string;
+  /** A gaming-agent session identity. */
+  sessionId: () => string;
 };
 
 export function createIdGenerator(): IdGenerator {
@@ -32,5 +36,7 @@ export function createIdGenerator(): IdGenerator {
     runToken: () => `run_${randomUUID()}`,
     requestId: () => `req_${randomUUID()}`,
     receipt: () => `rcpt_${randomUUID()}`,
+    gameId: () => `game_${randomUUID()}`,
+    sessionId: () => `sess_${randomUUID()}`,
   };
 }

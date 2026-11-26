@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -35,6 +36,11 @@ import {
 } from './container.js';
 import { buildPersistence } from './persistence.js';
 import { StartupError } from './startup-error.js';
+import { createArtifactStore } from '../artifacts/store.js';
+import { createGameStore } from '../games/store.js';
+import { createGameStudio } from '../games/studio.js';
+import { createDesignAssistant } from '../games/assistant.js';
+import { createGameSessions } from '../games/session.js';
 
 export { StartupError } from './startup-error.js';
 
@@ -188,6 +194,23 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     maxTokensPerDay: config.models.dailyTokenBudget,
   });
 
+  const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
+  const assistant = createDesignAssistant({ models, gateway, budget, clock });
+  const studio = createGameStudio({
+    store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
+    artifacts,
+    clock,
+    ids,
+    assistant,
+    maxProjects: config.games.maxProjectsPerOwner,
+  });
+  const gaming = createGameSessions({
+    artifacts,
+    clock,
+    ids,
+    maxPauseMs: config.games.maxPauseMs,
+  });
+
   const persistence = await buildPersistence({
     config,
     env,
@@ -306,6 +329,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     scheduler,
     health,
+    studio,
+    sessions: gaming.sessions,
+    gaming: gaming.agent,
   });
   if (!container.dependencies) {
     throw new StartupError(

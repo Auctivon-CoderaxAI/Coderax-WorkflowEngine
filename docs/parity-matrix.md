@@ -64,6 +64,9 @@ Status vocabulary:
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
 | 49 | Shared typed SDK for both clients | none (hand-written helpers) | `packages/sdk` | Strengthened |
 | 50 | Startup dependency validation | none (config read at request time) | `src/bootstrap/compose.ts` refuses to start | Strengthened |
+| 51 | Native Game Studio | project lifecycle + design brief only; every build capability hard-coded false (CX-32 Partial) | `src/games/studio.ts`: deterministic spec, plan, original source/assets/levels, measured playability, preview, export, iterations, persistence | Changed (deliberate) — lifecycle pattern migrated, executor newly built |
+| 52 | Native Gaming Agent | no session runtime (CX-33 Blocked) | `src/games/session.ts`: durable sessions over verified builds, observation, bounded controls, pause/resume, takeover, cancel, memory, logs, measured completion | Changed (deliberate) |
+| 53 | Gaming Agent — external game environments | none (blocked in the registry) | none; reported `blocked` with the exact prerequisite | Not started (both) |
 
 ## Summary
 
@@ -73,8 +76,8 @@ Status vocabulary:
 | Strengthened | 10 |
 | Simplified | 5 |
 | Missing | 10 |
-| Changed (deliberate) | 2 |
-| Not started (both) | 1 |
+| Changed (deliberate) | 4 |
+| Not started (both) | 2 |
 
 ## What this means
 
@@ -102,7 +105,7 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head: 122/122 tests, OpenAPI drift clean.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a

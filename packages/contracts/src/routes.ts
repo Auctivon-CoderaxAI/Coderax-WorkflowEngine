@@ -1,6 +1,25 @@
 import type { z } from 'zod';
 import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
+import {
+  BuildGameRequest,
+  CreateGameRequest,
+  CreateGameSessionRequest,
+  GameBuild,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionControlRequest,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
+  IterateGameRequest,
+  SaveGameSpecRequest,
+} from './games.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
 import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
@@ -45,13 +64,23 @@ export type RouteSpec = {
   query?: z.ZodTypeAny;
   body?: z.ZodTypeAny;
   /** The success response; every operation can also answer with a Problem. */
-  response: { status: number; description: string; schema: z.ZodTypeAny };
+  response: {
+    status: number;
+    description: string;
+    schema: z.ZodTypeAny;
+    /** Set for a non-JSON success body such as a playable HTML preview. */
+    contentType?: string;
+  };
   /** Server-sent events rather than a single JSON body. */
   stream?: boolean;
 };
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
+const GameParams = zod.object({ gameId: zod.string().trim().min(1).max(120) }).strict();
+const GameSessionParams = zod
+  .object({ sessionId: zod.string().trim().min(1).max(120) })
+  .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
@@ -215,6 +244,176 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     params: TaskParams,
     body: PermissionDecisionRequest,
     response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'getGameCapabilities',
+    method: 'GET',
+    path: '/v1/games/capabilities',
+    summary: 'Truthful status of Native Game Studio and Native Gaming Agent, with evidence.',
+    tags: ['games'],
+    auth: 'owner',
+    response: { status: 200, description: 'Game capability report', schema: GameCapabilityReport },
+  },
+  {
+    operationId: 'listGames',
+    method: 'GET',
+    path: '/v1/games',
+    summary: 'Owner-scoped, persistent game projects.',
+    tags: ['games'],
+    auth: 'owner',
+    query: zod
+      .object({ cursor: zod.string().max(200).optional(), limit: zod.coerce.number().int().min(1).max(100).optional() })
+      .strict(),
+    response: { status: 200, description: 'Game project list', schema: GameProjectList },
+  },
+  {
+    operationId: 'createGame',
+    method: 'POST',
+    path: '/v1/games',
+    summary: 'Create a game project from a natural-language specification.',
+    tags: ['games'],
+    auth: 'owner',
+    body: CreateGameRequest,
+    response: { status: 201, description: 'Created game project', schema: GameProject },
+  },
+  {
+    operationId: 'getGame',
+    method: 'GET',
+    path: '/v1/games/{gameId}',
+    summary: 'One game project with its latest build and design plan.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: { status: 200, description: 'Game project', schema: GameProject },
+  },
+  {
+    operationId: 'saveGameSpec',
+    method: 'POST',
+    path: '/v1/games/{gameId}/spec',
+    summary: 'Replace the design spec at an expected revision.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    body: SaveGameSpecRequest,
+    response: { status: 200, description: 'Updated game project', schema: GameProject },
+  },
+  {
+    operationId: 'buildGame',
+    method: 'POST',
+    path: '/v1/games/{gameId}/build',
+    summary: 'Generate original source, assets and levels, then verify playability.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    body: BuildGameRequest,
+    response: { status: 200, description: 'Verified or failed build with evidence', schema: GameBuild },
+  },
+  {
+    operationId: 'iterateGame',
+    method: 'POST',
+    path: '/v1/games/{gameId}/iterate',
+    summary: 'Apply a natural-language edit, rebuild and re-verify.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    body: IterateGameRequest,
+    response: { status: 200, description: 'Iteration result', schema: GameIteration },
+  },
+  {
+    operationId: 'previewGame',
+    method: 'GET',
+    path: '/v1/games/{gameId}/preview',
+    summary: 'Playable HTML preview of the latest verified build.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: {
+      status: 200,
+      description: 'Playable HTML document',
+      schema: zod.string(),
+      contentType: 'text/html; charset=utf-8',
+    },
+  },
+  {
+    operationId: 'exportGame',
+    method: 'GET',
+    path: '/v1/games/{gameId}/export',
+    summary: 'Export the verified source as a deterministic ZIP archive.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: { status: 200, description: 'ZIP archive as base64', schema: GameExport },
+  },
+  {
+    operationId: 'createGameSession',
+    method: 'POST',
+    path: '/v1/games/{gameId}/sessions',
+    summary: 'Start an isolated gaming-agent session against a verified build.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameParams,
+    body: CreateGameSessionRequest,
+    response: { status: 201, description: 'Created game session', schema: GameSession },
+  },
+  {
+    operationId: 'listGameSessions',
+    method: 'GET',
+    path: '/v1/game-sessions',
+    summary: 'Owner-scoped gaming-agent sessions.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    response: { status: 200, description: 'Game session list', schema: GameSessionList },
+  },
+  {
+    operationId: 'getGameSession',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}',
+    summary: 'Session status, bounded progress, memory and recent logs.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Game session', schema: GameSession },
+  },
+  {
+    operationId: 'observeGameSession',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}/observation',
+    summary: 'Screen frame and inspected game state for the current tick.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Observation', schema: GameObservation },
+  },
+  {
+    operationId: 'controlGameSession',
+    method: 'POST',
+    path: '/v1/game-sessions/{sessionId}/control',
+    summary: 'Pause, resume, take over, release, cancel or send one bounded input.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    body: GameSessionControlRequest,
+    response: { status: 200, description: 'Updated game session', schema: GameSession },
+  },
+  {
+    operationId: 'gameSessionLogs',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}/logs',
+    summary: 'Bounded execution log and session memory.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Session logs', schema: GameSessionLogs },
+  },
+  {
+    operationId: 'gameSessionVerification',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}/verification',
+    summary: 'Measured objective completion evidence for a finished session.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Session verification', schema: GameSessionVerification },
   },
   {
     operationId: 'listNotifications',

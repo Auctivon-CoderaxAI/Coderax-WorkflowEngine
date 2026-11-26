@@ -36,6 +36,9 @@ are clients of the same versioned API.
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent | Implemented | `src/agents/native` |
+| Native Game Studio | Implemented | `src/games/studio.ts`, `docs/game-studio.md`, `docs/evidence/game-studio/` |
+| Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`, durable Work task with `kind: game` |
+| Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
@@ -54,7 +57,8 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 48 tests: unit, contract, integration, security, e2e
+npm test                          # 122 tests: unit, contract, integration, security, e2e
+npm run game:evidence             # regenerates the playable game evidence frames
 npm run openapi:check             # fails if the published contract drifted
 ```
 

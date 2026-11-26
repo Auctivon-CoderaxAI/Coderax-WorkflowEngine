@@ -81,7 +81,9 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
           : {
               description: route.response.description,
               content: {
-                'application/json': { schema: toJsonSchema(route.response.schema) },
+                [route.response.contentType ?? 'application/json']: {
+                  schema: toJsonSchema(route.response.schema),
+                },
               },
             },
         '4XX': ERROR_RESPONSE,

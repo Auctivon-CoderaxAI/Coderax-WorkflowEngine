@@ -14,6 +14,7 @@ export type RequestContext = {
 
 export type HandlerResult =
   | { kind: 'json'; status: number; body: unknown }
+  | { kind: 'text'; status: number; contentType: string; body: string }
   | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
 
 export type RouteHandler = (context: RequestContext) => Promise<HandlerResult>;
@@ -29,6 +30,7 @@ export type RawRequest = {
 
 export type RouterResult =
   | { kind: 'json'; status: number; body: unknown }
+  | { kind: 'text'; status: number; contentType: string; body: string }
   | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
 
 export type RouteRegistry = {
@@ -78,7 +80,9 @@ export function createRouteRegistry(): RouteRegistry {
     missing: () => [...ROUTE_INDEX.keys()].filter((operationId) => !handlers.has(operationId)),
     openapi: () =>
       buildOpenApiDocument(
-        [...handlers.keys()].map((operationId) => ROUTE_INDEX.get(operationId) as RouteSpec),
+        [...ROUTE_INDEX.keys()]
+          .filter((operationId) => handlers.has(operationId))
+          .map((operationId) => ROUTE_INDEX.get(operationId) as RouteSpec),
       ),
   };
 }
@@ -238,6 +242,9 @@ export function createRouter(input: {
             return problem('internal_error', 'The response did not match its contract.', requestId);
           }
           return { kind: 'json', status: result.status, body: parsed.data };
+        }
+        if (result.kind === 'text') {
+          return result;
         }
         return { kind: 'sse', status: result.status, events: result.events };
       }

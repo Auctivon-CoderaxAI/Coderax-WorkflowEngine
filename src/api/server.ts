@@ -73,6 +73,20 @@ export function createHttpServer(input: {
           return;
         }
 
+        if (result.kind === 'text') {
+          response.writeHead(result.status, {
+            'content-type': result.contentType,
+            'cache-control': 'no-store',
+            // The preview is a self-contained document with no external loads.
+            'content-security-policy':
+              "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'",
+            'x-content-type-options': 'nosniff',
+            'content-length': Buffer.byteLength(result.body),
+          });
+          response.end(result.body);
+          return;
+        }
+
         response.writeHead(result.status, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',

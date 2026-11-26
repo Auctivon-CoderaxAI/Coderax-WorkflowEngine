@@ -207,4 +207,137 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     status: 200,
     body: await service.notifications(context.principal),
   }));
+
+  registry.register('getGameCapabilities', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: service.gameCapabilities(context.principal),
+  }));
+
+  registry.register('listGames', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.listGames(context.principal, {
+      ...(typeof context.query.cursor === 'string' ? { cursor: context.query.cursor } : {}),
+      ...(typeof context.query.limit === 'number' ? { limit: context.query.limit } : {}),
+    }),
+  }));
+
+  registry.register('createGame', async (context) => {
+    const result = await service.createGame(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('getGame', async (context) => {
+    const result = await service.getGame(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('saveGameSpec', async (context) => {
+    const result = await service.saveGameSpec(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('buildGame', async (context) => {
+    const result = await service.buildGame(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('iterateGame', async (context) => {
+    const result = await service.iterateGame(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('previewGame', async (context) => {
+    const result = await service.gamePreview(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return {
+      kind: 'text',
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: result.value,
+    };
+  });
+
+  registry.register('exportGame', async (context) => {
+    const result = await service.exportGame(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('createGameSession', async (context) => {
+    const result = await service.createGameSession(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('listGameSessions', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.listGameSessions(context.principal),
+  }));
+
+  registry.register('getGameSession', async (context) => {
+    const result = await service.getGameSession(context.principal, context.params.sessionId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('observeGameSession', async (context) => {
+    const result = await service.observeGameSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('controlGameSession', async (context) => {
+    const result = await service.controlGameSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('gameSessionLogs', async (context) => {
+    const result = await service.gameSessionLogs(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('gameSessionVerification', async (context) => {
+    const result = await service.gameSessionVerification(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
 }

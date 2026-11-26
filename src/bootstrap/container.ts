@@ -17,6 +17,8 @@ import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { Router } from '../api/router.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
 
 /**
  * Dependencies are named, not positional.
@@ -45,6 +47,9 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -66,6 +71,9 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'scheduler',
   'health',
+  'studio',
+  'sessions',
+  'gaming',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {
