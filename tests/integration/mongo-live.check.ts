@@ -48,6 +48,13 @@ test('REAL MongoDB: durable leases, fencing and task state', { timeout: 30_000 }
     env: { CODERAX_MONGODB_URI: uri },
     clock,
   });
+  // A second independently composed replica: the database, not this process,
+  // must arbitrate the lease. This is the cross-replica scheduling substrate.
+  const replicaStores = await buildPersistence({
+    config,
+    env: { CODERAX_MONGODB_URI: uri },
+    clock,
+  });
   try {
     assert.equal(stores.driver, 'mongo');
 
@@ -64,6 +71,17 @@ test('REAL MongoDB: durable leases, fencing and task state', { timeout: 30_000 }
       await stores.lease.claim({ key, owner: 'owner_live', token: 'token-b', now, expiresAt }),
       false,
     );
+    assert.equal(
+      await replicaStores.lease.claim({
+        key,
+        owner: 'owner_live',
+        token: 'token-replica',
+        now,
+        expiresAt,
+      }),
+      false,
+    );
+    assert.equal((await replicaStores.lease.read({ key, now }))?.token, 'token-a');
     assert.equal(
       (await stores.lease.renew({ key, token: 'token-b', now, expiresAt })).renewed,
       false,
@@ -116,6 +134,7 @@ test('REAL MongoDB: durable leases, fencing and task state', { timeout: 30_000 }
       await cleanup.collection(`${prefix}${name}`).deleteMany({});
     }
     await cleanup.close();
+    await replicaStores.close();
     await stores.close();
     workspace.cleanup();
   }

@@ -2,6 +2,7 @@ import { checkArtifacts } from './artifacts.js';
 import { checkDependencies } from './dependencies.js';
 import { checkOpenApi } from './openapi.js';
 import { checkReachability } from './reachability.js';
+import { checkRelease } from './release.js';
 import { checkRegistration } from './registration.js';
 import { checkSdk } from './sdk.js';
 import { checkStructure } from './structure.js';
@@ -22,6 +23,7 @@ const CHECKS: Record<string, () => Report | Promise<Report>> = {
   openapi: checkOpenApi,
   dependencies: checkDependencies,
   artifacts: checkArtifacts,
+  release: checkRelease,
 };
 
 const name = process.argv[2];

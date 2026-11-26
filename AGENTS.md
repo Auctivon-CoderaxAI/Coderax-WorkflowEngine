@@ -46,7 +46,8 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
    adversarial, architecture and end-to-end suites.
 3. `npm run gate` — OpenAPI drift, route registration, SDK compatibility,
    architecture boundaries and single ownership, unreachable modules, dependency
-   manifests and lockfile integrity, and package artifact integrity.
+   manifests and lockfile integrity, package artifact integrity, and release
+   manifest compatibility.
 
 The fake MongoDB collection suite is explicitly not live database evidence.
 `npm run test:mongo:live` requires `CODERAX_TEST_MONGO_URI` and fails without it.

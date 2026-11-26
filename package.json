@@ -34,8 +34,9 @@
     "gate:openapi": "node dist/scripts/gate/run.js openapi",
     "gate:dependencies": "node dist/scripts/gate/run.js dependencies",
     "gate:artifacts": "node dist/scripts/gate/run.js artifacts",
+    "gate:release": "node dist/scripts/gate/run.js release",
     "gate:audit": "npm audit --audit-level=high",
-    "gate": "npm run gate:openapi && npm run gate:registration && npm run gate:sdk && npm run gate:structure && npm run gate:reachability && npm run gate:dependencies && npm run gate:artifacts",
+    "gate": "npm run gate:openapi && npm run gate:registration && npm run gate:sdk && npm run gate:structure && npm run gate:reachability && npm run gate:dependencies && npm run gate:artifacts && npm run gate:release",
     "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && npm run gate"
   },
   "dependencies": {

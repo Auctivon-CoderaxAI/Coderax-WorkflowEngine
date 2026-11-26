@@ -16,28 +16,12 @@ import {
  * A module, factory or exported helper that nothing reaches is not a feature; it
  * is code that cannot be exercised, reviewed against callers, or covered by the
  * acceptance suite. Reachability is computed from the real import graph starting
- * at the entry point, not from a hand-maintained list.
+ * at the entry point, not from a hand-maintained allowlist.
  *
- * A short, reviewed exception list exists for parity scaffolding that is kept for
- * a future wiring step. Exceptions are warnings: visible on every run, and never
- * allowed to hide a new orphan.
+ * There are no exemptions. A former exception that is kept "for a migration" is
+ * still a capability the product cannot use; it must be wired or deleted, and
+ * the decision belongs in a reviewed change rather than in this gate.
  */
-
-/** Modules that are intentionally not wired yet, with the reason and the gap. */
-export const KNOWN_DISCONNECTED: ReadonlyMap<string, string> = new Map([
-  [
-    'src/execution/retry.ts',
-    'bounded same-engine retry is preserved for the migration but not yet invoked by orchestration; parity row 11 is reported as unwired, not preserved',
-  ],
-]);
-
-/** Named exports kept for a documented migration path, with the reason. */
-export const KNOWN_UNUSED_EXPORTS: ReadonlyMap<string, string> = new Map([
-  [
-    'adaptMongoWorkRunMethods',
-    'adapter from the verified Coderax Work-run methods; kept for the persistence migration until a caller adopts it',
-  ],
-]);
 
 const ENTRY = 'src/main.ts';
 
@@ -75,19 +59,13 @@ export function checkReachability(): Report {
   }
   const reached = reachableModules(sources);
   const findings: Finding[] = [];
-  const warnings: Finding[] = [];
 
   for (const file of sources) {
     if (reached.has(file.path)) continue;
-    const reason = KNOWN_DISCONNECTED.get(file.path);
-    if (reason) {
-      warnings.push({ rule: 'known-disconnected-module', detail: `${file.path} — ${reason}` });
-    } else {
-      findings.push({
-        rule: 'unreachable-module',
-        detail: `${file.path} is not reachable from ${ENTRY}`,
-      });
-    }
+    findings.push({
+      rule: 'unreachable-module',
+      detail: `${file.path} is not reachable from ${ENTRY}; wire it into the composition root or delete it`,
+    });
   }
 
   const corpus = [
@@ -99,19 +77,11 @@ export function checkReachability(): Report {
   const texts = corpus.map((file) => file.text);
 
   for (const file of sources) {
-    if (KNOWN_DISCONNECTED.has(file.path)) continue;
     for (const match of file.text.matchAll(
       /^export\s+(?:async\s+)?(?:function|const|class|enum)\s+([A-Za-z0-9_]+)/gm,
     )) {
       const name = match[1];
       if (!name) continue;
-      if (KNOWN_UNUSED_EXPORTS.has(name)) {
-        warnings.push({
-          rule: 'known-unused-export',
-          detail: `${file.path} ${name} — ${KNOWN_UNUSED_EXPORTS.get(name)}`,
-        });
-        continue;
-      }
       if (occurrenceCount(name, texts) <= 1) {
         findings.push({
           rule: 'unused-export',
@@ -121,5 +91,5 @@ export function checkReachability(): Report {
     }
   }
 
-  return report(findings, warnings);
+  return report(findings);
 }

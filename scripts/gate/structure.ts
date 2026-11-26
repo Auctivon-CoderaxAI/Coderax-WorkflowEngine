@@ -148,7 +148,43 @@ const OWNERSHIP: ReadonlyArray<{
     pattern: /createModelCatalog\(\s*\{/g,
     allowed: ['src/bootstrap/compose.ts'],
     rule: 'single-model-router',
+    why: 'only the composition root may construct the model catalog',
+  },
+  {
+    pattern: /create(?:Model)?Router\(\s*\{/g,
+    allowed: ['src/bootstrap/compose.ts'],
+    rule: 'single-model-router',
     why: 'only the composition root may construct the model router',
+  },
+  {
+    pattern: /create\w*Supervisor\(\s*\{/g,
+    allowed: ['src/bootstrap/compose.ts'],
+    rule: 'single-supervisor',
+    why: 'only the composition root may construct the execution supervisor',
+  },
+  {
+    pattern: /createTaskScheduler\(\s*\{/g,
+    allowed: ['src/bootstrap/compose.ts'],
+    rule: 'single-scheduler',
+    why: 'only the composition root may construct the task scheduler',
+  },
+  {
+    pattern: /createApplicationService\(\s*\{/g,
+    allowed: ['src/bootstrap/compose.ts'],
+    rule: 'single-workflow-engine',
+    why: 'the orchestration authority is constructed once, by the composition root',
+  },
+  {
+    pattern: /createEventBus\(\s*\{/g,
+    allowed: ['src/bootstrap/compose.ts'],
+    rule: 'single-event-bus',
+    why: 'only the composition root may construct the event bus',
+  },
+  {
+    pattern: /createAgentRegistry\(\s*\{/g,
+    allowed: ['src/bootstrap/compose.ts'],
+    rule: 'single-agent-registry',
+    why: 'only the composition root may construct the capability registry',
   },
   {
     pattern: /createBudgetLedger\(\s*\{/g,
@@ -173,6 +209,7 @@ const OWNERSHIP: ReadonlyArray<{
 const FORBIDDEN_LITERALS: ReadonlyArray<{
   pattern: RegExp;
   allowed?: readonly string[];
+  allowedPrefixes?: readonly string[];
   rule: string;
   why: string;
 }> = [
@@ -195,8 +232,29 @@ const FORBIDDEN_LITERALS: ReadonlyArray<{
   {
     pattern: /\bfetch\s*\(/g,
     allowed: ['src/agents/native/gateway.ts'],
+    allowedPrefixes: ['src/models/providers/'],
     rule: 'single-egress',
-    why: 'the only outbound HTTP call is the injected model gateway',
+    why: 'outbound HTTP is the injected gateway or the provider adapter layer',
+  },
+  {
+    pattern:
+      /\bfrom\s+['"](?:openai|@anthropic-ai\/sdk|@google\/generative-ai|@google\/genai|cohere-ai|groq-sdk|@mistralai\/mistralai|axios|undici|node-fetch|got)['"]/g,
+    allowedPrefixes: ['src/models/providers/'],
+    rule: 'single-inference-egress',
+    why: 'provider SDKs and HTTP clients live only in the model provider layer',
+  },
+  {
+    pattern: /\bfrom\s+['"](?:node:https|https)['"]/g,
+    allowedPrefixes: ['src/models/providers/'],
+    rule: 'no-low-level-http',
+    why: 'outbound TLS goes through the fetch-based provider boundary',
+  },
+  {
+    pattern: /\bfrom\s+['"](?:node:http|http)['"]/g,
+    allowed: ['src/api/server.ts'],
+    allowedPrefixes: ['src/models/providers/'],
+    rule: 'no-low-level-http',
+    why: 'a plain HTTP client belongs in the provider boundary; only the API server listens',
   },
 ];
 
@@ -259,6 +317,7 @@ export function findForbiddenLiterals(files: readonly SourceFile[]): Finding[] {
   for (const rule of FORBIDDEN_LITERALS) {
     for (const file of files) {
       if (rule.allowed?.includes(file.path)) continue;
+      if (rule.allowedPrefixes?.some((prefix) => file.path.startsWith(prefix))) continue;
       for (const match of file.text.matchAll(rule.pattern)) {
         findings.push({
           rule: rule.rule,
@@ -319,6 +378,130 @@ export function findCycles(files: readonly SourceFile[]): Finding[] {
   return findings;
 }
 
+function declarationMatches(
+  files: readonly SourceFile[],
+  pattern: RegExp,
+  inScope?: (path: string) => boolean,
+): string[] {
+  const found: string[] = [];
+  for (const file of files) {
+    if (inScope && !inScope(file.path)) continue;
+    const matches = [...file.text.matchAll(pattern)];
+    found.push(...matches.map(() => file.path));
+  }
+  return found;
+}
+
+function duplicateAuthority(rule: string, found: string[], why: string): Finding[] {
+  if (found.length <= 1) return [];
+  return [
+    {
+      rule,
+      detail: `${[...new Set(found)].join(', ')} declare ${found.length} authorities; ${why}`,
+    },
+  ];
+}
+
+/**
+ * One authority per decision, regardless of the module name a branch chooses.
+ *
+ * The active branches are stacked (router -> intelligence/supervisor/media), so
+ * a path allowlist would either reject the legitimate successor or permit a
+ * duplicate under a new name. Counting declarations instead lets exactly one
+ * implementation exist while still failing a second planner, supervisor,
+ * scheduler, workflow engine, event bus, registry or per-domain store.
+ */
+export function findDuplicateAuthorities(files: readonly SourceFile[]): Finding[] {
+  const findings: Finding[] = [];
+  const routing = [
+    ...declarationMatches(files, /export function (createModelCatalog)\b/g),
+    ...declarationMatches(
+      files,
+      /export function (create(?:Model)?Router)\b/g,
+      (path) => path.startsWith('src/models/'),
+    ),
+  ];
+  findings.push(
+    ...duplicateAuthority(
+      'single-model-authority',
+      routing,
+      'exactly one component may decide a model route',
+    ),
+  );
+  findings.push(
+    ...duplicateAuthority(
+      'single-supervisor',
+      declarationMatches(files, /export function (create\w*Supervisor)\b/g),
+      'exactly one execution supervisor may exist',
+    ),
+  );
+  findings.push(
+    ...duplicateAuthority(
+      'single-planner',
+      declarationMatches(
+        files,
+        /export function (create\w*Planner)\b/g,
+        (path) => path.startsWith('src/agents/'),
+      ),
+      'exactly one native planner authority may exist',
+    ),
+  );
+  findings.push(
+    ...duplicateAuthority(
+      'single-scheduler',
+      declarationMatches(files, /export function (createTaskScheduler)\b/g),
+      'exactly one task scheduler may exist',
+    ),
+  );
+  findings.push(
+    ...duplicateAuthority(
+      'single-workflow-engine',
+      declarationMatches(files, /export function (createApplicationService)\b/g),
+      'exactly one orchestration service may exist',
+    ),
+  );
+  findings.push(
+    ...duplicateAuthority(
+      'single-task-runner',
+      declarationMatches(files, /export function (createTaskRunner)\b/g),
+      'exactly one run pump may exist',
+    ),
+  );
+  findings.push(
+    ...duplicateAuthority(
+      'single-event-bus',
+      declarationMatches(files, /export function (createEventBus)\b/g),
+      'exactly one event bus may exist',
+    ),
+  );
+  findings.push(
+    ...duplicateAuthority(
+      'single-agent-registry',
+      declarationMatches(files, /export function (createAgentRegistry)\b/g),
+      'exactly one capability registry may exist',
+    ),
+  );
+
+  const stores = new Map<string, string[]>();
+  for (const file of files) {
+    for (const match of file.text.matchAll(
+      /export function createMongo([A-Za-z]+?)(?:Repository|Store|Adapter|Log|Table)\b/g,
+    )) {
+      const domain = (match[1] ?? '').toLowerCase();
+      stores.set(domain, [...(stores.get(domain) ?? []), file.path]);
+    }
+  }
+  for (const [domain, paths] of stores) {
+    if (paths.length > 1) {
+      findings.push({
+        rule: 'duplicate-persistence',
+        detail: `${[...new Set(paths)].join(', ')} define ${domain} persistence more than once`,
+      });
+    }
+  }
+  return findings.sort((left, right) => `${left.rule}:${left.detail}`.localeCompare(`${right.rule}:${right.detail}`));
+}
+
 function packageField(rel: string, field: string): string | null {
   try {
     const parsed = JSON.parse(readRepoText(rel)) as Record<string, unknown>;
@@ -354,6 +537,7 @@ export function checkStructure(): Report {
   const findings = [
     ...findBoundaryViolations(files),
     ...findOwnershipViolations(files),
+    ...findDuplicateAuthorities(files),
     ...findForbiddenLiterals(files),
     ...findCycles(files),
     ...contractVersionChecks(),

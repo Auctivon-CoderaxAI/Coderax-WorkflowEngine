@@ -94,5 +94,5 @@ See `docs/quality-gate.md`.
 | Reviewers installed | None |
 | Approvals on PR #1 | 0 |
 | Hosted CI | Workflow configured on standard hosted runners; no hosted run observed (account billing restriction) |
-| Local verification at this change | build 0, 168/168 tests, seven static gates clean; real MongoDB and hosted CI not run here |
+| Local verification at this change | build 0, 175/175 tests, eight static gates clean; real MongoDB and hosted CI not run here |
 | Dependency audit | One high advisory (`zod < 4.6.6`); enforcing and reported, not ignored |

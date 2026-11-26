@@ -54,8 +54,9 @@ The engine refuses to start until all of these pass, and reports each failure:
 ## Migration gaps that block a real deployment
 
 - The default lease table is process-local. Cross-replica durability requires the
-  Mongo-backed table (`adaptMongoWorkRunMethods` wraps the already-verified
-  `createWorkRunMethods`); it is not wired yet.
+  Mongo-backed table (`createLeaseStore` over the Mongo table wraps the already-verified
+  `createWorkRunMethods`); select `persistence.driver: mongo` explicitly, because it
+  is not the default.
 - Authentication is an owner bearer token. Integrating Coderax's JWT session so the
   web client does not hold a second credential is Phase 5 work.
 - No TLS termination, process supervisor unit or backup policy is defined here.

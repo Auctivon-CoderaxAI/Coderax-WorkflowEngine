@@ -47,7 +47,7 @@ Deliberately **not** extracted yet:
 | --- | --- | --- |
 | LibreChat native agent internals (tools, MCP, skills, subagents, RAG, code execution) | Large, working, and coupled to `packages/api` state; moving it wholesale would be a rewrite | Phase 7 |
 | Real model provider adapters | Needs the verified provider list and secrets at deploy time; the port and a real OpenAI-compatible client exist | Phase 4/8 |
-| Mongo lease table | The adapter exists (`adaptMongoWorkRunMethods`); the default here is the in-process table, which is honest but single-process | Phase 8 |
+| Mongo lease table | The native port (`createLeaseStore` over a Mongo table) is implemented; the legacy method adapter was removed as disconnected. The default memory driver remains single-process | Phase 8 |
 | OpenCode server transport | Needs the pinned `@opencode-ai/sdk` and an operator-run server | Phase 4 |
 | FreeBuff SDK transport | Needs a trusted source-built SDK | Phase 4 |
 | Cloud browser orchestration, DeploymentPlatformAI integration, plugins | Not implemented anywhere yet | Phase 7 |

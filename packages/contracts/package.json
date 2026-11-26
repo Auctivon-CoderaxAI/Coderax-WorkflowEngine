@@ -4,6 +4,9 @@
   "private": true,
   "description": "Versioned Coderax execution contracts: HTTP payloads and execution events.",
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

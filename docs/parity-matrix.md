@@ -24,7 +24,7 @@ Status vocabulary:
 | 8 | One settlement per run | `run.ts` | `src/execution/runner.ts` | Preserved |
 | 9 | Stream ending without a terminal event is a failure | `run.ts` (`protocol_error`) | `runner.ts` | Preserved |
 | 10 | Bounded cancellation cleanup (5 s) | `run.ts` | `src/execution/runner.ts` `cancelGraceMs` (5 s default) | Preserved |
-| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` (policy exists; orchestration does not invoke it) | Simplified — the disconnected-capability gate reports the unwired module; runtime auto-retry is not claimed |
+| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | absent; the unwired module was removed rather than reported as preserved | Missing — a disconnected policy is not a capability |
 | 12 | Workspace confinement, symlink-resolved, mode-partitioned, Windows-safe | `workspace.ts` | `src/execution/workspace.ts` | Preserved |
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |
@@ -71,8 +71,8 @@ Status vocabulary:
 | --- | --- |
 | Preserved | 21 |
 | Strengthened | 10 |
-| Simplified | 6 |
-| Missing | 10 |
+| Simplified | 5 |
+| Missing | 11 |
 | Changed (deliberate) | 2 |
 | Not started (both) | 1 |
 
@@ -83,8 +83,8 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
-are closed, migrating a client would remove functionality, which the brief
+capability Coderax has today. Until rows 11, 18, 22, 27–31, 34, 36, 40, 44, 46
+and 47 are closed, migrating a client would remove functionality, which the brief
 forbids.
 
 Dependency order for closing them:
@@ -102,9 +102,9 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 168/168 tests, OpenAPI drift and all seven
+- `npm run verify` at the pushed head: 175/175 tests, OpenAPI drift and all eight
   static gates clean. This includes the security, adversarial, architecture,
-  recovery, fencing and replay suites.
+  recovery, fencing, replay, release-compatibility and capability-registry suites.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. A **real MongoDB** check now exists
   (`npm run test:mongo:live`, run by the `real MongoDB integration` job against a
