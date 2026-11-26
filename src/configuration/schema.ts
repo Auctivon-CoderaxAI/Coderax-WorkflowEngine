@@ -37,6 +37,14 @@ export const NativeConfig = z
   .object({
     enabled: z.boolean().default(true),
     maxSteps: z.number().int().min(1).max(64).default(12),
+    /** Independent steps a complex plan may run at once. */
+    maxParallelSteps: z.number().int().min(1).max(8).default(3),
+    /** Revised plans allowed after a step or verification failure. */
+    maxReplans: z.number().int().min(0).max(5).default(2),
+    /** Attempts per step, including the first; corrections stay on this model. */
+    maxStepAttempts: z.number().int().min(1).max(3).default(2),
+    /** Hard bound on model calls and file reads for one run. */
+    maxIterations: z.number().int().min(1).max(128).default(32),
   })
   .strict();
 

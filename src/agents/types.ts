@@ -10,6 +10,12 @@ import type {
   ModelRef,
   Usage,
 } from '@coderax/contracts';
+import type {
+  ReasoningMode,
+  TaskEvidence,
+  TaskPlan,
+  TaskVerification,
+} from '../domain.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -32,6 +38,8 @@ export type AgentRunRequest = {
   ownerId: string;
   tenantId: string | null;
   conversationId: string;
+  /** The durable task this run belongs to; absent for a one-shot Chat turn. */
+  taskId?: string;
   objective: string;
   /**
    * Earlier turns, oldest first. The current objective is not repeated here: it
@@ -45,11 +53,28 @@ export type AgentRunRequest = {
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
+  /** `auto` lets the agent choose; a resumed task passes its resolved mode. */
+  reasoning?: 'auto' | 'fast' | 'complex';
+  /** Steps the durable checkpoint already completed; resume skips exactly these. */
+  completedSteps?: string[];
+  /** The persisted dependency-aware plan, reused on resume or retry. */
+  plan?: TaskPlan | null;
+  /** Evidence already produced by completed steps in an earlier generation. */
+  evidence?: TaskEvidence[];
 };
 
 export type AgentReportEvent =
+  /** The planner produced or revised a dependency-aware plan; nothing ran yet. */
+  | { type: 'plan.ready'; plan: TaskPlan }
   | { type: 'step.started'; stepId: string; title: string }
-  | { type: 'step.completed'; stepId: string; title: string }
+  | {
+      type: 'step.completed';
+      stepId: string;
+      title: string;
+      attempts?: number;
+      evidence?: TaskEvidence;
+    }
+  | { type: 'step.failed'; stepId: string; title: string; detail: string }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
@@ -66,8 +91,17 @@ export type AgentReportEvent =
 export type AgentReport = (event: AgentReportEvent) => void;
 
 export type AgentRunOutcome =
-  | { ok: true; summary: string; usage?: Usage }
-  | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
+  | { ok: true; summary: string; usage?: Usage; verification?: TaskVerification }
+  | {
+      ok: false;
+      code: EngineFailureCode;
+      detail: string;
+      retryable: boolean;
+      /** Tokens spent before a terminal or suspended outcome. */
+      usage?: Usage;
+    };
+
+export type { ReasoningMode };
 
 export type AgentAdapter = {
   agent: AgentId;

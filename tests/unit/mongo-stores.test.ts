@@ -138,7 +138,7 @@ test('a task is never settled through the unclaimed path', async () => {
 test('reissue claims a new generation and refuses a live task', async () => {
   const tasks = createMongoTaskRepository(createFakeCollection());
   await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1', state: 'failed',
-    checkpoint: { text: 'previous', completedSteps: ['first'] } }));
+    checkpoint: { text: 'previous', completedSteps: ['first'], plan: null, evidence: [] } }));
 
   const issued = await tasks.reissue({
     taskId: 'task_1',
@@ -147,7 +147,12 @@ test('reissue claims a new generation and refuses a live task', async () => {
     leaseExpiresAt: NOW,
   });
   assert.equal(issued.applied, true);
-  assert.deepEqual(issued.applied && issued.task.checkpoint, { text: '', completedSteps: ['first'] });
+  assert.deepEqual(issued.applied && issued.task.checkpoint, {
+    text: '',
+    completedSteps: ['first'],
+    plan: null,
+    evidence: [],
+  });
   assert.equal(issued.applied && issued.task.generation, 2);
   assert.equal(issued.applied && issued.task.state, 'queued');
   assert.equal(issued.applied && issued.task.runToken, 'run-2');

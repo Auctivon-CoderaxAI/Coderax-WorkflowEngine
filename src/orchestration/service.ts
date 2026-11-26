@@ -15,11 +15,12 @@ import type {
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
+  Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskRecord } from '../domain.js';
+import type { TaskEvidence, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -43,6 +44,7 @@ import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
+import { resolveReasoningMode } from '../agents/native/reason.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -191,16 +193,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       updatedAt: task.updatedAt,
       ...(task.leaseExpiresAt ? { leaseExpiresAt: task.leaseExpiresAt } : {}),
       cancelRequested: task.cancelRequested,
+      ...(task.reasoning ? { reasoning: task.reasoning } : {}),
       steps: task.steps.map((step) => ({
         id: step.id,
         title: step.title,
         state: step.state,
+        ...(step.dependsOn ? { dependsOn: [...step.dependsOn] } : {}),
+        ...(step.attempts !== undefined ? { attempts: step.attempts } : {}),
       })),
       ...(task.result
         ? {
             result: {
               ...(task.result.summary ? { summary: task.result.summary } : {}),
               artifacts: task.result.artifacts,
+              ...(task.result.verification
+                ? {
+                    verification: {
+                      passed: task.result.verification.passed,
+                      reason: redactText(task.result.verification.reason, [], 1000),
+                      evidence: task.result.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
           }
         : {}),
@@ -243,6 +259,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
   }
 
+  /** Usage is cumulative across a suspend/resume boundary, never reset by it. */
+  function mergeUsage(previous: Usage | null, next: Usage | undefined): Usage | null {
+    if (!previous && !next) return null;
+    const inputTokens = (previous?.inputTokens ?? 0) + (next?.inputTokens ?? 0);
+    const outputTokens = (previous?.outputTokens ?? 0) + (next?.outputTokens ?? 0);
+    return {
+      ...(inputTokens > 0 ? { inputTokens } : {}),
+      ...(outputTokens > 0 ? { outputTokens } : {}),
+    };
+  }
+
   async function releaseLease(task: TaskRecord, token: string): Promise<void> {
     await deps.lease
       .release({ key: workRunKey(scopeOf(task)), token })
@@ -259,11 +286,68 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     token: string,
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
+    steps?: TaskRecord['steps'],
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       return;
     }
     const now = deps.clock.iso();
+    const mergedUsage = mergeUsage(
+      task.usage,
+      'usage' in outcome ? outcome.usage : undefined,
+    );
+
+    // Escalation is a suspended state, not a failure: the plan, its checkpoint
+    // and any partial text stay durable so an approved resume continues exactly
+    // where authorization stopped. No completion notification is emitted because
+    // nothing completed.
+    if (outcome.kind === 'failed' && outcome.code === 'approval_required') {
+      const applied = await deps.tasks.updateFenced({
+        taskId: task.taskId,
+        token,
+        patch: {
+          state: 'awaiting_approval',
+          updatedAt: now,
+          leaseExpiresAt: null,
+          failure: {
+            code: outcome.code,
+            detail: outcome.detail,
+            retryable: false,
+          },
+          ...(checkpoint ? { checkpoint } : {}),
+          ...(steps ? { steps } : {}),
+          ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+          ...(mergedUsage ? { usage: mergedUsage } : {}),
+        },
+      });
+      if (applied.applied) {
+        const partial = checkpoint?.text ?? '';
+        if (partial.length > 0) {
+          await deps.conversations
+            .appendMessage({
+              messageId: deps.ids.messageId(),
+              conversationId: task.conversationId,
+              role: 'assistant',
+              text: partial,
+              createdAt: now,
+              unfinished: true,
+              agent: task.agent,
+            })
+            .catch(() => undefined);
+        }
+        deps.audit.record({
+          actor: task.ownerId,
+          action: 'work.awaiting_approval',
+          taskId: task.taskId,
+          conversationId: task.conversationId,
+          outcome: 'accepted',
+          detail: outcome.code,
+        });
+      }
+      await releaseLease(task, token);
+      return;
+    }
+
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -272,6 +356,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             result: {
               summary: outcome.summary.slice(0, 20_000),
               artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+              ...(outcome.verification
+                ? {
+                    verification: {
+                      passed: outcome.verification.passed,
+                      reason: redactText(outcome.verification.reason, [], 1000),
+                      evidence: outcome.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           }
@@ -287,10 +382,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               },
             };
 
+    const statePatch = {
+      ...patch,
+      ...(checkpoint ? { checkpoint } : {}),
+      ...(steps ? { steps } : {}),
+      ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+      ...(mergedUsage ? { usage: mergedUsage } : {}),
+    };
     const applied = await deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
-      patch: checkpoint ? { ...patch, checkpoint } : patch,
+      patch: statePatch,
     });
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
@@ -417,6 +519,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
+    const evidence: TaskEvidence[] = [...(started.task.checkpoint.evidence ?? [])];
+    let plan: TaskPlan | null = started.task.checkpoint.plan ?? null;
     let text = '';
     let visible = text;
     const emitText = (next: string, replace = false): void => {
@@ -427,10 +531,65 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const report = (event: AgentReportEvent): void => {
       if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
+
+      /**
+       * A plan is persisted before its first step starts, so the owner can see
+       * the dependency graph and a resume executes the plan that was shown, not
+       * a different one produced by a second model call.
+       */
+      if (event.type === 'plan.ready') {
+        plan = event.plan;
+        const previous = new Map(steps.map((step) => [step.id, step]));
+        const next: TaskStep[] = event.plan.steps.map((step) => {
+          const existing = previous.get(step.id);
+          const state = existing?.state ?? (completed.includes(step.id) ? 'completed' : 'queued');
+          return {
+            id: step.id,
+            title: step.title,
+            state,
+            dependsOn: [...step.dependsOn],
+            ...(existing?.attempts !== undefined ? { attempts: existing.attempts } : {}),
+          };
+        });
+        for (const step of steps) {
+          if (step.state === 'completed' && !next.some((entry) => entry.id === step.id)) {
+            next.unshift(step);
+          }
+        }
+        steps.length = 0;
+        steps.push(...next);
+        void deps.tasks.updateFenced({
+          taskId,
+          token,
+          patch: {
+            steps,
+            reasoning: event.plan.mode,
+            checkpoint: {
+              completedSteps: [...completed],
+              text: visible,
+              plan: event.plan,
+              evidence,
+            },
+            updatedAt: deps.clock.iso(),
+          },
+        });
+        return;
+      }
+
       if (event.type === 'step.started') {
+        const planned = plan?.steps.find((step) => step.id === event.stepId);
         const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'running';
-        else steps.push({ id: event.stepId, title: event.title, state: 'running' });
+        if (existing) {
+          existing.state = 'running';
+          if (planned) existing.dependsOn = [...planned.dependsOn];
+        } else {
+          steps.push({
+            id: event.stepId,
+            title: event.title,
+            state: 'running',
+            ...(planned ? { dependsOn: [...planned.dependsOn] } : {}),
+          });
+        }
         publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
         void deps.tasks.updateFenced({
           taskId,
@@ -441,17 +600,43 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
       if (event.type === 'step.completed') {
         const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'completed';
-        completed.push(event.stepId);
+        if (existing) {
+          existing.state = 'completed';
+          if (event.attempts !== undefined) existing.attempts = event.attempts;
+        }
+        if (!completed.includes(event.stepId)) completed.push(event.stepId);
+        if (event.evidence) {
+          // Evidence is persisted, so it is scrubbed before it reaches the
+          // checkpoint: the transcript path already redacts, and a durable
+          // record must not become the one place a credential survives.
+          const safeEvidence: TaskEvidence = {
+            ...event.evidence,
+            citation: redactText(event.evidence.citation, [], 500),
+            output: redactContent(event.evidence.output).slice(0, 4_000),
+          };
+          const index = evidence.findIndex((entry) => entry.stepId === event.stepId);
+          if (index === -1) evidence.push(safeEvidence);
+          else evidence[index] = safeEvidence;
+        }
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
         void deps.tasks.updateFenced({
           taskId,
           token,
           patch: {
             steps,
-            checkpoint: { completedSteps: [...completed], text: visible },
+            checkpoint: { completedSteps: [...completed], text: visible, plan, evidence },
             updatedAt: deps.clock.iso(),
           },
+        });
+        return;
+      }
+      if (event.type === 'step.failed') {
+        const existing = steps.find((step) => step.id === event.stepId);
+        if (existing) existing.state = 'failed';
+        void deps.tasks.updateFenced({
+          taskId,
+          token,
+          patch: { steps, updatedAt: deps.clock.iso() },
         });
         return;
       }
@@ -509,6 +694,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ownerId: task.ownerId,
         tenantId: task.tenantId,
         conversationId: task.conversationId,
+        taskId: task.taskId,
         objective: task.objective,
         history,
         model: model.value.ref,
@@ -517,6 +703,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         maxSteps: deps.config.engines.native.maxSteps,
         budget: task.budget,
         signal: controller.signal,
+        reasoning: task.reasoning ?? 'auto',
+        completedSteps: [...started.task.checkpoint.completedSteps],
+        plan: started.task.checkpoint.plan ?? null,
+        evidence: [...(started.task.checkpoint.evidence ?? [])],
       },
       report,
     });
@@ -533,7 +723,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outcome = result.outcome.kind === 'completed'
       ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
       : result.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    await settle(
+      started.task,
+      token,
+      outcome,
+      {
+        completedSteps: completed,
+        text: safeText,
+        plan,
+        evidence,
+      },
+      steps,
+    );
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
@@ -588,6 +789,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
+      // Reasoning mode is resolved once, from the objective and the owner's
+      // explicit choice, and persisted. A resume does not silently change it.
+      const reasoning = resolveReasoningMode({
+        requested: request.reasoning,
+        objective: request.objective,
+      });
+
       const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail(
@@ -630,8 +838,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         state: 'queued',
         generation: 1,
         runToken: null,
+        reasoning,
         steps: [],
-        checkpoint: { completedSteps: [], text: '' },
+        checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
         createdAt: now,
         updatedAt: now,
         leaseExpiresAt: null,
@@ -719,6 +928,43 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           state: task.state,
           generation: task.generation,
           outcome: 'already_terminal',
+        });
+      }
+
+      // A task waiting for the owner has already released its lease: there is no
+      // live run to cancel, but it is still cancellable through its own fence.
+      if (task.state === 'awaiting_approval') {
+        const applied = await deps.tasks.updateFenced({
+          taskId: task.taskId,
+          token: task.runToken ?? '',
+          patch: {
+            state: 'cancelled',
+            updatedAt: deps.clock.iso(),
+            cancelRequested: true,
+          },
+        });
+        if (applied.applied) {
+          publish(applied.task, 'task.cancelled', {});
+          await notifyTerminal(applied.task, 'cancelled');
+          deps.audit.record({
+            actor: task.ownerId,
+            action: 'work.cancelled',
+            taskId: task.taskId,
+            conversationId: task.conversationId,
+            outcome: 'cancelled',
+          });
+          return ok({
+            taskId: task.taskId,
+            state: 'cancelled',
+            generation: task.generation,
+            outcome: 'accepted',
+          });
+        }
+        return ok({
+          taskId: task.taskId,
+          state: (await deps.tasks.get(task.taskId))?.state ?? task.state,
+          generation: task.generation,
+          outcome: 'superseded',
         });
       }
 
@@ -928,6 +1174,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           maxSteps: 1,
           budget: null,
           signal: controller.signal,
+          reasoning: 'fast',
+          completedSteps: [],
+          plan: null,
         },
         () => undefined,
       );

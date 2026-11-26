@@ -1,12 +1,24 @@
 import type { EngineFailureCode, Usage } from '@coderax/contracts';
+import type { TaskVerification } from '../domain.js';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore, RunScope } from './lease.js';
 import { workRunKey } from './lease.js';
 import type { AgentAdapter, AgentReport, AgentRunRequest } from '../agents/types.js';
 
 export type RunOutcome =
-  | { kind: 'completed'; summary: string; usage?: Usage }
-  | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
+  | {
+      kind: 'completed';
+      summary: string;
+      usage?: Usage;
+      verification?: TaskVerification;
+    }
+  | {
+      kind: 'failed';
+      code: EngineFailureCode;
+      detail: string;
+      retryable: boolean;
+      usage?: Usage;
+    }
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
   | { kind: 'interrupted'; detail: string };
@@ -183,6 +195,7 @@ export function createTaskRunner(input: {
               kind: 'completed',
               summary: outcome.summary,
               ...(outcome.usage ? { usage: outcome.usage } : {}),
+              ...(outcome.verification ? { verification: outcome.verification } : {}),
             },
             ownershipLost: false,
           };
@@ -193,6 +206,7 @@ export function createTaskRunner(input: {
             code: outcome.code,
             detail: outcome.detail,
             retryable: outcome.retryable,
+            ...(outcome.usage ? { usage: outcome.usage } : {}),
           },
           ownershipLost: false,
         };
