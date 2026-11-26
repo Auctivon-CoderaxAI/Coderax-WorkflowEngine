@@ -1,7 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ModelGateway } from '../src/agents/native/types.js';
+import type { ProviderAdapter, ProviderCompletionRequest } from '../src/models/types.js';
+import { ProviderError } from '../src/models/types.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -42,66 +43,92 @@ export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, 
 }
 
 /**
- * A deterministic gateway for tests. It is a test double, not a provider: the
- * production path is `createOpenAiCompatibleGateway`, exercised separately.
+ * A deterministic provider fixture. It reports a zero price list, so the real
+ * router verifies it like any other provider; the fixture never bypasses cost,
+ * context, budget or fallback logic.
  */
-export function fakeGateway(input: {
+export function fakeProvider(input: {
   text?: string;
   beforeReturn?: () => Promise<void>;
-} = {}): ModelGateway & { calls: number } {
-  const gateway = {
-    id: 'test-gateway',
+  modelId?: string;
+} = {}): ProviderAdapter & { calls: number } {
+  const provider = {
+    id: 'free',
+    kind: 'openai' as const,
     calls: 0,
-    complete: async ({ signal }: { signal: AbortSignal }) => {
-      gateway.calls += 1;
+    discover: async () => [
+      {
+        ref: { providerId: 'free', modelId: input.modelId ?? 'coderax-small' },
+        label: 'Free test model',
+        contextTokens: 32_768,
+        maxOutputTokens: 4_096,
+        capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
+        pricing: { prompt: '0', completion: '0', request: '0' },
+      },
+    ],
+    complete: async ({ signal }: ProviderCompletionRequest) => {
+      provider.calls += 1;
       if (input.beforeReturn) await input.beforeReturn();
-      if (signal.aborted) throw new Error('aborted');
+      if (signal.aborted) throw new ProviderError('cancelled', 'aborted', { retryable: false });
       return {
         text: input.text ?? 'A verified result.',
+        toolCalls: [],
         usage: { inputTokens: 11, outputTokens: 13 },
       };
     },
   };
-  return gateway;
+  return provider;
 }
 
-export function failingGateway(failures: number): ModelGateway & { calls: number } {
-  const gateway = {
-    id: 'failing-gateway',
-    calls: 0,
+export function failingProvider(failures: number): ProviderAdapter & { calls: number } {
+  const base = fakeProvider();
+  const provider = {
+    ...base,
     complete: async () => {
-      gateway.calls += 1;
-      if (gateway.calls <= failures) throw new Error('provider unavailable');
-      return { text: 'Recovered result.', usage: { inputTokens: 3, outputTokens: 4 } };
+      provider.calls += 1;
+      if (provider.calls <= failures) {
+        throw new ProviderError('server', 'provider unavailable', { retryable: true });
+      }
+      return { text: 'Recovered result.', toolCalls: [], usage: { inputTokens: 3, outputTokens: 4 } };
     },
   };
-  return gateway;
+  return provider;
 }
 
-export function slowGateway(delayMs: number): ModelGateway & { calls: number } {
-  const gateway = {
-    id: 'slow-gateway',
+export function slowProvider(delayMs: number): ProviderAdapter & { calls: number } {
+  const provider = {
+    ...fakeProvider(),
     calls: 0,
-    complete: ({ signal }: { signal: AbortSignal }) =>
-      new Promise<{ text: string }>((resolve, reject) => {
-        gateway.calls += 1;
-        const timer = setTimeout(() => resolve({ text: 'Slow result.' }), delayMs);
-        timer.unref();
-        signal.addEventListener(
-          'abort',
-          () => {
-            clearTimeout(timer);
-            reject(new Error('aborted'));
-          },
-          { once: true },
-        );
-      }),
+    complete: ({ signal }: ProviderCompletionRequest) =>
+      new Promise<{ text: string; toolCalls: never[]; usage: { inputTokens: number; outputTokens: number } }>(
+        (resolve, reject) => {
+          provider.calls += 1;
+          const timer = setTimeout(
+            () =>
+              resolve({
+                text: 'Slow result.',
+                toolCalls: [],
+                usage: { inputTokens: 2, outputTokens: 2 },
+              }),
+            delayMs,
+          );
+          timer.unref();
+          signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(new ProviderError('cancelled', 'aborted', { retryable: false }));
+            },
+            { once: true },
+          );
+        },
+      ),
   };
-  return gateway;
+  return provider;
 }
 
 export async function startTestApp(options: {
-  gateway?: ModelGateway;
+  provider?: ProviderAdapter;
   config?: Record<string, unknown>;
 } = {}): Promise<{
   app: Application;
@@ -114,7 +141,7 @@ export async function startTestApp(options: {
   const app = await composeApplication({
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    gateway: options.gateway ?? fakeGateway(),
+    providers: [{ adapter: options.provider ?? fakeProvider() }],
   });
   const { url } = await app.start();
   return {
@@ -155,6 +182,7 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     mode: 'cloud',
     objective: 'Do the thing',
     model: { providerId: 'free', modelId: 'coderax-small' },
+    modelPinned: false,
     state: 'queued',
     generation: 1,
     runToken: null,

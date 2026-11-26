@@ -10,6 +10,7 @@ import type {
   ModelRef,
   Usage,
 } from '@coderax/contracts';
+import type { RoutingMode } from '../models/types.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -40,6 +41,10 @@ export type AgentRunRequest = {
   history?: AgentHistoryTurn[];
   /** Already resolved by the model catalogue; never a raw provider override. */
   model: ModelRef;
+  /** Automatic, Fast or Complex ranking, chosen by the engine from the task. */
+  routing: RoutingMode;
+  /** False pins the owner's explicit model; a route-chosen model may fall back. */
+  allowFallback: boolean;
   mode: DataMode;
   workspaceRoot: string;
   maxSteps: number;
@@ -66,7 +71,7 @@ export type AgentReportEvent =
 export type AgentReport = (event: AgentReportEvent) => void;
 
 export type AgentRunOutcome =
-  | { ok: true; summary: string; usage?: Usage }
+  | { ok: true; summary: string; usage?: Usage; model?: ModelRef }
   | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
 
 export type AgentAdapter = {

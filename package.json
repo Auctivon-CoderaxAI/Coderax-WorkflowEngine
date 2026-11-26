@@ -20,6 +20,7 @@
     "test:contract": "npm run build && node --test \"dist/tests/contract/*.test.js\"",
     "test:integration": "npm run build && node --test \"dist/tests/integration/*.test.js\"",
     "test:security": "npm run build && node --test \"dist/tests/security/*.test.js\"",
+    "benchmark": "npm run build && node dist/scripts/benchmark.js",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
     "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"

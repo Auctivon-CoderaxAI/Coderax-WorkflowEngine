@@ -30,6 +30,8 @@ import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
+import { inferRoutingMode } from '../models/router.js';
+import { estimateTokens } from '../models/verify.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
@@ -372,9 +374,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    const model = task.model
-      ? deps.models.resolve(task.model, task.mode)
-      : deps.models.resolve(null, task.mode);
+    const routing = inferRoutingMode({ objective: task.objective });
+    const pinned = task.modelPinned === true && task.model !== null;
+    const model = deps.models.resolve(pinned ? task.model : null, task.mode, {
+      routing,
+      estimatedInputTokens: estimateTokens([task.objective]),
+      ...(task.budget === null ? {} : { maxOutputTokens: task.budget.maxOutputTokens }),
+    });
     if (!model.ok) {
       await settle(task, token, {
         kind: 'failed',
@@ -512,6 +518,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         objective: task.objective,
         history,
         model: model.value.ref,
+        routing,
+        allowFallback: !pinned,
         mode: task.mode,
         workspaceRoot: workspace.value.root,
         maxSteps: deps.config.engines.native.maxSteps,
@@ -522,6 +530,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
     if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
+    // The router settles its own reservations. An external engine reports usage
+    // after the fact, so it is charged exactly once here.
+    if (started.task.engine !== 'native') {
+      deps.budget.charge(
+        task.ownerId,
+        result.outcome.kind === 'completed' ? (result.outcome.usage ?? {}) : {},
+        deps.clock.now(),
+      );
+    }
 
     if (result.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer
@@ -585,11 +602,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
 
-      const model = deps.models.resolve(request.model, request.mode);
+      const routing = inferRoutingMode({ objective: request.objective });
+      const model = deps.models.resolve(request.model, request.mode, {
+        routing,
+        estimatedInputTokens: estimateTokens([request.objective]),
+        ...(request.budget === undefined
+          ? {}
+          : { maxOutputTokens: request.budget.maxOutputTokens }),
+      });
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
-      if (!reservation.allowed) {
+      if (!deps.budget.available(principal.ownerId, deps.clock.now())) {
         return fail(
           'budget_exhausted',
           'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -626,7 +649,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         engine: adapter.value.engine,
         mode: request.mode,
         objective: request.objective,
-        model: model.value.ref,
+        // An automatic route stores no model until execution ranks it; an explicit
+        // request stays pinned so a fallback can never replace the owner's choice.
+        model: request.model === undefined ? null : model.value.ref,
+        modelPinned: request.model !== undefined,
         state: 'queued',
         generation: 1,
         runToken: null,
@@ -880,11 +906,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model, request.mode);
+      const routing = inferRoutingMode({ objective: request.message });
+      const model = deps.models.resolve(request.model, request.mode, {
+        routing,
+        estimatedInputTokens: estimateTokens([request.message]),
+      });
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
-      if (!reservation.allowed) {
+      if (!deps.budget.available(principal.ownerId, deps.clock.now())) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
       const workspace = await resolveEngineWorkspace({
@@ -923,6 +952,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           objective: request.message,
           history,
           model: model.value.ref,
+          routing,
+          allowFallback: request.model === undefined,
           mode: request.mode,
           workspaceRoot: workspace.value.root,
           maxSteps: 1,
@@ -933,12 +964,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       );
       if (!outcome.ok) {
         return fail(
-          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
+          outcome.code === 'cancelled'
+            ? 'cancelled'
+            : outcome.code === 'budget_exhausted'
+              ? 'budget_exhausted'
+              : 'engine_unavailable',
           outcome.detail,
           outcome.retryable,
         );
       }
-      deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+      const usedModel = outcome.model ?? model.value.ref;
+      if (adapter.value.engine !== 'native') {
+        deps.budget.charge(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+      }
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
@@ -953,7 +991,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         messageId,
         text: outcome.summary,
         agent: request.agent,
-        model: model.value.ref,
+        model: usedModel,
         ...(outcome.usage ? { usage: outcome.usage } : {}),
         createdAt: deps.clock.iso(),
       });
@@ -1013,7 +1051,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           usage: { inputTokens: used.inputTokens, outputTokens: used.outputTokens },
         },
         remaining: { requests: Math.max(0, budget.maxRequests - used.requests) },
-        exhausted: used.requests >= budget.maxRequests,
+        exhausted: !deps.budget.available(principal.ownerId, deps.clock.now()),
       };
     },
 
