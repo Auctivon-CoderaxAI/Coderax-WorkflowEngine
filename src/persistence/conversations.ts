@@ -23,6 +23,7 @@ export class ConversationConflictError extends Error {
 }
 
 export type ConversationRepository = {
+  /** Reuse an ID only when the stored owner and data mode both match. */
   ensure: (record: ConversationRecord) => Promise<ConversationRecord>;
   get: (ownerId: string, conversationId: string) => Promise<ConversationRecord | null>;
   list: (ownerId: string) => Promise<ConversationList>;

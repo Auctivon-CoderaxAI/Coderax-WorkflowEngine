@@ -29,7 +29,7 @@ import { isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import type { ConversationRecord, TaskApproval, TaskPatch, TaskRecord } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
-import type { ConversationRepository } from '../persistence/conversations.js';
+import { ConversationConflictError, type ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
@@ -52,6 +52,7 @@ import type { ModelCatalog } from '../models/catalog.js';
 import { inferRoutingMode } from '../models/router.js';
 import { estimateTokens } from '../models/verify.js';
 import type { BudgetLedger } from '../models/budget.js';
+import type { PolicyDecision } from '../models/policy.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -64,7 +65,6 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveConversationWorkspace, workspaceRoots } from '../execution/workspace.js';
-import { ConversationConflictError } from '../persistence/conversations.js';
 import { buildTranscript } from './transcript.js';
 
 export type ApplicationServiceDeps = {
@@ -75,6 +75,7 @@ export type ApplicationServiceDeps = {
   agents: AgentRegistry;
   models: ModelCatalog;
   budget: BudgetLedger;
+  externalPolicy: (engine: Exclude<AgentAdapter['engine'], 'native'>, mode: DataMode) => PolicyDecision;
   lease: LeaseStore;
   tasks: TaskRepository;
   conversations: ConversationRepository;
@@ -203,6 +204,12 @@ const WORK_SCOPES: readonly PermissionScope[] = [
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   /** Which attempt currently represents each task, for a same-replica cancel. */
   const executionsByTask = new Map<string, string>();
+
+  function checkExternal(engine: AgentAdapter['engine'], mode: DataMode): ServiceResult<void> {
+    if (engine === 'native') return ok(undefined);
+    const decision = deps.externalPolicy(engine, mode);
+    return decision.allowed ? ok(undefined) : fail('model_missing', decision.detail);
+  }
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -679,6 +686,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
+    const external = checkExternal(adapter.value.engine, task.mode);
+    if (!external.ok) {
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'not_configured',
+        detail: external.detail,
+        retryable: false,
+      });
+      return;
+    }
+
     const routing = inferRoutingMode({ objective: task.objective });
     const pinned = task.modelPinned === true && task.model !== null;
     const model = deps.models.resolve(pinned ? task.model : null, task.mode, {
@@ -843,12 +861,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     };
 
-    // An external agent's isolation says `conversations: none`; handing it the
-    // transcript would contradict that promise.
+    // Hand the transcript only to an agent whose isolation grants conversations.
+    // An external agent's descriptor says `conversations: none`.
+    // An agent whose isolation says `conversations: none` receives no history
+    // field at all, not an empty array that suggests a transcript exists.
     const history =
-      started.task.agent === 'coderax'
+      adapter.value.isolation.conversations === 'granted'
         ? await historyFor(task.conversationId, task.objective)
-        : [];
+        : undefined;
     const identity: ExecutionIdentity = {
       executionId: deps.ids.executionId(),
       kind: 'work',
@@ -887,6 +907,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const held = externalReservation?.allowed ? externalReservation.reservation : null;
+    let dispatched = false;
 
     // Work and Chat now share one execution path. The runner keeps its lease
     // heartbeat and bounded cancellation; the supervisor owns the identity, the
@@ -907,7 +928,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             tenantId: task.tenantId,
             conversationId: task.conversationId,
             objective: task.objective,
-            history,
+            ...(history === undefined ? {} : { history }),
             model: model.value.ref,
             routing,
             allowFallback: !pinned,
@@ -947,6 +968,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               : {}),
           },
           report: execution.report,
+          admitDispatch: () => {
+            // Recheck provider authorization at the exact dispatch boundary: a
+            // grant or policy that changed while the run was queued must not
+            // send the request.
+            dispatched = !execution.signal.aborted &&
+              checkExternal(adapter.value.engine, task.mode).ok;
+            return dispatched;
+          },
         });
         return {
           outcome: result.outcome,
@@ -963,12 +992,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // Budget ownership is independent of task-ownership fences; release the
     // reservation before any guard that can return early.
     if (held) {
-      if (supervised.admitted && supervised.outcome.kind === 'completed') {
-        await deps.budget.settle(held.id, supervised.outcome.usage ?? {});
+      if (dispatched) {
+        // A dispatched attempt keeps its request charge even when it failed;
+        // a completed call is settled with the usage the provider reported.
+        const usage =
+          supervised.admitted && supervised.outcome.kind === 'completed'
+            ? supervised.outcome.usage ?? {}
+            : {};
+        await deps.budget.settle(held.id, usage);
       } else {
-        // The external engine may have dispatched before failing; retain the
-        // request charge while returning its unused token allowance.
-        await deps.budget.release(held.id, { dispatched: true });
+        await deps.budget.release(held.id);
       }
     }
 
@@ -1103,6 +1136,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
+      const external = checkExternal(adapter.value.engine, request.mode);
+      if (!external.ok) return external;
 
       const routing = inferRoutingMode({ objective: request.objective });
       const model = deps.models.resolve(request.model, request.mode, {
@@ -1145,7 +1180,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!workspace.ok) return workspace;
       const quarantined = quarantineDetail(workspace.value.root);
       if (quarantined) return fail('workspace_denied', quarantined);
-
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1473,6 +1507,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     chat: async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
+      const external = checkExternal(adapter.value.engine, request.mode);
+      if (!external.ok) return external;
       const routing = inferRoutingMode({ objective: request.message });
       const model = deps.models.resolve(request.model, request.mode, {
         operation: 'chat',
@@ -1506,7 +1542,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!workspace.ok) return workspace;
       const quarantined = quarantineDetail(workspace.value.root);
       if (quarantined) return fail('workspace_denied', quarantined);
-
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1515,9 +1550,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
-      // Only Native may see the transcript; an external agent is isolated from it.
-      const history =
-        request.agent === 'coderax' ? await historyFor(conversationId, request.message) : [];
+      // Only an agent whose isolation grants conversations may see the transcript.
+      const history = adapter.value.isolation.conversations === 'granted'
+        ? await historyFor(conversationId, request.message)
+        : undefined;
       const identity: ExecutionIdentity = {
         executionId: deps.ids.executionId(),
         kind: 'chat',
@@ -1530,7 +1566,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: 0,
         token: null,
       };
-
+      let dispatched = false;
       // The router reserves internally. An external engine does not pass through
       // it, so hold one request/token slot before dispatch and settle afterward.
       const reservation =
@@ -1563,7 +1599,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               tenantId: conversation.value.tenantId,
               conversationId,
               objective: request.message,
-              history,
+              ...(history === undefined ? {} : { history }),
               model: model.value.ref,
               routing,
               allowFallback: request.model === undefined,
@@ -1584,6 +1620,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
                 : {}),
             },
             execution.report,
+            () => {
+              dispatched = !execution.signal.aborted &&
+                checkExternal(adapter.value.engine, request.mode).ok;
+              return dispatched;
+            },
           );
           return {
             outcome: outcome.ok
@@ -1606,12 +1647,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (!supervised.admitted) {
-        if (held) await deps.budget.release(held.id, { dispatched: false });
+        if (held) {
+          // A dispatched external call may already have been billed even when it
+          // failed, so its reserved tokens stay charged; an undispatched one is
+          // refunded in full.
+          if (dispatched) await deps.budget.settle(held.id, {});
+          else await deps.budget.release(held.id);
+        }
         return fail('engine_unavailable', supervised.detail, supervised.code !== 'workspace_denied');
       }
       const outcome = supervised.outcome;
       if (outcome.kind !== 'completed') {
-        if (held) await deps.budget.release(held.id, { dispatched: true });
+        if (held) {
+          if (dispatched) await deps.budget.settle(held.id, {});
+          else await deps.budget.release(held.id);
+        }
         return fail(
           outcome.kind === 'cancelled' ? 'cancelled' : 'engine_unavailable',
           redactText(

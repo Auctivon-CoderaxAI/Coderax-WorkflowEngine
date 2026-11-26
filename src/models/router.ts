@@ -811,6 +811,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
     let budgetRefusal: string | null = null;
+    let lastDispatchFailure: ProviderError | null = null;
     const executed = planned.fallbackAllowed
       ? planned.candidates.slice(0, 1 + maxFallbacks)
       : planned.candidates.slice(0, 1);
@@ -949,13 +950,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           runtimeAdmission,
           providerAdmission,
         );
-        lastFailure = providerError;
+        lastDispatchFailure = providerError;
       }
     }
 
-    if (budgetRefusal !== null) {
+    if (budgetRefusal !== null && lastDispatchFailure === null) {
       throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
     }
+    lastFailure = lastDispatchFailure ?? lastFailure;
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null
@@ -975,12 +977,13 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
     let budgetRefusal: string | null = null;
+    let lastDispatchFailure: ProviderError | null = null;
 
     for (const candidate of executed) {
       if (request.signal.aborted) {
         throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
       }
-      const runtime = models.get(modelKey(candidate.model.ref));
+      let runtime = models.get(modelKey(candidate.model.ref));
       if (!runtime) continue;
       const provider = providers.get(runtime.state.ref.providerId);
       if (!provider) continue;
@@ -1083,9 +1086,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           !revalidated ||
           !modelAvailability(revalidated, revalidatedAt).available ||
           revalidatedPolicy === null ||
-          !revalidatedPolicy.allowed
+          !revalidatedPolicy.allowed ||
+          output > outputBudget(request, revalidated.state) ||
+          !contextFits({ state: revalidated.state, estimatedInputTokens: estimated, maxOutputTokens: output }) ||
+          ((request.tools?.length ?? 0) > 0 && !revalidated.state.capabilities.toolCalling) ||
+          (request.messages?.some((message) => (message.images?.length ?? 0) > 0) &&
+            !revalidated.state.capabilities.vision)
         ) {
-          acquired.release();
+          acquired.release({ dispatched: false });
           await budget.release(reserved.reservation.id);
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
@@ -1097,7 +1105,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           );
           continue;
         }
+        if (signal.aborted) {
+          throw new ProviderError('cancelled', 'The inference stream was cancelled before dispatch.', { retryable: false });
+        }
         providerStarted = true;
+        runtime = revalidated;
         const events = provider.adapter.stream
           ? provider.adapter.stream(providerRequest)
           : synthesize(provider.adapter.complete(providerRequest));
@@ -1119,7 +1131,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         recordSuccess(runtime, provider, latencyMs, runtimeAdmission, providerAdmission);
         return;
       } catch (error) {
-        acquired.release();
+        acquired.release({ dispatched: providerStarted });
         const providerError =
           error instanceof ProviderError
             ? error
@@ -1163,7 +1175,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         }
         await budget.release(reserved.reservation.id, { dispatched: providerStarted });
         settled = true;
-        lastFailure = providerError;
+        lastDispatchFailure = providerError;
       } finally {
         // A consumer can stop iterating before the provider finishes. Release the
         // provider slot and account for the work already started; otherwise the
@@ -1174,7 +1186,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           providerAbort.abort();
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
-          acquired.release();
+          acquired.release({ dispatched: providerStarted });
           if (providerStarted) {
             await budget.settle(
               reserved.reservation.id,
@@ -1187,9 +1199,10 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
     }
 
-    if (budgetRefusal !== null) {
+    if (budgetRefusal !== null && lastDispatchFailure === null) {
       throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
     }
+    lastFailure = lastDispatchFailure ?? lastFailure;
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null

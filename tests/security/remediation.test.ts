@@ -76,6 +76,10 @@ test('an external agent is never given the conversation transcript', async () =>
     externals: { opencode: transport },
     env: { OPENCODE_PASSWORD: 'test-password' },
     config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [testProviderPolicy(), testProviderPolicy('opencode')],
+      },
       engines: {
         opencode: {
           enabled: true,
@@ -333,6 +337,10 @@ test('an autonomous external agent runs only with a durable, single-use grant', 
     externals: { opencode: transport },
     env: { OPENCODE_PASSWORD: 'test-password' },
     config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [testProviderPolicy(), testProviderPolicy('opencode')],
+      },
       engines: {
         opencode: {
           enabled: true,

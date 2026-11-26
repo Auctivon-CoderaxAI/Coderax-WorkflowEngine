@@ -227,14 +227,20 @@ export function createNativeAgent(input: {
       let actualModel: ModelRef | undefined;
 
       /** Per-step token ceiling, independent of the router's own reservation. */
+      // Reservations, not just actual usage: a provider that omits a token side
+      // must not let the next step spend the same headroom again.
+      let reservedInput = 0;
+      let reservedOutput = 0;
       function budgetExhausted(prompt: string, maxOutput: number | undefined): boolean {
         if (!request.budget) return false;
-        const inputLeft = request.budget.maxInputTokens - (totals.input ?? 0);
-        const outputLeft = request.budget.maxOutputTokens - (totals.output ?? 0);
+        // The router already bounded the first dispatch. Cumulative reservations
+        // guard every later step, including when usage omitted a token side.
+        if (reservedInput === 0 && reservedOutput === 0) return false;
+        const inputTokens = estimateTokens([NATIVE_ACTION_SYSTEM, prompt]);
+        const outputTokens = maxOutput ?? request.budget.maxOutputTokens;
         return (
-          inputLeft <= 0 ||
-          outputLeft <= 0 ||
-          estimateTokens([NATIVE_ACTION_SYSTEM, prompt]) + (maxOutput ?? 0) > inputLeft + outputLeft
+          reservedInput + inputTokens > request.budget.maxInputTokens ||
+          reservedOutput + outputTokens > request.budget.maxOutputTokens
         );
       }
 
@@ -291,6 +297,8 @@ export function createNativeAgent(input: {
                 ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
               });
               accumulate(totals, completion.usage);
+              reservedInput += estimateTokens([NATIVE_ACTION_SYSTEM, prompt]);
+              reservedOutput += request.budget?.maxOutputTokens ?? 0;
               actualModel = completion.model;
               text = completion.text;
             }

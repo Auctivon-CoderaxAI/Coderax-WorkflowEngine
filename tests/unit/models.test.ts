@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createNativeAgent } from '../../src/agents/native/agent.js';
 import type { ModelRef } from '@coderax/contracts';
 import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 import { createModelRouter } from '../../src/models/router.js';
@@ -252,4 +253,38 @@ test('a dispatched reservation keeps its request charge when it is released', as
     inputTokens: 0,
     outputTokens: 0,
   });
+});
+
+test('Native bounds cumulative step usage even when a provider omits either token count', async () => {
+  for (const missingOutput of [false, true]) {
+    let calls = 0;
+    const model = { providerId: 'fixture', modelId: 'fixture' };
+    const native = createNativeAgent({
+      enabled: true,
+      gateway: {
+        id: 'fixture',
+        complete: async () => {
+          calls += 1;
+          return {
+            model, attempts: [model], latencyMs: 0, text: 'result', toolCalls: [],
+            usage: missingOutput ? { inputTokens: 1 } : { outputTokens: 1 },
+          };
+        },
+      },
+    });
+    const request = {
+      ownerId: 'owner', tenantId: null, conversationId: 'conv', objective: 'test',
+      mode: 'cloud' as const, model, operation: 'work' as const, routing: 'auto' as const, allowFallback: false,
+      workspaceRoot: '/fixture', maxSteps: 3,
+      budget: { maxRequests: 3, maxInputTokens: 130, maxOutputTokens: 10 },
+      signal: new AbortController().signal,
+    };
+    const outcome = await native.run(request, () => undefined);
+    assert.equal(outcome.ok, false);
+    if (!outcome.ok) assert.equal(outcome.code, 'budget_exhausted');
+    assert.equal(calls, 1);
+    const single = await native.run({ ...request, maxSteps: 1 }, () => undefined);
+    assert.ok(single.ok);
+    assert.deepEqual(single.usage, missingOutput ? { inputTokens: 1 } : { outputTokens: 1 });
+  }
 });

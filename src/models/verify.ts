@@ -52,14 +52,23 @@ export function verifyFreeTier(input: {
     };
   }
 
-  // A stale attestation must not mask a later active one for the same model.
+  // Use the active evidence that stays valid longest.
+  let active: CostVerdict | null = null;
+  let latestExpiry = -Infinity;
   let failure: CostVerdict | null = null;
   for (const attestation of matches) {
     const verdict = verifyAttestation(attestation, input.now);
-    if (verdict.costClass === 'free') return verdict;
-    failure ??= verdict;
+    if (verdict.costClass === 'free') {
+      const expiry = Date.parse(attestation.expiresAt);
+      if (expiry > latestExpiry) {
+        active = verdict;
+        latestExpiry = expiry;
+      }
+    } else {
+      failure ??= verdict;
+    }
   }
-  return failure ?? {
+  return active ?? failure ?? {
     costClass: 'paid',
     basis: 'none',
     detail: 'No active free-tier attestation exists for this exact model.',

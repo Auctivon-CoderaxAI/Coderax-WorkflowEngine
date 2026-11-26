@@ -1,17 +1,23 @@
 # Security remediation: revalidation and evidence
 
-Target: `main` (`808dfd3`) plus the two in-flight branches that change the
-execution and inference seams — `feat/durable-events-integration` and
-`feat/zero-cost-model-router`. Both merged without a source conflict. The branch
-is `security/remediation`.
+This document describes the consolidated remediation branch. It is based on
+`main` (`808dfd3`) plus the authoritative in-flight work, merged in dependency
+order and then hardened:
 
-`feat/intelligence-core` and `feat/native-reasoning-planner` were inspected and
-**not merged** at the time (PR #5 has since reconciled them; see the
-coordination section). Intelligence Core adds a second model router (`src/models/router.ts`
-with the same exported names as the verified router), a tool loop and a different
-gateway contract; landing both routers would leave two authorities for one
-decision, which `AGENTS.md` forbids. Its findings are recorded at the end as
-follow-ups, not silently claimed as fixed.
+| Source | Exact commit | Role after consolidation |
+| --- | --- | --- |
+| `main` | `808dfd3` | Baseline and its runnable vulnerability reproduction |
+| `ci/permanent-quality-gates` | `c6baf77` | Zod 4 remediation, gate manifest, real-Mongo infrastructure |
+| `feat/zero-cost-model-router` (PR #4) | `b6e002b` + `ade0a29` | **Only** routing and provider-authorization authority |
+| `feat/durable-events-integration` | `2554edc` | Durable execution events |
+| `feat/execution-supervisor` (PR #5) | `13d4b4f` | **Only** supervision, termination, fencing and quarantine authority |
+| `security/remediation` | `4b2ea75` | Unique security deltas, preserved and re-verified |
+
+PR #2's durable quota design (`src/models/budget.ts`,
+`src/persistence/budgets.ts`) was adopted and extended with idempotent
+settlement/release; its competing router and gateway were not merged. PR #3's
+planner was reconciled through PR #5, not as a second planner. The branch under
+review is `security/reconciliation`.
 
 Baseline reproduction was executed, not inferred: a clean worktree at `808dfd3`
 (`npm ci && npm run build`) ran the script preserved at
@@ -330,3 +336,61 @@ What this means for a rebase:
 - Hosted CI did not run for this head; see the pull request for the executed
   command and its exact output.
 - An independent review is required before merge and was not fabricated here.
+
+
+## Consolidated verification (2026-11-26)
+
+All results below were produced on this branch with a real MongoDB 7.0.14
+server, not with the collection fake. The fake remains the fast semantic suite;
+the live gate is the distributed evidence.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full compiled suite | `node --test "dist/tests/**/*.test.js"` with `CODERAX_REQUIRE_MONGO=1` | **341 passed, 0 failed, 0 skipped** |
+| Every permanent gate | `node dist/scripts/run-gates.js all` | **11/11 passed** |
+| Gate manifest coverage | `node dist/scripts/run-gates.js coverage` | 50 test files assigned, none unclaimed |
+| Dependency audit | `node dist/scripts/run-gates.js audit` | critical 0, high 0, moderate 0 |
+| OpenAPI drift | `node dist/scripts/run-gates.js openapi` | no drift |
+| Baseline reproduction | clean worktree at `808dfd3`, `npm ci && npm run build && node repro.mjs` | all six defects `true` |
+| Live quota window | `tests/live/mongo.test.ts` | one winner across two replicas; replayed settlement charged once |
+
+### Authority consolidation
+
+- `src/models/policy.ts` and `src/models/router.ts` are the only provider
+  authorization and routing authority. PR #5's `src/models/routed.ts`,
+  `src/agents/native/gateway.ts` and its router test were removed.
+- `src/execution/supervisor.ts` is the only execution authority. Work and Chat
+  both run through it; termination evidence or a held workspace gates the next
+  conflicting run, and `submitWork` refuses a held root before creating a task.
+- `tests/architecture/capabilities.test.ts` and `graph.test.ts` fail on a second
+  router, planner, engine, server, task runner or provider call site. The
+  synthetic fixtures now name `createModelRouter`, the one authoritative factory.
+- `src/models/budget.ts` is a durable reservation ledger over either the shared
+  Mongo window or the same atomic window in-process. Reservation ids make
+  settlement and release exactly-once; the daily ceiling lives in the store, not
+  in a process map.
+
+### Dependency advisory
+
+The advisory is GHSA-mrhx-c7xc-m3w5 (Zod). Affected versions are `<4.6.6`; the
+patched release is `4.6.6` and the workspace uses `4.6.7` across every manifest.
+CVE-2023-54404 is recorded by the authoritative databases as **REJECTED**
+(2026-10-28) and is not an active advisory. OSV notes that no release changes the
+unbounded-default `z.record`/`z.tuple` behavior, so the transport-level JSON depth
+and container bounds in `src/api/router.ts` remain as defense in depth. No audit
+finding is suppressed and the audit threshold is unchanged (high and critical
+fail the gate).
+
+### Remaining external blockers
+
+- **PR creation:** the environment has no authorized GitHub token
+  (`POST /repos/.../pulls` returns `401 Requires authentication`), so the branch
+  is published and the compare link is provided instead of a fabricated PR.
+- **Hosted Actions at this SHA:** the `verify` workflow triggers on pull
+  requests to `main` and pushes to `main`; without an authorized PR the branch
+  cannot trigger it. Results above are local cloud-compute evidence.
+- **Independent approval:** not fabricated. A reviewer must open the PR and
+  approve it.
+- **Branch protection / secret scanning:** the unauthenticated rule-set read is
+  empty and classic protection requires authentication; see
+  `docs/governance.md`. No protection setting was changed.

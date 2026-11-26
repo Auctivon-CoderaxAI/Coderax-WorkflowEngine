@@ -33,6 +33,8 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | Dependency vulnerabilities | `audit` | `dist/scripts/check-audit.js` (high and critical fail) |
 | Model cost policy | `adversarial`, `unit` | `tests/adversarial/cost-policy.test.ts`, `tests/unit/models.test.ts` |
 | Private/cloud isolation | `security` | `tests/security/isolation.test.ts`, `tests/security/regressions.test.ts` |
+| Durable quota window | `unit`, `mongo-live` | `tests/unit/models.test.ts`, `tests/live/mongo.test.ts` |
+| External engine authorization | `integration`, `security` | `tests/integration/external-dispatch.test.ts`, `tests/security/remediation.test.ts` |
 | Generation fencing | `adversarial`, `unit` | `tests/adversarial/fencing.test.ts`, `tests/unit/fencing.test.ts` |
 | Crash recovery | `adversarial` | crash-to-interrupted-to-resume test in `tests/adversarial/fencing.test.ts` |
 | Event replay | `adversarial`, `unit` | `tests/adversarial/replay.test.ts`, `tests/unit/events.test.ts` |
@@ -46,10 +48,10 @@ driver, server indexes, two-connection arbitration, generation fencing, crash
 recovery or notification durability. The live suite now covers those six paths
 and the gate forces `CODERAX_REQUIRE_MONGO=1`, so a missing service fails instead
 of silently skipping. The image is pinned to `mongo:7.0.14`; the service is
-ephemeral and receives no production credentials. Quota, durable events,
-approvals and artifacts cannot be claimed against a database until their owning
-branches land; the gate will require their live tests then rather than treating
-the in-memory path as evidence.
+ephemeral and receives no production credentials. The live suite now also proves
+the durable quota window (two replicas racing for the last slot, replayed
+settlement charged once) and durable approval consumption, so those guarantees
+are not claimed from an in-memory path.
 
 ## Architecture regression tests
 

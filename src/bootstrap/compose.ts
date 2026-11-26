@@ -1,4 +1,4 @@
-import type { AgentIsolation, EngineCapabilities } from '@coderax/contracts';
+import type { AgentIsolation, DataMode, EngineCapabilities } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
@@ -16,7 +16,7 @@ import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js'
 import { createGeminiProvider } from '../models/providers/gemini.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
 import { createModelRouter, type ModelRouter } from '../models/router.js';
-import { createProviderPolicyRegistry, type ProviderPolicy } from '../models/policy.js';
+import { createProviderPolicyRegistry, type ProviderPolicy, type ProviderPolicyRegistry } from '../models/policy.js';
 import type {
   BenchmarkScore,
   FreeTierAttestation,
@@ -67,6 +67,7 @@ export type Application = {
   server: HttpServer;
   /** The single model router, exposed for the benchmark harness and health tests. */
   modelRouter: ModelRouter;
+  providerPolicy: ProviderPolicyRegistry;
   /** Which lease table the validated persistence setting selected. */
   persistence: { driver: 'memory' | 'mongo' };
   /** Everything is validated before this resolves. */
@@ -358,6 +359,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }));
 
   const policy = createProviderPolicyRegistry(input.policies ?? config.models.policy);
+  const externalPolicy = (engine: 'opencode' | 'freebuff', mode: DataMode) =>
+    policy.evaluate({ providerId: engine, operation: 'external_agent', mode, at: clock.now() });
   // A configured provider without a policy record cannot route. Failing startup
   // is louder than a deployment that silently has no authorized inference.
   const unauthorized = providerBuild.registrations
@@ -628,7 +631,18 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         check: async () => {
           const available = agents
             .list()
-            .agents.filter((agent) => agent.availability.available);
+            .agents.filter((agent) => {
+              if (!agent.availability.available) return false;
+              const engine = agent.engine;
+              if (engine === 'native') return true;
+              return (['cloud', 'private'] as const).some(
+                (mode) =>
+                  externalPolicy(engine, mode).allowed &&
+                  (['chat', 'work'] as const).some(
+                    (operation) => models.resolve(null, mode, { operation }).ok,
+                  ),
+              );
+            });
           return available.length > 0
             ? {
                 status: 'ok' as const,
@@ -637,7 +651,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
             : {
                 status: 'failed' as const,
                 detail:
-                  'No agent is available: verify a zero-cost model route or configure an injected external transport.',
+                  'No agent is available: verify a zero-cost model route and, for an external engine, configure its transport and owner grant.',
               };
         },
       },
@@ -718,6 +732,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const service = createApplicationService({
     ...infrastructure,
+    externalPolicy,
   });
 
   const registry = createRouteRegistry();
@@ -769,6 +784,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     router,
     server,
     modelRouter: models,
+    providerPolicy: policy,
     persistence: { driver: persistence.driver },
     start: async () => {
       const { url } = await server.listen();
