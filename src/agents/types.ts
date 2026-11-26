@@ -13,7 +13,6 @@ import type {
   Usage,
 } from '@coderax/contracts';
 import type { ProcessingOperation } from '../models/policy.js';
-import type { PendingAction, StepOutput } from '../domain.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 
 /**
@@ -24,33 +23,78 @@ import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
  * runner or a path to private data.
  */
 
-/**
- * One completed earlier turn. The engine builds these from the stored
- * conversation, so an agent sees a follow-up in context without owning storage.
- */
 export type AgentHistoryTurn = {
   role: 'user' | 'assistant';
   text: string;
 };
 
-/**
- * Capabilities the engine lends to an agent for one turn. They are supplied per
- * run, never held by the adapter: an external agent receives no context at all,
- * and Native receives only what this owner's task is allowed to use.
- */
+export type PlannedStep = {
+  id: string;
+  title: string;
+  dependsOn?: string[];
+  successCriteria?: string;
+};
+
+/** One tool call the engine dispatched, recorded before and after the effect. */
+export type ExecutedToolAction = {
+  stepId: string;
+  digest: string;
+  tool: string;
+  callId: string;
+  /**
+   * `awaiting_approval` means the gate stopped the call before it could have an
+   * effect, so the approved replay may execute exactly this call once.
+   * `dispatched` means the engine started the call and does not know whether the
+   * effect landed; it must never be replayed automatically.
+   */
+  state: 'awaiting_approval' | 'dispatched' | 'completed';
+  ok: boolean;
+  output: string;
+};
+
+export type AgentExecutionState = {
+  /** Observations per step, so a resumed step keeps what it already learned. */
+  observations: Record<string, string[]>;
+  executed: ExecutedToolAction[];
+};
+
+export type StepResult = { id: string; title: string; text: string };
+
 export type AgentContext = {
   taskId?: string | null;
   tools?: { runtime: ToolRuntime; gate: ApprovalGate };
   memory?: { list: () => Promise<string[]> };
   knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
-  /** Persisted plan and finished steps, so a resume does not re-plan or re-run. */
-  pendingAction?: PendingAction | null;
-  savePendingAction?: (action: PendingAction | null) => Promise<boolean>;
-  savePlan?: (steps: Array<{ id: string; title: string }>) => Promise<boolean>;
-  plannedSteps?: Array<{ id: string; title: string }>;
+  /** The exact action an owner decision applies to; kept until it is settled. */
+  pendingAction?: {
+    stepId: string;
+    json: string;
+    /** Execution slot bound to the approval; survives the suspension. */
+    callId?: string;
+    /** The exact decision the owner granted. */
+    requestId?: string;
+  } | null;
+  savePendingAction?: (action: {
+    stepId: string;
+    json: string;
+    callId?: string;
+    requestId?: string;
+  } | null) => Promise<boolean>;
+  /** Persists the whole plan (and its graph) before its first step runs. */
+  savePlan?: (steps: PlannedStep[]) => Promise<boolean>;
+  plannedSteps?: PlannedStep[];
   completedSteps?: string[];
+  completedResults?: StepResult[];
   priorText?: string;
-  priorOutputs?: StepOutput[];
+  /** Durable observations and dispatched actions restored on resume. */
+  executionState?: AgentExecutionState;
+  saveExecutionState?: (state: AgentExecutionState) => Promise<boolean>;
+  saveStepResult?: (result: StepResult) => Promise<boolean>;
+  /** True only when the selected model's evidence records native tool support. */
+  nativeTools?: boolean;
+  /** Hard ceilings; the composition root supplies them from configuration. */
+  maxActionsPerRun?: number;
+  maxRunMs?: number;
   /** Owner approval policy for tool actions that need a decision. */
   requireApproval?: boolean;
 };
@@ -84,6 +128,7 @@ export type AgentRunRequest = {
 export type AgentReportEvent =
   | { type: 'step.started'; stepId: string; title: string }
   | { type: 'step.completed'; stepId: string; title: string; output?: string }
+  | { type: 'step.blocked'; stepId: string; title: string; detail: string }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
@@ -106,8 +151,16 @@ export type AgentRunOutcome =
       usage?: Usage;
       /** The model that actually served the run, when routing replaced one. */
       model?: ModelRef;
+      /** Model requests this run issued, for the durable per-task ledger. */
+      requests?: number;
     }
-  | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
+  | {
+      ok: false;
+      code: EngineFailureCode;
+      detail: string;
+      retryable: boolean;
+      requests?: number;
+    };
 
 export type AgentAdapter = {
   agent: AgentId;

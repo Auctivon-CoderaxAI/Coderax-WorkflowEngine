@@ -2,7 +2,8 @@
  * The action protocol is a JSON object in the model's text. It is intentionally
  * provider-independent: it works with any chat-completions model, including one
  * that has no native function-calling support, and the engine validates every
- * field before dispatch.
+ * field before dispatch. It remains an explicitly supported mode, not a legacy
+ * fallback that can be silently skipped.
  */
 export type ModelAction =
   | { kind: 'tool'; tool: string; input: Record<string, unknown>; thought: string }
@@ -38,7 +39,9 @@ export function parseAction(raw: string): ModelAction {
 
   const final = action.final ?? action.answer;
   if (typeof final === 'string') {
-    return final.trim() ? { kind: 'final', text: final, thought } : { kind: 'invalid', reason: 'The final answer was empty.' };
+    return final.trim()
+      ? { kind: 'final', text: final, thought }
+      : { kind: 'invalid', reason: 'The final answer was empty.' };
   }
 
   const tool = action.tool ?? action.name;
@@ -48,4 +51,21 @@ export function parseAction(raw: string): ModelAction {
   }
 
   return { kind: 'invalid', reason: 'The object named neither a tool nor a final answer.' };
+}
+
+/**
+ * A native function call becomes the same validated action the JSON protocol
+ * produces, so authorization and validation have exactly one path.
+ */
+export function actionFromToolCall(
+  call: { name: string; arguments: Record<string, unknown> },
+): ModelAction {
+  const name = call.name.trim();
+  if (name.length === 0) return { kind: 'invalid', reason: 'The tool call named no tool.' };
+  return {
+    kind: 'tool',
+    tool: name.slice(0, 120),
+    input: objectOf(call.arguments) ?? {},
+    thought: 'native tool call',
+  };
 }

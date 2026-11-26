@@ -89,7 +89,7 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
     // One plan (with history) and three planned steps (with history).
     assert.equal(followUpPrompts.length, 4);
     for (const prompt of followUpPrompts) {
-      assert.ok(prompt.includes('Earlier in this conversation:'));
+      assert.ok(prompt.includes('Earlier in this conversation'));
       // The stored user turn and the stored assistant answer, in order.
       assert.ok(prompt.includes('Owner: First objective'));
       // The plan consumed answer-1; the stored answer begins at the first step.

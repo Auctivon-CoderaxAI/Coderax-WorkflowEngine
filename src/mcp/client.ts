@@ -1,7 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { z } from 'zod';
+import { createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+import { z, type ZodTypeAny } from 'zod';
+import type { ToolSource } from '@coderax/contracts';
 import type { Tool } from '../tools/types.js';
-import { bounded, failure, success } from '../tools/types.js';
+import { authorizeUrl } from '../security/network.js';
+import { bounded, failure, parametersToJsonSchema, success } from '../tools/types.js';
 
 /**
  * A minimal MCP client. Only explicitly configured servers are contacted; a tool
@@ -10,29 +14,36 @@ import { bounded, failure, success } from '../tools/types.js';
  * `command.execute`, and a browser/computer-use server additionally requires
  * `browser.use` with per-invocation approval. Server text is bounded and never
  * trusted as instructions.
+ *
+ * Discovery preserves each server's input schema; without it a model cannot know
+ * the required fields, and the runtime would accept an argument object the server
+ * rejects. Names are derived to fit the shared 120-character tool-name limit.
  */
 
-export type McpServerConfig =
-  | {
-      name: string;
-      transport: 'http';
-      url: string;
-      /** Header name -> environment variable name; the value is never in config. */
-      headersEnv?: Record<string, string>;
-    }
-  | {
-      name: string;
-      transport: 'stdio';
-      command: string;
-      args?: string[];
-      /** Environment variable name -> value from the parent environment. */
-      envFrom?: string[];
-    };
+export type McpServerConfig = {
+  name: string;
+  transport: 'http' | 'stdio';
+  url?: string;
+  /** Header name -> environment variable name; the value is never in config. */
+  headersEnv?: Record<string, string>;
+  command?: string;
+  args?: string[];
+  /** Environment variable name -> value from the parent environment. */
+  envFrom?: string[];
+  /** Where a plugin-declared server came from. */
+  source?: ToolSource;
+};
+
+export type McpToolListing = {
+  name: string;
+  description: string;
+  inputSchema?: Record<string, unknown>;
+};
 
 export type McpConnection = {
   name: string;
   transport: 'http' | 'stdio';
-  listTools: () => Promise<Array<{ name: string; description: string }>>;
+  listTools: () => Promise<McpToolListing[]>;
   callTool: (name: string, args: unknown) => Promise<{ ok: boolean; text: string }>;
   close: () => Promise<void>;
 };
@@ -46,9 +57,51 @@ type JsonRpcResponse = {
 
 const PROTOCOL_VERSION = '2025-06-18';
 const REQUEST_TIMEOUT_MS = 20_000;
+const MAX_DISCOVERY_PAGES = 10;
+const MAX_TOOL_NAME = 120;
+const MAX_HTTP_RESPONSE_BYTES = 2_000_000;
+
+/** Reads a response body through a hard byte ceiling before decoding it. */
+async function boundedResponseText(response: Response): Promise<string> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_HTTP_RESPONSE_BYTES) {
+    throw new Error('The MCP server response is too large.');
+  }
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_HTTP_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error('The MCP server response is too large.');
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 function sanitizeName(value: string): string {
   return value.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 60);
+}
+
+/**
+ * `mcp__<server>__<tool>` can exceed the contract limit when both parts are
+ * long. Truncation plus a short digest keeps the name unique and inside the
+ * limit, so the `/v1/tools` response still validates.
+ */
+function namespacedName(server: string, tool: string): string {
+  const base = `mcp__${sanitizeName(server)}__${sanitizeName(tool)}`;
+  if (base.length <= MAX_TOOL_NAME) return base;
+  const digest = createHash('sha256').update(base).digest('hex').slice(0, 8);
+  return `${base.slice(0, MAX_TOOL_NAME - digest.length - 1)}_${digest}`;
 }
 
 function isBrowserServer(name: string): boolean {
@@ -89,8 +142,6 @@ function createRpc(input: {
     pending.delete(message.id);
     clearTimeout(entry.timer);
     if (message.error) {
-      // An MCP error message can echo a request body or a credential; keep the
-      // boundary to a stable, user-safe detail.
       entry.reject(new Error('The MCP server returned an error.'));
     } else {
       entry.resolve(message.result);
@@ -131,7 +182,23 @@ function createRpc(input: {
   };
 }
 
-async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' }>) {
+async function connectHttp(config: McpServerConfig) {
+  if (!config.url) throw new Error('An MCP HTTP server needs a URL.');
+  let parsed: URL;
+  try {
+    parsed = new URL(config.url);
+  } catch {
+    throw new Error('The MCP server URL is not valid.');
+  }
+  // A header credential may travel only over TLS, except to loopback. The same
+  // policy that protects `http.fetch` also rejects a URL that resolves to a
+  // private network or a cloud metadata service.
+  const authorized = await authorizeUrl(config.url, {
+    allowedHosts: [parsed.hostname],
+    allowInsecureLoopback: true,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+  });
+  if (!authorized.ok) throw new Error('The MCP server URL is not a permitted destination.');
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
@@ -145,7 +212,7 @@ async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(config.url, {
+      const response = await fetch(config.url as string, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
@@ -154,7 +221,7 @@ async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' 
       });
       if (!response.ok) throw new Error('The MCP server rejected the request.');
       const type = response.headers.get('content-type') ?? '';
-      const text = await response.text();
+      const text = await boundedResponseText(response);
       if (type.includes('text/event-stream')) {
         const lines = text
           .split(/\r?\n/)
@@ -171,8 +238,6 @@ async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' 
   }
 
   async function request(method: string, params: unknown): Promise<unknown> {
-    // HTTP transport is request/response, so the id is reserved here and the
-    // matching frame is read directly instead of waiting on a stream.
     const body = { jsonrpc: '2.0', id: 1, method, params };
     const message = await post(body);
     if (!message) return null;
@@ -190,13 +255,13 @@ async function connectHttp(config: Extract<McpServerConfig, { transport: 'http' 
   };
 }
 
-function connectStdio(config: Extract<McpServerConfig, { transport: 'stdio' }>) {
+function connectStdio(config: McpServerConfig) {
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '' };
   for (const name of config.envFrom ?? []) {
     const value = process.env[name];
     if (value) env[name] = value;
   }
-  const child: ChildProcessWithoutNullStreams = spawn(config.command, config.args ?? [], {
+  const child: ChildProcessWithoutNullStreams = spawn(config.command ?? '', config.args ?? [], {
     shell: false,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -211,8 +276,11 @@ function connectStdio(config: Extract<McpServerConfig, { transport: 'stdio' }>) 
   });
 
   let buffer = '';
+  // One decoder for the whole stream: decoding each chunk independently corrupts
+  // a multibyte character that spans a chunk boundary.
+  const decoder = new StringDecoder('utf8');
   child.stdout.on('data', (chunk: Buffer) => {
-    buffer += chunk.toString('utf8');
+    buffer += decoder.write(chunk);
     let newline = buffer.indexOf('\n');
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
@@ -253,38 +321,80 @@ export async function connectMcpServer(config: McpServerConfig): Promise<McpConn
   const channel = config.transport === 'http' ? await connectHttp(config) : connectStdio(config);
   const name = sanitizeName(config.name);
 
-  await channel.request('initialize', {
-    protocolVersion: PROTOCOL_VERSION,
-    capabilities: {},
-    clientInfo: { name: 'coderax-workflow-engine', version: '0.1.0' },
-  });
-  await channel.notify('notifications/initialized', {});
+  try {
+    await channel.request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'coderax-workflow-engine', version: '0.1.0' },
+    });
+    await channel.notify('notifications/initialized', {});
 
-  const tools = await channel.request('tools/list', {});
-  const listed =
-    typeof tools === 'object' && tools !== null && Array.isArray((tools as { tools?: unknown }).tools)
-      ? (tools as { tools: Array<{ name?: unknown; description?: unknown }> }).tools
-      : [];
+    // Discovery follows the server's cursor page by page, bounded so a repeating
+    // cursor cannot stall startup.
+    const listed: McpToolListing[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_DISCOVERY_PAGES; page += 1) {
+      const result: unknown = await channel.request('tools/list', cursor ? { cursor } : {});
+      const body: { tools?: unknown; nextCursor?: unknown } =
+        typeof result === 'object' && result !== null
+          ? (result as { tools?: unknown; nextCursor?: unknown })
+          : {};
+      if (Array.isArray(body.tools)) {
+        for (const tool of body.tools) {
+          if (typeof tool !== 'object' || tool === null) continue;
+          const typed = tool as { name?: unknown; description?: unknown; inputSchema?: unknown };
+          if (typeof typed.name !== 'string') continue;
+          listed.push({
+            name: typed.name,
+            description: bounded(
+              typeof typed.description === 'string' ? typed.description : 'MCP tool',
+              600,
+            ),
+            ...(typeof typed.inputSchema === 'object' && typed.inputSchema !== null
+              ? { inputSchema: typed.inputSchema as Record<string, unknown> }
+              : {}),
+          });
+        }
+      }
+      const next: unknown = body.nextCursor;
+      if (typeof next !== 'string' || next.length === 0 || next === cursor) break;
+      cursor = next;
+    }
 
-  return {
-    name,
-    transport: config.transport,
-    listTools: async () =>
-      listed
-        .filter((tool): tool is { name: string; description?: unknown } => typeof tool.name === 'string')
-        .map((tool) => ({
-          name: tool.name,
-          description: bounded(
-            typeof tool.description === 'string' ? tool.description : 'MCP tool',
-            600,
-          ),
-        })),
-    callTool: async (toolName, args) => {
-      const result = await channel.request('tools/call', { name: toolName, arguments: args ?? {} });
-      return textFromResult(result);
-    },
-    close: channel.close,
-  };
+    return {
+      name,
+      transport: config.transport,
+      listTools: async () => listed,
+      callTool: async (toolName, args) => {
+        const result = await channel.request('tools/call', { name: toolName, arguments: args ?? {} });
+        return textFromResult(result);
+      },
+      close: channel.close,
+    };
+  } catch (error) {
+    // The child or socket exists even though attachment failed. Closing it here
+    // is what keeps a rejected server from surviving application shutdown.
+    await channel.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+/** A conservative validation schema derived from a server-provided inputSchema. */
+export function schemaFromJsonSchema(input: Record<string, unknown> | undefined): ZodTypeAny {
+  if (!input) return z.record(z.unknown());
+  const properties =
+    typeof input.properties === 'object' && input.properties !== null
+      ? (input.properties as Record<string, unknown>)
+      : null;
+  if (!properties) return z.record(z.unknown());
+  const required = Array.isArray(input.required)
+    ? input.required.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  const shape: Record<string, ZodTypeAny> = {};
+  for (const name of required) shape[name] = z.unknown();
+  // Unknown keys are passed through: the MCP server is the authority on its own
+  // schema and validates again, while required fields are enforced here.
+  return z.object(shape).passthrough();
 }
 
 /** Exposes one MCP server's tools to the runtime under a namespaced name. */
@@ -292,23 +402,31 @@ export function createMcpTools(input: {
   connection: McpConnection;
   /** Bounded so a hostile server cannot flood the prompt. */
   maxTools?: number;
+  source?: ToolSource;
 }): Promise<Tool[]> {
   return input.connection.listTools().then((listed) =>
     listed.slice(0, input.maxTools ?? 40).map((listedTool) => {
       const browser = isBrowserServer(input.connection.name) || isBrowserServer(listedTool.name);
-      const name = `mcp__${sanitizeName(input.connection.name)}__${sanitizeName(listedTool.name)}`;
+      const name = namespacedName(input.connection.name, listedTool.name);
       return {
         name,
         description: bounded(listedTool.description, 600),
-        source: 'mcp' as const,
+        source: input.source ?? 'mcp',
         scopes: browser
           ? ['browser.use']
           : input.connection.transport === 'stdio'
             ? ['command.execute']
             : ['network.access'],
         approval: browser ? 'always' : 'once',
-        parameters: { input: 'object' },
-        schema: z.record(z.unknown()),
+        parameters: listedTool.inputSchema
+          ? Object.fromEntries(
+              Object.keys(
+                (listedTool.inputSchema.properties as Record<string, unknown> | undefined) ?? {},
+              ).map((key) => [key, 'unknown']),
+            )
+          : { input: 'object' },
+        ...(listedTool.inputSchema ? { inputSchema: listedTool.inputSchema } : {}),
+        schema: schemaFromJsonSchema(listedTool.inputSchema),
         resource: () => `mcp:${input.connection.name}/${listedTool.name}`,
         run: async (args) => {
           const result = await input.connection.callTool(listedTool.name, args);
@@ -328,7 +446,7 @@ export type McpAttachment = {
 };
 
 /**
- * Connects every configured server. One unavailable server is reported and does
+ * Connects every approved server. One unavailable server is reported and does
  * not stop the engine: it simply contributes no tools.
  */
 export async function attachMcpServers(configs: McpServerConfig[]): Promise<McpAttachment> {
@@ -340,7 +458,7 @@ export async function attachMcpServers(configs: McpServerConfig[]): Promise<McpA
     try {
       const connection = await connectMcpServer(config);
       connections.push(connection);
-      tools.push(...(await createMcpTools({ connection })));
+      tools.push(...(await createMcpTools({ connection, ...(config.source ? { source: config.source } : {}) })));
     } catch {
       failures.push({ name: sanitizeName(config.name), detail: 'The MCP server could not be attached.' });
     }
@@ -355,3 +473,5 @@ export async function attachMcpServers(configs: McpServerConfig[]): Promise<McpA
     },
   };
 }
+
+export { parametersToJsonSchema };

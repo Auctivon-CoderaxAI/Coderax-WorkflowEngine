@@ -58,8 +58,10 @@ import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
+import { createHash } from 'node:crypto';
 import { estimateTokens } from '../models/verify.js';
 import { inferRoutingMode } from '../models/router.js';
+import { createReceipt } from '../execution/receipt.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -196,18 +198,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     requireApproval: boolean;
   }): ApprovalGate {
     return {
-      ensure: async ({ scope, resource, description, tool, binding, consume }) => {
+      ensure: async ({ scope, resource, description, tool, binding, callId, requestId, policy, consume }) => {
         if (input.taskId === null) return { decision: 'denied' as const };
         if (!input.requireApproval) return { decision: 'denied' };
         const prior = await deps.permissions.lookup({
-          ownerId: input.ownerId, taskId: input.taskId, scope, resource, binding, consume,
+          ownerId: input.ownerId,
+          taskId: input.taskId,
+          scope,
+          resource,
+          binding,
+          callId,
+          ...(requestId ? { requestId } : {}),
+          consume,
         });
         if (prior) return prior;
         const created = await deps.permissions.request({
           ownerId: input.ownerId,
           taskId: input.taskId,
           agent: 'coderax',
+          callId,
           binding,
+          policy,
           scope,
           resource,
           description: `${tool}: ${description}`.slice(0, 2000),
@@ -228,6 +239,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     mode: DataMode;
     task?: TaskRecord;
   }): Promise<AgentContext> {
+    const routedModel = input.task?.model ?? null;
     return {
       taskId: input.task?.taskId ?? null,
       tools: {
@@ -250,10 +262,36 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
       ...(input.task
         ? {
-            plannedSteps: input.task.steps.map((step) => ({ id: step.id, title: step.title })),
+            plannedSteps: input.task.checkpoint.plan ?? input.task.steps.map((step) => ({
+              id: step.id,
+              title: step.title,
+              dependsOn: [],
+            })),
             completedSteps: [...input.task.checkpoint.completedSteps],
-            ...(input.task.checkpoint.outputs ? { priorOutputs: input.task.checkpoint.outputs } : {}),
+            completedResults: input.task.checkpoint.stepResults ?? (input.task.checkpoint.outputs ?? []).map((entry) => ({
+              id: entry.stepId,
+              title: entry.stepId,
+              text: entry.text,
+            })),
+            ...(input.task.checkpoint.executionState
+              ? { executionState: input.task.checkpoint.executionState }
+              : {}),
             priorText: input.task.checkpoint.text,
+            // Native function calling is enabled only when the router reports
+            // that the routed model declares tool support; otherwise the JSON
+            // action protocol is used. The model is never trusted to decide this.
+            nativeTools:
+              deps.config.tools.nativeFunctionCalling === 'auto' && routedModel !== null
+                ? (deps.models
+                    .list()
+                    .models.find(
+                      (entry) =>
+                        entry.ref.providerId === routedModel?.providerId &&
+                        entry.ref.modelId === routedModel?.modelId,
+                    )?.toolCalling ?? false)
+                : false,
+            maxActionsPerRun: deps.config.engines.native.maxActionsPerRun,
+            maxRunMs: deps.config.engines.native.maxRunMs,
             requireApproval: input.task.requireApproval,
           }
         : {}),
@@ -434,10 +472,45 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               },
             };
 
+    // A terminal receipt is built from the engine's own checkpoint and tool
+    // ledger, never from the agent's summary.
+    const effective = checkpoint ?? task.checkpoint;
+    const plan = effective.plan ?? task.steps.map((step) => ({
+      id: step.id,
+      title: step.title,
+      dependsOn: [],
+    }));
+    const toolCalls = (effective.executionState?.executed ?? [])
+      .filter((entry) => entry.state === 'completed')
+      .slice(-256)
+      .map((entry) => ({
+        callId: entry.callId,
+        tool: entry.tool,
+        ok: entry.ok,
+        digest: entry.digest,
+      }));
+    const receipt = createReceipt({
+      receiptId: deps.ids.receipt(),
+      task,
+      state: outcome.kind,
+      startedAt: task.createdAt,
+      finishedAt: now,
+      steps: plan.map((step) => {
+        const completed = effective.completedSteps.includes(step.id);
+        return { id: step.id, title: step.title, state: completed ? 'completed' as const : 'failed' as const };
+      }),
+      toolCalls,
+      planDigest: createHash('sha256').update(JSON.stringify(plan)).digest('hex').slice(0, 32),
+      ...(outcome.kind === 'completed' && outcome.usage ? { usage: outcome.usage } : {}),
+      ...(outcome.kind === 'completed' && outcome.requests !== undefined
+        ? { requests: outcome.requests }
+        : {}),
+    });
+
     const applied = await deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
-      patch: checkpoint ? { ...patch, checkpoint } : patch,
+      patch: checkpoint ? { ...patch, checkpoint, receipt } : { ...patch, receipt },
     });
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
@@ -575,6 +648,29 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const completed: string[] = [...started.task.checkpoint.completedSteps];
     const outputs = [...(started.task.checkpoint.outputs ?? (started.task.checkpoint.text
       ? [{ stepId: completed.join(', '), text: started.task.checkpoint.text }] : []))];
+    let plan = started.task.checkpoint.plan ?? steps.map((step) => ({
+      id: step.id,
+      title: step.title,
+      dependsOn: [],
+    }));
+    let stepResults = [...(started.task.checkpoint.stepResults ?? [])];
+    let executionState = started.task.checkpoint.executionState ?? {
+      observations: {},
+      executed: [],
+    };
+    const checkpointNow = (): TaskRecord['checkpoint'] => ({
+      completedSteps: [...completed],
+      text: visible,
+      outputs: [...outputs],
+      plan,
+      stepResults: [...stepResults],
+      executionState: {
+        observations: Object.fromEntries(
+          Object.entries(executionState.observations).map(([key, lines]) => [key, [...lines]]),
+        ),
+        executed: executionState.executed.map((entry) => ({ ...entry })),
+      },
+    });
     let reports = Promise.resolve();
     const saveReport = (patch: TaskPatch): void => {
       reports = reports.then(async () => {
@@ -605,10 +701,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (existing) existing.state = 'completed';
         completed.push(event.stepId);
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        if (event.output !== undefined) outputs.push({ stepId: event.stepId, text: redactContent(event.output) });
+        if (event.output !== undefined) {
+          outputs.push({ stepId: event.stepId, text: redactContent(event.output) });
+          const result = { id: event.stepId, title: event.title, text: redactContent(event.output) };
+          const position = stepResults.findIndex((entry) => entry.id === event.stepId);
+          if (position >= 0) stepResults[position] = result;
+          else stepResults.push(result);
+          stepResults = stepResults.slice(-64);
+        }
         saveReport({
           steps: structuredClone(steps),
-          checkpoint: { completedSteps: [...completed], text: visible, outputs: [...outputs] },
+          checkpoint: checkpointNow(),
           updatedAt: deps.clock.iso(),
         });
         return;
@@ -651,11 +754,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
        * authority that can approve a resource, and the adapter must have created
        * that request before reporting it.
        */
-      publish(started.task, 'approval.required', {
-        requestId: event.requestId,
-        tool: event.tool,
-        description: redactText(event.description, [], 2000),
-      });
+      if (event.type === 'approval.required') {
+        publish(started.task, 'approval.required', {
+          requestId: event.requestId,
+          tool: event.tool,
+          description: redactText(event.description, [], 2000),
+        });
+      }
     };
 
     const history = task.agent === 'coderax' ? await historyFor(task.conversationId, task.objective) : [];
@@ -687,15 +792,46 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
                 context: {
                   ...await nativeContext({ ownerId: task.ownerId, mode: task.mode, task: started.task }),
                   pendingAction: started.task.pendingAction ?? null,
-                  savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
-                    taskId, token, patch: { pendingAction: pendingAction?.observations
-                      ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) } : pendingAction },
-                  })).applied,
-                  savePlan: async (plan) => {
-                    const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
-                    const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
+                  savePendingAction: async (pendingAction) =>
+                    (await deps.tasks.updateFenced({ taskId, token, patch: { pendingAction } })).applied,
+                  savePlan: async (nextPlan) => {
+                    plan = nextPlan.map((step) => ({
+                      id: step.id,
+                      title: step.title,
+                      dependsOn: [...(step.dependsOn ?? [])],
+                      ...(step.successCriteria ? { successCriteria: step.successCriteria } : {}),
+                    }));
+                    const planned = plan.map((step) => ({ id: step.id, title: step.title, state: 'queued' as const }));
+                    const saved = await deps.tasks.updateFenced({
+                      taskId,
+                      token,
+                      patch: { steps: planned, checkpoint: checkpointNow() },
+                    });
                     if (saved.applied) steps.splice(0, steps.length, ...planned);
                     return saved.applied;
+                  },
+                  saveExecutionState: async (state) => {
+                    executionState = {
+                      observations: Object.fromEntries(
+                        Object.entries(state.observations).map(([key, lines]) => [key, [...lines]]),
+                      ),
+                      executed: state.executed.map((entry) => ({ ...entry })),
+                    };
+                    return (await deps.tasks.updateFenced({
+                      taskId,
+                      token,
+                      patch: { checkpoint: checkpointNow() },
+                    })).applied;
+                  },
+                  saveStepResult: async (result) => {
+                    // The step.completed report already carries this result into
+                    // the checkpoint it writes, so a second write here would race
+                    // that write without adding durability.
+                    const position = stepResults.findIndex((entry) => entry.id === result.id);
+                    if (position >= 0) stepResults[position] = { ...result };
+                    else stepResults.push({ ...result });
+                    stepResults = stepResults.slice(-64);
+                    return true;
                   },
                 },
               }
@@ -714,7 +850,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           await settle(started.task, token,
             outcome.kind === 'completed' ? { ...outcome, summary: redactContent(outcome.summary) }
               : outcome.kind === 'suspended' && controller.signal.aborted ? { kind: 'cancelled' } : outcome,
-            { completedSteps: completed, text: safeText, outputs },
+            checkpointNow(),
           );
         },
       });

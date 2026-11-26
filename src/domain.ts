@@ -18,6 +18,10 @@ export type TaskStep = {
 export type PendingAction = {
   stepId: string;
   json: string;
+  /** Execution slot bound to the owner's decision; survives suspension. */
+  callId?: string;
+  /** The exact decision this action was approved for. */
+  requestId?: string;
   observations?: string[];
   priorActions?: number;
   invalidAnswers?: number;
@@ -25,12 +29,69 @@ export type PendingAction = {
 
 export type StepOutput = { stepId: string; text: string };
 
+export type TaskPlanStep = {
+  id: string;
+  title: string;
+  dependsOn: string[];
+  successCriteria?: string;
+};
+
+export type TaskExecutedAction = {
+  stepId: string;
+  digest: string;
+  tool: string;
+  callId: string;
+  /**
+   * `awaiting_approval` had no effect and may be replayed once approved.
+   * `dispatched` means the effect is unknown and must not be replayed.
+   */
+  state: 'awaiting_approval' | 'dispatched' | 'completed';
+  ok: boolean;
+  output: string;
+};
+
 export type TaskCheckpoint = {
   /** Steps whose work is durably complete; a resume skips exactly these. */
   completedSteps: string[];
   outputs?: StepOutput[];
   /** Partial assistant text already emitted, replayed on resume. */
   text: string;
+  /**
+   * The full plan is written before the first step. A resume must finish the
+   * work it promised, not only the part whose steps already started.
+   */
+  plan?: TaskPlanStep[] | null;
+  stepResults?: Array<{ id: string; title: string; text: string }>;
+  /**
+   * Durable observations and every tool call the engine dispatched. A resumed
+   * generation uses this ledger instead of the model's recollection.
+   */
+  executionState?: {
+    observations: Record<string, string[]>;
+    executed: TaskExecutedAction[];
+  };
+};
+
+/**
+ * Internal terminal evidence. It is persisted with the task but is not part of
+ * the public contract until the unified API surface adopts it.
+ */
+export type ExecutionReceipt = {
+  receiptId: string;
+  taskId: string;
+  generation: number;
+  agent: AgentId;
+  engine: EngineId;
+  mode: DataMode;
+  model?: ModelRef;
+  state: 'completed' | 'failed' | 'cancelled';
+  startedAt: IsoDateTime;
+  finishedAt: IsoDateTime;
+  usage?: Usage;
+  requests?: number;
+  steps: Array<{ id: string; title: string; state: TaskState }>;
+  toolCalls: Array<{ callId: string; tool: string; ok: boolean; digest: string }>;
+  planDigest: string;
 };
 
 export type TaskResult = {
@@ -71,6 +132,8 @@ export type TaskRecord = {
   steps: TaskStep[];
   pendingAction?: PendingAction | null;
   checkpoint: TaskCheckpoint;
+  /** Terminal evidence of what the engine observed, never model narrative. */
+  receipt?: ExecutionReceipt | null;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
   leaseExpiresAt: IsoDateTime | null;
@@ -89,6 +152,7 @@ export type TaskPatch = Partial<
     | 'steps'
     | 'pendingAction'
     | 'checkpoint'
+    | 'receipt'
     | 'updatedAt'
     | 'leaseExpiresAt'
     | 'cancelRequested'

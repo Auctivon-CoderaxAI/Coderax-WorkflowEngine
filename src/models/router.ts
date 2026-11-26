@@ -1414,6 +1414,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       if (timer !== null) clearInterval(timer);
       timer = null;
     },
+    supportsNativeTools: true,
     complete: async (request) => {
       const estimated = estimateRequest(request);
       const planned = plan({

@@ -58,7 +58,20 @@ conditional `findOneAndUpdate` succeeds, so concurrent replicas cannot both take
 the last slot; the updated document is the proof of admission, not a read-then-write
 check.
 
-Settlement policy is asymmetric on purpose:
+Budget reservations are durable. `src/models/budget.ts` reserves one request and
+the estimated input tokens before a call is dispatched, and
+`src/persistence/budgets.ts` implements the window atomically — a conditional
+`findOneAndUpdate` with `$inc`, so two replicas racing for the last slot cannot
+both win. A settlement replaces the reservation with the usage the provider reported. A
+call that failed after dispatch keeps its reservation as a conservative input
+charge, because a timeout or 5xx is not proof that the provider spent nothing;
+only an attempt that was never dispatched is released. Input accounting includes
+the system prompt, the user prompt and the serialized tool catalogue
+(`src/models/tokens.ts`); a provider that reports no usage is still charged the
+estimate, and a streamed completion folds its usage frames before settlement.
+The owner's daily request/token window is durable in MongoDB and therefore shared
+across replicas; per-provider minute/day counters remain process-local and are a
+discovery aid, not the spend ceiling.
 
 - a call that **may have reached the provider** is charged the reserved amount
   (`release(id, { dispatched: true })`), because a timeout, a broken stream or a
@@ -88,25 +101,42 @@ guarantees are exercised against a driver fake, not a live replica set.
 1. **Plan.** A model-assisted plan is requested when `maxSteps > 1`; a malformed
    or failed plan falls back to the deterministic planner. On resume the
    persisted plan is reused, so step ids stay stable.
-2. **Act.** The model returns exactly one JSON object:
-   `{"tool":"fs.read","input":{...}}` or `{"thought":"…","final":"…"}`. The
-   protocol is provider-independent and works on models without native function
-   calling. A plain-prose answer is accepted once as a final answer; a malformed
-   JSON object gets one repair attempt, then the run fails with `protocol_error`.
+2. **Act.** When the model's evidence records tool support and the gateway can
+   send tool definitions, Native uses native function calling. It verifies that
+   support on the wire: a provider that rejects `tools` is answered through the
+   JSON action protocol, which is an explicitly supported compatibility mode.
+   Without native tools the model returns exactly one JSON object:
+   `{"tool":"fs.read","input":{...}}` or `{"thought":"…","final":"…"}`. A
+   plain-prose answer is accepted once; a malformed JSON object gets one repair
+   attempt, then the run fails with `protocol_error`.
 3. **Observe.** Every tool result or failure is appended to the step's bounded
    observation list.
 4. **Reflect and recover.** A failed tool is shown to the model so it can choose
    another action. A step that exhausts its four actions is summarised from what
    actually happened, never given a fabricated result.
 
-Step and action counts are bounded, provider usage is accumulated across plan and
-steps, and cancellation is checked before every model or tool call.
+Plans are dependency graphs, not ordered titles: `dependsOn` is validated for
+unknown ids, duplicates and cycles, and a step whose prerequisites have not
+completed is blocked rather than run early. The whole graph is persisted before
+the first step, and completed results are fed back into later prompts. The engine
+verifies completion against that durable plan; a run that skipped a planned step
+fails with `verification_failed` instead of trusting the model's summary.
+
+Step, action, wall-clock and per-task token/request ceilings are all bounded;
+an identical repeated action is refused rather than looped. Every dispatched tool
+call is recorded before the effect and settled after it, so a resume never
+replays an unknown effect. Provider usage is accumulated across plan and steps,
+and cancellation is checked before every model or tool call.
 
 ## Tools and permissions
 
 `src/tools/runtime.ts` is the single execution path for built-in, MCP and plugin
 tools. It validates input against the tool's schema, then asks the approval gate
-for every declared scope against the **exact resource**.
+for every declared scope against the **exact resource**. An approval is bound to
+the execution slot (`callId`), the validated arguments and the policy; it is
+single-use, so it cannot be replayed or widened to another resource. The Native
+system prompt frames tool output, retrieved text and history as untrusted data;
+none of it can grant a permission, add a tool or change the plan.
 
 Built-ins:
 
@@ -114,13 +144,17 @@ Built-ins:
 | --- | --- | --- | --- |
 | `fs.read`, `fs.list`, `fs.search` | `workspace.read` | never | symlink-resolved workspace confinement |
 | `fs.write` | `workspace.write` | once | bounded content, sha256 receipt |
-| `shell.run` | `command.execute` | always | disabled by default; allow-listed commands, no shell |
-| `http.fetch` | `network.access` | once | disabled by default; allow-listed hosts, no IP literals or localhost |
+| `shell.run` | `command.execute` | always | disabled by default; allow-listed bare commands, argument validation, no shell |
+| `http.fetch` | `network.access` | once | disabled by default; HTTPS, allow-listed hosts, pinned addresses, no redirects followed implicitly |
 | `memory.search` / `memory.write` | `memory.read` / `memory.write` | never / once | owner + data-mode partition |
 | `knowledge.search` | `knowledge.read` | never | owner + data-mode partition |
 
 `src/tools/paths.ts` rejects absolute paths, lexical escapes and symlinks that
-resolve outside the workspace.
+resolve outside the workspace. `src/security/shell.ts` rejects dispatch-only
+commands, code-runner flags and host/parent paths before anything starts, and
+`src/security/network.ts` resolves and pins public addresses, blocks loopback and
+private ranges, and re-authorizes every redirect hop. Plaintext loopback is a
+local-development option and is off by default.
 
 ### Durable approval suspension
 
@@ -137,8 +171,9 @@ than auto-approved; a chat turn with no task is likewise denied.
 
 `src/knowledge/store.ts` chunks documents (paragraph-aware, 1200 characters with
 150-character overlap, 500 chunks maximum) and partitions them by owner and data
-mode. When `knowledge.embeddingModel` is set and a zero-cost inference endpoint
-is configured, chunks and queries are embedded through an OpenAI-compatible
+mode. When `knowledge.embeddingModel` is set, `knowledge.embeddingVerifiedFree`
+is explicitly recorded and a zero-cost HTTPS inference endpoint is configured,
+chunks and queries are embedded through an OpenAI-compatible
 `/embeddings` endpoint and ranked by cosine similarity. Without embeddings,
 ranking is lexical (TF-IDF with a phrase bonus) and the response says
 `embedding: "lexical"` so a caller cannot mistake it for vector search.
@@ -156,9 +191,31 @@ computer-use server requires `browser.use` with per-invocation approval. One
 unavailable server is reported in health and contributes no tools; it does not
 stop the engine. Server text is bounded and never treated as instructions.
 
-A browser/computer-use agent is therefore attachable through a configured MCP
-server. No browser server is configured in this repository, so cloud browser
-automation is **not live-verified**.
+Only owner-configured servers are attached. stdio is opt-in (`mcp.allowStdio`),
+plugin-contributed servers execute only when named in `mcp.approvedServers`, and
+a server destination is checked against the same SSRF policy as `http.fetch`;
+responses are size-bounded. A browser/computer-use agent is therefore attachable
+through a configured MCP server. No browser server is configured in this
+repository, so cloud browser automation is **not live-verified**.
+
+## Plugins
+
+`src/plugins/manifest.ts` loads data-only `plugin.json` manifests from an
+opt-in directory. A manifest may declare a name, version, description and MCP
+servers; it cannot load code or add a tool implementation. Plugin MCP servers
+may forward only `CODERAX_MCP_*` environment variables and are not approved by
+being installed.
+
+## Execution receipts
+
+A terminal task persists an internal `ExecutionReceipt` built from the engine's
+plan, completed steps and dispatched tool ledger, never from model text. It
+records the generation, model, terminal state, usage, request count, per-step
+state and a digest of the plan; tool arguments are represented by a digest. The
+receipt is **not** exposed by the public `1.1.0` contract: it remains stored with
+the task record until the unified-contract PR adopts the schema, operation
+identifiers, OpenAPI surface and SDK packaging. This branch does not define a
+competing 1.2.0 contract.
 
 ## External agents
 
@@ -174,11 +231,12 @@ transport is supplied.
 
 ## Remaining gaps
 
-- No plugin manifest loader yet; `GET /v1/tools` lists built-ins and MCP tools.
-- No multi-agent workflow DAG with per-step permission scopes. Native runs one
-  plan; delegation between agents is not implemented.
-- Events and the routing quota ledger are process-local. A restart loses the
-  minute/day counters, and cross-replica quota accounting is not shared.
-- OpenCode and MCP transports are tested against scripted servers, not a live
-  external deployment.
-- No schedules, cloud browser server or live MongoDB verification in this change.
+- No bounded multi-agent delegation. Native executes one dependency-aware plan;
+  an agent cannot spawn another agent with its own task and permission scope.
+- Per-provider minute/day counters in the router are process-local; the durable
+  owner budget is the cross-replica spend ceiling, not a distributed provider quota.
+- Schedules, live cloud browser, multimodal transport and a FreeBuff transport
+  remain unimplemented or injection-only.
+- OpenCode, MCP and MongoDB paths are tested against scripted/fake servers, not a
+  live external deployment.
+- No schedules, cloud browser server or multimodal model transport in this change.

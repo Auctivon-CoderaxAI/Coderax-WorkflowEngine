@@ -28,6 +28,7 @@ export type ToolContext = {
 export type ToolFailureCode =
   | 'permission_required'
   | 'approval_required'
+  | 'approval_unavailable'
   | 'not_found'
   | 'validation_failed'
   | 'tool_failed'
@@ -37,6 +38,13 @@ export type ToolResult =
   | { ok: true; output: string }
   | { ok: false; code: ToolFailureCode; detail: string };
 
+export type ToolSchema = {
+  name: string;
+  description: string;
+  /** JSON Schema for native function calling and MCP passthrough. */
+  parameters: Record<string, unknown>;
+};
+
 export type Tool = {
   name: string;
   description: string;
@@ -44,6 +52,8 @@ export type Tool = {
   scopes: PermissionScope[];
   approval: 'never' | 'once' | 'always';
   parameters: Record<string, string>;
+  /** Server-provided JSON Schema, when the source has one (MCP, plugin). */
+  inputSchema?: Record<string, unknown>;
   schema: ZodTypeAny;
   /** Exact resource named to the owner; never derived from a grant. */
   resource: (input: unknown, context: ToolContext) => string;
@@ -59,6 +69,12 @@ export type ApprovalGate = {
     description: string;
     tool: string;
     binding: string;
+    /** The one execution slot this decision authorizes. */
+    callId: string;
+    /** A resumed call names the decision it was suspended on. */
+    requestId?: string;
+    /** `always` and `once` both consume one owner decision per invocation. */
+    policy: 'once' | 'always';
     consume: boolean;
   }) => Promise<{ decision: ApprovalDecision; requestId?: string }>;
 };
@@ -73,11 +89,16 @@ export type ToolCallOutcome = {
 export type ToolRuntime = {
   list: () => ToolDescriptor[];
   get: (name: string) => Tool | null;
+  /** Native function definitions derived from the tool's own schema. */
+  schemas: () => ToolSchema[];
   call: (input: {
     name: string;
     arguments: unknown;
     context: ToolContext;
     gate: ApprovalGate;
+    policy?: 'never' | 'once' | 'always';
+    /** Present only when replaying a durable pending approval. */
+    approvalRequestId?: string;
   }) => Promise<ToolCallOutcome>;
   /** A bounded catalogue rendered for the model's action prompt. */
   catalogue: () => string;
@@ -104,4 +125,29 @@ export function success(output: string): ToolResult {
 
 export function bounded(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
+}
+
+/** Maps the human-readable parameter list to a conservative object schema. */
+export function parametersToJsonSchema(parameters: Record<string, string>): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  for (const [name, type] of Object.entries(parameters)) {
+    const optional = type.endsWith('?');
+    const base = optional ? type.slice(0, -1) : type;
+    const schema =
+      base === 'number'
+        ? { type: 'number' }
+        : base === 'boolean'
+          ? { type: 'boolean' }
+          : base === 'string[]'
+            ? { type: 'array', items: { type: 'string' } }
+            : base === 'object'
+              ? { type: 'object', additionalProperties: true }
+              : { type: 'string' };
+    properties[name] = schema;
+  }
+  return {
+    type: 'object',
+    properties,
+    additionalProperties: false,
+  };
 }

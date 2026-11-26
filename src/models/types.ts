@@ -295,6 +295,11 @@ export type GatewayStreamEvent =
 
 export type ModelGateway = {
   id: string;
+  /**
+   * True when the transport can send native tool definitions. The agent still
+   * decides per run; the router only forwards `tools` when the caller set them.
+   */
+  supportsNativeTools?: boolean;
   complete: (request: GatewayRequest) => Promise<GatewayCompletion>;
   stream?: (request: GatewayRequest) => AsyncIterable<GatewayStreamEvent>;
 };

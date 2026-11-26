@@ -11,6 +11,8 @@ export type RunOutcome =
       usage?: Usage;
       /** The model that actually served the run, when the adapter reported it. */
       model?: ModelRef;
+      /** Model requests the run issued, recorded in the durable task. */
+      requests?: number;
     }
   | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
   /** `abandoned` means the adapter ignored its abort and may still be running. */
@@ -196,6 +198,7 @@ export function createTaskRunner(input: {
                 summary: outcome.summary,
                 ...(outcome.usage ? { usage: outcome.usage } : {}),
                 ...(outcome.model ? { model: outcome.model } : {}),
+                ...(outcome.requests !== undefined ? { requests: outcome.requests } : {}),
               },
               ownershipLost: false,
             };

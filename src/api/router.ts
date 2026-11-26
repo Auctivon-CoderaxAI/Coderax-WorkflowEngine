@@ -184,11 +184,15 @@ export function createRouter(input: {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
         }
+        let parsedQuery: Record<string, unknown> = query;
         if (route.spec.query) {
           const parsed = route.spec.query.safeParse(query);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
+          // Hand the handler the coerced values, not the raw URL strings: a
+          // `z.coerce.number()` field must arrive as a number.
+          parsedQuery = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;
@@ -220,7 +224,7 @@ export function createRouter(input: {
           result = await route.handler({
             principal: principal ?? { ownerId: input.auth.ownerId, isOwner: true },
             params,
-            query,
+            query: parsedQuery,
             body,
             requestId,
             accept: raw.accept ?? '',
