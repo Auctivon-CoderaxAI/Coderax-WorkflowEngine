@@ -16,6 +16,17 @@ import { fail, ok } from '../support/result.js';
  * resource only, so an agent cannot widen `workspace.read` into a broader path by
  * asking once. External agents begin with nothing; Native is the only agent whose
  * isolation already includes memory and conversations.
+ *
+ * Three rules make a decision enforceable rather than advisory:
+ *
+ * - a request can be decided once. A denied request cannot later be flipped to
+ *   approved by replaying the same id, which is the escalation path a mutable
+ *   record would leave open.
+ * - an expired request is never pending and never approved, even if the clock
+ *   moved between a list and a decision.
+ * - an approval can be spent once. The durable copy of the decision lives on the
+ *   task row (`recordApproval`/`consumeApproval`); this store is the prompt and
+ *   the validation in front of it.
  */
 export type PermissionStore = {
   request: (input: {
@@ -37,6 +48,8 @@ export type PermissionStore = {
   }) => Promise<ServiceResult<PermissionList>>;
   isApproved: (taskId: string, scope: PermissionScope, resource: string) => Promise<boolean>;
   hasPending: (taskId: string) => Promise<boolean>;
+  /** Forget a request; used when a task settles so its prompts do not linger. */
+  clear: (taskId: string) => void;
 };
 
 export function createPermissionStore(input: {
@@ -45,6 +58,10 @@ export function createPermissionStore(input: {
   defaultTtlMs?: number;
 }): PermissionStore {
   const requests = new Map<string, PermissionRequest & { ownerId: string }>();
+  const consumed = new Set<string>();
+
+  const live = (record: PermissionRequest & { ownerId: string }): boolean =>
+    new Date(record.expiresAt).getTime() > input.clock.now().getTime();
 
   function listFor(ownerId: string, taskId: string): PermissionList {
     return {
@@ -82,22 +99,26 @@ export function createPermissionStore(input: {
         return fail('not_found', 'That permission request does not exist for this task.');
       }
       const now = input.clock.now();
-      if (new Date(record.expiresAt).getTime() <= now.getTime()) {
+      if (!live(record)) {
         return fail('conflict', 'That permission request has expired.');
+      }
+      if (record.decision !== 'pending' || consumed.has(requestId)) {
+        return fail('conflict', 'That permission request has already been decided.');
       }
       record.decision = decision;
       record.decidedAt = now.toISOString();
+      if (decision === 'denied') consumed.add(requestId);
       return ok(listFor(ownerId, taskId));
     },
     isApproved: async (taskId, scope, resource) => {
-      const now = input.clock.now();
       for (const record of requests.values()) {
         if (
           record.taskId === taskId &&
           record.scope === scope &&
           record.resource === resource &&
           record.decision === 'approved' &&
-          new Date(record.expiresAt).getTime() > now.getTime()
+          !consumed.has(record.requestId) &&
+          live(record)
         ) {
           return true;
         }
@@ -106,9 +127,19 @@ export function createPermissionStore(input: {
     },
     hasPending: async (taskId) => {
       for (const record of requests.values()) {
-        if (record.taskId === taskId && record.decision === 'pending') return true;
+        if (record.taskId === taskId && record.decision === 'pending' && live(record)) {
+          return true;
+        }
       }
       return false;
+    },
+    clear: (taskId) => {
+      for (const [requestId, record] of requests) {
+        if (record.taskId === taskId) requests.delete(requestId);
+      }
+      for (const requestId of consumed) {
+        if (requests.get(requestId)?.taskId === taskId) consumed.delete(requestId);
+      }
     },
   };
 }

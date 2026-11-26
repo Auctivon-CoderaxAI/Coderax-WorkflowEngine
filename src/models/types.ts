@@ -6,6 +6,7 @@ import type {
   ProblemCode,
   Usage,
 } from '@coderax/contracts';
+import type { ProviderHosting } from '../security/endpoint.js';
 
 /**
  * Model routing is the only place that chooses an inference endpoint. These
@@ -226,6 +227,12 @@ export type ProviderSettings = {
   maxConcurrency: number;
   requestTimeoutMs: number;
   discoveryIntervalMs: number;
+  /**
+   * Derived from the parsed endpoint, never configured by hand. `private`
+   * execution may only use a `local` provider, so a remote host cannot receive
+   * private data by claiming otherwise.
+   */
+  hosting: ProviderHosting;
 };
 
 export type RegisteredProvider = {
@@ -289,6 +296,8 @@ export type ModelHealth = {
 
 export type ProviderHealth = {
   providerId: string;
+  /** Local endpoints may serve private work; hosted ones never do. */
+  hosting: ProviderHosting;
   available: boolean;
   lastDiscoveryAt: string | null;
   lastError: string | null;

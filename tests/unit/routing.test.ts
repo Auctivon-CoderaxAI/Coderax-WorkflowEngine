@@ -20,6 +20,7 @@ const SETTINGS: ProviderSettings = {
   maxConcurrency: 4,
   requestTimeoutMs: 1_000,
   discoveryIntervalMs: 60_000,
+  hosting: 'local',
 };
 
 function freeModel(id: string, overrides: Partial<DiscoveredModel> = {}): DiscoveredModel {

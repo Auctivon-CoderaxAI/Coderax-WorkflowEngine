@@ -143,6 +143,9 @@ type AttemptFailure = {
   runtime: ModelRuntime;
 };
 
+const PRIVATE_LOCAL_ONLY =
+  'Private execution requires a local inference endpoint; a hosted provider is never used for private data.';
+
 const DEFAULT_DISCOVERY_MS = 600_000;
 const DEFAULT_FAILURE_THRESHOLD = 3;
 const DEFAULT_COOLDOWN_MS = 30_000;
@@ -316,6 +319,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     for (const runtime of models.values()) {
       const state = runtime.state;
       if (!state.supported || state.costClass !== 'free') continue;
+      const provider = providers.get(state.ref.providerId);
+      if (!provider) continue;
+      // Private data is never sent to a hosted endpoint. The hosting is derived
+      // from the parsed URL, so it cannot be asserted away by configuration.
+      if (input.mode === 'private' && provider.settings.hosting !== 'local') continue;
       const availability = modelAvailability(runtime, at);
       if (!availability.available) continue;
       if (runtime.circuit.state(at) === 'open') continue;
@@ -402,6 +410,16 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             retryable: false,
           };
         }
+      } else if (
+        input.mode === 'private' &&
+        providers.get(runtime.state.ref.providerId)?.settings.hosting !== 'local'
+      ) {
+        return {
+          ok: false,
+          code: 'model_missing',
+          detail: PRIVATE_LOCAL_ONLY,
+          retryable: false,
+        };
       } else if (runtime.state.costClass !== 'free') {
         // A paid request is never replaced by a free one, even with fallback on.
         return {
@@ -498,6 +516,17 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           ok: false,
           code: 'engine_not_configured',
           detail: 'That model is not in the verified catalogue.',
+          retryable: false,
+        };
+      }
+      if (
+        dataMode === 'private' &&
+        providers.get(runtime.state.ref.providerId)?.settings.hosting !== 'local'
+      ) {
+        return {
+          ok: false,
+          code: 'model_missing',
+          detail: PRIVATE_LOCAL_ONLY,
           retryable: false,
         };
       }
@@ -1044,6 +1073,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       route: route('auto'),
       providers: [...providers.entries()].map(([providerId, provider]) => ({
         providerId,
+        hosting: provider.settings.hosting,
         available: providerAvailable(provider, at),
         lastDiscoveryAt: provider.lastDiscoveryAt?.toISOString() ?? null,
         lastError: provider.lastError,

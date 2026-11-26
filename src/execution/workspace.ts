@@ -1,4 +1,5 @@
-import { realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { DataMode } from '@coderax/contracts';
 import type { ServiceResult } from '../support/result.js';
@@ -87,4 +88,42 @@ export async function resolveEngineWorkspace(input: {
     return fail('workspace_denied', 'The workspace belongs to another data mode.');
   }
   return ok({ mode: input.mode, root: confinement, confinement });
+}
+
+/**
+ * The directory one conversation may write.
+ *
+ * Two runs in the same data mode used to share the mode root, so a run could read
+ * another conversation's files and a quarantine had to take the whole mode out of
+ * service. The path is derived here from the conversation id through a digest; a
+ * caller never supplies it, and it cannot escape its mode root through a symlink
+ * because the resolved directory is checked again after creation.
+ *
+ * The directory is per conversation, not per generation, so a resume continues in
+ * the same place a previous generation wrote.
+ */
+export async function resolveConversationWorkspace(input: {
+  mode: DataMode;
+  roots: WorkspaceRoots;
+  conversationId: string;
+}): Promise<ServiceResult<ResolvedWorkspace>> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(input.conversationId)) {
+    return fail('workspace_denied', 'That conversation id cannot name a workspace.');
+  }
+  const base = await resolveEngineWorkspace({ mode: input.mode, roots: input.roots });
+  if (!base.ok) return base;
+
+  const digest = createHash('sha256').update(input.conversationId, 'utf8').digest('hex');
+  const candidate = path.join(base.value.confinement, 'conversations', digest.slice(0, 32));
+  try {
+    await mkdir(candidate, { recursive: true, mode: 0o700 });
+  } catch {
+    return fail('workspace_denied', 'The conversation workspace could not be created.');
+  }
+
+  const resolved = await realOrNull(candidate);
+  if (!resolved || !isInside(resolved, base.value.confinement) || resolved === base.value.confinement) {
+    return fail('workspace_denied', 'The conversation workspace is outside its data mode root.');
+  }
+  return ok({ mode: input.mode, root: resolved, confinement: base.value.confinement });
 }

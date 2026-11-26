@@ -1,5 +1,6 @@
 import { isTerminalState } from '@coderax/contracts';
-import type { TaskPatch, TaskRecord } from '../domain.js';
+import type { PermissionScope } from '@coderax/contracts';
+import type { TaskApproval, TaskPatch, TaskRecord } from '../domain.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
 
 export type CreateTaskResult =
@@ -10,6 +11,10 @@ export type FencedWriteResult =
   | { applied: true; task: TaskRecord }
   | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' };
 
+export type ApprovalWriteResult =
+  | { applied: true; task: TaskRecord }
+  | { applied: false; reason: 'not_found' | 'terminal' | 'decided' };
+
 /**
  * The only writer of task state.
  *
@@ -17,6 +22,11 @@ export type FencedWriteResult =
  * unique run token and the task is not already terminal. That is the invariant
  * that stops an expired execution from overwriting a newer execution's state,
  * and it is enforced here rather than trusted to each caller.
+ *
+ * `recordApproval` and `consumeApproval` are the durable half of the permission
+ * system. A decision is written to the task row (so it survives a restart) and a
+ * grant can be consumed once; both transitions are conditional in the same way,
+ * so two replicas cannot both act on one approval.
  */
 export type TaskRepository = {
   create: (task: TaskRecord) => Promise<CreateTaskResult>;
@@ -36,6 +46,21 @@ export type TaskRepository = {
     now: string;
     leaseExpiresAt: string;
   }) => Promise<FencedWriteResult>;
+  /** Durably records the owner's decision for one request. */
+  recordApproval: (input: {
+    taskId: string;
+    requestId: string;
+    scope: PermissionScope;
+    resource: string;
+    decision: 'approved' | 'denied';
+    decidedAt: string;
+  }) => Promise<ApprovalWriteResult>;
+  /** Atomically spends an approved grant; false when it was already used. */
+  consumeApproval: (input: {
+    taskId: string;
+    requestId: string;
+    now: string;
+  }) => Promise<boolean>;
   listByConversation: (conversationId: string) => Promise<TaskRecord[]>;
   /** Tasks that are not terminal, used by startup ownership verification. */
   listUnsettled: () => Promise<TaskRecord[]>;
@@ -120,6 +145,36 @@ export function createTaskRepository(): TaskRepository {
       tasks.set(taskId, next);
       activeByConversation.set(next.conversationId, next.taskId);
       return { applied: true, task: { ...next } };
+    },
+    recordApproval: async ({ taskId, requestId, scope, resource, decision, decidedAt }) => {
+      const task = tasks.get(taskId);
+      if (!task) return { applied: false, reason: 'not_found' };
+      if (isTerminalState(task.state)) return { applied: false, reason: 'terminal' };
+      // A spent grant can never be replaced, and the same request is not recorded
+      // twice. A later request may replace an unconsumed decision: the owner is
+      // allowed to reconsider a denial, and the request list only offers one that
+      // is still pending.
+      if (task.approval?.requestId === requestId || task.approval?.consumedAt) {
+        return { applied: false, reason: 'decided' };
+      }
+      const approval: TaskApproval = { requestId, scope, resource, decision, decidedAt };
+      const next: TaskRecord = { ...task, approval, updatedAt: decidedAt };
+      tasks.set(taskId, next);
+      return { applied: true, task: { ...next } };
+    },
+    consumeApproval: async ({ taskId, requestId, now }) => {
+      const task = tasks.get(taskId);
+      if (!task || !task.approval) return false;
+      if (task.approval.requestId !== requestId) return false;
+      if (task.approval.decision !== 'approved') return false;
+      if (task.approval.consumedAt) return false;
+      const next: TaskRecord = {
+        ...task,
+        approval: { ...task.approval, consumedAt: now },
+        updatedAt: now,
+      };
+      tasks.set(taskId, next);
+      return true;
     },
     listByConversation: async (conversationId) =>
       [...tasks.values()]

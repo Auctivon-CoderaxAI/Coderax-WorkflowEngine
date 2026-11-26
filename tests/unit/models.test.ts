@@ -45,7 +45,7 @@ const paidRef = { providerId: 'paid', modelId: 'gpt-premium' };
 
 test('the route selects the first available verified-free candidate', async () => {
   const router = createModelRouter({
-    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
+    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000, hosting: 'local' } }],
     preferredRoute: [freeRef],
     budget: budget(),
   });
@@ -61,7 +61,7 @@ test('a paid model is refused, not silently replaced', async () => {
     providers: [{ adapter: provider([
       discovered(freeRef, { prompt: '0', completion: '0' }),
       discovered(paidRef, { prompt: '0.000001', completion: '0.000002' }),
-    ]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
+    ]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000, hosting: 'local' } }],
     preferredRoute: [paidRef, freeRef],
     budget: budget(),
   });
@@ -74,7 +74,7 @@ test('a paid model is refused, not silently replaced', async () => {
 
 test('an unknown model is refused with a configuration error', async () => {
   const router = createModelRouter({
-    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
+    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000, hosting: 'local' } }],
     budget: budget(),
   });
   await router.refresh();
@@ -85,7 +85,7 @@ test('an unknown model is refused with a configuration error', async () => {
 
 test('discovery never advertises paid routing', async () => {
   const router = createModelRouter({
-    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000 } }],
+    providers: [{ adapter: provider([discovered(freeRef, { prompt: '0', completion: '0' })]), settings: { requestsPerMinute: 10, tokensPerMinute: 10_000, maxConcurrency: 1, requestTimeoutMs: 1_000, discoveryIntervalMs: 60_000, hosting: 'local' } }],
     budget: budget(),
   });
   await router.refresh();

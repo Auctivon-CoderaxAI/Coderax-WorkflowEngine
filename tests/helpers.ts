@@ -1,7 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ProviderAdapter, ProviderCompletionRequest } from '../src/models/types.js';
+import type {
+  ProviderAdapter,
+  ProviderCompletionRequest,
+  ProviderSettings,
+} from '../src/models/types.js';
+import type { ExternalAgentTransport } from '../src/agents/adapters/external.js';
 import { ProviderError } from '../src/models/types.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
@@ -129,7 +134,11 @@ export function slowProvider(delayMs: number): ProviderAdapter & { calls: number
 
 export async function startTestApp(options: {
   provider?: ProviderAdapter;
+  /** Defaults to a local endpoint; a test may declare a hosted one. */
+  providerSettings?: Partial<ProviderSettings>;
   config?: Record<string, unknown>;
+  externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
+  env?: Record<string, string>;
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -140,8 +149,14 @@ export async function startTestApp(options: {
   const config = baseConfig(workspace, options.config);
   const app = await composeApplication({
     config,
-    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    providers: [{ adapter: options.provider ?? fakeProvider() }],
+    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, ...(options.env ?? {}) },
+    providers: [
+      {
+        adapter: options.provider ?? fakeProvider(),
+        ...(options.providerSettings ? { settings: options.providerSettings } : {}),
+      },
+    ],
+    ...(options.externals ? { externals: options.externals } : {}),
   });
   const { url } = await app.start();
   return {
@@ -193,6 +208,7 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     leaseExpiresAt: null,
     cancelRequested: false,
     requireApproval: true,
+    approval: null,
     budget: null,
     usage: null,
     result: null,

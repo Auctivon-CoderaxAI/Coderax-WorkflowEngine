@@ -1,5 +1,20 @@
 import { z } from 'zod';
 import { CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
+import { endpointIssue } from '../security/endpoint.js';
+
+/**
+ * Every endpoint that receives a credential must be https unless it is loopback,
+ * and no endpoint may carry a credential in its URL. The rule lives here so a
+ * provider, an external agent and an embedding endpoint cannot disagree.
+ */
+const SecureEndpoint = z
+  .string()
+  .trim()
+  .url()
+  .superRefine((value, context) => {
+    const issue = endpointIssue(value);
+    if (issue) context.addIssue({ code: z.ZodIssueCode.custom, message: `endpoint ${issue}` });
+  });
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -43,7 +58,7 @@ export const NativeConfig = z
 export const OpenCodeConfig = z
   .object({
     enabled: z.boolean().default(false),
-    baseURL: z.string().url().optional(),
+    baseURL: SecureEndpoint.optional(),
     model: z.string().min(1).optional(),
     passwordEnv: z.string().min(1).optional(),
   })
@@ -52,7 +67,7 @@ export const OpenCodeConfig = z
 export const FreebuffConfig = z
   .object({
     enabled: z.boolean().default(false),
-    baseURL: z.string().url().optional(),
+    baseURL: SecureEndpoint.optional(),
     sdkPath: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
   })
@@ -83,7 +98,7 @@ export const ModelProviderConfig = z
       .trim()
       .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'provider id must be lower-case letters, digits, - or _'),
     kind: z.enum(['openai', 'gemini']).default('openai'),
-    baseURL: z.string().url(),
+    baseURL: SecureEndpoint,
     apiKeyEnv: z
       .string()
       .trim()

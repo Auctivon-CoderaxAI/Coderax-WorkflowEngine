@@ -36,6 +36,7 @@ import { registerRoutes } from '../api/routes.js';
 import { createHttpServer } from '../api/server.js';
 import type { HttpServer } from '../api/server.js';
 import { validateWorkspaceRoots, workspaceRoots } from '../execution/workspace.js';
+import { classifyEndpoint, hostingOf } from '../security/endpoint.js';
 import {
   createApplicationContainer,
   createDependencyContainer,
@@ -109,6 +110,9 @@ const PROVIDER_DEFAULTS: ProviderSettings = {
   maxConcurrency: 2,
   requestTimeoutMs: 60_000,
   discoveryIntervalMs: 600_000,
+  // Fail closed: a provider whose endpoint is not known to be local never
+  // serves private work. Real registrations overwrite this from the parsed URL.
+  hosting: 'hosted',
 };
 
 /**
@@ -185,6 +189,7 @@ function buildProviders(input: {
         maxConcurrency: provider.maxConcurrency,
         requestTimeoutMs: provider.requestTimeoutMs,
         discoveryIntervalMs,
+        hosting: hostingOf(provider.baseURL),
       },
     });
   }
@@ -205,7 +210,11 @@ function buildProviders(input: {
         : createOpenAiProvider(common);
     registrations.push({
       adapter,
-      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
+      settings: {
+        ...PROVIDER_DEFAULTS,
+        discoveryIntervalMs,
+        hosting: hostingOf(provider.baseURL),
+      },
     });
     configured.add(provider.id);
   }
@@ -213,15 +222,22 @@ function buildProviders(input: {
   const customBase = input.env.CODERAX_INFERENCE_BASE_URL;
   const customKey = input.env.CODERAX_INFERENCE_KEY;
   if (customBase && customKey && !configured.has('custom')) {
-    registrations.push({
-      adapter: createOpenAiProvider({
-        id: 'custom',
-        baseURL: customBase,
-        apiKey: customKey,
-        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-      }),
-      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
-    });
+    // This variable is not covered by the configuration schema, so the same
+    // endpoint rule is applied here instead of trusting the value.
+    const verdict = classifyEndpoint(customBase);
+    if (!verdict.ok) {
+      issues.push(`CODERAX_INFERENCE_BASE_URL ${verdict.reason}`);
+    } else {
+      registrations.push({
+        adapter: createOpenAiProvider({
+          id: 'custom',
+          baseURL: customBase,
+          apiKey: customKey,
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        }),
+        settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs, hosting: verdict.hosting },
+      });
+    }
   }
 
   return { registrations, issues };
@@ -278,7 +294,14 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ? {
         registrations: input.providers.map((entry) => ({
           adapter: entry.adapter,
-          settings: { ...PROVIDER_DEFAULTS, ...entry.settings, discoveryIntervalMs: entry.settings?.discoveryIntervalMs ?? config.models.routing.discoveryIntervalMs },
+          settings: {
+            ...PROVIDER_DEFAULTS,
+            // An injected adapter runs in this process unless it says otherwise.
+            hosting: 'local' as const,
+            ...entry.settings,
+            discoveryIntervalMs:
+              entry.settings?.discoveryIntervalMs ?? config.models.routing.discoveryIntervalMs,
+          },
         })),
         issues: [] as string[],
       }
