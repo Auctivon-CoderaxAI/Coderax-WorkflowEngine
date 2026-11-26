@@ -18,29 +18,29 @@ The online run of `npm run release:verify -- --online` reports **7 PASS and 7
 FAIL with 55 explicit blockers**. Those blockers are listed below; the command
 reproduces them from the pinned commits.
 
-Verified on 2026-11-26 against:
+Last evaluated on 2026-11-26 at `87a765b73ade337917e463aa7ce785d7c900c195`:
 
 | Component | Pinned commit | Version |
 | --- | --- | --- |
-| Coderax-WorkflowEngine | `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd` | `0.1.0`, contract `1.0.0`, SDK `1.0.0`, events `1` |
+| Coderax-WorkflowEngine | `9a386db9ff4970f59a300f5eb3d5f5b1627ef9b6` (contract commit; `HEAD` is a descendant) | `0.2.0`, contract `1.1.0`, SDK `1.1.0`, events `1` |
 | Coderax (web) | `a5d237b0ff672356374849d565363955df69d298` | `v0.8.8` |
 | CoderaxCLI | `1b7c8e0a429755502f7563b16a8a09db899452d8` | `0.1.0` |
 
 | Matrix entry | State | Evidence |
 | --- | --- | --- |
 | Repository commit SHAs | **PASS** | three full 40-character SHAs; engine base is an ancestor of `HEAD`; shipped `src`, `packages`, `openapi.json` are byte-identical to the audited commit; working tree required clean |
-| Engine version | **PASS** | `package.json` `0.1.0` |
-| API contract version | **PASS** | `CONTRACT_VERSION = 1.0.0`; `openapi.json` `info.version = 1.0.0` |
-| SDK version | **PASS** | `@coderax/sdk@1.0.0`; checksum-verified artifact |
+| Engine version | **PASS** | `package.json` `0.2.0` |
+| API contract version | **PASS** | `CONTRACT_VERSION = 1.1.0`; `openapi.json` `info.version = 1.1.0` |
+| SDK version | **PASS** | `@coderax/sdk@1.1.0`; the canonical 14-file tarball matches its SHA-256, SHA-512 and integrity |
 | Event schema version | **PASS** | `EVENT_SCHEMA_VERSION = 1` |
-| Web compatibility | **FAIL** | Coderax does not consume `@coderax/sdk`; it proxies only `/api`, `/oauth` and health to `CODERAX_API_ORIGIN` |
-| CLI compatibility | **FAIL** | CoderaxCLI targets a Coderax deployment (`/api/ask/agents`, `/api/work/chat`), not the engine `/v1` API |
-| Database migration requirements | **PASS** | two additive, reversible `work_runs` indexes; a test proves they equal `ensureWorkRunIndexes` |
+| Web compatibility | **FAIL** | Coderax `main` does not consume `@coderax/sdk`; its open gateway branch `feat/workflow-engine-gateway-v1@19bdb150` mirrors contract `1.0.0` with 17 operation ids and is not merged |
+| CLI compatibility | **FAIL** | CoderaxCLI `main` targets a Coderax deployment (`/api/ask/agents`, `/api/work/chat`), not the engine `/v1` API; PR #5 and PR #6 add a private `packages/workflow-sdk` for that other API |
+| Database migration requirements | **PASS** | the two declared additive, reversible `work_runs` indexes equal `ensureWorkRunIndexes`; task, approval, schedule and artifact indexes are created at startup but are not yet declared in the matrix |
 | Required GitHub Actions checks | **FAIL** | no successful run recorded at any pinned SHA; hosted Actions is billing-blocked on the engine; client conclusions are unknown |
 | Independent review status | **FAIL** | no independent approval for any of the three commits |
 | Deployment readiness | **FAIL** | engine is not deployed; live web `/health` returns `503 API proxy is not configured`; no CLI release |
 | Rollback compatibility | **PASS** | pre-cutover abort for all three; no rollback path deletes data |
-| Unpublished integration commits | **FAIL** | four engine branches are unmerged; the durable-events integration is pending a merge or owner exclusion |
+| Unpublished integration commits | **FAIL** | eight engine branches are unmerged; three are reserved by a named owner, five are pending a merge or an owner exclusion |
 | Cross-repository CI credential safety | **FAIL** | five production credentials are exposed to a pull-request-triggered job in Coderax; four release-path findings; no CI owner sign-off |
 
 `npm run release:verify -- --online` prints the full blocker list. The current
@@ -89,15 +89,18 @@ The engine's own workflows are audited live on every run. The new
 
 ### 3. Unpublished integration commits
 
-Five engine branches are not ancestors of `main`:
+Eight engine branches are not ancestors of `main`:
 
 | Branch | Commit | Ahead/behind | Disposition |
 | --- | --- | --- | --- |
 | `feat/durable-events-integration` | `2554edc` | 2 / 0 | pending merge or owner exclusion |
 | `feat/durable-events` | `9b3fd7d` | 8 / 1 | superseded by `2554edc` (base64 snapshot carrier) |
-| `feat/intelligence-core` | `c8f9a34` | 3 / 0 | pending merge or owner exclusion |
-| `feat/native-reasoning-planner` | `efd760a` | 2 / 0 | pending merge or owner exclusion |
-| `feat/zero-cost-model-router` | `7ae5cbc` | 1 / 0 | pending merge or owner exclusion |
+| `feat/intelligence-core` | `24c90e0` | 7 / 0 | pending merge or owner exclusion (PR #2 head `e14e4b7`) |
+| `feat/native-reasoning-planner` | `c241bae` | 4 / 0 | pending merge or owner exclusion (PR #3) |
+| `feat/zero-cost-model-router` | `43f3581` | 3 / 0 | pending merge or owner exclusion (PR #4) |
+| PR #7 (`origin/pr/7`) | `9b4cb5c` | 4 / 0 | superseded by `ea66028`; alternate operation ids are not republished |
+| PR #8 (`origin/pr/8`) | `ffec08f` | 13 / 0 | pending merge; reserves the six team operations |
+| PR #9 (`origin/pr/9`) | `d1f4b50` | 2 / 0 | pending merge; reserves seven schedule operations |
 
 Measured with `git merge-tree`, the integration branch conflicts with
 `feat/intelligence-core` in `packages/contracts/src/routes.ts`,
@@ -115,9 +118,9 @@ release until it is merged or an owner records an exclusion with a rationale.
 
 The engine has never had a successful hosted Actions run; the repository's
 `docs/governance.md` records the billing restriction. A local `npm run verify`
-run at `808dfd3` passed 108 tests with zero failures; its log is committed at
-`release/evidence/engine-verify-808dfd3.log` and its SHA-256 is pinned in the
-manifest. A local run is evidence, not a substitute for the required hosted
+run at `9a386db` passed 177 tests with zero failures against a real MongoDB; its
+log is committed at `release/evidence/engine-verify-9a386db-merged.log` and its
+SHA-256 is pinned in the manifest. A local run is evidence, not a substitute for the required hosted
 check. No independent reviewer is installed, and no component has an approval.
 The engine is not deployed. These are recorded as FAIL, not waived.
 

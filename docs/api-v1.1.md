@@ -179,12 +179,13 @@ implementation. Do not code against them:
 
 | Capability | Why | Owner / branch |
 | --- | --- | --- |
-| RAG / knowledge retrieval | no embedding provider or vector index | `feat/intelligence-core` (`ingestKnowledge`, `listKnowledge`, `searchKnowledge`) |
-| Tools and routing report | implementation lives on an unmerged branch | `feat/intelligence-core` (`listTools`, `getRouting`) |
+| RAG / knowledge retrieval | no embedding provider or vector index | PR #2 / `feat/intelligence-core` (`ingestKnowledge`, `listKnowledge`, `searchKnowledge`) |
+| Tools and routing report | implementation lives on an unmerged branch | PR #2 / `feat/intelligence-core` (`listTools`, `getRouting`) |
 | Multimodal input | no image or audio path | unassigned |
-| Multi-agent collaboration | one explicitly selected agent per task | unassigned |
+| Multi-agent collaboration | bounded team orchestration is unmerged | PR #8 (`submitTeam`, `getTeam`, `resumeTeam`, `cancelTeam`, `listTeamPermissions`, `decideTeamPermission`) |
 | Durable event storage | replay is process-local on `main` | `feat/durable-events-integration` |
-| Model-driven reasoning planner | deterministic planner only | `feat/native-reasoning-planner` |
+| Schedule editing and occurrence history | only create/list/get/cancel are implemented | PR #9 (`updateSchedule`, `pauseSchedule`, `resumeSchedule`, `getScheduleUpcoming`, `listScheduleExecutions`, `triggerSchedule`, `dispatchScheduleEvent`) |
+| Model-driven reasoning planner | deterministic planner only | PR #3 / `feat/native-reasoning-planner` |
 
 The handshake reports each of these as `unsupported` or `unconfigured`. When an
 owner's branch merges, the capability state and the operation list change in the
@@ -204,7 +205,7 @@ dist-artifacts/manifest.json
 Current SHA-256:
 
 ```text
-f4c9048702a78ac23e12c1c5bcbe63eca235144270660ec59177abdd167d8651  coderax-contracts-1.1.0.tgz
+d2e76532244b84a5c445a98cc058fbaeeeaa795b835c3395049b25f101c967b9  coderax-contracts-1.1.0.tgz
 c2599576231c85c3f6e68a31933ab2833627582e3f7d5f791fc46becacc79b33  coderax-sdk-1.1.0.tgz
 ```
 
@@ -244,12 +245,16 @@ force-pushed by this work:
 
 | Branch | Head | Contract interaction |
 | --- | --- | --- |
-| `feat/intelligence-core` | `24c90e0` | reserves `ChatFrame` and `negotiated`; adds tools/routing/knowledge routes |
-| `feat/zero-cost-model-router` | `43f3581` | router internals; no new route ids |
-| `feat/native-reasoning-planner` | `c241bae` | permission producer; no new route ids |
+| `feat/intelligence-core` / PR #2 | `24c90e0` / `e14e4b7` | reserves `ChatFrame` and `negotiated`; adds tools/routing/knowledge routes |
+| `feat/zero-cost-model-router` / PR #4 | `43f3581` / `b6e002b` | router internals; no new route ids |
+| `feat/native-reasoning-planner` / PR #3 | `c241bae` / `90b87db` | permission producer; no new route ids |
 | `feat/durable-events` | `9b3fd7d` | snapshots only |
-| `feat/durable-events-integration` | `2554edc` | reserves `markNotificationsRead`; adds persistent event log |
-| `feat/execution-supervisor` | `a4fabac` | supervisor internals; no new route ids |
+| `feat/durable-events-integration` | `2554edc` | adds the persistent event log behind `streamTaskEvents`; not merged |
+| `feat/execution-supervisor` / PR #5 | `a4fabac` / `13d4b4f` | supervisor internals; no new route ids |
+| PR #7 | `9b4cb5c` | competing 1.1.0 surface; superseded by this catalogue |
+| PR #8 | `ffec08f` | reserves six team operations |
+| PR #9 | `d1f4b50` | reserves seven schedule operations |
+| release train (`freebuff/4fc2df…`) | `6e70c5d` | adopted and repinned; no route ids |
 | `ci/permanent-quality-gate` | `676ad8c` | gates; no route ids |
 | `security/remediation-808dfd3` | `74b1264` | hardening; no route ids |
 
@@ -261,13 +266,23 @@ Three active shapes were adopted exactly rather than re-invented:
 intelligence branch; the wire shape is identical. The owner should drop the
 duplicate symbol when merging.
 
-Reserved operation IDs owned by unmerged branches, not to be added by a client or
-gateway against this contract until their handler lands:
-`listTools`, `getRouting`, `ingestKnowledge`, `listKnowledge`, `searchKnowledge`.
-When those branches rebase, they should keep this catalogue as the single source
-of routes and delete their own duplicate route entries; conflicts are expected in
-`routes.ts` and `sdk/src/index.ts` and should be resolved in favour of one entry
-per operation.
+### Ownership registry
+
+`packages/contracts/src/ownership.ts` is the machine-readable half of the one
+contract rule. `OPERATION_DOMAINS` maps every published id to exactly one domain;
+`DOMAIN_OWNERS` names the runtime module and the audited head; and
+`RESERVED_OPERATIONS` records every id proposed by an unmerged branch with its
+exact head and either `blocked` or `superseded` status. A `superseded` id must
+name the published id that owns the behaviour, so two names never describe one
+operation. `tests/contract/ownership.test.ts` enforces exhaustiveness and refuses
+a published/reserved collision.
+
+The full branch-by-branch decisions, client status and persistence evidence are
+in [`reconciliation.md`](reconciliation.md). Reserved ids are not to be added by
+a client or gateway until their handler lands. When an owner branch rebases, it
+should keep this catalogue as the single source of routes and delete its own
+duplicate route entries; conflicts are expected in `routes.ts` and
+`sdk/src/index.ts` and should be resolved in favour of one entry per operation.
 
 The cross-repository harness is
 `tests/integration/http-contract.test.ts`. It starts the real HTTP server and

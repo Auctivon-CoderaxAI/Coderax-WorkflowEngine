@@ -383,8 +383,8 @@
     {
       "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
       "branch": "feat/intelligence-core",
-      "commit": "c8f9a348e40d7c49bca0d6ba2fd432271112df74",
-      "ahead": 3,
+      "commit": "24c90e0fe8366339fb5deddef5e580930612d4c8",
+      "ahead": 7,
       "behind": 0,
       "disposition": "pending-merge",
       "summary": "Open feature branch adding zero-cost routing, a native tool loop and durable tool approvals. It touches the same route catalogue, composition root and orchestration service as the integration branch.",
@@ -402,8 +402,8 @@
     {
       "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
       "branch": "feat/native-reasoning-planner",
-      "commit": "efd760a58cfa20a3b1caddc4f31db774389ab19d",
-      "ahead": 2,
+      "commit": "c241bae6922f8660d3dceac4bab211b4a8a37012",
+      "ahead": 4,
       "behind": 0,
       "disposition": "pending-merge",
       "summary": "Open feature branch adding dependency-aware reasoning, verification and escalation to the native agent. It does not change the HTTP contract.",
@@ -421,8 +421,8 @@
     {
       "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
       "branch": "feat/zero-cost-model-router",
-      "commit": "7ae5cbc59fe0595bed285901fbf16b622321d055",
-      "ahead": 1,
+      "commit": "43f35819b52f72fe81de097f6a11242b51e4dba5",
+      "ahead": 3,
       "behind": 0,
       "disposition": "pending-merge",
       "summary": "Open feature branch adding a provider-independent zero-cost inference router. It does not change the HTTP contract.",
@@ -434,6 +434,63 @@
           "line": 1,
           "statement": "The branch records the zero-cost router in the parity matrix.",
           "sha256": "22851813898e2312759c8b89bdedac448c800ef38dcab1690042b94497ff5583"
+        }
+      ]
+    },
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "PR #7 (origin/pr/7)",
+      "commit": "9b4cb5ce4f8688cf232d006028e5e255eda6cb1f",
+      "ahead": 4,
+      "behind": 0,
+      "disposition": "superseded",
+      "summary": "An earlier 1.1.0 surface with 27 operations under alternate ids (createArtifact, controlSchedule, writeMemory, searchMemory, deleteMemory). Superseded by the authoritative catalogue, which publishes one id per behaviour and only operations with a handler.",
+      "supersededBy": "ea660285b3c0a950067aa3b57f1764ccb509af8a",
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "packages/contracts/src/routes.ts",
+          "line": 1,
+          "statement": "The branch declares a competing 1.1.0 route catalogue.",
+          "sha256": "d89e9d9b944a2a4a5a1435da1b32f2a16fb8056a0a88d81cd3a48961256eb2e1"
+        }
+      ]
+    },
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "PR #8 (origin/pr/8)",
+      "commit": "ffec08f43bd837c7600d83138d538982e8607048",
+      "ahead": 13,
+      "behind": 0,
+      "disposition": "pending-merge",
+      "summary": "Bounded Native team orchestration layered on intelligence-core and durable events. Reserves submitTeam, getTeam, resumeTeam, cancelTeam and the team permission operations; not merged and not republished here.",
+      "supersededBy": null,
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "packages/contracts/src/team.ts",
+          "line": 1,
+          "statement": "The branch declares the team wire schemas and its reserved operations.",
+          "sha256": "4ee0a5413064ff70aea5fb5e512e596e749da28179bc0e41ac3b81ca001546a9"
+        }
+      ]
+    },
+    {
+      "repository": "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
+      "branch": "PR #9 (origin/pr/9)",
+      "commit": "d1f4b505b9aa6f0fa9b90f738e120dc77d5e37ae",
+      "ahead": 2,
+      "behind": 0,
+      "disposition": "pending-merge",
+      "summary": "Durable scheduling with editing, pause/resume, occurrence history and manual dispatch. Reserves seven schedule operations; the release contract publishes only the four implemented on this base.",
+      "supersededBy": null,
+      "exclusion": null,
+      "evidence": [
+        {
+          "path": "packages/contracts/src/routes.ts",
+          "line": 1,
+          "statement": "The branch declares updateSchedule, pauseSchedule, resumeSchedule and the occurrence operations.",
+          "sha256": "1fa13c4d22894737aa3107f3c2c94de1dba1ceb92219763defdba6191563cad8"
         }
       ]
     }
