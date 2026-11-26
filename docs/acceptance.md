@@ -14,8 +14,10 @@
   not change the gate runner, manifest, workflow or required-job shape. Two
   reconciliation rounds were merged: `821352f` (engine regressions) and its
   post-adoption head `a1f2319` (fail-closed audit tests). The `821352f` tree
-  `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed hosted run `45900429936`
-  (single `verify` job, 23 steps); run `45888790260` covers `d00156a` only.
+  `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed hosted run `45900429936`;
+  the final reconciliation tree `119e315` (merged as `2e4fcea`) passed hosted run
+  `45901507390`, both single `verify` jobs with 23 steps. Run `45888790260`
+  covers `d00156a` only.
 
 ## Candidate integration head
 
@@ -241,10 +243,11 @@ no shell-execution path is admitted outside the declared tool seam.
   all 23 steps, including `Real MongoDB integration tests (required, no fake)`,
   and every step passed. Run `45888499599` passed earlier at
   `d6f877c283b64e8a243b862789b3b6e4e5fb6082`; run `45888302201` was cancelled
-  when the branch advanced and is not counted. The reconciliation tree
-  `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed run `45900429936` with the
-  same single `verify` job and all 23 steps; the record commit after it is
-  docs-only.
+  when the branch advanced and is not counted. Reconciliation tree
+  `c15091d13022a6a23d0a5bdb068846507a6cd64c` passed run `45900429936`, and the
+  final reconciliation tree `119e315` (merged as `2e4fcea`) passed run
+  `45901507390`; both used the same single `verify` job and all 23 steps. The
+  record commit after them is docs-only.
 - Creating the PR requires an authorized GitHub write integration. This host has
   no `gh` binary and no GitHub write credential; the unauthenticated API cannot
   create a pull request. No PR, self-approval or independent review was
