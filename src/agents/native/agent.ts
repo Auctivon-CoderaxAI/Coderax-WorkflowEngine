@@ -301,7 +301,11 @@ export function createNativeAgent(input: {
             }
           : undefined;
 
-      const executeStep = async (step: TaskPlanStep): Promise<StepRunResult> => {
+      const executeStep = async (
+        step: TaskPlanStep,
+        signal: AbortSignal,
+      ): Promise<StepRunResult> => {
+        if (signal.aborted) return { kind: 'cancelled' };
         if (completed.has(step.id)) return { kind: 'completed' };
 
         const scope: PermissionScope | null = step.kind === 'read' ? 'workspace.read' : null;
@@ -353,7 +357,7 @@ export function createNativeAgent(input: {
         let feedback: string | undefined;
 
         for (;;) {
-          if (request.signal.aborted) return { kind: 'cancelled' };
+          if (signal.aborted) return { kind: 'cancelled' };
           attempts += 1;
           spend();
           const execution = await executor.execute({
@@ -364,7 +368,7 @@ export function createNativeAgent(input: {
             evidence: [...evidence.values()],
             workspaceRoot: request.workspaceRoot,
             model: request.model,
-            signal: request.signal,
+            signal,
             ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
             ...(feedback ? { feedback } : {}),
           });
@@ -397,7 +401,7 @@ export function createNativeAgent(input: {
             return { kind: 'completed' };
           }
 
-          if (request.signal.aborted) return { kind: 'cancelled' };
+          if (signal.aborted) return { kind: 'cancelled' };
           const correction = decideCorrection({
             failure: execution.failure,
             attempts,
@@ -413,7 +417,7 @@ export function createNativeAgent(input: {
             return { kind: 'failed', failure: execution.failure };
           }
           if (correction === 'correct') feedback = execution.failure.detail;
-          await pause(REASONING_PAUSE_MS, request.signal);
+          await pause(REASONING_PAUSE_MS, signal);
         }
       };
 
@@ -535,7 +539,27 @@ export function createNativeAgent(input: {
             };
           }
 
-          const results = await Promise.all(wave.map((step) => executeStep(step)));
+          // A wave must not outlive the run that owns it. If one step throws
+          // (for example, the iteration bound is exhausted), abort its siblings
+          // and wait for them to settle before returning; otherwise an action
+          // could still be running after the engine releases the task's lease.
+          const waveController = new AbortController();
+          const waveSignal = AbortSignal.any([request.signal, waveController.signal]);
+          const settled = await Promise.allSettled(
+            wave.map(async (step) => {
+              try {
+                return await executeStep(step, waveSignal);
+              } catch (error) {
+                waveController.abort();
+                throw error;
+              }
+            }),
+          );
+          const results: StepRunResult[] = [];
+          for (const result of settled) {
+            if (result.status === 'rejected') throw result.reason;
+            results.push(result.value);
+          }
           const approval = results.find((result) => result.kind === 'approval');
           if (approval) {
             return {

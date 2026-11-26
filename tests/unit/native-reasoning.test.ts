@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { AgentReportEvent, AgentRunRequest } from '../../src/agents/types.js';
 import { createNativeAgent } from '../../src/agents/native/agent.js';
 import type {
+  ActionExecutor,
   ModelCompletionRequest,
   ModelGateway,
   NativeLimits,
@@ -203,6 +204,60 @@ test('complex plans run independent steps in parallel and dependent steps after 
   assert.match(dependentPrompt, /result-b/);
   assert.match(dependentPrompt, /Earlier in this conversation:/);
   assert.match(dependentPrompt, /Owner context/);
+
+  const verificationPrompt = gateway.prompts.find((prompt) =>
+    prompt.includes('Assess only whether the evidence proves the objective.'),
+  );
+  assert.ok(verificationPrompt);
+  assert.match(verificationPrompt, /OUTPUT a: result-a/);
+  assert.match(verificationPrompt, /OUTPUT b: result-b/);
+});
+
+test('an exhausted wave aborts and drains sibling actions before returning', async () => {
+  let started = 0;
+  let aborted = false;
+  const executor: ActionExecutor = {
+    execute: ({ signal }) => {
+      started += 1;
+      return new Promise((resolve) => {
+        const stop = (): void => {
+          aborted = true;
+          resolve({
+            ok: false,
+            failure: { code: 'provider_error', detail: 'aborted', retryable: false },
+          });
+        };
+        if (signal.aborted) {
+          stop();
+          return;
+        }
+        signal.addEventListener('abort', stop, { once: true });
+      });
+    },
+  };
+  const agent = createNativeAgent({
+    enabled: true,
+    gateway: fakeGateway(),
+    executor,
+    limits: {
+      maxSteps: 8,
+      maxParallelSteps: 2,
+      maxReplans: 0,
+      maxStepAttempts: 1,
+      maxIterations: 1,
+    },
+  });
+
+  const outcome = await agent.run(
+    runRequest({ plan: planOf([step('a'), step('b')]) }),
+    () => undefined,
+  );
+
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.code, 'iteration_exhausted');
+  assert.equal(started, 1);
+  assert.equal(aborted, true, 'the in-flight sibling action must be aborted');
 });
 
 test('a failed step triggers a bounded replan and the revision runs', async () => {
