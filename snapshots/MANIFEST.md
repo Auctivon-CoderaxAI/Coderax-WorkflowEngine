@@ -10,20 +10,29 @@ path and its sha256 in the verified local tree. The full diff is 57,128 bytes
 
 ## Status
 
-- Local verification: `npm run verify` -> 111/111 tests, `openapi.json matches
-the published contracts`.
-- Upload status: **content pending**. This commit carries the index only. The
-patch is split into three base64 parts of 10,000 / 10,000 / 24 bytes; they are
-not yet committed because a single call carrying them was truncated.
-- The verified tree also exists in the authoring sandbox. This index is the
-record that lets the tree be rebuilt and checked if that sandbox is reclaimed.
+- Local verification: `npm run verify` -> 111/111 tests, `openapi.json` matches
+  the published contracts.
+- Upload status: **complete**. The gzipped patch is carried by four base64 parts,
+  all committed to this branch and each confirmed byte-identical to the authored
+  file by comparing its git blob hash after upload:
 
-## Restore procedure (once the parts are present)
+  | part | commit | git blob | bytes |
+  | --- | --- | --- | --- |
+  | 0 | `3e71131` | `da0ae16bdb9fac109abe64eb4063664ba26173ea` | 6000 |
+  | 1 | `534005e` | `0f0936b5ac4caae05f75c1545cfe36e8b557a12c` | 6000 |
+  | 2 | `6db24ef` | `93f791d21ad7d4ec31b0c5a83c90daf6bf97b24b` | 6000 |
+  | 3 | `fe3cf4b` | `78e27e2942b3b12c56dd839adc0699a2c7022658` | 2024 |
+
+- Concatenating the four parts reproduces `pending.b64` exactly, and decoding it
+  reproduces the 57,128-byte patch exactly (checked with `cmp`).
+
+## Restore procedure
 
 ```sh
 cat snapshots/durable-events.part0.b64 \
     snapshots/durable-events.part1.b64 \
-    snapshots/durable-events.part2.b64 | base64 -d | gunzip > /tmp/pending.patch
+    snapshots/durable-events.part2.b64 \
+    snapshots/durable-events.part3.b64 | base64 -d | gunzip > /tmp/pending.patch
 patch -p1 < /tmp/pending.patch
 npm ci && npm run verify
 ```
@@ -65,9 +74,10 @@ hand-written.
 ## Part checksums
 
 ```
-4ba6138870dd4b46665edd3a61e8f0bdb616408f4f4e0b682bdf8abdae0a2fc2  part0 (10000 bytes)
-e24e15f97f030cddd392eb0753094221aa31eb7554fe1fb6eae0ed4283194697  part1 (10000 bytes)
-c8291a8552f9ccdf1ca8b480f65b8a2949746babc5fd630b1a960fc3e3d24ea1  part2 (24 bytes)
+fb4a73870bc8c5669e6fdb9c516221cbfd6f9d05087f6fd91b0bf648c48c370b  part0 (6000 bytes)
+a2e1b93ea61f7b750e1594aa78edadbf644fa3a72811a23fd9fd2b4dfb628a06  part1 (6000 bytes)
+c5307904c3c7eb9fd51b517e5c457e366c35f91617f572640214ae43816fba2a  part2 (6000 bytes)
+fc820012456874b2c1aeccaf445f409d67937b54c3c4b68cdd926079b4a896db  part3 (2024 bytes)
 ```
 
 This file and the snapshot parts are temporary scaffolding. Delete them in the
