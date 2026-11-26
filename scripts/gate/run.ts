@@ -38,7 +38,22 @@ if (!name || !(name in CHECKS)) {
   process.exit(2);
 }
 
-const result = await CHECKS[name]();
+function annotation(value: string): string {
+  return value.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+let result: Report;
+try {
+  result = await CHECKS[name]();
+} catch (error) {
+  const detail = (error as Error).message;
+  process.stderr.write(`error: ${name} failed: ${detail}\n`);
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    process.stdout.write(`::error title=${annotation(`${name}:error`)}::${annotation(detail)}\n`);
+  }
+  process.exit(1);
+}
+
 for (const warning of result.warnings) {
   process.stdout.write(`warning: ${warning.rule}: ${warning.detail}\n`);
 }
@@ -46,6 +61,16 @@ for (const finding of result.findings) {
   process.stderr.write(`error: ${finding.rule}: ${finding.detail}\n`);
 }
 if (result.findings.length > 0) {
+  // A hosted run keeps the step log behind repository admin rights. An
+  // annotation is readable from the check run, so a failing gate names its
+  // finding there instead of only exiting 1.
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    for (const finding of result.findings.slice(0, 10)) {
+      process.stdout.write(
+        `::error title=${annotation(`${name}:${finding.rule}`)}::${annotation(finding.detail)}\n`,
+      );
+    }
+  }
   process.stderr.write(`${name}: ${result.findings.length} finding(s)\n`);
   process.exit(1);
 }
