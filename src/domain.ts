@@ -212,6 +212,7 @@ export type ScheduleExecutionRecord = {
   admissionStarted?: boolean;
   failureAccountingPending?: boolean;
   noticePending?: boolean;
+  completionNoticeSummary?: string;
   selectedTimingRevision?: number;
   scheduleId: string;
   ownerId: string;
@@ -239,6 +240,7 @@ export type ScheduleExecutionPatch = Partial<
     | 'admissionStarted'
     | 'failureAccountingPending'
     | 'noticePending'
+    | 'completionNoticeSummary'
     | 'attempt'
     | 'taskId'
     | 'detail'

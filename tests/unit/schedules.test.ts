@@ -1028,7 +1028,8 @@ test('a refusal on retry survives a notice outage and never schedules another at
     return { ok: false, reason: 'refused', detail: 'Agent unavailable' };
   };
   const engine = engineFor({ store, notices, port: port.port, clock: testClock().clock });
-  await assert.rejects(engine.tick(), /acknowledgement lost/);
+  await engine.tick();
+  assert.equal((await store.getExecution(receipt.executionId))?.noticePending, true);
   assert.equal((await store.getExecution(receipt.executionId))?.state, 'refused');
   notices.record = record;
   await engine.tick();
@@ -1146,4 +1147,38 @@ test('a recovered failure pauses once even when accounting committed before ackn
     assert.equal((await store.get(schedule.scheduleId))?.state, 'paused');
     assert.equal((await store.getExecution(receipt.executionId))?.noticePending, false);
   }
+});
+
+test('persistent notice delivery failures leave receipts pending while Work continues', async () => {
+  const store = createScheduleRepository();
+  const notices = createScheduleNoticeStore();
+  const record = notices.record;
+  const schedule = scheduleRecord({ nextRunAt: null });
+  const due = scheduleRecord({ scheduleId: 'sch_due' });
+  await store.create(schedule);
+  await store.create(due);
+  const missed = executionRecord(schedule, { state: 'missed', noticePending: true });
+  const active = executionRecord(schedule, {
+    executionId: 'exe_active', executionKey: 'active:1', taskId: 'task_active', state: 'dispatched',
+  });
+  await store.createExecution(missed);
+  await store.createExecution(active);
+  const port = testPort();
+  port.snapshots.set('task_active', { generation: 1, state: 'completed', summary: 'Result', failure: null });
+  notices.record = async () => { throw new Error('notice store unavailable'); };
+  const engine = engineFor({ store, notices, port: port.port, clock: testClock().clock });
+
+  const tick = await engine.tick();
+  assert.equal(tick.reconciled, 1);
+  assert.equal(tick.dispatched, 1);
+  assert.equal((await store.getExecution(active.executionId))?.state, 'completed');
+  await engine.tick();
+  assert.equal((await store.pendingNotices(10)).length, 2);
+
+  notices.record = record;
+  await engine.tick();
+  const delivered = (await notices.list(OWNER, 5)).notifications;
+  assert.equal(delivered.length, 2);
+  assert.ok(delivered.some(notice => notice.summary === 'Scheduled run "Test schedule" completed: Result'));
+  assert.equal((await store.pendingNotices(10)).length, 0);
 });

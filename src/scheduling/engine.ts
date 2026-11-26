@@ -168,18 +168,21 @@ export function createScheduleEngine(input: {
     kind: 'completed' | 'failed' | 'missed' | 'refused';
     summary: string;
   }): Promise<void> {
-    await notices.record({
-      noticeId: input.noticeId,
-      scheduleId: input.schedule.scheduleId,
-      executionId: input.executionId,
-      ownerId: input.schedule.ownerId,
-      kind: input.kind,
-      summary: input.summary.slice(0, NOTICE_SUMMARY_LIMIT),
-      createdAt: iso(),
-      read: false,
-    });
-    if (input.kind !== 'completed') {
+    try {
+      await notices.record({
+        noticeId: input.noticeId,
+        scheduleId: input.schedule.scheduleId,
+        executionId: input.executionId,
+        ownerId: input.schedule.ownerId,
+        kind: input.kind,
+        summary: input.summary.slice(0, NOTICE_SUMMARY_LIMIT),
+        createdAt: iso(),
+        read: false,
+      });
       await store.updateExecution({ executionId: input.executionId, from: [input.kind], patch: { noticePending: false } });
+    } catch {
+      // Leave the durable obligation pending. The same notice ID makes a lost
+      // insert or acknowledgement safe to retry without blocking scheduled Work.
     }
   }
 
@@ -828,23 +831,18 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
     if (snapshot.state === 'completed') {
       const summary = snapshot.summary ?? '';
       const condition = evaluateCondition(schedule.condition, summary);
-      if (condition === 'met') {
-        await recordNotice({
-          noticeId: `ntc_${execution.executionId}_completed`,
-          schedule,
-          executionId: execution.executionId,
-          kind: 'completed',
-          summary: summary.length > 0
-            ? `Scheduled run "${schedule.name}" completed: ${summary}`
-            : `Scheduled run "${schedule.name}" completed.`,
-        });
-      }
+      const completionNoticeSummary = condition === 'met'
+        ? (summary.length > 0
+          ? `Scheduled run "${schedule.name}" completed: ${summary}`
+          : `Scheduled run "${schedule.name}" completed.`).slice(0, NOTICE_SUMMARY_LIMIT)
+        : undefined;
       const moved = await store.updateExecution({
         executionId: execution.executionId, observed: execution,
         from: ONGOING_EXECUTION_STATES,
         patch: {
           state: 'completed',
           condition,
+          ...(completionNoticeSummary && { noticePending: true, completionNoticeSummary }),
           detail: truncate(summary, FAILURE_DETAIL_LIMIT),
           updatedAt: iso(),
           finishedAt: iso(),
@@ -856,6 +854,10 @@ trigger: execution.attempt > 1 ? 'retry' : execution.trigger, occurrenceKey: exe
         );
         report.reconciled += 1;
         await store.releaseCapacity(execution.executionId);
+        if (completionNoticeSummary) await recordNotice({
+          noticeId: `ntc_${execution.executionId}_completed`,
+          schedule, executionId: execution.executionId, kind: 'completed', summary: completionNoticeSummary,
+        });
       }
       return;
     }
@@ -1063,11 +1065,11 @@ trigger: 'retry', selectedTimingRevision: schedule.timingRevision ?? 0, occurren
 
     for (const receipt of await store.pendingNotices(settings.batchSize)) {
       const kind = receipt.state;
-      if (kind !== 'failed' && kind !== 'refused' && kind !== 'missed') continue;
+      if (kind !== 'failed' && kind !== 'refused' && kind !== 'missed' && kind !== 'completed') continue;
       const schedule = receipt.failureAccountingPending ? await accountFailure(receipt) : await store.get(receipt.scheduleId);
       if (schedule) await recordNotice({
         noticeId: `ntc_${receipt.executionId}_${kind}`, executionId: receipt.executionId, schedule, kind,
-        summary: `Scheduled run "${schedule.name}" ${kind}: ${receipt.detail ?? ''}`,
+        summary: receipt.completionNoticeSummary ?? `Scheduled run "${schedule.name}" ${kind}: ${receipt.detail ?? ''}`,
       });
     }
 
