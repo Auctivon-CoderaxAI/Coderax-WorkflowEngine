@@ -289,6 +289,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         (scope) => scope === 'workspace.write' || scope === 'command.execute',
       );
       const busy = exclusive ? activeRoots.get(root) : undefined;
+      let replacing = false;
       if (busy) {
         const running = active.get(busy);
         // A newer generation of the same task is a supersession, not a conflict:
@@ -309,6 +310,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
             input.identity.executionId,
           );
         }
+        replacing = true;
         if (running.requested !== 'shutdown') {
           running.requested = 'interrupt';
           running.controller.abort();
@@ -326,6 +328,30 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         heldRoots.delete(root);
       }
 
+      /*
+       * Admission and reservation are one synchronous step. The durable write
+       * below is an await: two calls that both passed the check above would
+       * otherwise launch with write authority over the same root. A superseding
+       * generation may take the reservation over because the older execution's
+       * cleanup only removes a reservation that still names it.
+       */
+      if (exclusive) {
+        const reserved = activeRoots.get(root);
+        if (reserved !== undefined && !(replacing && reserved === busy)) {
+          return refused(
+            'workspace_busy',
+            'Another supervised execution currently holds this workspace root.',
+            input.identity.executionId,
+          );
+        }
+        activeRoots.set(root, input.identity.executionId);
+      }
+      const releaseReservation = (): void => {
+        if (exclusive && activeRoots.get(root) === input.identity.executionId) {
+          activeRoots.delete(root);
+        }
+      };
+
       const record: ExecutionRecord = {
         ...input.identity,
         workspaceRoot: root,
@@ -338,7 +364,15 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         capabilityRevokedAt: null,
         processUseCount: 0,
       };
-      if (!(await deps.executions.create(record))) {
+      let created: boolean;
+      try {
+        created = await deps.executions.create(record);
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
+      if (!created) {
+        releaseReservation();
         return refused(
           'execution_duplicate',
           'That execution identity already exists.',
@@ -369,7 +403,6 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         done,
       };
       active.set(input.identity.executionId, entry);
-      if (exclusive) activeRoots.set(root, input.identity.executionId);
       void deps.executions
         .heartbeat(input.identity.executionId, startedAt)
         .catch(() => false);
@@ -492,9 +525,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
       }
 
       active.delete(input.identity.executionId);
-      if (exclusive && activeRoots.get(root) === input.identity.executionId) {
-        activeRoots.delete(root);
-      }
+      releaseReservation();
 
       const workspaceHeld = termination.kind === 'unverified';
       if (workspaceHeld) {

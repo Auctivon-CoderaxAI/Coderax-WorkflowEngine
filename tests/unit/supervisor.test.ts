@@ -4,7 +4,7 @@ import type { PermissionScope } from '@coderax/contracts';
 import { createCapabilityBroker } from '../../src/execution/capabilities.js';
 import { createExecutionSupervisor } from '../../src/execution/supervisor.js';
 import type { SupervisionLaunch } from '../../src/execution/supervisor.js';
-import type { ExecutionIdentity } from '../../src/execution/identity.js';
+import type { ExecutionIdentity, ExecutionRecord } from '../../src/execution/identity.js';
 import { createUnavailableIsolationProvider } from '../../src/execution/termination.js';
 import { createExecutionRepository } from '../../src/persistence/executions.js';
 import { createIdGenerator } from '../../src/support/clock.js';
@@ -382,4 +382,59 @@ test('a stale execution record is retired as interrupted, a fresh one is left al
   assert.equal(h.capabilities.isLive('exec_stale'), false);
   // The owning process unwinds after the retirement and must not overwrite it.
   assert.equal((await h.executions.get('exec_stale'))?.cause, 'interrupted');
+});
+
+test('a second writer is refused while the first admission is still being persisted', async () => {
+  const clock = {
+    now: () => new Date('2026-11-26T12:00:00.000Z'),
+    iso: () => '2026-11-26T12:00:00.000Z',
+  };
+  const base = createExecutionRepository();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let first = true;
+  // The durable write is the only await between the admission decision and the
+  // point at which the execution becomes active.
+  const executions = {
+    ...base,
+    create: async (record: ExecutionRecord) => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return base.create(record);
+    },
+  };
+  const supervisor = createExecutionSupervisor({
+    clock,
+    ids: createIdGenerator(),
+    executions,
+    capabilities: createCapabilityBroker(),
+    isolation: createUnavailableIsolationProvider('No deployment workload isolation is configured.'),
+    containmentHoldMs: 60_000,
+    shutdownGraceMs: 20,
+    heartbeatIntervalMs: 1_000,
+  });
+
+  const firstRun = supervisor.run({
+    identity: identity({ executionId: 'exec_first', token: 'run_first' }),
+    adapter: { agent: 'coderax', workload: 'in-process' },
+    workspaceRoot: '/work/shared',
+    scopes: SCOPES,
+    launch: async () => ({ outcome: { kind: 'completed', summary: 'done' } }),
+  });
+  const second = await supervisor.run({
+    identity: identity({ executionId: 'exec_second', token: 'run_second' }),
+    adapter: { agent: 'coderax', workload: 'in-process' },
+    workspaceRoot: '/work/shared',
+    scopes: SCOPES,
+    launch: async () => ({ outcome: { kind: 'completed', summary: 'done' } }),
+  });
+  assert.equal(second.admitted, false);
+  if (!second.admitted) assert.equal(second.code, 'workspace_busy');
+
+  release();
+  assert.equal((await firstRun).admitted, true);
 });

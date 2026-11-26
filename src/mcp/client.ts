@@ -251,14 +251,22 @@ export async function connectMcpServer(config: McpServerConfig): Promise<McpConn
   const channel = config.transport === 'http' ? await connectHttp(config) : connectStdio(config);
   const name = sanitizeName(config.name);
 
-  await channel.request('initialize', {
-    protocolVersion: PROTOCOL_VERSION,
-    capabilities: {},
-    clientInfo: { name: 'coderax-workflow-engine', version: '0.1.0' },
-  });
-  await channel.notify('notifications/initialized', {});
-
-  const tools = await channel.request('tools/list', {});
+  let tools: unknown;
+  try {
+    await channel.request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'coderax-workflow-engine', version: '0.1.0' },
+    });
+    await channel.notify('notifications/initialized', {});
+    tools = await channel.request('tools/list', {});
+  } catch (error) {
+    // A server that started but failed the handshake is still a live child
+    // process. Close it before rethrowing, or shutdown never learns about it
+    // and the process outlives every execution that could have owned it.
+    await channel.close().catch(() => undefined);
+    throw error;
+  }
   const listed =
     typeof tools === 'object' && tools !== null && Array.isArray((tools as { tools?: unknown }).tools)
       ? (tools as { tools: Array<{ name?: unknown; description?: unknown }> }).tools
