@@ -115,9 +115,11 @@ artifact that can be revised by id (`document.json` or `project.json`);
 At the branch head, `npm run verify`:
 
 - `tsc -b` across contracts, SDK and engine;
-- `node --test "dist/tests/**/*.test.js"` — 174 tests, 164 pass, 0 fail,
-  10 skipped (the skips are the real-Mongo lanes that require a reachable
-  database);
+- `node --test "dist/tests/**/*.test.js"` — 175 tests, 175 pass, 0 fail,
+  **0 skipped**, against a real `mongod` (7.0.14). `mongodb-memory-server` is now
+  a dev dependency, so the real-Mongo durability lanes start their own server
+  instead of skipping; `.github/workflows/verify.yml` additionally pins
+  `CODERAX_REQUIRE_MONGODB=1`, so CI fails rather than reporting a green skip;
 - `openapi.json` matches the published contracts.
 
 The generation suite reads files back instead of trusting the writer: DOCX parts
@@ -131,6 +133,23 @@ retrieve → edit → new version → retrieve the previous version → delete, 
 concurrent/stale edit refusal, quota exhaustion with no artifacts left behind, a
 cross-mode read that reports `not_found`, and owner-token refusal.
 
+### A half-finished edit
+
+An edit appends the output files first and the stored document source last, so
+the source is the only concurrency token and the only thing a reader resolves.
+If the source write fails after the outputs were appended (a storage fault, or a
+racing writer that won the version), the request fails, the source stays on its
+old version, and the orphaned output version is never named by the stored model
+— nothing half-updated becomes visible. The test for this injects exactly one
+refused `addVersion` on the source and asserts the state that remains.
+
+A retry must still be possible after such a failure. Pinning each output append
+to the version the *source* records made the next edit conflict forever, because
+the output artifact was already one version ahead; the source version is the
+concurrency token and the derived outputs now follow it. The same test proves
+the retry at the original `expectedVersion` succeeds and that the new source
+version names the retried outputs.
+
 ## Outstanding work
 
 - XLSX and PPTX editing of an *existing* file. Documents are editable by artifact
@@ -142,6 +161,6 @@ cross-mode read that reports `not_found`, and owner-token refusal.
 - Registering productivity producers with the multimodal capability registry
   after `feat/multimodal-creative-intelligence` lands.
 - Merging PRs #2–#5 and rebasing this branch onto the consolidated `main`.
-- Real MongoDB integration and hosted CI at the pushed SHA: both require
-  infrastructure that is not available in this cloud workspace, and neither is
-  claimed here.
+- Hosted CI at the pushed SHA: the workflow runs only for pull requests to
+  `main` and pushes to `main`, and no pull request could be opened from this
+  environment (no `gh`, no token), so no run exists to report.
