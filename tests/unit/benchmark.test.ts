@@ -55,6 +55,7 @@ function task(overrides: Partial<BenchmarkTask>): BenchmarkTask {
 
 test('grading is deterministic and does not execute generated code', () => {
   assert.equal(normalizeAnswer('  O(n)  '), 'o(n)');
+  assert.equal(normalizeAnswer('```text\nyes\n```'), 'yes');
   assert.equal(gradeTask(task({ expected: 'yes' }), { text: '**Yes**', toolCalls: [] }), true);
   assert.equal(gradeTask(task({ expected: 'yes' }), { text: 'no', toolCalls: [] }), false);
   assert.equal(gradeTask(task({ expected: 'yes' }), { text: 'yes indeed', toolCalls: [] }), false);

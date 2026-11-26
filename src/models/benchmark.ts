@@ -122,7 +122,8 @@ export function normalizeAnswer(text: string): string {
     .toLowerCase()
     .replace(/```[a-z]*\n?/g, '')
     .replace(/[`*_]/g, '')
-    .replace(/\s+/g, ' ');
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function numbersIn(text: string): number[] {

@@ -554,8 +554,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
       report,
     });
-    if (controllers.get(taskId) !== controller) return;
-    controllers.delete(taskId);
+    // Budget ownership is independent of task-ownership fences; release the
+    // reservation before any guard that can return early.
     if (held) {
       if (result.outcome.kind === 'completed') {
         deps.budget.settle(held.id, result.outcome.usage ?? {});
@@ -565,6 +565,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         deps.budget.release(held.id, { dispatched: true });
       }
     }
+    if (controllers.get(taskId) !== controller) return;
+    controllers.delete(taskId);
 
     if (result.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer

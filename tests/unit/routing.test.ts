@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createBudgetLedger } from '../../src/models/budget.js';
+import { createCircuit } from '../../src/models/circuit.js';
 import { createModelRouter, inferRoutingMode, type ModelRouter } from '../../src/models/router.js';
 import type {
   BenchmarkScore,
@@ -574,12 +575,16 @@ test('stopping on the model event releases an unused reservation', async () => {
   assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
 });
 
-test('stopping a stream early releases the provider slot and settles the reservation', async () => {
+test('stopping a stream early releases the provider slot, aborts upstream and settles', async () => {
   const model = freeModel('streamed');
   const ledger = budget();
+  let upstreamAborted = false;
   const provider = adapter({
     models: [model],
-    stream: async function* () {
+    stream: async function* (incoming) {
+      incoming.signal.addEventListener('abort', () => {
+        upstreamAborted = true;
+      }, { once: true });
       yield { type: 'text' as const, text: 'first' };
       yield { type: 'text' as const, text: 'never read' };
     },
@@ -597,9 +602,27 @@ test('stopping a stream early releases the provider slot and settles the reserva
 
   // A leaked slot makes this fail with the local concurrency ceiling; a leaked
   // reservation leaves the request count at one instead of two.
+  assert.equal(upstreamAborted, true);
   const completed = await engine.complete(request('streamed'));
   assert.equal(completed.text, 'ok:streamed');
   assert.equal(ledger.snapshot('owner', new Date()).requests, 2);
+});
+
+test('a stale closed admission cannot release a newer half-open probe', () => {
+  const circuit = createCircuit({ failureThreshold: 1, cooldownMs: 1_000 });
+  const start = new Date('2026-11-26T12:00:00.000Z');
+  const stale = circuit.allow(start);
+  assert.equal(stale?.probe, false);
+  if (!stale) return;
+  circuit.failure(start, stale);
+  const later = new Date(start.getTime() + 1_001);
+  const probe = circuit.allow(later);
+  assert.equal(probe?.probe, true);
+  circuit.abandon(stale);
+  // The newer probe is still active, so no second admission is allowed.
+  assert.equal(circuit.allow(later), null);
+  if (probe) circuit.success(probe);
+  assert.equal(circuit.state(later), 'closed');
 });
 
 test('streaming fails over only before the first token', async () => {

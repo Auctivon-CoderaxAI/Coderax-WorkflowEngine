@@ -8,7 +8,7 @@ import type {
 } from '@coderax/contracts';
 import { modelKey } from '@coderax/contracts';
 import type { BudgetLedger } from './budget.js';
-import { createCircuit, type Circuit } from './circuit.js';
+import { createCircuit, type Circuit, type CircuitAdmission } from './circuit.js';
 import { createProviderLimiter, type ProviderLimiter } from './rate.js';
 import type {
   BenchmarkScore,
@@ -607,25 +607,36 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     return eligible({ mode: 'cloud', routing: mode }, at).map((entry) => entry.model.ref);
   }
 
-  function recordSuccess(runtime: ModelRuntime, provider: ProviderRuntime, latencyMs: number): void {
+  function recordSuccess(
+    runtime: ModelRuntime,
+    provider: ProviderRuntime,
+    latencyMs: number,
+    runtimeAdmission?: CircuitAdmission,
+    providerAdmission?: CircuitAdmission,
+  ): void {
     runtime.attempts += 1;
     runtime.successes += 1;
     runtime.consecutiveFailures = 0;
     runtime.latencyMs = ewma(runtime.latencyMs, latencyMs);
-    runtime.circuit.success();
+    runtime.circuit.success(runtimeAdmission);
     provider.latencyMs = ewma(provider.latencyMs, latencyMs);
-    provider.circuit.success();
+    provider.circuit.success(providerAdmission);
     provider.lastError = null;
   }
 
-  function recordFailure(failure: AttemptFailure, at: Date): void {
+  function recordFailure(
+    failure: AttemptFailure,
+    at: Date,
+    runtimeAdmission?: CircuitAdmission,
+    providerAdmission?: CircuitAdmission,
+  ): void {
     const { runtime, provider, error } = failure;
     runtime.attempts += 1;
     runtime.failures += 1;
     runtime.consecutiveFailures += 1;
     runtime.lastFailureAt = at;
-    runtime.circuit.failure(at);
-    provider.circuit.failure(at);
+    runtime.circuit.failure(at, runtimeAdmission);
+    provider.circuit.failure(at, providerAdmission);
     provider.lastError = sanitizeDetail(error.message);
     const boundedDelay = (delay: number): number =>
       Math.min(MAX_PROVIDER_COOLDOWN_MS, Math.max(1_000, delay));
@@ -711,13 +722,15 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         }
         throw new ModelRoutingError('budget_exhausted', reserved.detail, false);
       }
-      if (!runtime.circuit.allow(at)) {
+      const runtimeAdmission = runtime.circuit.allow(at);
+      if (!runtimeAdmission) {
         budget.release(reserved.reservation.id);
         continue;
       }
-      if (!provider.circuit.allow(at)) {
+      const providerAdmission = provider.circuit.allow(at);
+      if (!providerAdmission) {
         budget.release(reserved.reservation.id);
-        runtime.circuit.abandon();
+        runtime.circuit.abandon(runtimeAdmission);
         continue;
       }
       const acquired = provider.limiter.acquire({
@@ -726,8 +739,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       });
       if (!acquired.allowed) {
         budget.release(reserved.reservation.id);
-        runtime.circuit.abandon();
-        provider.circuit.abandon();
+        runtime.circuit.abandon(runtimeAdmission);
+        provider.circuit.abandon(providerAdmission);
         lastFailure = new ProviderError(
           'rate_limit',
           `The local provider ${acquired.reason} ceiling is already in use.`,
@@ -761,7 +774,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           inputTokens: estimated,
           outputTokens: output,
         });
-        recordSuccess(runtime, provider, latencyMs);
+        recordSuccess(runtime, provider, latencyMs, runtimeAdmission, providerAdmission);
         return {
           text: completion.text,
           ...(completion.usage === undefined ? {} : { usage: completion.usage }),
@@ -782,11 +795,16 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
                 retryable: true,
               });
         if (providerError.kind === 'cancelled' || request.signal.aborted) {
-          runtime.circuit.abandon();
-          provider.circuit.abandon();
+          runtime.circuit.abandon(runtimeAdmission);
+          provider.circuit.abandon(providerAdmission);
           throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
         }
-        recordFailure({ error: providerError, provider, runtime }, now());
+        recordFailure(
+          { error: providerError, provider, runtime },
+          now(),
+          runtimeAdmission,
+          providerAdmission,
+        );
         lastFailure = providerError;
       }
     }
@@ -848,20 +866,22 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         }
         throw new ModelRoutingError('budget_exhausted', reserved.detail, false);
       }
-      if (!runtime.circuit.allow(at)) {
+      const runtimeAdmission = runtime.circuit.allow(at);
+      if (!runtimeAdmission) {
         budget.release(reserved.reservation.id);
         continue;
       }
-      if (!provider.circuit.allow(at)) {
+      const providerAdmission = provider.circuit.allow(at);
+      if (!providerAdmission) {
         budget.release(reserved.reservation.id);
-        runtime.circuit.abandon();
+        runtime.circuit.abandon(runtimeAdmission);
         continue;
       }
       const acquired = provider.limiter.acquire({ tokens: estimated + output, now: at });
       if (!acquired.allowed) {
         budget.release(reserved.reservation.id);
-        runtime.circuit.abandon();
-        provider.circuit.abandon();
+        runtime.circuit.abandon(runtimeAdmission);
+        provider.circuit.abandon(providerAdmission);
         lastFailure = new ProviderError('rate_limit', 'The local provider ceiling is already in use.', {
           retryAfterMs: acquired.retryAfterMs,
           retryable: true,
@@ -875,8 +895,10 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       let emitted = false;
       let usage: Usage | undefined;
       const started = performance.now();
+      const providerAbort = new AbortController();
       const signal = AbortSignal.any([
         request.signal,
+        providerAbort.signal,
         AbortSignal.timeout(provider.settings.requestTimeoutMs),
       ]);
       const providerRequest = {
@@ -898,8 +920,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         if (!revalidated || !modelAvailability(revalidated, now()).available) {
           acquired.release();
           budget.release(reserved.reservation.id);
-          runtime.circuit.abandon();
-          provider.circuit.abandon();
+          runtime.circuit.abandon(runtimeAdmission);
+          provider.circuit.abandon(providerAdmission);
           settled = true;
           lastFailure = new ProviderError(
             'invalid',
@@ -926,7 +948,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           reserved.reservation.id,
           usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 },
         );
-        recordSuccess(runtime, provider, latencyMs);
+        recordSuccess(runtime, provider, latencyMs, runtimeAdmission, providerAdmission);
         return;
       } catch (error) {
         acquired.release();
@@ -948,11 +970,16 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             budget.release(reserved.reservation.id, { dispatched: providerStarted });
           }
           settled = true;
-          runtime.circuit.abandon();
-          provider.circuit.abandon();
+          runtime.circuit.abandon(runtimeAdmission);
+          provider.circuit.abandon(providerAdmission);
           throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
         }
-        recordFailure({ error: providerError, provider, runtime }, now());
+        recordFailure(
+          { error: providerError, provider, runtime },
+          now(),
+          runtimeAdmission,
+          providerAdmission,
+        );
         if (emitted) {
           // Output already reached the caller; switching models would duplicate it.
           budget.settle(
@@ -974,8 +1001,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         // provider slot and account for the work already started; otherwise the
         // concurrency ceiling and the reservation would leak for the rest of the day.
         if (!settled) {
-          runtime.circuit.abandon();
-          provider.circuit.abandon();
+          // Stop the upstream body before making the local slot available again;
+          // releasing the reader lock alone does not close the connection.
+          providerAbort.abort();
+          runtime.circuit.abandon(runtimeAdmission);
+          provider.circuit.abandon(providerAdmission);
           acquired.release();
           if (providerStarted) {
             budget.settle(
@@ -1041,7 +1071,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           provider.lastError = sanitizeDetail(
             error instanceof Error ? error.message : 'Provider discovery failed.',
           );
-          provider.circuit.failure(at);
+          // Discovery health is separate from inference health; discoveryOk
+          // already excludes the provider, and an inference probe recovers it.
           report.providers.push({
             providerId,
             ok: false,
