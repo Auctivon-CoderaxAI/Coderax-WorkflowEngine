@@ -79,7 +79,7 @@ function matches(document: Document, filter: MongoFilter): boolean {
         } else if (operator === '$in') {
           if (!(operand as unknown[]).includes(value)) return false;
         } else if (operator === '$nin') {
-          if ((operand as unknown[]).includes(value)) return false;
+          if ((Array.isArray(value) ? value : [value]).some(item => (operand as unknown[]).includes(item))) return false;
         } else if (operator === '$ne') {
           if (value === operand) return false;
         } else {
@@ -252,6 +252,17 @@ export function createFakeCollection(): FakeCollection {
       documents.push(...kept);
       return { deletedCount };
     },
+    countDocuments: async filter => documents.filter(row => matches(row, filter)).length,
+    aggregate: pipeline => ({
+      toArray: async () => {
+        const [match, group] = pipeline;
+        if (!match?.$match || JSON.stringify(group) !== JSON.stringify({ $group: { _id: null, bytes: { $sum: '$bytes' } } })) {
+          throw new Error('Unsupported aggregate pipeline');
+        }
+        const rows = documents.filter(row => matches(row, match.$match as MongoFilter));
+        return [{ bytes: rows.reduce((sum, row) => sum + Number(row.bytes), 0) }];
+      },
+    }),
     find: cursor,
   };
 }

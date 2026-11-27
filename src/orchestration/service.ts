@@ -165,7 +165,7 @@ export type DeliverableDirective =
   | { present: true; value: unknown; error?: string };
 
 export function readDeliverableDirective(objective: string): DeliverableDirective {
-  const match = /```deliverable\s*\n([\s\S]*?)```/.exec(objective);
+  const match = /```deliverable\s*\n([\s\S]*?)^```/m.exec(objective);
   if (!match) return { present: false };
   try {
     return { present: true, value: JSON.parse(match[1] ?? '') as unknown };
@@ -543,7 +543,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       taskId: task.taskId,
       limit: 500,
     });
-    if (listed.ok && listed.value.artifacts.length > 0) {
+    if (listed.ok && status.result && task.kind !== 'game') {
       status.result = {
         ...(status.result ?? { artifacts: [] }),
         artifacts: listed.value.artifacts.map((artifact) => ({
@@ -563,7 +563,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    * mismatched directive produces nothing rather than substituting a different
    * deliverable, and a refused generation leaves the run's own result intact.
    */
-  async function produceDeliverable(task: TaskRecord): Promise<ProducedArtifact[]> {
+  async function produceDeliverable(task: TaskRecord, signal: AbortSignal): Promise<ProducedArtifact[]> {
     const directive = readDeliverableDirective(task.objective);
     if (!directive.present || directive.error) return [];
     const parsed = DeliverableRequest.safeParse(directive.value);
@@ -574,7 +574,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       {
         conversationId: task.conversationId,
         taskId: task.taskId,
-        signal: new AbortController().signal,
+        signal,
       },
     );
     if (!delivered.ok) return [];
@@ -692,6 +692,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
     steps?: TaskRecord['steps'],
+    signal?: AbortSignal,
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       return;
@@ -772,7 +773,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     }
 
-    const produced = outcome.kind === 'completed' ? await produceDeliverable(task) : [];
+    const produced = outcome.kind === 'completed' && signal && !signal.aborted
+      ? await produceDeliverable(task, signal).catch(() => []) : [];
+    if (outcome.kind === 'completed' && signal?.aborted) outcome = { kind: 'cancelled' };
 
     const patch =
       outcome.kind === 'completed'
@@ -1311,18 +1314,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         reason: 'The runner failed before termination could be verified.',
       });
-      await settle(started.task, token, {
-        kind: 'failed',
-        code: 'provider_error',
-        detail: 'The execution supervisor could not verify the run.',
-        retryable: true,
-      });
+      try {
+        await settle(started.task, token, {
+          kind: 'failed', code: 'provider_error',
+          detail: 'The execution supervisor could not verify the run.', retryable: true,
+        });
+      } finally {
+        if (controllers.get(taskId) === controller) controllers.delete(taskId);
+      }
       return;
     }
 
     const current = controllers.get(taskId);
     const superseded = current !== undefined && current !== controller;
-    if (!superseded) controllers.delete(taskId);
     await writeChain.catch(() => undefined);
 
     const verified = result.terminated;
@@ -1348,8 +1352,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           iterations,
         },
         steps,
+        controller.signal,
       );
     } finally {
+      if (controllers.get(taskId) === controller) controllers.delete(taskId);
       // Verified termination means the adapter returned. Anything else means it
       // may still be running, so its capability and workspace are revoked rather
       // than left available to a generation the engine can no longer supervise.

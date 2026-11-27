@@ -143,7 +143,7 @@ export type DocumentEdit = z.infer<typeof DocumentEdit>;
 export const DocumentBase = z
   .object({
     artifactId: ArtifactId,
-    mode: DataMode.default('cloud'),
+    mode: DataMode.optional(),
     expectedVersion: z.number().int().positive().optional(),
   })
   .strict();
@@ -526,7 +526,7 @@ export type DeliverableProject = z.infer<typeof DeliverableProject>;
  * revised by id; `receipt` is the audit receipt recorded after persistence
  * succeeded, so a created deliverable always has both stored bytes and a receipt.
  */
-export const Deliverable = z
+const DeliverableFields = z
   .object({
     kind: DeliverableKind,
     title: z.string().min(1).max(200),
@@ -548,6 +548,10 @@ export const Deliverable = z
     analysis: DatasetAnalysis.optional(),
   })
   .strict();
+export const Deliverable = z.union([
+  DeliverableFields.extend({ kind: z.literal('software'), artifacts: z.array(ArtifactDescriptor).min(1).max(100), project: DeliverableProject }),
+  DeliverableFields.extend({ kind: DeliverableKind.exclude(['software']) }),
+]);
 export type Deliverable = z.infer<typeof Deliverable>;
 
 /** One produced format and the stored artifact that holds its current bytes. */

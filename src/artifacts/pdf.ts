@@ -82,9 +82,8 @@ export type PdfDocumentInput = {
 /**
  * Splits a token that is wider than the line into the largest chunks that fit.
  *
- * The candidate length is bounded by the width of a wide glyph, so a very long
- * unbroken token is measured a bounded number of times. Without the bound the
- * search is quadratic and a single huge token stalls the render.
+ * Grow from a wide-glyph estimate until the prefix overflows, then binary-search
+ * that interval. Measurements stay local even for very long tokens.
  */
 function breakToken(font: PDFFont, size: number, width: number, token: string): string[] {
   const limit = Math.max(1, width);
@@ -93,13 +92,15 @@ function breakToken(font: PDFFont, size: number, width: number, token: string): 
   const parts: string[] = [];
   let rest = token;
   while (rest.length > 0) {
-    if (rest.length <= cap && font.widthOfTextAtSize(rest, size) <= limit) {
-      parts.push(rest);
-      break;
-    }
     let low = 1;
     let high = Math.min(rest.length, cap);
     let best = 1;
+    while (font.widthOfTextAtSize(rest.slice(0, high), size) <= limit) {
+      best = high;
+      low = high + 1;
+      if (high === rest.length) break;
+      high = Math.min(rest.length, high * 2);
+    }
     while (low <= high) {
       const mid = (low + high) >> 1;
       if (font.widthOfTextAtSize(rest.slice(0, mid), size) <= limit) {

@@ -3,7 +3,7 @@ import {
   DocumentSourceArtifact,
   type ArtifactDescriptor,
   type DataMode,
-  type Deliverable,
+  Deliverable,
   type DeliverableRequestInput,
 } from '@coderax/contracts';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
@@ -100,7 +100,7 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
     if (input.mode !== requestMode) {
       return fail(
         'validation_failed',
-        'The base artifact belongs to the other data mode and cannot be read by this request.',
+        'The requested base mode must match the deliverable mode.',
       );
     }
     const content = await deps.artifacts.download(principal, input.artifactId, {
@@ -156,7 +156,7 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
           principal,
           {
             artifactId: normalised.base.artifactId,
-            mode: normalised.base.mode,
+            mode: normalised.base.mode ?? mode,
             ...(normalised.base.expectedVersion
               ? { expectedVersion: normalised.base.expectedVersion }
               : {}),
@@ -227,7 +227,7 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
       });
 
       const artifacts: ArtifactDescriptor[] = persisted.value.descriptors;
-      return ok({
+      return ok(Deliverable.parse({
         kind: produced.value.kind,
         title: produced.value.title,
         summary: produced.value.summary,
@@ -237,7 +237,7 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
         ...(persisted.value.source ? { source: persisted.value.source } : {}),
         ...(persisted.value.project ? { project: persisted.value.project } : {}),
         ...(produced.value.analysis ? { analysis: produced.value.analysis } : {}),
-      });
+      }));
     } catch (error) {
       deps.audit.record({
         actor: principal.ownerId,

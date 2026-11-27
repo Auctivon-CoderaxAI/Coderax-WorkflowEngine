@@ -391,7 +391,7 @@ file, uploads new files with project/conversation/task associations, and returns
 the version-pinned manifest. A document revision is addressed by artifact id and
 `expectedVersion`, so a concurrent edit is refused instead of overwritten.
 
-`tests/e2e/deliverables.test.ts` runs the use case against a real MongoDB: it
+`tests/e2e/deliverables.test.ts` runs the use case through the MongoDB adapter with `createFakeDatabase()`: it
 generates the artifact forms, downloads their bytes, edits a document by a second
 immutable version, races two edits to prove the conflict, restores version one,
 compares the restored content byte-for-byte with the original, and asserts that a
@@ -402,7 +402,7 @@ database.
 The producer's staged file list is a generation-time shape. It maps to the
 store's descriptor at the persistence boundary; it must not become a second
 store, a second descriptor or a second quota ledger. `createArtifactToolkit` is
-the internal seam, and `POST /v1/deliverables` with the SDK's `deliver` is its
+the internal seam, and `POST /v1/deliverables` with the SDK's `client.generateDeliverable(...)` is its
 canonical client surface. Document `base` paths and HTML output remain
 unsupported because a workspace path is not an artifact identity and HTML is not
 an accepted durable media type; a revision names an artifact id and an expected

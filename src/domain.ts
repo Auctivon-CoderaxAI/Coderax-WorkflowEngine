@@ -372,6 +372,8 @@ export type ScheduleNoticeRecord = {
  * named only by `sha256`; the file name here is metadata and never a path.
  */
 export type ArtifactRecord = {
+  mutationRevision?: number;
+  slotTracked?: boolean;
   artifactId: string;
   ownerId: string;
   tenantId: string | null;
@@ -398,6 +400,7 @@ export type ArtifactRecord = {
 };
 
 export type ArtifactVersionRecord = {
+  reservationId?: string;
   ownerId: string;
   mode: DataMode;
   artifactId: string;

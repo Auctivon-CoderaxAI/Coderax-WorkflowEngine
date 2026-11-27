@@ -63,7 +63,9 @@ import type {
   BrowserSessionCreateInput,
   BrowserTakeoverRequest,
   ArtifactKind,
+  ArtifactUploadInput,
   ArtifactUploadRequest,
+  ArtifactVersionInput,
   ArtifactVersionRequest,
   ChatRequest,
   DeliverableRequestInput,
@@ -723,7 +725,7 @@ export class CoderaxClient {
     });
   }
 
-  uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
+  uploadArtifact(request: ArtifactUploadInput): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
       path: '/v1/artifacts',
@@ -733,7 +735,7 @@ export class CoderaxClient {
 
   uploadArtifactVersion(
     artifactId: string,
-    request: ArtifactVersionRequest,
+    request: ArtifactVersionInput,
   ): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
@@ -994,7 +996,9 @@ export type {
   ScheduleEventRequest,
   ScheduleTriggerRequest,
   ArtifactKind,
+  ArtifactUploadInput,
   ArtifactUploadRequest,
+  ArtifactVersionInput,
   ArtifactVersionRequest,
   WorkSubmitRequest,
 };

@@ -369,7 +369,6 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     const records = await deps.artifacts.list(input.principal.ownerId, {
       mode: input.mode,
       projectId: input.projectId,
-      limit: Math.max(1, settings.maxArtifactsPerOwner),
     });
     for (const record of records) {
       if (input.excludeArtifactId && record.artifactId === input.excludeArtifactId) continue;
@@ -386,6 +385,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
   /** One version owns one reference; releasing it can delete only at zero. */
   async function releaseDigest(ref: {
+    referenceId?: string;
+    legacyReleaseId?: string;
     ownerId: string;
     mode: DataMode;
     sha256: string;
@@ -503,19 +504,19 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
   }): Promise<number> {
     if (!input.artifact) return 0;
     const bytes = input.versions.reduce((total, row) => total + row.bytes, 0);
+    const key = { ownerId: input.ownerId, mode: input.mode, artifactId: input.artifact.artifactId };
     for (const row of input.versions) {
-      await releaseDigest({
-        ownerId: input.ownerId,
-        mode: input.mode,
-        sha256: row.sha256,
-      });
+      const legacyId = key.artifactId + ':' + row.version;
+      if (row.reservationId) await deps.capacity.commit({ reservationId: row.reservationId });
+      else await deps.capacity.commitLegacyVersion?.({ ...key, version: row.version });
+      await releaseDigest({ ...key, sha256: row.sha256, ...(row.reservationId
+        ? { referenceId: row.reservationId } : { legacyReleaseId: legacyId }) });
+      await deps.capacity.refund({ ...key, bytes: row.bytes, artifacts: 0,
+        ...(row.reservationId ? { ticket: row.reservationId } : { legacyTicket: legacyId }) });
     }
-    await deps.capacity.refund({
-      ownerId: input.ownerId,
-      mode: input.mode,
-      bytes,
-      artifacts: 1,
-    });
+    await deps.capacity.refund({ ...key, bytes: 0, artifacts: 1,
+      ...(input.artifact.slotTracked ? { ticket: key.artifactId } : { legacyTicket: key.artifactId }) });
+    await deps.artifacts.finishRemoval?.(key);
     return bytes;
   }
 
@@ -563,6 +564,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
     for (const row of rows) {
       if (count <= settings.maxVersionsPerArtifact) break;
       if (row.version === currentVersion) continue;
+      if (row.reservationId) await deps.capacity.commit({ reservationId: row.reservationId });
+      else await deps.capacity.commitLegacyVersion?.({ ...key, version: row.version });
       const removed = await deps.artifacts.removeVersion({ ...key, version: row.version });
       if (!removed) continue;
       count -= 1;
@@ -570,11 +573,13 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       await releaseDigest({
         ownerId: key.ownerId,
         mode: key.mode,
+        ...(removed.reservationId ? { referenceId: removed.reservationId } : {}),
         sha256: removed.sha256,
       });
       await deps.capacity.refund({
         ownerId: key.ownerId,
         mode: key.mode,
+        ...(removed.reservationId ? { ticket: removed.reservationId } : {}),
         bytes: removed.bytes,
         artifacts: 0,
       });
@@ -687,7 +692,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         });
         if (!reservation.ok) return reservation;
 
-        const ref = { ownerId: principal.ownerId, mode: request.mode, sha256 };
+        const ref = { ownerId: principal.ownerId, mode: request.mode, sha256, referenceId: reservation.value.reservationId };
         try {
           if (!(await retainBytes(ref, prepared.value.bytes))) {
             await deps.capacity.release(reservation.value).catch(() => undefined);
@@ -704,6 +709,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         }
 
         const artifact: ArtifactRecord = {
+          slotTracked: true,
           artifactId,
           ownerId: principal.ownerId,
           tenantId: null,
@@ -727,6 +733,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           expiresAt: expires.value,
         };
         const version: ArtifactVersionRecord = {
+          reservationId: reservation.value.reservationId,
           ownerId: principal.ownerId,
           mode: request.mode,
           artifactId,
@@ -842,7 +849,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           });
           if (!reservation.ok) return reservation;
 
-          const ref = { ownerId: principal.ownerId, mode: request.mode, sha256 };
+          const ref = { ownerId: principal.ownerId, mode: request.mode, sha256, referenceId: reservation.value.reservationId };
           try {
             if (!(await retainBytes(ref, prepared.value.bytes))) {
               await deps.capacity.release(reservation.value).catch(() => undefined);
@@ -860,6 +867,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
           const updated: ArtifactRecord = {
             ...current,
+            mutationRevision: (current.mutationRevision ?? 0) + 1,
             ...(prepared.value.relativePath
               ? { relativePath: prepared.value.relativePath }
               : {}),
@@ -875,6 +883,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             expiresAt: expires.value,
           };
           const version: ArtifactVersionRecord = {
+            reservationId: reservation.value.reservationId,
             ownerId: principal.ownerId,
             mode: request.mode,
             artifactId,
@@ -930,7 +939,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           });
           // Re-read after pruning: the response must describe the retained set,
           // not the pre-prune count.
-          const finalArtifact = (await deps.artifacts.get(key)) ?? updated;
+          const finalArtifact = (await deps.artifacts.get(key).catch(() => null)) ?? appended.artifact;
           return ok({
             artifact: toDescriptor(finalArtifact),
             version: toVersionDescriptor(version),
@@ -974,6 +983,11 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const key = { ownerId: principal.ownerId, mode: request.mode, artifactId };
         const current = await deps.artifacts.get(key);
         if (!current) return fail('not_found', 'That artifact does not exist for this owner.');
+        const target = await deps.artifacts.version({ ...key, version: request.version });
+        if (target?.relativePath && await projectPathConflict({
+          principal, mode: request.mode, projectId: current.projectId ?? null,
+          pathKey: artifactPathKey(target.relativePath), excludeArtifactId: artifactId,
+        })) return fail('conflict', 'The restored path conflicts with another project file.');
         const restored = await deps.artifacts.restoreVersion({
           ...key,
           version: request.version,
@@ -1003,7 +1017,6 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const records = await deps.artifacts.list(principal.ownerId, {
           mode: query.mode,
           projectId: query.projectId,
-          limit: Math.max(1, settings.maxArtifactsPerOwner),
         });
         const files = records
           .filter(
@@ -1057,6 +1070,12 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const artifact = await deps.artifacts.get(key);
         if (!artifact) return fail('not_found', 'That artifact does not exist for this owner.');
         const rows = await deps.artifacts.versions(key);
+        const observed = await deps.artifacts.get(key);
+        if (!observed || observed.mutationRevision !== artifact.mutationRevision ||
+            rows.length !== artifact.versions || !rows.some(row =>
+          row.version === artifact.version && row.sha256 === artifact.sha256)) {
+          return fail('conflict', 'Artifact history changed during export; retry.');
+        }
         const versionNumber = queryNumber(query.version) ?? artifact.version;
         const version = rows.find((row) => row.version === versionNumber);
         if (!version) return fail('not_found', 'That artifact version does not exist.');
@@ -1119,6 +1138,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           ownerId: principal.ownerId,
           mode,
         });
+        let pruned = 0;
         let releasedBytes = 0;
         for (const record of expired) {
           const removed = await deps.artifacts.remove({
@@ -1126,6 +1146,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             mode: record.mode,
             artifactId: record.artifactId,
           });
+          if (!removed.artifact) continue;
+          pruned++;
           releasedBytes += await refundRemoved({
             ownerId: record.ownerId,
             mode: record.mode,
@@ -1133,27 +1155,29 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
             versions: removed.versions,
           });
         }
-        if (expired.length > 0) {
+        if (pruned > 0) {
           audit({
             ownerId: principal.ownerId,
             action: 'artifact.pruned',
-            artifactId: `${expired.length}`,
+            artifactId: `${pruned}`,
             mode,
-            detail: `artifacts=${expired.length} bytes=${releasedBytes}`,
+            detail: `artifacts=${pruned} bytes=${releasedBytes}`,
           });
         }
-        return ok({ pruned: expired.length, releasedBytes, at });
+        return ok({ pruned, releasedBytes, at });
       }),
 
     reconcile: async () => {
       if (!deps.blobs.durable) return;
       for (const mode of ['private', 'cloud'] as const) {
-        const usage = await deps.artifacts.usage({ ownerId: deps.ownerId, mode });
         await deps.capacity.reconcile({
           ownerId: deps.ownerId,
           mode,
-          usedBytes: usage.bytes,
-          usedArtifacts: usage.artifacts,
+          usage: async () => {
+            const partition = { ownerId: deps.ownerId, mode };
+            const usage = await deps.artifacts.usage(partition);
+            return (await deps.artifacts.pendingRemovals?.(1, partition))?.length ? null : usage;
+          },
           maxBytes: settings.maxBytesPerOwner,
           maxArtifacts: settings.maxArtifactsPerOwner,
         });
@@ -1169,6 +1193,9 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       if (!deps.blobs.durable) return { pruned: 0, releasedBytes: 0, at };
       // Reclaim abandoned chunks and old zero-reference blobs, then resolve
       // admissions whose process died. Both are bounded so startup stays fast.
+      for (const work of await deps.artifacts.pendingRemovals?.(SWEEP_LIMIT) ?? []) {
+        if (work.artifact) await refundRemoved({ ...work, ownerId: work.artifact.ownerId, mode: work.artifact.mode });
+      }
       await deps.blobs.maintain({ graceMs: 86_400_000, limit: 200 });
       // A process can die after its metadata rows are removed but before every
       // reference is released. Such a blob has an old reference timestamp and
@@ -1180,6 +1207,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
       });
       await sweepReservations(at);
       const expired = await deps.artifacts.listExpired({ now: at, limit: SWEEP_LIMIT });
+      let pruned = 0;
       let releasedBytes = 0;
       for (const record of expired) {
         const removed = await deps.artifacts.remove({
@@ -1187,6 +1215,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           mode: record.mode,
           artifactId: record.artifactId,
         });
+        if (!removed.artifact) continue;
+        pruned++;
         releasedBytes += await refundRemoved({
           ownerId: record.ownerId,
           mode: record.mode,
@@ -1194,7 +1224,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           versions: removed.versions,
         });
       }
-      return { pruned: expired.length, releasedBytes, at };
+      return { pruned, releasedBytes, at };
     },
   };
 

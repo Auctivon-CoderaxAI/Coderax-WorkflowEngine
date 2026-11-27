@@ -66,6 +66,7 @@ test('the deliverable request and result are validated by the published schemas'
   assert.equal(deliverable.artifacts.length, 1);
 
   // The never-executed disclosure is mandatory on a generated project.
+  assert.equal(Deliverable.safeParse({ ...deliverable, kind: 'software' }).success, false);
   const project = {
     projectId: 'proj_1',
     manifest: {

@@ -4,7 +4,6 @@ import {
   artifactPathKey,
   type AppendVersionOutcome,
   type ArtifactKey,
-  type ArtifactListFilter,
   type ArtifactRepository,
   type ArtifactUsage,
   type CreateArtifactOutcome,
@@ -43,6 +42,7 @@ type Document = Record<string, unknown>;
 function strip(document: Document): Document {
   const copy = { ...document };
   delete copy._id;
+  delete copy.cleanup;
   delete copy.expiresAtMs;
   return copy;
 }
@@ -140,15 +140,6 @@ export function createMongoArtifactRepository(
 ): ArtifactRepository {
   const { artifacts, versions } = collections;
 
-  function matches(record: ArtifactRecord, filter: ArtifactListFilter): boolean {
-    if (record.mode !== filter.mode) return false;
-    if (filter.kind && record.kind !== filter.kind) return false;
-    if (filter.projectId && record.projectId !== filter.projectId) return false;
-    if (filter.conversationId && record.conversationId !== filter.conversationId) return false;
-    if (filter.taskId && record.taskId !== filter.taskId) return false;
-    return true;
-  }
-
   return {
     create: async ({ artifact, version }): Promise<CreateArtifactOutcome> => {
       if (await artifacts.findOne(identity(artifact))) {
@@ -179,14 +170,15 @@ export function createMongoArtifactRepository(
       const stored = await artifacts.findOne(key);
       if (!stored) return { ok: false, reason: 'not_found' };
       const current = toArtifact(stored);
-      if (current.version !== expectedVersion) return { ok: false, reason: 'conflict' };
+      if (current.version !== expectedVersion || artifact.versions !== current.versions + 1 ||
+          (artifact.mutationRevision ?? 1) !== (current.mutationRevision ?? 0) + 1) return { ok: false, reason: 'conflict' };
 
       // The version number is part of the filter: two replicas that both read
       // version N cannot both write N+1.
       let updated: { matchedCount?: number; upsertedCount?: number };
       try {
         updated = await artifacts.updateOne(
-          { ...key, version: expectedVersion },
+          { ...key, cleanup: { $exists: false }, version: expectedVersion, mutationRevision: current.mutationRevision ?? { $exists: false }, versions: current.versions },
           { $set: artifactDocument(artifact) },
           { upsert: false },
         );
@@ -229,19 +221,15 @@ export function createMongoArtifactRepository(
     },
 
     get: async (key) => {
-      const stored = await artifacts.findOne(identity(key));
+      const stored = await artifacts.findOne({ ...identity(key), cleanup: { $exists: false } });
       return stored ? toArtifact(stored) : null;
     },
 
     list: async (ownerId, filter) => {
-      const documents = await artifacts
-        .find({ ownerId, mode: filter.mode })
-        .sort({ updatedAt: -1 })
-        .toArray();
-      return documents
-        .map(toArtifact)
-        .filter((record) => matches(record, filter))
-        .slice(0, filter.limit);
+      const { limit, ...criteria } = filter;
+      const query = artifacts.find({ ownerId, ...criteria, cleanup: { $exists: false } }).sort({ updatedAt: -1 });
+      if (limit !== undefined) query.limit(limit);
+      return (await query.toArray()).map(toArtifact);
     },
 
     versions: async (key) => {
@@ -255,24 +243,44 @@ export function createMongoArtifactRepository(
     },
 
     usage: async ({ ownerId, mode }): Promise<ArtifactUsage> => {
-      const rows = await versions.find({ ownerId, mode }).toArray();
-      const bytes = rows.reduce((total, row) => total + (toVersion(row).bytes ?? 0), 0);
-      const artifacts = await collections.artifacts.find({ ownerId, mode }).toArray();
-      return { bytes, artifacts: artifacts.length };
+      const filter = { ownerId, mode };
+      const [totals, count] = await Promise.all([
+        versions.aggregate([{ $match: filter }, { $group: { _id: null, bytes: { $sum: '$bytes' } } }]).toArray(),
+        artifacts.countDocuments(filter),
+      ]);
+      return { bytes: Number(totals[0]?.bytes ?? 0), artifacts: count };
     },
 
     referenced: async ({ ownerId, mode, sha256 }) =>
       (await versions.findOne({ ownerId, mode, sha256 })) !== null,
 
     remove: async (key): Promise<RemoveArtifactOutcome> => {
-      const stored = await artifacts.findOne(identity(key));
-      const rows = await versions.find(identity(key)).sort({ version: 1 }).toArray();
-      await versions.deleteMany(identity(key));
-      await artifacts.deleteOne(identity(key));
-      return {
-        artifact: stored ? toArtifact(stored) : null,
-        versions: rows.map(toVersion),
-      };
+      const id = identity(key);
+      const stored = await artifacts.findOne({ ...id, cleanup: { $exists: false } });
+      if (!stored) return { artifact: null, versions: [] };
+      const rows = (await versions.find(id).sort({ version: 1 }).toArray()).map(toVersion);
+      if (rows.length !== stored.versions || !rows.some(row => row.version === stored.version)) {
+        throw new Error('Artifact history is changing during deletion');
+      }
+      // The descriptor itself is the durable cleanup journal. A crash at any
+      // subsequent step leaves the version identities available to maintenance.
+      const claimed = await artifacts.updateOne({ ...id, cleanup: { $exists: false },
+        version: stored.version, versions: stored.versions,
+        mutationRevision: stored.mutationRevision ?? { $exists: false } },
+        { $set: { cleanup: rows } }, { upsert: false });
+      if (!claimed.matchedCount) return { artifact: null, versions: [] };
+      return { artifact: toArtifact(stored), versions: rows };
+    },
+
+    pendingRemovals: async (limit, partition) => {
+      const rows = await artifacts.find({ ...partition, cleanup: { $exists: true } }).limit(limit).toArray();
+      return rows.map(row => ({ artifact: toArtifact(row), versions: row.cleanup as ArtifactVersionRecord[] }));
+    },
+
+    finishRemoval: async key => {
+      const id = identity(key);
+      await versions.deleteMany(id);
+      await artifacts.deleteOne({ ...id, cleanup: { $exists: true } });
     },
 
     removeVersion: async (input) => {
@@ -283,12 +291,15 @@ export function createMongoArtifactRepository(
       if (input.version >= artifact.version) return null;
       const row = await versions.findOne({ ...key, version: input.version });
       if (!row) return null;
-      await versions.deleteOne({ ...key, version: input.version });
-      await artifacts.updateOne(
-        { ...key, version: artifact.version },
-        { $set: { versions: Math.max(1, artifact.versions - 1) } },
-        { upsert: false },
+      const claimed = await artifacts.updateOne(
+        { ...key, cleanup: { $exists: false }, version: artifact.version, versions: artifact.versions,
+          mutationRevision: artifact.mutationRevision ?? { $exists: false } },
+        { $inc: { versions: -1, mutationRevision: 1 } }, { upsert: false },
       );
+      if (!claimed.matchedCount) return null;
+      if (!(await versions.deleteOne({ ...key, version: input.version })).deletedCount) {
+        throw new Error('Claimed artifact version disappeared during pruning');
+      }
       return toVersion(row);
     },
 
@@ -341,7 +352,7 @@ export function createMongoArtifactRepository(
       if (!row) return { ok: false, reason: 'not_found' };
       const target = toVersion(row);
       const updated = await artifacts.updateOne(
-        { ...key, version: input.expectedVersion },
+        { ...key, cleanup: { $exists: false }, version: input.expectedVersion, mutationRevision: artifact.mutationRevision ?? { $exists: false } },
         {
           $set: {
             kind: target.kind,
@@ -352,6 +363,7 @@ export function createMongoArtifactRepository(
             bytes: target.bytes,
             sha256: target.sha256,
             version: target.version,
+            mutationRevision: (artifact.mutationRevision ?? 0) + 1,
             updatedAt: input.now,
           },
         },
@@ -360,6 +372,7 @@ export function createMongoArtifactRepository(
       if ((updated.matchedCount ?? 0) !== 1) return { ok: false, reason: 'conflict' };
       const restored: ArtifactRecord = {
         ...artifact,
+        mutationRevision: (artifact.mutationRevision ?? 0) + 1,
         kind: target.kind,
         filename: target.filename,
         mediaType: target.mediaType,
@@ -378,7 +391,7 @@ export function createMongoArtifactRepository(
     },
 
     listExpired: async ({ now, limit, ownerId, mode }) => {
-      const filter: Document = { expiresAtMs: { $lte: Date.parse(now) } };
+      const filter: Document = { cleanup: { $exists: false }, expiresAtMs: { $lte: Date.parse(now) } };
       if (ownerId) filter.ownerId = ownerId;
       if (mode) filter.mode = mode;
       const documents = await artifacts
@@ -466,6 +479,7 @@ export function createMongoBlobStore(input: {
           sha256,
           bytes,
           chunks: chunkCount,
+          trackedReferences: true,
           refCount: 0,
           leaseCount: 0,
           readLeases: [],
@@ -502,21 +516,24 @@ export function createMongoBlobStore(input: {
       return content;
     },
 
-    acquire: async ({ ownerId, mode, sha256 }) => {
+    acquire: async ({ ownerId, mode, sha256, referenceId }) => {
       const key = blobKey({ ownerId, mode, sha256 });
       const acquired = await blobs.updateOne(
         { key },
-        { $inc: { refCount: 1 }, $set: { referencedAtMs: input.clock.now().getTime() } },
+        { ...(referenceId ? { $push: { referenceIds: referenceId } } : {}), $inc: { refCount: 1 }, $set: { referencedAtMs: input.clock.now().getTime() } },
         { upsert: false },
       );
       return (acquired.matchedCount ?? 0) === 1;
     },
 
-    release: async ({ ownerId, mode, sha256 }) => {
+    release: async ({ ownerId, mode, sha256, referenceId, legacyReleaseId }) => {
       const key = blobKey({ ownerId, mode, sha256 });
       const updated = await blobs.findOneAndUpdate(
-        { key, refCount: { $gt: 0 } },
+        { key, refCount: { $gt: 0 }, ...(referenceId ? { referenceIds: referenceId } : {}),
+          ...(legacyReleaseId ? { trackedReferences: { $exists: false }, legacyReleases: { $nin: [legacyReleaseId] } } : {}) },
         {
+          ...(referenceId ? { $pull: { referenceIds: referenceId } } : {}),
+          ...(legacyReleaseId ? { $push: { legacyReleases: legacyReleaseId } } : {}),
           $inc: { refCount: -1 },
           $set: { referencedAtMs: input.clock.now().getTime() },
         },

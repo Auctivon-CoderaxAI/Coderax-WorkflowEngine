@@ -84,8 +84,22 @@ export async function persistProduced(
 
   const stored: Stored[] = [];
   const rollback = async (): Promise<void> => {
+    const sourceId = input.produced.document?.versionOf?.artifactId;
+    const source = sourceId && await input.artifacts.download(input.principal, sourceId, { mode: input.mode });
+    const committed = source && source.ok
+      ? DocumentSourceArtifact.parse(JSON.parse(Buffer.from(source.value.contentBase64, 'base64').toString('utf8')))
+      : undefined;
     for (const entry of [...stored].reverse()) {
-      if (!entry.created) continue;
+      if (!entry.created) {
+        const previous = committed?.outputs.find(output => output.artifactId === entry.descriptor.artifactId)?.version
+          ?? entry.staged.versionOf?.previousVersion;
+        if (previous !== undefined) {
+          await input.artifacts.restore(input.principal, entry.descriptor.artifactId, {
+            mode: input.mode, expectedVersion: entry.descriptor.version, version: previous,
+          });
+        }
+        continue;
+      }
       await input.artifacts
         .remove(input.principal, entry.descriptor.artifactId, input.mode)
         .catch(() => undefined);
@@ -218,7 +232,8 @@ export async function persistProduced(
       await rollback();
       return written;
     }
-    for (const entry of written.value.manifest.files) {
+    const submitted = new Set(files.map(file => file.relativePath.normalize('NFC').toLowerCase()));
+    for (const entry of written.value.manifest.files.filter(file => submitted.has(file.relativePath.normalize('NFC').toLowerCase()))) {
       const descriptor = await input.artifacts.get(input.principal, entry.artifactId, input.mode);
       if (!descriptor.ok) {
         await rollback();

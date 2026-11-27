@@ -95,7 +95,9 @@ conflict was resolved by keeping one implementation per concern:
    never-executed disclosure — so keeping both would have been two
    implementations of one capability. `src/artifacts/generate.ts` and its two
    suites are removed; the SDK method is renamed to match the operation id, which
-   the contract test enforces.
+   the contract test enforces. This is a breaking migration for interim clients;
+   the published version remains 1.2.0. The owner SDK handles typed Problem codes:
+   model_missing and browser_unavailable now return HTTP 503 instead of 500.
 2. **One artifact store.** The durable service, repository, tree adapter, chunked
    blob store and quota admission stay exactly as `main` has them. `media.ts`
    keeps `main`'s structural OOXML central-directory check (it does not inflate
@@ -155,22 +157,7 @@ with `executed: false` for generated software.
 
 ## Verification evidence
 
-At the branch head, `npm run verify` runs the permanent gate: `tsc -b` across
-contracts, SDK and engine, then `node dist/scripts/run-gates.js all` and
-`node dist/scripts/run-gates.js coverage`. The result at this tree:
-
-- **11 gates passed, 0 failed, 0 skipped** — unit, integration (fake Mongo
-explicitly labelled), security, adversarial, contract, OpenAPI drift,
-architecture, package artifacts, end-to-end, dependency audit and the live
-real-MongoDB lane;
-- `gate coverage passed: 77 test file(s) assigned, none unclaimed`, so no suite
-can be added and silently left unrun;
-- the live lane ran against a real `mongod` (7.0.14) started with
-`CODERAX_TEST_MONGO_URI` and `CODERAX_REQUIRE_MONGO=1`; `mongodb-memory-server`
-is a dev dependency, so the same lanes start their own server locally instead of
-skipping. `.github/workflows/verify.yml` pins the same flags, so a missing
-database fails the required check rather than reporting a green skip;
-- `openapi.json` matches the published contracts.
+Branch-head verification is pending. No completed acceptance run is recorded for this revision.
 
 The generation suite reads files back instead of trusting the writer: DOCX parts
 are unzipped and their headings, tables and text counted; XLSX parts are checked
@@ -188,9 +175,9 @@ cross-mode read that reports `not_found`, and owner-token refusal.
 An edit appends the output files first and the stored document source last, so
 the source is the only concurrency token and the only thing a reader resolves.
 If the source write fails after the outputs were appended (a storage fault, or a
-racing writer that won the version), the request fails, the source stays on its
-old version, and the orphaned output version is never named by the stored model
-— nothing half-updated becomes visible. The test for this injects exactly one
+racing writer that won the version), the request fails. Rollback restores each
+output pointer still owned by the failed edit to the version named by the
+committed source. The appended bytes remain available by version. The test for this injects exactly one
 refused `addVersion` on the source and asserts the state that remains.
 
 Two edits that both read version 1 are resolved by the same rule: exactly one
@@ -218,5 +205,4 @@ version names the retried outputs.
   after `feat/multimodal-creative-intelligence` lands.
 - Merging PRs #2–#5 and rebasing this branch onto the consolidated `main`.
 - Hosted CI at the pushed SHA: the workflow runs only for pull requests to
-  `main` and pushes to `main`, and no pull request could be opened from this
-  environment (no `gh`, no token), so no run exists to report.
+  `main` and pushes to the configured branches. A passing hosted run for this repair is pending.

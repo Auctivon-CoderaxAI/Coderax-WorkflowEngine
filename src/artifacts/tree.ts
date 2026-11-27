@@ -49,6 +49,7 @@ type PlannedFile = {
   filename: string;
   mediaType: ArtifactMediaType;
   kind: ArtifactKind;
+  sha256: string;
   contentBase64: string;
   note?: string;
 };
@@ -92,6 +93,7 @@ export function createArtifactTreeWriter(deps: { artifacts: ArtifactService }) {
           filename: validated.value.filename,
           mediaType: validated.value.mediaType,
           kind: validated.value.kind,
+          sha256: validated.value.sha256,
           contentBase64: Buffer.from(validated.value.bytes).toString('base64'),
           ...(file.note ? { note: file.note } : {}),
         });
@@ -125,6 +127,8 @@ export function createArtifactTreeWriter(deps: { artifacts: ArtifactService }) {
       const created: string[] = [];
       for (const file of planned) {
         const previous = existing.get(file.pathKey);
+        if (previous?.sha256 === file.sha256 && previous.relativePath === file.relativePath &&
+            previous.kind === file.kind && previous.mediaType === file.mediaType) continue;
         const body = {
           filename: file.filename,
           relativePath: file.relativePath,

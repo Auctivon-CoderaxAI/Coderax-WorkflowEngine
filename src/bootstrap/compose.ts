@@ -580,7 +580,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       } finally {
         if (timer) clearTimeout(timer);
       }
-      // Persistence is closed only after the service and listener have drained.
       await persistence.close();
     })();
     return stopPromise;
@@ -597,16 +596,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // open, so an early request cannot be admitted against stale capacity.
       await service.artifacts.reconcile();
       const { url } = await server.listen();
-      // Startup ownership verification: a task whose lease died with a previous
-      // process is retired now, so no client sees it as running forever.
-      await service.recoverInterrupted();
-      // Retention and abandoned reservations are enforced at startup too, and a
-      // staging directory left by a crashed generation is removed.
-      await service.artifacts.sweepExpiredArtifacts();
-      await deliverables.sweepStaging();
-      // The schedule loop belongs to the engine process, not to a request. Both
-      // Coderax and CoderaxCLI can disconnect and a due occurrence still runs.
-      service.startSchedules();
+      try {
+        await service.recoverInterrupted();
+        await service.artifacts.sweepExpiredArtifacts();
+        await deliverables.sweepStaging();
+        service.startSchedules();
+      } catch (error) {
+        try {
+          await stop();
+        } catch {
+          await persistence.close();
+        }
+        throw error;
+      }
       return { url };
     },
     stop,

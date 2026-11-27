@@ -498,3 +498,35 @@ test('artifact routes require the owner token and validate the media allowlist',
     await started.close();
   }
 });
+
+test('a lost refund acknowledgement resumes deletion without releasing the shared blob twice', async () => {
+  const database = createFakeDatabase();
+  const app = await startTestApp({ config: { persistence: { driver: 'mongo' } }, persistence: { database } });
+  try {
+    const api = client(app.url);
+    const request = { filename: 'one.txt', mediaType: 'text/plain' as const, contentBase64: base64(textBytes('shared')) };
+    const first = await api.uploadArtifact(request);
+    const second = await api.uploadArtifact({ ...request, filename: 'two.txt' });
+    const capacity = database.collection('artifact_capacity');
+    const update = capacity.updateOne.bind(capacity);
+    let injected = false;
+    capacity.updateOne = async (filter, mutation, options) => {
+      const applied = await update(filter, mutation, options);
+      if (!injected && mutation.$pull?.tickets) {
+        injected = true;
+        throw new Error('lost refund acknowledgement');
+      }
+      return applied;
+    };
+    await assert.rejects(api.deleteArtifact(first.artifact.artifactId));
+    assert.ok(injected);
+    await app.app.service.artifacts.sweepExpiredArtifacts();
+    await app.app.service.artifacts.sweepExpiredArtifacts();
+    assert.equal((await api.downloadArtifact(second.artifact.artifactId)).contentBase64, request.contentBase64);
+    const counter = await capacity.findOne({ mode: 'private' });
+    assert.equal(counter?.availableArtifacts, artifactSettings().maxArtifactsPerOwner - 1);
+    assert.equal(counter?.availableBytes, artifactSettings().maxBytesPerOwner - second.artifact.bytes);
+  } finally {
+    await app.close();
+  }
+});

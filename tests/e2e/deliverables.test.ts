@@ -219,7 +219,13 @@ test('a dataset and a software project are stored as descriptors, not paths', as
       description: 'The same project with a README.',
       template: 'module',
       language: 'javascript',
-      files: [{ path: 'README.md', content: '# toolkit-demo\n' }],
+      files: [
+        { path: 'README.md', content: '# toolkit-demo\n' },
+        { path: 'src/index.js', content: Buffer.from((await api.downloadArtifact(
+          project.manifest.files.find(file => file.relativePath === 'src/index.js')!.artifactId,
+          { mode: 'cloud' },
+        )).contentBase64, 'base64').toString('utf8') },
+      ],
       projectId: project.projectId,
     });
     assert.equal(extended.project?.projectId, project.projectId);
@@ -334,6 +340,19 @@ test('a Work objective can request a deliverable and the task result lists its s
       const current = await api.task(accepted.taskId);
       return current.state === 'completed' ? current : null;
     });
+    const software = await api.submitWork({
+      objective: ['```deliverable', JSON.stringify({
+        kind: 'software', mode: 'cloud', name: 'fences', template: 'module',
+        description: 'Embedded fences', language: 'javascript',
+        files: [{ path: 'index.js', content: 'export const fence = "```";' }],
+      }), '```'].join('\n'),
+      mode: 'cloud', requireApproval: false,
+    });
+    const softwareResult = await waitFor(async () => {
+      const current = await api.task(software.taskId);
+      return current.state === 'completed' ? current : null;
+    });
+    assert.deepEqual(softwareResult.result?.artifacts.map(file => file.path), ['index.js']);
     const files = (status.result?.artifacts ?? []).map((artifact) => artifact.path).sort();
     assert.deepEqual(files, ['native-memo.document.json', 'native-memo.docx', 'native-memo.md']);
 
@@ -397,6 +416,7 @@ test('an edit that fails after the output appends leaves the stored source on it
     const sourceId = created.source!.artifactId;
     const docxId = created.artifacts.find((artifact) => artifact.filename === 'memo.docx')!.artifactId;
     const originalDocx = created.artifacts.find((artifact) => artifact.filename === 'memo.docx')!;
+    const originalBytes = (await api.downloadArtifact(docxId, { mode: 'cloud' })).contentBase64;
     const originalSource = JSON.parse(
       Buffer.from(
         (await api.downloadArtifact(sourceId, { mode: 'cloud' })).contentBase64,
@@ -450,18 +470,11 @@ test('an edit that fails after the output appends leaves the stored source on it
     if (failed.ok) throw new Error('the edit was expected to fail');
     assert.equal(failed.code, 'storage_unavailable', failed.detail);
 
-    // The output really did get a new version before the failure...
     const docxNow = await api.downloadArtifact(docxId, { mode: 'cloud' });
-    assert.equal(docxNow.version.version, 2);
-    assert.notEqual(docxNow.version.sha256, originalDocx.sha256);
-    assert.equal(
-      Buffer.from(docxNow.contentBase64, 'base64').subarray(0, 2).toString(),
-      'PK',
-      'the appended version is a real DOCX, not a placeholder',
-    );
+    assert.equal(docxNow.version.version, 1);
+    assert.equal(docxNow.version.sha256, originalDocx.sha256);
+    assert.equal(docxNow.contentBase64, originalBytes);
 
-    // ...while the stored source is still version 1 and still names the old
-    // output versions, so nothing reads the orphaned append.
     const sourceNow = await api.downloadArtifact(sourceId, { mode: 'cloud' });
     assert.equal(sourceNow.version.version, 1);
     const sourceBody = JSON.parse(
@@ -498,7 +511,7 @@ test('an edit that fails after the output appends leaves the stored source on it
         (await api.downloadArtifact(sourceId, { mode: 'cloud' })).contentBase64,
         'base64',
       ).toString('utf8'),
-    ) as { outputs: Array<{ format: string; version: number }> };
+    ) as { outputs: Array<{ artifactId: string; format: string; version: number }> };
     assert.ok(retriedSource.outputs.every((output) => output.version === 3));
   } finally {
     await first.close();
@@ -557,9 +570,9 @@ test('two concurrent edits at the same expected version have one winner and one 
         (await api.downloadArtifact(sourceId, { mode: 'cloud' })).contentBase64,
         'base64',
       ).toString('utf8'),
-    ) as { outputs: Array<{ format: string; version: number }> };
+    ) as { outputs: Array<{ artifactId: string; format: string; version: number }> };
     assert.ok(
-      storedSource.outputs.every((output) => output.version === 2),
+      storedSource.outputs.every((output) => winner.artifacts.some(artifact => artifact.artifactId === output.artifactId && artifact.version === output.version)),
       'the stored source names the winner’s output versions',
     );
 
@@ -572,8 +585,7 @@ test('two concurrent edits at the same expected version have one winner and one 
       [1, 2, 3],
     );
     const winnerDocx = winner.artifacts.find((artifact) => artifact.filename === 'race.docx')!;
-    assert.equal(winnerDocx.version, 2);
-    assert.equal(history.versions[1]!.sha256, winnerDocx.sha256);
+    assert.equal(history.versions.find(row => row.version === winnerDocx.version)?.sha256, winnerDocx.sha256);
   } finally {
     await first.close();
   }

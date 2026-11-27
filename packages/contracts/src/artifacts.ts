@@ -186,6 +186,7 @@ export const ArtifactUploadRequest = z
     note: z.string().max(500).optional(),
   })
   .strict();
+export type ArtifactUploadInput = z.input<typeof ArtifactUploadRequest>;
 export type ArtifactUploadRequest = z.infer<typeof ArtifactUploadRequest>;
 
 export const ArtifactVersionRequest = z
@@ -207,6 +208,7 @@ export const ArtifactVersionRequest = z
     expectedVersion: z.number().int().positive().optional(),
   })
   .strict();
+export type ArtifactVersionInput = z.input<typeof ArtifactVersionRequest>;
 export type ArtifactVersionRequest = z.infer<typeof ArtifactVersionRequest>;
 
 export const ArtifactUploadResult = z

@@ -185,7 +185,7 @@ function outputName(input: {
       // write failed, so pinning an output to the version the source records
       // would make every retry conflict forever; the derived file follows the
       // source, which is what a reader actually resolves.
-      versionOf: { artifactId: previous.artifactId },
+      versionOf: { artifactId: previous.artifactId, previousVersion: previous.version },
     };
   }
   const extension = input.format === 'markdown' ? 'md' : input.format;
@@ -764,7 +764,11 @@ async function produceSoftware(
     title: request.name,
     summary,
     files,
-    checks: build.checks,
+    checks: build.checks.length <= 60 ? build.checks.map(check => ({ ...check, name: check.name.slice(0, 80), detail: check.detail.slice(0, 500) })) : [
+      ...build.checks.filter(check => !check.ok).slice(0, 59),
+      { name: 'software.checks', ok: build.checks.every(check => check.ok),
+        detail: `${build.checks.length} checks performed; ${build.checks.filter(check => !check.ok).length} failed.` },
+    ],
     project: {
       name: request.name,
       entry: build.entry.startsWith(prefix) ? build.entry.slice(prefix.length) : build.entry,

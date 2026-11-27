@@ -23,6 +23,7 @@ type CheckDef = {
   value?: number;
   inclusive?: boolean;
   format?: string;
+  pattern?: RegExp;
 };
 
 type ZodDef = {
@@ -77,7 +78,8 @@ function stringBounds(schema: z.ZodTypeAny): JsonSchema {
       out.maxLength = check.maximum;
     }
     if (check.check === 'string_format' && typeof check.format === 'string') {
-      if (check.format === 'datetime') out.format = 'date-time';
+      if (check.format === 'regex' && check.pattern && !check.pattern.flags) out.pattern = check.pattern.source;
+      else if (check.format === 'datetime') out.format = 'date-time';
       else if (check.format === 'email') out.format = 'email';
       else if (check.format === 'url') out.format = 'uri';
     }

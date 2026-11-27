@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import type { SoftwareRequest, SourceFile, VerificationCheck } from '@coderax/contracts';
-import { digestOf, resolveInside, writeArtifact } from './file.js';
+import { resolveInside, writeArtifact } from './file.js';
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -392,29 +392,6 @@ export async function buildSoftware(input: {
           : `Unresolved relative imports: ${missing.join(', ')}.`,
     });
   }
-
-  const manifest = {
-    name: input.request.name,
-    description: input.request.description,
-    language: input.request.language,
-    template: input.request.template,
-    entry,
-    files: files.map((file) => ({
-      path: file.path,
-      sha256: digestOf(Buffer.from(file.content, 'utf8')),
-      bytes: Buffer.byteLength(file.content, 'utf8'),
-    })),
-    verification: {
-      executed: false,
-      method: 'parse-and-resolve',
-      note: 'Files were parsed and imports resolved; the generated program was not executed.',
-    },
-  };
-  await writeArtifact({
-    root: input.root,
-    relative: `${input.folder}/MANIFEST.json`,
-    data: `${JSON.stringify(manifest, null, 2)}\n`,
-  });
 
   return { folder: input.folder, entry: `${input.folder}/${entry}`, files: written, checks };
 }
