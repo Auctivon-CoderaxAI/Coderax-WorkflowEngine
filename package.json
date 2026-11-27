@@ -25,7 +25,8 @@
     "game:browser": "node scripts/browser-acceptance.mjs",
     "game:browser:install": "playwright install chromium",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
-    "verify": "npm run build && node --test \"dist/tests/**/*.test.js\" && node dist/scripts/check-openapi.js"
+    "gate": "node dist/scripts/run-gates.js",
+    "verify": "npm run build && node dist/scripts/run-gates.js all && node dist/scripts/run-gates.js coverage"
   },
   "dependencies": {
     "@coderax/contracts": "*",

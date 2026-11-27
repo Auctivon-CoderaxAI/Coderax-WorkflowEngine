@@ -45,9 +45,15 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
 `npm run verify` is the acceptance gate. It runs:
 
 1. `npm run build` — TypeScript project references across contracts, SDK and engine.
-2. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security
-   and end-to-end suites.
-3. `npm run openapi:check` — fails if `openapi.json` differs from the contracts.
+2. `node dist/scripts/run-gates.js all` — every suite assigned to a gate: unit,
+   contract, integration, security and end-to-end, plus OpenAPI drift detection
+   and the dependency audit.
+3. `node dist/scripts/run-gates.js coverage` — no compiled test may be unassigned;
+   an unassigned suite would otherwise never run.
+
+`CODERAX_TEST_MONGODB_URI` must name a disposable MongoDB for the database-backed
+suites. A missing database is a failure, not a skip. Run `npm run gate -- <id>` for
+a subset, but do not present a subset as acceptance.
 
 Paste the command and its actual result into the pull request's Testing section. A
 component passing its own unit tests is not sufficient: the UI-to-API-to-engine

@@ -49,14 +49,14 @@ jobs:
       - name: Build (TypeScript project references)
         run: npm run build
 
-      - name: Tests (unit, contract, integration, security, e2e, real MongoDB)
+      - name: Acceptance gate (all suites, OpenAPI drift, dependency audit)
         env:
           CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
           CODERAX_REQUIRE_MONGODB: '1'
-        run: node --test "dist/tests/**/*.test.js"
+        run: node dist/scripts/run-gates.js all
 
-      - name: Contract drift gate
-        run: npm run openapi:check
+      - name: Gate coverage
+        run: node dist/scripts/run-gates.js coverage
 
       - name: Reject committed secrets and local paths
         run: |
