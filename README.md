@@ -36,10 +36,19 @@ are clients of the same versioned API.
 | Schedule retry, missed-run recovery, pause/resume/cancel, edit, upcoming preview, priority, run and inference budgets | Implemented | `src/scheduling/engine.ts`, schedule tests |
 | Schedule completion, failure, missed-run and refusal notices | Implemented | `/v1/notifications` (merged list and mark-read), schedule notice stores |
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
-| Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
+| Zero-cost model router (discovery, verification, modes, limits, fallback, health) | Implemented | `src/models/router.ts`, `src/models/providers`, tests |
+| Reproducible quality benchmark harness | Implemented; live run requires provider credentials | `benchmarks/`, `scripts/benchmark.ts` |
+| Multimodal image input and creative SVG/HTML validation | Implemented; image only, private-mode attachments off by default | `src/media`, `src/creative`, [`docs/multimodal.md`](docs/multimodal.md) |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
-| Coderax Native agent | Implemented | `src/agents/native` |
+| Coderax Native agent: plan, tool actions, reflection, recovery | Implemented | `src/agents/native` |
+| Provider-independent zero-cost router with ranked modes + bounded fallback | Implemented | `src/models/router.ts` |
+| Built-in tools behind exact-resource permission gates | Implemented | `src/tools`, `tests/unit/tools.test.ts` |
+| Durable approval suspension and resume | Implemented | `src/agents/native/agent.ts`, `src/execution/runner.ts`, `tests/integration/intelligence.test.ts` |
+| MCP tools over HTTP and stdio | Implemented; scripted-server verified | `src/mcp/client.ts` |
+| Retrieval with semantic embeddings or honest lexical fallback | Implemented | `src/knowledge/store.ts` |
+| OpenCode HTTP/SSE transport | Implemented; not live-verified | `src/agents/adapters/opencode.ts` |
+| FreeBuff transport | Injection only — no authorized endpoint | `src/agents/adapters/external.ts` |
 | Native Game Studio | Implemented | `src/games/studio.ts`: NL specs, design plans, original source, 8 genres, 12 composable mechanics, seeded levels, browser-boot verification, build history/restore, export, `docs/evidence/game-studio/` |
 | Native Game Studio — real-browser acceptance | Verified for two reference builds | `scripts/browser-acceptance.mjs`: desktop/mobile Chromium rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart and audio; `docs/evidence/browser/` |
 | Native Game Studio — AI-assisted generation | **Blocked** | no verified model participation, executed model-assisted build or zero-cost model credential; a configured route or test narrative is not proof; deterministic generation remains operational |
@@ -76,10 +85,9 @@ exact dependency and the narrow ports the game code exposes for that migration.
 ```bash
 npm install
 npm run build
-npm test                          # unit, contract, integration, security and e2e suites
-npm run verify                    # build + every quality gate, including real MongoDB
-npm run game:evidence             # regenerates the playable game evidence frames
-npm run game:browser -- --base-url <origin>   # real-Chromium acceptance; needs Playwright
+npm run verify                    # build, reproducible SDK pack, 271 tests, OpenAPI drift gate
+npm test                          # tests only: unit, contract, integration, security, e2e
+npm run sdk:pack                  # reproducible tarballs + SHA256SUMS in dist-artifacts/
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -107,16 +115,34 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
   "auth": { "ownerId": "owner" },
   "workspaces": { "privateRoot": "/srv/coderax/private", "cloudRoot": "/srv/coderax/cloud" },
   "models": {
-    "route": [{ "providerId": "openrouter", "modelId": "coderax:free" }],
-    "vision": [{ "providerId": "openrouter", "modelId": "coderax:free" }]
+    "route": [{ "providerId": "openrouter", "modelId": "inclusionai/ling-3.2-flash:free" }],
+    "attestations": [],
+    "policy": []
   },
   "engines": { "default": "native" }
 }
 ```
 
-`models.vision` names the models verified to accept image input. It defaults to
-empty, which refuses every image turn instead of sending it to a model that may
-drop it; a text-only route keeps serving text turns.
+`models.route` is a preference order, not a free claim. The router discovers
+models, verifies zero cost from the provider price list or a time-bounded
+attestation, and refuses to start Native when no verified-free model is routable.
+`models.policy` is a separate requirement: a provider receives no traffic until an
+owner-approved record authorizes the exact processing operation and data mode.
+This sample leaves policy empty. Before starting Native, establish the actual
+retention, training terms, processing location and credential requirements for
+your configured endpoint, then add the corresponding policy and grants. The
+default OpenRouter URL does not establish regional processing. See
+[the policy guide](docs/model-routing.md#data-processing-policy) for the record format.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+Private mode refuses hosted inference without an explicitly approved private
+grant, and fails closed rather than using local inference when none exists.
+Gemini, Groq and Cerebras publish no machine-readable price and therefore need an
+attestation per exact model. See [`docs/model-routing.md`](docs/model-routing.md)
+for the verification rules, routing modes, budgets, rate limits, circuits,
+fallback, streaming normalization and benchmarks.
+Image turns require a verified vision route and a processing grant for multimodal input. A text-only route continues to serve text turns.
 
 The engine binds `127.0.0.1` by default and is never public-facing.
 
@@ -133,8 +159,7 @@ src/scheduling       zone-aware recurrence, durable schedule engine, occurrence 
 src/execution        leases, arbitration, heartbeat runner, retry, workspace confinement
 src/persistence      task repository (fenced writes), lease tables, conversations
 src/agents           registry, Coderax Native, isolated external adapters
-src/browser          provider port, protocol v1 adapter, policy, fail-closed provider
-src/models           verified catalogue, zero-cost route, daily budget ledger
+src/models           discovery, zero-cost verification, routing, limits, health, benchmarks
 src/events           ordered event log with dedupe and replay
 src/permissions      scoped, single-use approval requests
 src/memory           owner- and mode-partitioned memory

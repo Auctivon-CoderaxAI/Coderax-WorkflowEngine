@@ -1,8 +1,9 @@
+import { workRunKey } from '../../src/execution/lease.js';
+import { OWNER_TOKEN, taskRecord } from '../helpers.js';
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
-import { workRunKey } from '../../src/execution/lease.js';
-import { OWNER_TOKEN, startTestApp, taskRecord, waitFor } from '../helpers.js';
+import { slowProvider, startTestApp, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -84,15 +85,7 @@ test('a submitted task completes without any client connection', async () => {
 });
 
 test('a second task in the same conversation is refused while one is live', async () => {
-  const started = await startTestApp({
-    gateway: {
-      id: 'slow',
-      complete: ({ signal }) =>
-        new Promise((_resolve, reject) => {
-          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-        }),
-    },
-  });
+  const started = await startTestApp({ provider: slowProvider(60_000) });
   try {
     const first = await started.app.service.submitWork(principal, {
       objective: 'First task',
@@ -192,11 +185,21 @@ test('cancellation releases a hung adapter and ignores its late reports', { time
     late();
     assert.doesNotMatch(JSON.stringify(await started.app.dependencies.events.replay(task.value.taskId, 0)), /stale/);
     agent.run = async () => ({ ok: true, summary: 'done' });
+    // The abandoned adapter may still be writing to this conversation's workspace,
+    // so the supervisor quarantines it and the next run there is refused at
+    // submit, not accepted and failed later.
     const next = await started.app.service.submitWork(principal, {
       objective: 'next', conversationId: task.value.conversationId, mode: 'cloud', requireApproval: true,
     });
-    assert.ok(next.ok);
-    await started.app.service.cancelTask(principal, next.value.taskId);
+    assert.equal(next.ok, false);
+    assert.equal(next.ok === false && next.code, 'workspace_denied');
+
+    // A different conversation has its own directory and is unaffected.
+    const elsewhere = await started.app.service.submitWork(principal, {
+      objective: 'elsewhere', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(elsewhere.ok);
+    await started.app.service.cancelTask(principal, elsewhere.value.taskId);
   } finally {
     await started.close();
   }

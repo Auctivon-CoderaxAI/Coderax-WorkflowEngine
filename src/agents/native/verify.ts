@@ -1,7 +1,7 @@
 import type { Usage } from '@coderax/contracts';
 import type { TaskPlan, TaskVerification } from '../../domain.js';
 import type {
-  ModelGateway,
+  BasicModelGateway,
   ReasoningMode,
   StepEvidence,
   TaskPlanStep,
@@ -150,8 +150,8 @@ export type VerificationResult = {
 };
 
 export async function verifyObjective(input: {
-  gateway: ModelGateway;
-  model: Parameters<ModelGateway['complete']>[0]['model'];
+  gateway: BasicModelGateway;
+  model: Parameters<BasicModelGateway['complete']>[0]['model'];
   signal: AbortSignal;
   objective: string;
   mode: ReasoningMode;

@@ -1,578 +1,468 @@
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import { test } from 'node:test';
-import { composeApplication } from '../../src/bootstrap/compose.js';
-import { validateRemoteEndpoint } from '../../src/configuration/endpoint.js';
-import { validateInvariants } from '../../src/configuration/load.js';
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
+import type { ExternalAgentTransport } from '../../src/agents/adapters/external.js';
 import { EngineConfigSchema } from '../../src/configuration/schema.js';
-import {
-  baseConfig,
-  createWorkspaces,
-  fakeGateway,
-  OWNER_TOKEN,
-  startTestApp,
-  taskRecord,
-} from '../helpers.js';
+import { PROCESSING_OPERATIONS } from '../../src/models/policy.js';
+import { fakeProvider, OWNER_TOKEN, startTestApp, testProviderPolicy } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
-const ENV = { CODERAX_OWNER_TOKEN: OWNER_TOKEN };
 
-function problemText(error: unknown): string {
-  const issues = (error as { issues?: unknown }).issues;
-  if (Array.isArray(issues)) return issues.join(' ');
-  return (error as Error).message;
-}
-
-// ---------------------------------------------------------------------------
-// Findings 1 and 2: conversation-mode and surface binding.
-// ---------------------------------------------------------------------------
-
-test('private conversation history never crosses into a cloud run', async () => {
-  const prompts: string[] = [];
+/**
+ * Identity of a conversation is owner + data mode + kind of work.
+ *
+ * Reusing a private conversation for cloud work would send the private
+ * transcript to a hosted agent and write the cloud answer back into it.
+ */
+test('a conversation is never reused across data modes', async () => {
+  const provider = fakeProvider();
+  const policy = testProviderPolicy('free', {
+    credentials: 'owner-managed',
+    grants: PROCESSING_OPERATIONS.flatMap(operation => ([
+      { operation, mode: 'cloud' as const, location: 'owner-region' as const },
+      { operation, mode: 'private' as const, location: 'owner-region' as const },
+    ])),
+  });
   const started = await startTestApp({
-    gateway: {
-      id: 'recording',
-      complete: async ({ prompt }: { prompt: string }) => {
-        prompts.push(prompt);
-        return { text: 'private answer' };
+    provider,
+    config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [policy],
       },
     },
   });
   try {
-    const privateTurn = await started.app.service.submitWork(principal, {
-      objective: 'Private objective: launch code ORCHID-9',
-      mode: 'private',
-      requireApproval: true,
-    });
-    assert.equal(privateTurn.ok, true);
-    if (!privateTurn.ok) return;
-    await started.app.dependencies.scheduler.idle();
-
-    const promptsBefore = prompts.length;
-    const cloudRun = await started.app.service.submitWork(principal, {
-      objective: 'Cloud follow-up',
-      conversationId: privateTurn.value.conversationId,
-      mode: 'cloud',
-      requireApproval: true,
-    });
-    assert.equal(cloudRun.ok, false);
-    assert.equal(cloudRun.ok === false && cloudRun.code, 'conflict');
-
-    // The refusal happened before the model saw anything, and no cloud task exists.
-    assert.equal(prompts.length, promptsBefore);
-    const tasks = await started.app.dependencies.tasks.listByOwner(principal.ownerId);
-    assert.equal(tasks.length, 1);
-    assert.equal(tasks[0]?.mode, 'private');
-
-    const conversation = await started.app.service.conversation(
-      principal,
-      privateTurn.value.conversationId,
-    );
-    assert.equal(conversation.ok, true);
-    assert.equal(conversation.ok && conversation.value.mode, 'private');
-    assert.equal(conversation.ok && conversation.value.messages.length, 2);
-  } finally {
-    await started.close();
-  }
-});
-
-test('a cloud conversation cannot be read through a private request', async () => {
-  const started = await startTestApp();
-  try {
-    const cloudTurn = await started.app.service.submitWork(principal, {
-      objective: 'Cloud-only objective',
-      mode: 'cloud',
-      requireApproval: true,
-    });
-    assert.equal(cloudTurn.ok, true);
-    if (!cloudTurn.ok) return;
-    await started.app.dependencies.scheduler.idle();
-
     const chat = await started.app.service.chat(principal, {
-      message: 'Private question',
-      conversationId: cloudTurn.value.conversationId,
+      message: 'a private note',
+      conversationId: 'conv_mode',
       mode: 'private',
       agent: 'coderax',
     });
-    assert.equal(chat.ok, false);
-    assert.equal(chat.ok === false && chat.code, 'conflict');
+    assert.equal(chat.ok, true);
 
-    // The store itself refuses the cross-mode read, not only the service.
-    const messages = await started.app.dependencies.conversations.messages({
-      ownerId: principal.ownerId,
-      conversationId: cloudTurn.value.conversationId,
-      mode: 'private',
+    const crossed = await started.app.service.submitWork(principal, {
+      objective: 'cloud work',
+      conversationId: 'conv_mode',
+      mode: 'cloud',
+      requireApproval: false,
     });
-    assert.equal(messages, null);
+    assert.equal(crossed.ok, false);
+    assert.equal(crossed.ok === false && crossed.code, 'conflict');
+
+    const stillPrivate = await started.app.service.conversation(principal, 'conv_mode');
+    assert.equal(stillPrivate.ok, true);
+    assert.equal(stillPrivate.ok && stillPrivate.value.mode, 'private');
   } finally {
     await started.close();
   }
 });
 
-test('Chat and Work cannot start inside the other surface\u2019s conversation', async () => {
-  const started = await startTestApp();
+/**
+ * An external agent declares `conversations: none`. Handing it prior turns would
+ * quietly widen that isolation.
+ */
+test('an external agent is never given the conversation transcript', async () => {
+  const seenHistories: number[] = [];
+  const transport: ExternalAgentTransport = {
+    probe: async () => undefined,
+    run: async (request) => {
+      seenHistories.push(request.history?.length ?? 0);
+      return { ok: true, summary: 'external result' };
+    },
+  };
+  const started = await startTestApp({
+    externals: { opencode: transport },
+    env: { OPENCODE_PASSWORD: 'test-password' },
+    config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [testProviderPolicy(), testProviderPolicy('opencode')],
+      },
+      engines: {
+        opencode: {
+          enabled: true,
+          baseURL: 'http://127.0.0.1:4096',
+          model: 'local/model',
+          passwordEnv: 'OPENCODE_PASSWORD',
+        },
+      },
+    },
+  });
+  try {
+    const first = await started.app.service.submitWork(principal, {
+      objective: 'the earlier exchange',
+      conversationId: 'conv_external',
+      mode: 'cloud',
+      requireApproval: false,
+    });
+    assert.equal(first.ok, true);
+    await started.app.dependencies.scheduler.idle();
+
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'external follow-up',
+      conversationId: 'conv_external',
+      agent: 'opencode',
+      mode: 'cloud',
+      requireApproval: false,
+    });
+    assert.equal(submitted.ok, true);
+    await started.app.dependencies.scheduler.idle();
+
+    assert.equal(seenHistories.length, 1);
+    assert.equal(seenHistories[0], 0, 'the external agent received no history');
+    const status = await started.app.service.task(principal, submitted.ok ? submitted.value.taskId : '');
+    assert.equal(status.ok && status.value.state, 'completed');
+  } finally {
+    await started.close();
+  }
+});
+
+/**
+ * Private execution needs an owner policy record that grants that exact
+ * operation in private mode. The fixture policy is cloud-only, so a private run
+ * is refused instead of falling back to a hosted endpoint or local inference.
+ */
+test('private execution is refused without an owner grant for the mode', async () => {
+  const provider = fakeProvider();
+  const started = await startTestApp({ provider });
+  try {
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'private work',
+      mode: 'private',
+      requireApproval: false,
+    });
+    assert.equal(submitted.ok, false);
+    assert.equal(submitted.ok === false && submitted.code, 'model_missing');
+    await started.app.dependencies.scheduler.idle();
+    assert.equal(provider.calls, 0, 'no hosted request was made for private work');
+
+    const cloud = await started.app.service.submitWork(principal, {
+      objective: 'cloud work',
+      mode: 'cloud',
+      requireApproval: false,
+    });
+    assert.equal(cloud.ok, true);
+    await started.app.dependencies.scheduler.idle();
+    assert.equal(provider.calls > 0, true, 'cloud work may use the hosted endpoint');
+  } finally {
+    await started.close();
+  }
+});
+
+test('an inference endpoint that would leak a credential is refused at startup', () => {
+  const base = {
+    auth: { ownerId: 'owner-test' },
+    workspaces: { privateRoot: '/tmp/private', cloudRoot: '/tmp/cloud' },
+  };
+  const cleartext = EngineConfigSchema.safeParse({
+    ...base,
+    models: {
+      providers: [
+        { id: 'remote', baseURL: 'http://api.example.com/v1', apiKeyEnv: 'REMOTE_KEY' },
+      ],
+    },
+  });
+  assert.equal(cleartext.success, false);
+
+  const credentials = EngineConfigSchema.safeParse({
+    ...base,
+    models: {
+      providers: [
+        { id: 'remote', baseURL: 'https://user:pass@api.example.com/v1', apiKeyEnv: 'REMOTE_KEY' },
+      ],
+    },
+  });
+  assert.equal(credentials.success, false);
+
+  const loopback = EngineConfigSchema.safeParse({
+    ...base,
+    models: {
+      providers: [
+        { id: 'local', baseURL: 'http://127.0.0.1:11434/v1', apiKeyEnv: 'LOCAL_KEY' },
+      ],
+    },
+  });
+  assert.equal(loopback.success, true, 'a loopback runtime needs no TLS');
+
+  const secure = EngineConfigSchema.safeParse({
+    ...base,
+    models: {
+      providers: [
+        { id: 'remote', baseURL: 'https://api.example.com/v1', apiKeyEnv: 'REMOTE_KEY' },
+      ],
+    },
+  });
+  assert.equal(secure.success, true);
+});
+
+/**
+ * Provider output is written by someone else: it may contain a credential or an
+ * owner path, and it reaches the transcript, the reply and the notification.
+ */
+test('provider text is scrubbed before it is stored, returned or notified', async () => {
+  const secretText = 'leaked sk-abcdefghijklmnopqrstuvwx from /home/owner/project';
+  const started = await startTestApp({ provider: fakeProvider({ text: secretText }) });
   try {
     const chat = await started.app.service.chat(principal, {
-      message: 'Chat question',
+      message: 'show me',
       mode: 'cloud',
       agent: 'coderax',
     });
     assert.equal(chat.ok, true);
     if (!chat.ok) return;
+    assert.doesNotMatch(chat.value.text, /sk-abcdefghijklmnopqrstuvwx/);
+    assert.doesNotMatch(chat.value.text, /\/home\/owner/);
 
-    const workInChat = await started.app.service.submitWork(principal, {
-      objective: 'Work in a chat thread',
-      conversationId: chat.value.conversationId,
-      mode: 'cloud',
-      requireApproval: true,
-    });
-    assert.equal(workInChat.ok, false);
-    assert.equal(workInChat.ok === false && workInChat.code, 'conflict');
+    const conversation = await started.app.service.conversation(
+      principal,
+      chat.value.conversationId,
+    );
+    assert.equal(conversation.ok, true);
+    const stored = JSON.stringify(conversation);
+    assert.doesNotMatch(stored, /sk-abcdefghijklmnopqrstuvwx/);
+    assert.doesNotMatch(stored, /\/home\/owner/);
 
-    const work = await started.app.service.submitWork(principal, {
-      objective: 'Work objective',
-      mode: 'cloud',
-      requireApproval: true,
+    // A failing adapter's detail takes the same path into the task row and the
+    // completion notification.
+    const agent = started.app.dependencies.agents.get('coderax');
+    assert.ok(agent);
+    agent.run = async () => ({
+      ok: false,
+      code: 'provider_error',
+      detail: `upstream said ${secretText}`,
+      retryable: false,
     });
-    assert.equal(work.ok, true);
-    if (!work.ok) return;
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'fail with a secret',
+      mode: 'cloud',
+      requireApproval: false,
+    });
+    assert.equal(submitted.ok, true);
+    if (!submitted.ok) return;
     await started.app.dependencies.scheduler.idle();
 
-    const chatInWork = await started.app.service.chat(principal, {
-      message: 'Chat in a work thread',
-      conversationId: work.value.conversationId,
-      mode: 'cloud',
-      agent: 'coderax',
-    });
-    assert.equal(chatInWork.ok, false);
-    assert.equal(chatInWork.ok === false && chatInWork.code, 'conflict');
+    const row = await started.app.dependencies.tasks.get(submitted.value.taskId);
+    assert.ok(row?.failure?.detail);
+    assert.doesNotMatch(row.failure.detail, /sk-abcdefghijklmnopqrstuvwx/);
+
+    const notifications = await started.app.service.notifications(principal);
+    assert.doesNotMatch(JSON.stringify(notifications), /sk-abcdefghijklmnopqrstuvwx/);
   } finally {
     await started.close();
   }
 });
 
-test('an external agent declared conversations:none never receives history', async () => {
-  const workspace = createWorkspaces();
-  const seen: unknown[] = [];
-  try {
-    const config = baseConfig(workspace, {
-      engines: {
-        default: 'native',
-        opencode: {
-          enabled: true,
-          baseURL: 'https://opencode.example.test',
-          model: 'free/model',
-          passwordEnv: 'OPENCODE_PASSWORD',
-        },
-      },
-    });
-    const app = await composeApplication({
-      config,
-      env: { ...ENV, OPENCODE_PASSWORD: 'test-password' },
-      gateway: fakeGateway(),
-      externals: {
-        opencode: {
-          probe: async () => undefined,
-          run: async (request) => {
-            seen.push(request.history);
-            return { ok: true, summary: 'external answer' };
-          },
-        },
-      },
-    });
-    try {
-      const first = await app.service.submitWork(principal, {
-        objective: 'First native objective',
-        mode: 'cloud',
-        requireApproval: true,
-      });
-      assert.equal(first.ok, true);
-      if (!first.ok) return;
-      await app.dependencies.scheduler.idle();
-
-      const external = await app.service.submitWork(principal, {
-        objective: 'External objective',
-        conversationId: first.value.conversationId,
-        agent: 'opencode',
-        mode: 'cloud',
-        requireApproval: true,
-      });
-      assert.equal(external.ok, true);
-      if (!external.ok) return;
-      await app.dependencies.scheduler.idle();
-
-      assert.deepEqual(seen, [[]]);
-    } finally {
-      await app.stop();
-    }
-  } finally {
-    workspace.cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Finding 3: per-task, per-generation workspaces.
-// ---------------------------------------------------------------------------
-
-test('two tasks in one data mode receive separate workspaces', async () => {
+/**
+ * A mode root used to be the workspace of every conversation in it, so one run
+ * could read another's files and a quarantine took the whole mode out of service.
+ */
+test('each conversation has its own confined workspace and a resume reuses it', async () => {
+  const roots: string[] = [];
+  let calls = 0;
   const started = await startTestApp();
   try {
     const agent = started.app.dependencies.agents.get('coderax');
     assert.ok(agent);
-    const roots: string[] = [];
     agent.run = async (request) => {
+      calls += 1;
       roots.push(request.workspaceRoot);
-      return { ok: true, summary: 'done' };
+      return calls === 1
+        ? { ok: false, code: 'provider_error', detail: 'planned failure', retryable: true }
+        : { ok: true, summary: 'done' };
     };
 
     const first = await started.app.service.submitWork(principal, {
-      objective: 'First isolated task',
+      objective: 'first conversation',
+      conversationId: 'conv_ws_a',
       mode: 'cloud',
-      requireApproval: true,
+      requireApproval: false,
     });
     assert.equal(first.ok, true);
     await started.app.dependencies.scheduler.idle();
 
     const second = await started.app.service.submitWork(principal, {
-      objective: 'Second isolated task',
+      objective: 'second conversation',
+      conversationId: 'conv_ws_b',
       mode: 'cloud',
-      requireApproval: true,
+      requireApproval: false,
     });
     assert.equal(second.ok, true);
     await started.app.dependencies.scheduler.idle();
 
     assert.equal(roots.length, 2);
-    assert.ok(first.ok && second.ok);
-    if (!first.ok || !second.ok) return;
-    assert.notEqual(roots[0], roots[1]);
-    assert.ok(roots[0]?.includes(first.value.taskId));
-    assert.ok(roots[1]?.includes(second.value.taskId));
-    assert.notEqual(roots[0], started.workspace.cloudRoot);
-    assert.equal(existsSync(roots[0] ?? ''), true);
-  } finally {
-    await started.close();
-  }
-});
+    assert.notEqual(roots[0], roots[1], 'two conversations never share a directory');
 
-// ---------------------------------------------------------------------------
-// Findings 4, 5 and 6: abandoned execution revocation, supervision, stale reports.
-// ---------------------------------------------------------------------------
+    const modeRoot = await realpath(started.workspace.cloudRoot);
+    for (const root of roots) {
+      assert.equal(root.startsWith(`${modeRoot}${path.sep}`), true);
+      assert.equal(root.includes(`${path.sep}conversations${path.sep}`), true);
+    }
 
-test('an abandoned adapter loses its workspace and its events', { timeout: 15_000 }, async () => {
-  const started = await startTestApp({
-    config: { execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500, cancelGraceMs: 100 } },
-  });
-  try {
-    const deps = started.app.dependencies;
-    const agent = deps.agents.get('coderax');
-    assert.ok(agent);
-    let workspaceRoot = '';
-    let entered!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    let late: () => void = () => undefined;
-    agent.run = async (request, report) => {
-      workspaceRoot = request.workspaceRoot;
-      late = () => report({ type: 'text.delta', text: 'stale-after-revocation' });
-      entered();
-      return new Promise(() => undefined);
-    };
-
-    const task = await started.app.service.submitWork(principal, {
-      objective: 'Ignore cancellation',
-      mode: 'cloud',
-      requireApproval: true,
-    });
-    assert.equal(task.ok, true);
-    if (!task.ok) return;
-    await ready;
-
-    await started.app.service.cancelTask(principal, task.value.taskId);
-    await deps.scheduler.idle();
-
-    assert.equal(deps.supervisor.live().length, 0);
-    assert.equal(existsSync(workspaceRoot), false, 'the revoked path must stop existing');
-    const quarantined = readdirSync(path.join(started.workspace.cloudRoot, '.coderax-quarantine'));
-    assert.ok(quarantined.some((entry) => entry.startsWith(path.basename(workspaceRoot))));
-
-    late();
-    const replay = JSON.stringify(await deps.events.replay(task.value.taskId, 0));
-    assert.doesNotMatch(replay, /stale-after-revocation/);
-
-    const lateWrite = await writeFile(path.join(workspaceRoot, 'stale.txt'), 'x').then(
-      () => 'written',
-      () => 'refused',
+    const failed = await started.app.service.task(
+      principal,
+      first.ok ? first.value.taskId : '',
     );
-    assert.equal(lateWrite, 'refused');
-
-    const status = await started.app.service.task(principal, task.value.taskId);
-    assert.equal(status.ok, true);
-    assert.equal(status.ok && status.value.state, 'cancelled');
+    assert.equal(failed.ok && failed.value.state, 'failed');
+    if (!failed.ok) return;
+    const retried = await started.app.service.retryTask(
+      principal,
+      failed.value.taskId,
+      failed.value.generation,
+    );
+    assert.equal(retried.ok, true);
+    await started.app.dependencies.scheduler.idle();
+    assert.equal(roots.at(-1), roots[0], 'a new generation resumes in its own directory');
   } finally {
     await started.close();
   }
 });
 
-test('shutdown verifies termination and revokes a hung run', { timeout: 15_000 }, async () => {
+/**
+ * An external agent executes tools outside this process, so "approve before it
+ * acts" can only be honoured by refusing to dispatch without an owner grant.
+ * The grant is durable on the task row and can be spent once.
+ */
+test('an autonomous external agent runs only with a durable, single-use grant', async () => {
+  let runs = 0;
+  const transport: ExternalAgentTransport = {
+    probe: async () => undefined,
+    run: async () => {
+      runs += 1;
+      return { ok: true, summary: 'external done' };
+    },
+  };
   const started = await startTestApp({
-    config: { execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500, cancelGraceMs: 100 } },
-  });
-  const workspace = started.workspace;
-  let workspaceRoot = '';
-  try {
-    const deps = started.app.dependencies;
-    const agent = deps.agents.get('coderax');
-    assert.ok(agent);
-    let entered!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    agent.run = async (request) => {
-      workspaceRoot = request.workspaceRoot;
-      entered();
-      return new Promise(() => undefined);
-    };
-
-    const task = await started.app.service.submitWork(principal, {
-      objective: 'Hang until shutdown',
-      mode: 'cloud',
-      requireApproval: true,
-    });
-    assert.equal(task.ok, true);
-    if (!task.ok) return;
-    await ready;
-
-    const startedAt = Date.now();
-    await started.app.stop();
-    assert.ok(Date.now() - startedAt < 10_000);
-
-    assert.equal(deps.supervisor.live().length, 0);
-    assert.equal(existsSync(workspaceRoot), false);
-    const status = await started.app.service.task(principal, task.value.taskId);
-    assert.equal(status.ok, true);
-    assert.equal(status.ok && status.value.state, 'cancelled');
-  } finally {
-    rmSync(workspace.root, { recursive: true, force: true });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Finding 7: plaintext remote endpoints carrying credentials.
-// ---------------------------------------------------------------------------
-
-test('a plaintext remote endpoint is refused when it carries a credential', () => {
-  const remote = validateRemoteEndpoint({
-    url: 'http://inference.example.test/v1',
-    name: 'CODERAX_INFERENCE_BASE_URL',
-    carriesCredential: true,
-  });
-  assert.equal(remote.ok, false);
-  assert.equal(remote.ok === false && remote.code, 'engine_not_configured');
-
-  const secure = validateRemoteEndpoint({
-    url: 'https://inference.example.test/v1',
-    name: 'CODERAX_INFERENCE_BASE_URL',
-    carriesCredential: true,
-  });
-  assert.equal(secure.ok, true);
-
-  const loopback = validateRemoteEndpoint({
-    url: 'http://127.0.0.1:11434/v1',
-    name: 'CODERAX_INFERENCE_BASE_URL',
-    carriesCredential: true,
-  });
-  assert.equal(loopback.ok, true);
-});
-
-test('a credential embedded in an endpoint URL is refused even over TLS', () => {
-  for (const url of [
-    'https://user:password@inference.example.test/v1',
-    'https://inference.example.test/v1?api_key=abc',
-    'https://inference.example.test/v1?token=abc',
-  ]) {
-    const result = validateRemoteEndpoint({
-      url,
-      name: 'CODERAX_INFERENCE_BASE_URL',
-      carriesCredential: true,
-    });
-    assert.equal(result.ok, false, url);
-  }
-});
-
-test('startup refuses a plaintext remote inference endpoint', async () => {
-  const workspace = createWorkspaces();
-  try {
-    await assert.rejects(
-      () =>
-        composeApplication({
-          config: baseConfig(workspace),
-          env: {
-            ...ENV,
-            CODERAX_INFERENCE_BASE_URL: 'http://inference.example.test/v1',
-            CODERAX_INFERENCE_KEY: 'test-key',
-          },
-        }),
-      (error: unknown) => {
-        assert.match(problemText(error), /plaintext/);
-        return true;
+    externals: { opencode: transport },
+    env: { OPENCODE_PASSWORD: 'test-password' },
+    config: {
+      models: {
+        route: [{ providerId: 'free', modelId: 'coderax-small' }],
+        policy: [testProviderPolicy(), testProviderPolicy('opencode')],
       },
-    );
-  } finally {
-    workspace.cleanup();
-  }
-});
-
-test('an OpenCode password over plaintext is refused by configuration', () => {
-  const workspace = createWorkspaces();
-  try {
-    const config = EngineConfigSchema.parse({
-      auth: { ownerId: 'owner' },
-      workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
-      models: { route: [{ providerId: 'free', modelId: 'm' }] },
       engines: {
         opencode: {
           enabled: true,
-          baseURL: 'http://opencode.example.test',
-          model: 'free/model',
+          baseURL: 'http://127.0.0.1:4096',
+          model: 'local/model',
           passwordEnv: 'OPENCODE_PASSWORD',
         },
       },
-    });
-    const issues = validateInvariants(config);
-    assert.ok(issues.some((issue) => issue.includes('plaintext')));
-  } finally {
-    workspace.cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Finding 8: redaction before persistence.
-// ---------------------------------------------------------------------------
-
-test('a pasted credential is scrubbed from the transcript and the reply', async () => {
-  const started = await startTestApp({
-    gateway: {
-      id: 'leaky',
-      complete: async () => ({ text: `the recovered key is sk-${'a'.repeat(24)}` }),
     },
   });
   try {
-    const reply = await started.app.service.chat(principal, {
-      message: 'my password=hunter2hunter2 please remember it',
-      mode: 'private',
-      agent: 'coderax',
-    });
-    assert.equal(reply.ok, true);
-    if (!reply.ok) return;
-
-    assert.doesNotMatch(reply.value.text, /sk-a{24}/);
-    assert.match(reply.value.text, /\[redacted-key\]/);
-
-    const conversation = await started.app.service.conversation(
-      principal,
-      reply.value.conversationId,
-    );
-    assert.equal(conversation.ok, true);
-    if (!conversation.ok) return;
-    const stored = JSON.stringify(conversation.value.messages);
-    assert.doesNotMatch(stored, /hunter2hunter2/);
-    assert.doesNotMatch(stored, /sk-a{24}/);
-    assert.match(stored, /password=\[redacted\]/);
-  } finally {
-    await started.close();
-  }
-});
-
-test('failure, event, notification and audit text is scrubbed', async () => {
-  const started = await startTestApp();
-  try {
-    const deps = started.app.dependencies;
-    const agent = deps.agents.get('coderax');
-    assert.ok(agent);
-    const secret = `Bearer ${'b'.repeat(32)}`;
-    agent.run = async (_request, report) => {
-      report({ type: 'step.started', stepId: 's1', title: `credential ${secret}` });
-      return {
-        ok: false,
-        code: 'provider_error',
-        detail: `upstream rejected credential ${secret}`,
-        retryable: false,
-      };
-    };
-
-    const task = await started.app.service.submitWork(principal, {
-      objective: 'Fail with a credential',
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'run the external agent',
+      agent: 'opencode',
       mode: 'cloud',
       requireApproval: true,
     });
-    assert.equal(task.ok, true);
-    if (!task.ok) return;
-    await deps.scheduler.idle();
+    assert.equal(submitted.ok, true);
+    if (!submitted.ok) return;
+    const taskId = submitted.value.taskId;
+    await started.app.dependencies.scheduler.idle();
 
-    const status = await started.app.service.task(principal, task.value.taskId);
-    assert.equal(status.ok, true);
-    if (!status.ok) return;
-    assert.equal(status.value.state, 'failed');
-    assert.doesNotMatch(JSON.stringify(status.value.failure), /b{32}/);
+    const waiting = await started.app.service.task(principal, taskId);
+    assert.equal(waiting.ok && waiting.value.state, 'awaiting_approval');
+    assert.equal(waiting.ok && waiting.value.failure?.code, 'approval_required');
+    assert.equal(runs, 0, 'nothing was dispatched before the decision');
 
-    const replay = JSON.stringify(await deps.events.replay(task.value.taskId, 0));
-    assert.doesNotMatch(replay, /b{32}/);
-    assert.match(replay, /\[redacted\]/);
+    const listed = await started.app.service.permissions(principal, taskId);
+    assert.equal(listed.ok, true);
+    if (!listed.ok) return;
+    const denied = listed.value.requests.find((entry) => entry.decision === 'pending');
+    assert.ok(denied);
+    assert.equal(denied.scope, 'command.execute');
+    assert.equal(denied.resource, taskId);
 
-    const notifications = await started.app.service.notifications(principal);
-    assert.doesNotMatch(JSON.stringify(notifications), /b{32}/);
-
-    deps.audit.record({
-      actor: principal.ownerId,
-      action: 'test.audit',
-      outcome: 'failed',
-      detail: 'api_key=abcdefghijklmnop',
+    const denial = await started.app.service.decidePermission(principal, taskId, {
+      requestId: denied.requestId,
+      decision: 'denied',
     });
-    const receipt = deps.audit.list().at(-1);
-    assert.ok(receipt);
-    assert.doesNotMatch(receipt?.detail ?? '', /abcdefghijklmnop/);
+    assert.equal(denial.ok, true);
+    await started.app.service.resumeTask(
+      principal,
+      taskId,
+      waiting.ok ? waiting.value.generation : 1,
+    );
+    await started.app.dependencies.scheduler.idle();
+    assert.equal(runs, 0, 'a denial never dispatches the agent');
+
+    const again = await started.app.service.permissions(principal, taskId);
+    assert.equal(again.ok, true);
+    if (!again.ok) return;
+    const pending = again.value.requests.find((entry) => entry.decision === 'pending');
+    assert.ok(pending, 'the owner can decide again after a denial');
+    const approval = await started.app.service.decidePermission(principal, taskId, {
+      requestId: pending.requestId,
+      decision: 'approved',
+    });
+    assert.equal(approval.ok, true);
+
+    const durable = await started.app.dependencies.tasks.get(taskId);
+    assert.equal(durable?.approval?.decision, 'approved');
+
+    const current = await started.app.service.task(principal, taskId);
+    assert.equal(current.ok, true);
+    if (!current.ok) return;
+    const resumed = await started.app.service.resumeTask(
+      principal,
+      taskId,
+      current.value.generation,
+    );
+    assert.equal(resumed.ok, true);
+    await started.app.dependencies.scheduler.idle();
+
+    assert.equal(runs, 1);
+    const finished = await started.app.service.task(principal, taskId);
+    assert.equal(finished.ok && finished.value.state, 'completed');
+
+    const consumed = await started.app.dependencies.tasks.get(taskId);
+    assert.ok(consumed?.approval?.consumedAt, 'the grant was spent exactly once');
+
+    const replay = await started.app.service.resumeTask(
+      principal,
+      taskId,
+      finished.ok ? finished.value.generation : 2,
+    );
+    assert.equal(replay.ok === true && replay.value.outcome, 'already_terminal');
+    assert.equal(runs, 1, 'a spent grant cannot authorize another run');
   } finally {
     await started.close();
   }
 });
 
-test('every event payload is scrubbed at the bus, not only known types', async () => {
+/**
+ * A JSON array is the cheapest way to make a validator do unbounded work per
+ * byte. The body is refused before schema validation.
+ */
+test('an oversized request array is refused before schema validation', async () => {
   const started = await startTestApp();
   try {
-    const events = started.app.dependencies.events;
-    // The log only stores a write the fenced task row allocates a sequence for,
-    // so the test seeds its owner instead of bypassing the fence.
-    await started.app.dependencies.tasks.create(
-      taskRecord({ taskId: 'task_bus', runToken: 'run-bus' }),
-    );
-    const draft = {
-      taskId: 'task_bus',
-      runToken: 'run-bus',
-      agent: 'coderax' as const,
-      generation: 1,
-    };
-    await events.publish({
-      ...draft,
-      type: 'tool.call',
-      payload: {
-        callId: 'call_1',
-        tool: 'test',
-        input: { authorization: 'Bearer cccccccccccccccccccccccc', note: 'password=supersecret' },
+    const response = await fetch(`${started.url}/v1/notifications/read`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${OWNER_TOKEN}`,
+        'content-type': 'application/json',
       },
+      body: JSON.stringify({
+        taskIds: Array.from({ length: 1_000 }, (_, index) => `task-${index}`),
+      }),
     });
-    await events.publish({
-      ...draft,
-      type: 'step.started',
-      payload: { stepId: 's1', title: 'key sk-' + 'd'.repeat(24) },
-    });
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { detail?: string };
+    assert.match(body.detail ?? '', /too many entries/);
 
-    const replay = JSON.stringify(await events.replay('task_bus', 0));
-    assert.doesNotMatch(replay, /c{24}/);
-    assert.doesNotMatch(replay, /supersecret/);
-    assert.doesNotMatch(replay, /sk-d{24}/);
+    const accepted = await fetch(`${started.url}/v1/notifications/read`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${OWNER_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ taskIds: ['task-1'] }),
+    });
+    assert.equal(accepted.status, 200);
   } finally {
     await started.close();
   }

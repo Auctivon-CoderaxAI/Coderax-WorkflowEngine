@@ -130,7 +130,7 @@ test('Native sends a validated image as content parts on the chat model call', a
     enabled: true,
     gateway: {
       id: 'fixture',
-      complete: async (request) => {
+      complete: async (request: import('../../src/agents/native/types.js').ModelCompletionRequest) => {
         capturedImages = request.images;
         return { text: 'seen', usage: {} };
       },
@@ -144,6 +144,7 @@ test('Native sends a validated image as content parts on the chat model call', a
       workload: 'work',
       game: null,
       objective: 'describe the attached image',
+      operation: 'multimodal', routing: 'auto', allowFallback: false, reasoning: 'fast',
       model,
       mode: 'cloud',
       workspaceRoot: '/fixture',

@@ -1,9 +1,10 @@
+import { artifactSettings } from '../fixtures/artifacts.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';
 import { createFakeDatabase } from '../fakes/mongo.js';
-import { artifactSettings, base64, pngBytes, textBytes } from '../fixtures/artifacts.js';
-import { fakeGateway, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
+import { base64, pngBytes, textBytes } from '../fixtures/artifacts.js';
+import { fakeProvider, OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
 
 function client(url: string): CoderaxClient {
   return new CoderaxClient({ baseUrl: url, token: OWNER_TOKEN });
@@ -11,12 +12,12 @@ function client(url: string): CoderaxClient {
 
 test('artifacts, versions and task links survive an engine restart and a new client', async () => {
   const database = createFakeDatabase();
-  const gateway = fakeGateway();
+  const provider = fakeProvider();
   const config = { persistence: { driver: 'mongo' } };
   const original = pngBytes('restart-proof');
   let artifactId = '';
 
-  const first = await startTestApp({ gateway, config, persistence: { database } });
+  const first = await startTestApp({ provider, config, persistence: { database } });
   try {
     const api = client(first.url);
     const accepted = await api.submitWork({
@@ -28,7 +29,7 @@ test('artifacts, versions and task links survive an engine restart and a new cli
       const status = await api.task(accepted.taskId);
       return status.state === 'completed' ? status : null;
     });
-    const callsAfterWork = gateway.calls;
+    const callsAfterWork = provider.calls;
     assert.ok(callsAfterWork > 0);
 
     const uploaded = await api.uploadArtifact({
@@ -55,12 +56,15 @@ test('artifacts, versions and task links survive an engine restart and a new cli
     assert.equal(second.artifact.version, 2);
     assert.equal(second.version.relativePath, 'charts/chart-v2.png');
 
-    const status = await api.task(accepted.taskId);
+    const linked = await api.artifacts({
+      mode: 'cloud',
+      taskId: accepted.taskId,
+    });
     assert.deepEqual(
-      status.result?.artifacts.map((entry) => entry.path),
-      ['charts/chart-v2.png'],
+      linked.artifacts.map((entry) => entry.filename),
+      ['chart-v2.png'],
     );
-    assert.equal(status.result?.artifacts[0]?.digest, second.version.sha256);
+    assert.equal(linked.artifacts[0]?.sha256, second.version.sha256);
 
     const current = await api.downloadArtifact(artifactId, { mode: 'cloud' });
     assert.equal(current.contentBase64, base64(pngBytes('version-two')));
@@ -73,13 +77,13 @@ test('artifacts, versions and task links survive an engine restart and a new cli
     assert.equal(exported.contentBase64, base64(original));
 
     // Reading artifacts never reaches the inference gateway.
-    assert.equal(gateway.calls, callsAfterWork);
+    assert.equal(provider.calls, callsAfterWork);
   } finally {
     await first.close();
   }
 
   // A fresh process, a fresh client, the same durable rows.
-  const second = await startTestApp({ gateway, config, persistence: { database } });
+  const second = await startTestApp({ provider, config, persistence: { database } });
   try {
     const api = client(second.url);
     const persisted = await api.artifact(artifactId, 'cloud');
@@ -438,7 +442,7 @@ test('an ambiguous metadata failure keeps its reference and admission for recove
 });
 
 test('a memory deployment fails closed over HTTP and reports the limitation', async () => {
-  const started = await startTestApp();
+  const started = await startTestApp({ config: { artifacts: { allowEphemeral: false } } });
   try {
     const api = client(started.url);
     await assert.rejects(

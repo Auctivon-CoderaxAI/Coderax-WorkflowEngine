@@ -1,7 +1,5 @@
-import type { ModelRouter } from '../models/router.js';
-import type { BudgetLedger } from '../models/budget.js';
+import type { ModelCatalog } from '../models/catalog.js';
 import type { ModelGateway } from '../agents/native/types.js';
-import type { Clock } from '../support/clock.js';
 import type { DesignAssistant } from './studio.js';
 
 /**
@@ -14,10 +12,8 @@ import type { DesignAssistant } from './studio.js';
  * sees code generation or verification: those are deterministic and measured.
  */
 export function createDesignAssistant(input: {
-  models: ModelRouter;
+  models: ModelCatalog;
   gateway: ModelGateway | null;
-  budget: BudgetLedger;
-  clock: Clock;
   timeoutMs?: number;
 }): DesignAssistant {
   const available = input.gateway !== null;
@@ -26,19 +22,12 @@ export function createDesignAssistant(input: {
     available,
     narrate: async ({ ownerId, spec }) => {
       if (!input.gateway) return null;
-      const resolved = input.models.resolve(null, 'cloud', { operation: 'chat' });
+      const resolved = input.models.resolve(null, 'cloud');
       if (!resolved.ok) return null;
-      const reserved = await input.budget.reserve({
-        ownerId,
-        at: input.clock.now(),
-        inputTokens: 0,
-        outputTokens: 0,
-      });
-      if (!reserved.allowed) return null;
-
       try {
         const completion = await input.gateway.complete({
           model: resolved.value.ref,
+          ownerId, mode: 'cloud', operation: 'work',
           system:
             'You write short design narrative for a deterministic game generator. Reply with JSON only: {"logline": string, "pillars": string[]}. Never claim a mechanic that is not listed.',
           prompt: `Spec: ${JSON.stringify({
@@ -52,7 +41,6 @@ export function createDesignAssistant(input: {
           signal: AbortSignal.timeout(input.timeoutMs ?? 20_000),
           maxOutputTokens: 320,
         });
-        await input.budget.settle(reserved.reservation.id, completion.usage ?? {});
         const parsed = JSON.parse(completion.text.trim()) as {
           logline?: unknown;
           pillars?: unknown;
@@ -73,7 +61,6 @@ export function createDesignAssistant(input: {
           ...(pillars && pillars.length > 0 ? { pillars } : {}),
         };
       } catch {
-        await input.budget.release(reserved.reservation.id, { dispatched: true });
         return null;
       }
     },

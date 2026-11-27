@@ -8,6 +8,7 @@ import { z } from 'zod';
 export const CONTRACT_VERSION = '1.3.0' as const;
 /** Majors the server can still speak; a new major needs a new `/vN` prefix. */
 export const CONTRACT_MAJOR = 1 as const;
+export const SDK_VERSION = CONTRACT_VERSION;
 /**
  * `1.0.0` was the first published surface; `1.1.0` added the router, games and
  * browser routes. `1.2.0` adds the capability handshake, which is additive: it

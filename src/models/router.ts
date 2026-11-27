@@ -4,6 +4,9 @@ import type {
   ModelList,
   ModelRef,
   ProblemCode,
+  ProviderStatus,
+  RouterModel,
+  RoutingReport,
   Usage,
 } from '@coderax/contracts';
 import { modelKey } from '@coderax/contracts';
@@ -104,6 +107,8 @@ export type ModelRouterOptions = {
 };
 
 export type ModelRouter = ModelGateway & {
+  /** The published routing report: real usage joined with recorded quota. */
+  report: (mode: RoutingMode) => RoutingReport;
   /** The router always offers normalized streaming, even for one-shot adapters. */
   stream: NonNullable<ModelGateway['stream']>;
   list: () => ModelList;
@@ -133,6 +138,11 @@ type ProviderRuntime = {
   latencyMs: number;
   verifiedFree: number;
   quotaUntil: Date | null;
+  /** Real usage observed since UTC midnight; the routing report is not invented. */
+  usedRequests: number;
+  usedTokens: number;
+  recentRequests: number[];
+  usageDay: string;
 };
 
 type ModelRuntime = {
@@ -240,7 +250,36 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       latencyMs: 0,
       verifiedFree: 0,
       quotaUntil: null,
+      usedRequests: 0,
+      usedTokens: 0,
+      recentRequests: [],
+      usageDay: '',
     });
+  }
+
+  /**
+   * Record what the provider actually served. The routing report publishes these
+   * counters, so they count admitted requests and reported tokens rather than an
+   * estimate that would look like usage without being usage.
+   */
+  function noteUsage(provider: ProviderRuntime, at: Date, usage?: Usage): void {
+    const day = at.toISOString().slice(0, 10);
+    if (provider.usageDay !== day) {
+      provider.usageDay = day;
+      provider.usedRequests = 0;
+      provider.usedTokens = 0;
+      provider.recentRequests = [];
+    }
+    if (usage === undefined) {
+      provider.usedRequests += 1;
+      provider.recentRequests.push(at.getTime());
+      const cutoff = at.getTime() - 60_000;
+      while (provider.recentRequests.length > 0 && (provider.recentRequests[0] ?? 0) < cutoff) {
+        provider.recentRequests.shift();
+      }
+      return;
+    }
+    provider.usedTokens += Math.max(0, usage.inputTokens ?? 0) + Math.max(0, usage.outputTokens ?? 0);
   }
 
   let models = new Map<string, ModelRuntime>();
@@ -303,6 +342,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       ...(state.contextTokens === null ? {} : { contextTokens: state.contextTokens }),
       toolCalling: state.capabilities.toolCalling,
       streaming: state.capabilities.streaming,
+      inputModalities: state.capabilities.vision ? ['text', 'image'] : ['text'],
       availability: modelAvailability(runtime, at),
     };
   }
@@ -334,7 +374,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       if (!state.supported || state.costClass !== 'free') continue;
       // Cost, capability and policy are independent dimensions. A provider that
       // is free and capable is still excluded unless this exact operation is
-      // approved for this data mode.
+      // approved for this data mode and the provider's evidence permits it.
       const permission = policy.evaluate({
         providerId: state.ref.providerId,
         operation: input.operation,
@@ -774,6 +814,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
     let budgetRefusal: string | null = null;
+    let lastDispatchFailure: ProviderError | null = null;
     const executed = planned.fallbackAllowed
       ? planned.candidates.slice(0, 1 + maxFallbacks)
       : planned.candidates.slice(0, 1);
@@ -838,6 +879,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         tokens: estimated + output,
         now: at,
       });
+      if (acquired.allowed) noteUsage(provider, at);
       if (!acquired.allowed) {
         await budget.release(reserved.reservation.id);
         runtime.circuit.abandon(runtimeAdmission);
@@ -875,6 +917,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           inputTokens: estimated,
           outputTokens: output,
         });
+        noteUsage(
+          provider,
+          at,
+          completion.usage ?? { inputTokens: estimated, outputTokens: output },
+        );
         recordSuccess(runtime, provider, latencyMs, runtimeAdmission, providerAdmission);
         return {
           text: completion.text,
@@ -906,13 +953,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           runtimeAdmission,
           providerAdmission,
         );
-        lastFailure = providerError;
+        lastDispatchFailure = providerError;
       }
     }
 
-    if (budgetRefusal !== null) {
+    if (budgetRefusal !== null && lastDispatchFailure === null) {
       throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
     }
+    lastFailure = lastDispatchFailure ?? lastFailure;
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null
@@ -932,12 +980,13 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     const attempts: ModelRef[] = [];
     let lastFailure: ProviderError | null = null;
     let budgetRefusal: string | null = null;
+    let lastDispatchFailure: ProviderError | null = null;
 
     for (const candidate of executed) {
       if (request.signal.aborted) {
         throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
       }
-      const runtime = models.get(modelKey(candidate.model.ref));
+      let runtime = models.get(modelKey(candidate.model.ref));
       if (!runtime) continue;
       const provider = providers.get(runtime.state.ref.providerId);
       if (!provider) continue;
@@ -986,6 +1035,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         continue;
       }
       const acquired = provider.limiter.acquire({ tokens: estimated + output, now: at });
+      if (acquired.allowed) noteUsage(provider, at);
       if (!acquired.allowed) {
         await budget.release(reserved.reservation.id);
         runtime.circuit.abandon(runtimeAdmission);
@@ -1039,9 +1089,14 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           !revalidated ||
           !modelAvailability(revalidated, revalidatedAt).available ||
           revalidatedPolicy === null ||
-          !revalidatedPolicy.allowed
+          !revalidatedPolicy.allowed ||
+          output > outputBudget(request, revalidated.state) ||
+          !contextFits({ state: revalidated.state, estimatedInputTokens: estimated, maxOutputTokens: output }) ||
+          ((request.tools?.length ?? 0) > 0 && !revalidated.state.capabilities.toolCalling) ||
+          (request.messages?.some((message) => (message.images?.length ?? 0) > 0) &&
+            !revalidated.state.capabilities.vision)
         ) {
-          acquired.release();
+          acquired.release({ dispatched: false });
           await budget.release(reserved.reservation.id);
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
@@ -1053,7 +1108,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           );
           continue;
         }
+        if (signal.aborted) {
+          throw new ProviderError('cancelled', 'The inference stream was cancelled before dispatch.', { retryable: false });
+        }
         providerStarted = true;
+        runtime = revalidated;
         const events = provider.adapter.stream
           ? provider.adapter.stream(providerRequest)
           : synthesize(provider.adapter.complete(providerRequest));
@@ -1071,10 +1130,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           reserved.reservation.id,
           usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 },
         );
+        noteUsage(provider, at, usage ?? { inputTokens: estimated, outputTokens: emitted ? output : 0 });
         recordSuccess(runtime, provider, latencyMs, runtimeAdmission, providerAdmission);
         return;
       } catch (error) {
-        acquired.release();
+        acquired.release({ dispatched: providerStarted });
         const providerError =
           error instanceof ProviderError
             ? error
@@ -1118,7 +1178,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
         }
         await budget.release(reserved.reservation.id, { dispatched: providerStarted });
         settled = true;
-        lastFailure = providerError;
+        lastDispatchFailure = providerError;
       } finally {
         // A consumer can stop iterating before the provider finishes. Release the
         // provider slot and account for the work already started; otherwise the
@@ -1129,7 +1189,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           providerAbort.abort();
           runtime.circuit.abandon(runtimeAdmission);
           provider.circuit.abandon(providerAdmission);
-          acquired.release();
+          acquired.release({ dispatched: providerStarted });
           if (providerStarted) {
             await budget.settle(
               reserved.reservation.id,
@@ -1142,9 +1202,10 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       }
     }
 
-    if (budgetRefusal !== null) {
+    if (budgetRefusal !== null && lastDispatchFailure === null) {
       throw new ModelRoutingError('budget_exhausted', budgetRefusal, false);
     }
+    lastFailure = lastDispatchFailure ?? lastFailure;
     throw new ModelRoutingError(
       'engine_unavailable',
       lastFailure === null
@@ -1308,6 +1369,59 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     return report;
   }
 
+  function report(mode: RoutingMode): RoutingReport {
+    const at = now();
+    const statuses: ProviderStatus[] = [];
+    for (const [providerId, provider] of providers) {
+      const quota = {
+        requestsPerMinute: provider.settings.requestsPerMinute,
+        requestsPerDay: provider.settings.requestsPerDay ?? 500,
+        tokensPerDay: provider.settings.tokensPerDay ?? 500_000,
+      };
+      const entries = [...models.values()].filter(
+        (runtime) => runtime.state.ref.providerId === providerId,
+      );
+      const modelsOf: RouterModel[] = entries.map((runtime) => ({
+        ref: runtime.state.ref,
+        label: runtime.state.label,
+        providerId,
+        costClass: runtime.state.costClass,
+        capabilities: {
+          // A benchmark measures coding and reasoning; a missing score is neutral
+          // evidence, not a claim that the model is good at either.
+          coding: runtime.state.quality?.coding ?? 0.5,
+          reasoning: runtime.state.quality?.reasoning ?? 0.5,
+          speed: 0.5,
+          toolCalling: runtime.state.capabilities.toolCalling,
+          multimodal: runtime.state.capabilities.vision,
+          contextTokens: runtime.state.contextTokens ?? 8_192,
+        },
+        availability: modelAvailability(runtime, at),
+        requestsRemaining: Math.max(0, quota.requestsPerDay - provider.usedRequests),
+        tokensRemaining: Math.max(0, quota.tokensPerDay - provider.usedTokens),
+      }));
+      statuses.push({
+        id: providerId,
+        costEvidence: provider.verifiedFree > 0 ? 'verified-free' : 'unverified',
+        quota,
+        used: {
+          requestsThisMinute: provider.recentRequests.filter(
+            (instant) => instant >= at.getTime() - 60_000,
+          ).length,
+          requestsToday: provider.usedRequests,
+          tokensToday: provider.usedTokens,
+        },
+        models: modelsOf,
+      });
+    }
+    return {
+      mode,
+      providers: statuses,
+      route: route(mode),
+      allowPaid: false,
+    };
+  }
+
   function health(): RouterHealth {
     const at = now();
     return {
@@ -1327,6 +1441,11 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             ? provider.quotaUntil.toISOString()
             : null,
         circuit: provider.circuit.state(at),
+        usedRequests: provider.usedRequests,
+        usedTokens: provider.usedTokens,
+        requestsThisMinute: provider.recentRequests.filter(
+          (instant) => instant >= at.getTime() - 60_000,
+        ).length,
       })),
       models: [...models.values()].map((runtime): ModelHealth => ({
         ref: runtime.state.ref,
@@ -1358,6 +1477,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     id: 'coderax-model-router',
     list,
     route,
+    report,
     resolve,
     plan,
     refresh,

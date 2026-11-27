@@ -1,9 +1,11 @@
-import type { TaskPlanStep } from '../../domain.js';
+import type { TaskPlan, TaskPlanStep } from '../../domain.js';
 
 /**
  * A plan becomes execution order only here. Dependencies are checked against
  * completed work, independent steps are grouped into a wave, and a missing or
- * cyclic dependency is refused instead of being treated as ready.
+ * cyclic dependency is refused instead of being treated as ready. The team
+ * scheduler calls this same function, so there is one scheduling semantic in the
+ * engine rather than one per feature.
  */
 export type ScheduleResult =
   | { ok: true; waves: TaskPlanStep[][] }
@@ -35,8 +37,6 @@ export function planWaves(input: {
           'The plan has no ready step: a dependency is missing, or the dependencies contain a cycle.',
       };
     }
-    // A dependent step is never placed in the same wave as its dependency, even
-    // when the dependency is in this ready set; `done` is updated after the wave.
     const wave = ready.slice(0, maxParallel);
     for (const step of wave) remaining.delete(step.id);
     waves.push(wave);
@@ -46,10 +46,17 @@ export function planWaves(input: {
   return { ok: true, waves };
 }
 
-/** Number of steps that could run once the completed set is applied. */
 export function remainingSteps(
   steps: TaskPlanStep[],
   completed: ReadonlySet<string>,
 ): TaskPlanStep[] {
   return steps.filter((step) => !completed.has(step.id));
+}
+
+/** A member graph is a plan; this is the only conversion the team needs. */
+export function planFromSteps(input: {
+  mode: TaskPlan['mode'];
+  steps: TaskPlanStep[];
+}): TaskPlan {
+  return { revision: 1, mode: input.mode, steps: input.steps };
 }

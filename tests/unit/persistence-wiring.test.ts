@@ -8,6 +8,7 @@ import {
   baseConfig,
   createWorkspaces,
   fakeGateway,
+  fakeProvider,
   OWNER_TOKEN,
   waitFor,
   type TestWorkspace,
@@ -36,7 +37,7 @@ test('the default persistence driver is memory', async () => {
     const app = await composeApplication({
       config: baseConfig(workspace),
       env: ENV,
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
     });
     assert.deepEqual(app.persistence, { driver: 'memory' });
     await app.stop();
@@ -52,7 +53,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
     const first = await composeApplication({
       config: mongoConfig(workspace),
       env: ENV,
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
       persistence: { database },
     });
     assert.deepEqual(first.persistence, { driver: 'mongo' });
@@ -111,7 +112,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
     const second = await composeApplication({
       config: mongoConfig(workspace),
       env: ENV,
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
       persistence: { database },
     });
     try {
@@ -172,7 +173,7 @@ test('mongo without a connection string fails startup and names the variable', a
         composeApplication({
           config: mongoConfig(workspace),
           env: ENV,
-          gateway: fakeGateway(),
+          providers: [{ adapter: fakeProvider() }],
         }),
       (error: unknown) => {
         assert.match(startupIssue(error), /CODERAX_MONGODB_URI is not set/);
@@ -196,7 +197,7 @@ test('the connection string is read from the configured variable name', async ()
         collectionPrefix: 'test_',
       }),
       env: { ...ENV, CODERAX_TEST_MONGO: 'mongodb://127.0.0.1:27017' },
-      gateway: fakeGateway(),
+      providers: [{ adapter: fakeProvider() }],
       persistence: {
         connect: async (input) => {
           seen.push(input);
@@ -222,7 +223,7 @@ test('an unreachable deployment fails startup instead of downgrading', async () 
         composeApplication({
           config: mongoConfig(workspace),
           env: { ...ENV, CODERAX_MONGODB_URI: 'mongodb://127.0.0.1:1/coderax' },
-          gateway: fakeGateway(),
+          providers: [{ adapter: fakeProvider() }],
           persistence: {
             connect: async () => {
               throw new MongoUnavailableError(
@@ -256,7 +257,7 @@ test('a collection that cannot be indexed fails startup', async () => {
         composeApplication({
           config: mongoConfig(workspace),
           env: ENV,
-          gateway: fakeGateway(),
+          providers: [{ adapter: fakeProvider() }],
           persistence: { database },
         }),
       (error: unknown) => {
@@ -315,4 +316,27 @@ test('the Mongo connector requires TLS for remote or discoverable connections', 
   settings = { hosts: [{ host: 'localhost' }] };
   await (await connect(target)).close();
   assert.deepEqual(seen, [false, true]);
+});
+
+test('a second replica can decide a stored approval and exactly one replica consumes it', async () => {
+  const workspace = createWorkspaces();
+  const database = createFakeDatabase();
+  const options = { config: mongoConfig(workspace), gateway: fakeGateway(), env: ENV, persistence: { database } };
+  const first = await composeApplication(options);
+  const second = await composeApplication(options);
+  try {
+    const args = { ownerId: 'owner', taskId: 'task', scope: 'browser.use' as const,
+      resource: 'browser', binding: 'action-A', consume: true };
+    const store = first.dependencies.permissions;
+    const other = second.dependencies.permissions;
+    const request = await store.request({ ...args, agent: 'coderax', description: 'One action' });
+    assert.ok((await other.decide({ ...args, requestId: request.requestId, decision: 'approved' })).ok);
+    assert.equal(await store.lookup({ ...args, binding: 'action-B' }), null);
+    const results = await Promise.all([store.lookup(args), other.lookup(args)]);
+    assert.equal(results.filter(result => result?.decision === 'granted').length, 1);
+  } finally {
+    await first.stop();
+    await second.stop();
+    workspace.cleanup();
+  }
 });

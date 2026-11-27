@@ -63,10 +63,18 @@ function toRequest(document: Record<string, unknown>): PermissionRequest {
   };
 }
 
+/** A previous deployment stored expiration as BSON Date rather than milliseconds. */
+function expiration(now: number) {
+  return { $or: [
+    { expiresAtMs: { $gt: now } },
+    { expiresAtMs: { $exists: false }, validUntil: { $gt: new Date(now) } },
+  ] };
+}
+
 export async function ensurePermissionIndexes(collection: MongoCollectionLike): Promise<void> {
   await collection.createIndex(
     { requestId: 1 },
-    { unique: true, name: 'permission_request_id' },
+    { unique: true, name: 'permission_request' },
   );
   await collection.createIndex(
     { ownerId: 1, taskId: 1 },
@@ -131,7 +139,9 @@ export function createMongoPermissionStore(input: {
           requestId,
           ownerId,
           taskId,
-          expiresAtMs: { $gt: now.getTime() },
+          decision: 'pending',
+          consumed: { $ne: true },
+          ...expiration(now.getTime()),
         },
         { $set: { decision, decidedAt: now.toISOString() } },
         { returnDocument: 'after', includeResultMetadata: false },
@@ -139,7 +149,7 @@ export function createMongoPermissionStore(input: {
       if (!updated) {
         const existing = await input.collection.findOne({ requestId, ownerId, taskId });
         return existing
-          ? fail('conflict', 'That permission request has expired.')
+          ? fail('conflict', 'That permission request has expired or was already decided.')
           : fail('not_found', 'That permission request does not exist for this task.');
       }
       return ok(await listFor(ownerId, taskId));
@@ -157,7 +167,7 @@ export function createMongoPermissionStore(input: {
         resource,
         decision: 'approved',
         consumed: { $ne: true },
-        expiresAtMs: { $gt: input.clock.now().getTime() },
+        ...expiration(input.clock.now().getTime()),
       });
       return document !== null;
     },
@@ -177,16 +187,15 @@ export function createMongoPermissionStore(input: {
         $or: [{ binding }, { binding: { $exists: false } }],
       };
       if (requestId) {
-        const named = await input.collection.findOne({ ...base, requestId });
+        const named = await input.collection.findOne({ ...base, requestId, $and: [expiration(now)] });
         if (!named) return null;
         const document = named as Record<string, unknown>;
-        if (Number(document.expiresAtMs ?? 0) <= now) return null;
         if (document.decision === 'denied') return { decision: 'denied', requestId };
         if (document.decision === 'pending') return { decision: 'pending', requestId };
         if (document.consumed === true) return null;
         if (consume) {
           const claimed = await input.collection.updateOne(
-            { requestId, ownerId, taskId, consumed: { $ne: true }, decision: 'approved' },
+            { requestId, ownerId, taskId, consumed: { $ne: true }, decision: 'approved', ...expiration(now) },
             { $set: { consumed: true } },
             { upsert: false },
           );
@@ -198,15 +207,14 @@ export function createMongoPermissionStore(input: {
         ...base,
         decision: 'approved',
         consumed: { $ne: true },
-        expiresAtMs: { $gt: now },
-        $and: [{ $or: [{ callId }, { callId: { $exists: false } }, { policy: 'once' }] }],
+        $and: [expiration(now), { $or: [{ callId }, { callId: { $exists: false } }, { policy: 'once' }] }],
       });
       if (approved) {
         const document = approved as Record<string, unknown>;
         const id = String(document.requestId ?? '');
         if (consume && id !== '') {
           const claimed = await input.collection.updateOne(
-            { requestId: id, consumed: { $ne: true }, decision: 'approved' },
+            { requestId: id, consumed: { $ne: true }, decision: 'approved', ...expiration(now) },
             { $set: { consumed: true } },
             { upsert: false },
           );
@@ -217,7 +225,7 @@ export function createMongoPermissionStore(input: {
       const pending = await input.collection.findOne({
         ...base,
         decision: 'pending',
-        expiresAtMs: { $gt: now },
+        $and: [expiration(now)],
       });
       if (pending) {
         const id = String((pending as Record<string, unknown>).requestId ?? '');

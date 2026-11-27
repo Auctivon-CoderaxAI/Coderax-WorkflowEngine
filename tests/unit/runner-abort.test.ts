@@ -20,6 +20,7 @@ function request(signal: AbortSignal): AgentRunRequest {
     conversationId: 'conversation',
     workload: 'work',
     game: null,
+    operation: 'work', routing: 'auto', allowFallback: false,
     objective: 'stop',
     model: { providerId: 'free', modelId: 'coderax-small' },
     reasoning: 'auto',

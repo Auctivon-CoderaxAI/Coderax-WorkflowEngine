@@ -40,6 +40,8 @@ export const DOMAIN_KEYS = [
   'browser',
   'knowledge',
   'media',
+  'creative',
+  'teams',
   'contract',
 ] as const;
 export type DomainKey = (typeof DOMAIN_KEYS)[number];
@@ -94,7 +96,9 @@ const DOMAIN_NOTES: Readonly<Record<DomainKey, { owner: string; note: string }>>
   'gaming-agent': { owner: 'src/games/session.ts', note: 'A game session’s observed state, logs and verification.' },
   browser: { owner: 'src/orchestration/browser.ts', note: 'Owner-scoped browser sessions and approval-bound actions.' },
   knowledge: { owner: 'src/knowledge/store.ts', note: 'Owner- and mode-scoped lexical retrieval over stored documents.' },
-  media: { owner: 'src/media/intake.ts', note: 'Validated image attachments for a vision route.' },
+  media: { owner: 'src/media/service.ts', note: 'Validated inline images and owner-scoped durable media.' },
+  creative: { owner: 'src/creative/service.ts', note: 'Validation of generated visual artifacts.' },
+  teams: { owner: 'src/orchestration/team.ts', note: 'Bounded Native team execution and owner approval.' },
   contract: { owner: 'packages/contracts/src/routes.ts', note: 'The published route catalogue itself.' },
 });
 
@@ -109,62 +113,6 @@ export const DOMAIN_OWNERS: readonly DomainOwner[] = Object.freeze(
 );
 
 export const RESERVED_OPERATIONS: readonly ReservedOperation[] = Object.freeze([
-{
-    id: 'getRouting',
-    domain: 'intelligence',
-    branch: 'PR #2 (origin/pr/2)',
-    head: 'e14e4b714a5091b51cd2d0598b2b17cca56435f3',
-    status: 'blocked',
-    reason: 'Provider eligibility report lives on feat/intelligence-core; PR #4 owns routing.',
-  },
-{
-    id: 'submitTeam',
-    domain: 'multiAgent',
-    branch: 'PR #8 (origin/pr/8)',
-    head: 'ffec08f43bd837c7600d83138d538982e8607048',
-    status: 'blocked',
-    reason: 'PR #8 adds bounded Native team orchestration; not merged here.',
-  },
-{
-    id: 'getTeam',
-    domain: 'multiAgent',
-    branch: 'PR #8 (origin/pr/8)',
-    head: 'ffec08f43bd837c7600d83138d538982e8607048',
-    status: 'blocked',
-    reason: 'Team read model belongs to PR #8.',
-  },
-{
-    id: 'resumeTeam',
-    domain: 'multiAgent',
-    branch: 'PR #8 (origin/pr/8)',
-    head: 'ffec08f43bd837c7600d83138d538982e8607048',
-    status: 'blocked',
-    reason: 'Team control belongs to PR #8.',
-  },
-{
-    id: 'cancelTeam',
-    domain: 'multiAgent',
-    branch: 'PR #8 (origin/pr/8)',
-    head: 'ffec08f43bd837c7600d83138d538982e8607048',
-    status: 'blocked',
-    reason: 'Team control belongs to PR #8.',
-  },
-{
-    id: 'listTeamPermissions',
-    domain: 'multiAgent',
-    branch: 'PR #8 (origin/pr/8)',
-    head: 'ffec08f43bd837c7600d83138d538982e8607048',
-    status: 'blocked',
-    reason: 'Team-scoped approvals belong to PR #8 and its supervisor owner.',
-  },
-{
-    id: 'decideTeamPermission',
-    domain: 'multiAgent',
-    branch: 'PR #8 (origin/pr/8)',
-    head: 'ffec08f43bd837c7600d83138d538982e8607048',
-    status: 'blocked',
-    reason: 'Team-scoped approvals belong to PR #8 and its supervisor owner.',
-  },
 {
     id: 'markNotificationRead',
     domain: 'notifications',

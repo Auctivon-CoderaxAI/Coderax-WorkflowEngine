@@ -1,5 +1,5 @@
 import type { ModelRef, Usage } from '@coderax/contracts';
-import type { ModelGateway } from './types.js';
+import type { BasicModelGateway } from './types.js';
 
 /**
  * Reject provider endpoints that can never be an owner-authorized inference
@@ -49,7 +49,7 @@ export function createOpenAiCompatibleGateway(input: {
   apiKey: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
-}): ModelGateway {
+}): BasicModelGateway {
   const baseURL = validateProviderBaseURL(input.baseURL).toString().replace(/\/+$/, '');
   const fetchImpl = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? 60_000;
@@ -119,7 +119,7 @@ export function createOpenAiCompatibleGateway(input: {
         signal.removeEventListener('abort', onAbort);
       }
     },
-  } satisfies ModelGateway;
+  } satisfies BasicModelGateway;
 }
 
 export type { ModelRef };

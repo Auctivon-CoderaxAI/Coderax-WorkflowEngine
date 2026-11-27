@@ -100,10 +100,15 @@ export function createToolRuntime(input: {
       };
     }
 
+    const guard = request.context.guard;
+    const resource = bounded(String(tool.resource(parsed.data, request.context)), 1024);
+    if (guard && (!guard.live() || tool.scopes.some((scope) => !guard.permits(scope, resource)))) {
+      return { result: failure('cancelled', 'The execution is no longer authorized.'), approval: 'not_required' };
+    }
     let approval: ToolCallOutcome['approval'] = 'not_required';
     if (tool.approval !== 'never') {
       const policy = tool.approval;
-      const resource = bounded(String(tool.resource(parsed.data, request.context)), 1024);
+
       const binding = bindingOf(tool, policy, request.context.mode, parsed.data);
       for (const scope of tool.scopes) {
         let decision;
@@ -161,6 +166,9 @@ export function createToolRuntime(input: {
     }
 
     try {
+      if (guard && (!guard.live() || tool.scopes.some(scope => !guard.permits(scope, resource)))) {
+        return { result: failure('cancelled', 'The execution is no longer authorized.'), approval: 'denied' };
+      }
       const result = await tool.run(parsed.data, request.context);
       return { result, approval };
     } catch {

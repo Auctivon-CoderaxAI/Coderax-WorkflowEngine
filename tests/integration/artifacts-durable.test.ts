@@ -13,7 +13,7 @@ import {
 import {
   baseConfig,
   createWorkspaces,
-  fakeGateway,
+  fakeProvider,
   OWNER_TOKEN,
   type TestWorkspace,
 } from '../helpers.js';
@@ -45,7 +45,7 @@ async function startEngine(input: {
   return composeApplication({
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    gateway: fakeGateway(),
+    providers: [{ adapter: fakeProvider() }],
     persistence: { database: input.database },
   });
 }

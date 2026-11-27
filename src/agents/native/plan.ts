@@ -5,10 +5,10 @@ import type {
   TaskPlanStep,
 } from '../../domain.js';
 import type {
-  ModelGateway,
+  BasicModelGateway,
   PlanInput,
   PlanOutcome,
-  Planner,
+  ReasoningPlanner,
   ReplanInput,
 } from './types.js';
 import {
@@ -104,7 +104,7 @@ function hasCycle(steps: TaskPlanStep[]): boolean {
   return steps.some((step) => visit(step.id));
 }
 
-function resourceIsConfined(resource: string): boolean {
+export function resourceIsConfined(resource: string): boolean {
   if (resource.length === 0 || resource.length > 512) return false;
   if (resource.startsWith('/') || resource.includes('\\')) return false;
   if (/^[A-Za-z]:/.test(resource)) return false;
@@ -352,7 +352,7 @@ export function correctivePlan(input: {
 }
 
 async function modelPlan(input: {
-  gateway: ModelGateway;
+  gateway: BasicModelGateway;
   planInput: PlanInput;
   system: string;
   prompt: string;
@@ -400,11 +400,11 @@ async function modelPlan(input: {
 }
 
 export function createNativePlanner(input: {
-  gateway: ModelGateway;
+  gateway: BasicModelGateway;
   maxSteps: number;
   /** A rendered tool catalogue; absent means Native has no tools to plan. */
   tools?: string;
-}): Planner {
+}): ReasoningPlanner {
   return {
     plan: async (planInput): Promise<PlanOutcome> => {
       const maxSteps = Math.min(planInput.maxSteps, input.maxSteps);

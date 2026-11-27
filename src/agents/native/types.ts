@@ -1,19 +1,32 @@
-import type {
-  ArtifactDescriptor,
-  DeliverableRequestInput,
-  EngineFailureCode,
-  ModelRef,
-  PermissionScope,
-  Usage,
-} from '@coderax/contracts';
 import type { AgentHistoryTurn } from '../types.js';
-import type {
-  PlanStepKind,
-  ReasoningMode,
-  TaskEvidence,
-  TaskPlan,
-  TaskPlanStep,
-} from '../../domain.js';
+export type { PlanStepKind, ReasoningMode, TaskPlan, TaskPlanStep } from '../../domain.js';
+import type { ArtifactDescriptor, DeliverableRequestInput, EngineFailureCode, ModelRef, PermissionScope, Usage } from '@coderax/contracts';
+import type { ReasoningMode, TaskEvidence, TaskPlan, TaskPlanStep } from '../../domain.js';
+/**
+ * The gateway port is owned by the model router: an agent names a resolved model
+ * and never reaches a provider URL or key. Re-exported here so the native agent
+ * does not import routing internals.
+ */
+export type {
+  GatewayCompletion,
+  GatewayRequest,
+  GatewayStreamEvent,
+  ModelGateway,
+} from '../../models/types.js';
+
+export type PlanStep = {
+  id: string;
+  title: string;
+};
+
+/**
+ * Planning is a port so Native can use a deterministic planner today and a model
+ * planner later without changing the run contract. A plan is data: the engine
+ * persists completed step ids, which is what makes resume skip finished work.
+ */
+export type Planner = {
+  plan: (input: { objective: string; maxSteps: number }) => PlanStep[];
+};
 
 export type ModelCompletionRequest = {
   model: ModelRef;
@@ -25,24 +38,6 @@ export type ModelCompletionRequest = {
   maxOutputTokens?: number;
 };
 
-export type ModelGateway = {
-  id: string;
-  complete: (request: ModelCompletionRequest) => Promise<{ text: string; usage?: Usage }>;
-};
-
-/**
- * A plan step is the unit the planner produces and the executor consumes. The
- * planner never calls a provider or reads a file; it only produces this data, so
- * planning cannot execute anything by construction.
- */
-export type PlanStep = TaskPlanStep;
-export type { PlanStepKind, ReasoningMode, TaskPlan, TaskPlanStep };
-
-/**
- * One step's real output. `output` is context for later reasoning; `citation` is
- * the bounded, user-safe statement of what was produced, which is what a verifier
- * is allowed to rely on.
- */
 export type StepEvidence = TaskEvidence;
 
 export type StepActionFailure = {
@@ -147,7 +142,7 @@ export type PlanOutcome = {
  * Planning is a port. It has no gateway of its own beyond the one it was given,
  * and it returns data only; the agent decides whether and how to execute it.
  */
-export type Planner = {
+export type ReasoningPlanner = {
   plan: (input: PlanInput) => Promise<PlanOutcome>;
   replan: (input: ReplanInput) => Promise<PlanOutcome>;
 };
@@ -178,3 +173,5 @@ export type DeliverableTool = (input: {
   | { ok: true; descriptors: ArtifactDescriptor[]; summary: string }
   | { ok: false; code: EngineFailureCode; detail: string }
 >;
+
+export type BasicModelGateway = { id: string; complete: (request: ModelCompletionRequest) => Promise<{ text: string; usage?: Usage }> };

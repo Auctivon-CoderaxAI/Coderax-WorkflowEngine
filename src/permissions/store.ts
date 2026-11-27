@@ -67,7 +67,7 @@ export type PermissionStore = {
     scope: PermissionScope;
     resource: string;
     binding: string;
-    callId: string;
+    callId?: string;
     /** A resumed call names the exact decision it was suspended on. */
     requestId?: string;
     consume: boolean;
@@ -134,11 +134,9 @@ export function createPermissionStore(input: {
       if (new Date(record.expiresAt).getTime() <= now.getTime()) {
         return fail('conflict', 'That permission request has expired.');
       }
+      if (record.decision !== 'pending' || record.consumed) return fail('conflict', 'That request was already decided.');
       record.decision = decision;
       record.decidedAt = now.toISOString();
-      // A fresh decision is spendable again; an earlier consumption belonged to
-      // the previous answer and must not make the new grant unusable.
-      if (decision === 'approved') record.consumed = false;
       return ok(listFor(ownerId, taskId));
     },
     get: async (ownerId, taskId, requestId) => {
@@ -219,3 +217,13 @@ export function createPermissionStore(input: {
     },
   };
 }
+
+export type PermissionRow = PermissionRequest & { ownerId: string; binding: string; consumed: boolean };
+export type PermissionTable = {
+  insert: (row: PermissionRow) => Promise<void>;
+  get: (requestId: string) => Promise<PermissionRow | null>;
+  listTask: (ownerId: string, taskId: string) => Promise<PermissionRow[]>;
+  listPending: (ownerId: string) => Promise<PermissionRow[]>;
+  listByTask: (taskId: string) => Promise<PermissionRow[]>;
+  updateDecision: (input: { requestId: string; ownerId: string; taskId: string; decision: PermissionRequest['decision']; decidedAt: string }) => Promise<PermissionRow | null>;
+};

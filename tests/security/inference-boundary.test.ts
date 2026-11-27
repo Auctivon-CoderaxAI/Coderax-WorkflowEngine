@@ -107,7 +107,17 @@ test('only a provider adapter performs network I/O', () => {
   );
 
   const outboundTransport = /from\s+['"](?:node:https|node:net|node:tls|node:dns|undici|axios|node-fetch)['"]/;
-  assert.deepEqual(offenders(outboundTransport, mayOpenSocket), []);
+  // The endpoint validator can parse IP addresses, but this exact named
+  // import cannot open a socket. Inspect every other import as before.
+  const socketOffenders = files.filter((file) => {
+    const path = pathOf(file);
+    if (mayOpenSocket(path)) return false;
+    const source = path === 'security/endpoint.ts'
+      ? codeOf(file).replace(/^import \{ isIPv4 \} from 'node:net';$/m, '')
+      : codeOf(file);
+    return outboundTransport.test(source);
+  }).map(pathOf);
+  assert.deepEqual(socketOffenders, []);
 });
 
 test('no vendor inference SDK is imported anywhere', () => {

@@ -36,7 +36,7 @@ export type Unsubscribe = () => void;
  * a test can supply a smaller object without a database.
  */
 export type SeqAuthority = {
-  allocateSeq: (input: { taskId: string; token: string }) => Promise<number | null>;
+  allocateSeq: (input: { taskId: string; token: string; generation?: number }) => Promise<number | null>;
   adoptSeq: (input: { taskId: string; seq: number }) => Promise<void>;
 };
 
@@ -58,6 +58,8 @@ export type EventBus = {
   replay: (taskId: string, after: number) => Promise<Replay>;
   subscribe: (taskId: string, after: number, listener: (event: ExecutionEvent) => void) => Unsubscribe;
   lastSeq: (taskId: string) => Promise<number>;
+  flush: (taskId: string) => Promise<void>;
+  close: () => Promise<void>;
 };
 
 export function createEventBus(input: {
@@ -67,12 +69,34 @@ export function createEventBus(input: {
   pollMs: number;
   eventId: () => string;
   iso: () => string;
+  generation?: (taskId: string) => Promise<number | null>;
 }): EventBus {
+  // A poller must never observe and skip seq N while this process is still
+  // writing seq N-1. Serialize allocation and persistence per stream.
+  const pending = new Map<string, Promise<unknown>>();
+  function ordered<T>(taskId: string, action: () => Promise<T>): Promise<T> {
+    const previous = pending.get(taskId);
+    const write = (previous?.catch(() => undefined) ?? Promise.resolve()).then(action);
+    pending.set(taskId, write);
+    return write.finally(() => {
+      if (pending.get(taskId) === write) pending.delete(taskId);
+    });
+  }
+  async function append(event: ExecutionEvent): Promise<boolean> {
+    try {
+      return (await input.store.append(event)) === 'stored';
+    } catch {
+      // Retry the same id and sequence. If the first acknowledgement was lost
+      // after the write committed, the existing id proves it is already stored.
+      return (await input.store.append(event)) === 'stored' || await input.store.has(event.eventId);
+    }
+  }
   return {
-    publish: async (draft) => {
+    publish: (draft) => ordered(draft.taskId, async () => {
       const seq = await input.seq.allocateSeq({
         taskId: draft.taskId,
         token: draft.runToken,
+        generation: draft.generation,
       });
       if (seq === null) return null;
       const event = {
@@ -91,14 +115,16 @@ export function createEventBus(input: {
       // A duplicate here means the allocated sequence was already stored, which
       // only happens if the head lagged the log. Reporting it as unpublished is
       // honest: the caller must not treat this event as delivered.
-      return (await input.store.append(event)) === 'stored' ? event : null;
-    },
+      return await append(event) ? event : null;
+    }),
 
-    accept: async (event) => {
+    accept: (event) => ordered(event.taskId, async () => {
       if (await input.store.has(event.eventId)) {
         return { accepted: false, reason: 'duplicate' };
       }
-      if (event.seq <= (await input.store.lastSeq(event.taskId))) {
+      const generation = await input.generation?.(event.taskId);
+      if ((generation !== undefined && event.generation !== generation)
+        || event.seq <= (await input.store.lastSeq(event.taskId))) {
         return { accepted: false, reason: 'out_of_order' };
       }
       // An adopted event crosses the same redaction boundary a published one
@@ -107,14 +133,14 @@ export function createEventBus(input: {
       const safe = (
         payload === undefined ? event : { ...event, payload: redactValue(payload) }
       ) as ExecutionEvent;
-      if ((await input.store.append(safe)) === 'duplicate') {
+      if (!await append(safe)) {
         return { accepted: false, reason: 'duplicate' };
       }
       // Adoption raises the head so the next allocation continues above it; a
       // head that stayed behind would hand out a sequence the log already holds.
       await input.seq.adoptSeq({ taskId: event.taskId, seq: event.seq });
       return { accepted: true, event: safe };
-    },
+    }),
 
     replay: (taskId, after) => input.store.replay(taskId, after),
 
@@ -157,5 +183,7 @@ export function createEventBus(input: {
     },
 
     lastSeq: (taskId) => input.store.lastSeq(taskId),
+    flush: async (taskId) => { await pending.get(taskId); },
+    close: async () => { await Promise.all([...pending.values()]); },
   };
 }

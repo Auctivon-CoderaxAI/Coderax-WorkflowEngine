@@ -19,3 +19,5 @@ export * from './routes.js';
 export * from './ownership.js';
 export * from './json-schema.js';
 export * from './openapi.js';
+
+export * from './team.js';

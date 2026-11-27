@@ -636,7 +636,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
     upload: (principal, request) =>
       guard(async () => {
-        if (!deps.blobs.durable) return durabilityFailure();
+        if (!deps.blobs.durable && !settings.allowEphemeral) return durabilityFailure();
 
         const prepared = await prepare({
           filename: request.filename,
@@ -782,7 +782,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
     addVersion: (principal, artifactId, request) =>
       guard(async () => {
-        if (!deps.blobs.durable) return durabilityFailure();
+        if (!deps.blobs.durable && !settings.allowEphemeral) return durabilityFailure();
 
         const key = { ownerId: principal.ownerId, mode: request.mode, artifactId };
         for (let attempt = 0; attempt < 2; attempt += 1) {

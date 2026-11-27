@@ -1,0 +1,408 @@
+# Security remediation: revalidation and evidence
+
+This document describes the consolidated remediation branch. It is based on
+`main` (`808dfd3`) plus the authoritative in-flight work, merged in dependency
+order and then hardened:
+
+| Source | Exact commit | Role after consolidation |
+| --- | --- | --- |
+| `main` | `808dfd3` | Baseline and its runnable vulnerability reproduction |
+| `ci/permanent-quality-gates` | `c6baf77` | Zod 4 remediation, gate manifest, real-Mongo infrastructure |
+| `feat/zero-cost-model-router` (PR #4) | `b6e002b` + `ade0a29` | **Only** routing and provider-authorization authority |
+| `feat/durable-events-integration` | `2554edc` | Durable execution events |
+| `feat/execution-supervisor` (PR #5) | `13d4b4f` | **Only** supervision, termination, fencing and quarantine authority |
+| `security/remediation` | `4b2ea75` | Unique security deltas, preserved and re-verified |
+
+PR #2's durable quota design (`src/models/budget.ts`,
+`src/persistence/budgets.ts`) was adopted and extended with idempotent
+settlement/release; its competing router and gateway were not merged. PR #3's
+planner was reconciled through PR #5, not as a second planner. The branch under
+review is `security/reconciliation`.
+
+PR #2 (`feat/intelligence-core`, head `c851c34`) was reviewed again for security
+fixes that this branch still needed. Two were genuine gaps and are adopted:
+
+- `src/security/network.ts` — SSRF and DNS-rebinding protection for a
+  model-initiated fetch. A hostname allowlist alone lets an allow-listed name
+  resolve to a metadata service or a private port, and a second DNS answer can
+  move the connection after validation. The module resolves every address,
+  refuses non-public ranges, pins the validated address into the request and
+  never follows a redirect. `http.fetch` now uses it instead of `fetch`; a test
+  proves an approved call dispatches through that pinned transport with the
+  validated address list and that global `fetch` is never invoked.
+- `src/security/shell.ts` — command validation for `shell.run`. An allowlisted
+  name is not enough (`node -e`, `sh -c`, `git -c`, `xargs` and a workspace-bin
+  `PATH` shadow all escape it), so the module resolves an absolute executable,
+  refuses launcher commands, dangerous interpreter flags, control characters and
+  host-path arguments. The process still starts with `shell: false`.
+
+PR #2's plugin manifests, execution receipts, arbitration loop and native-agent
+rewrite are **not** adopted: they belong to PR #2's own review, and importing them
+here would create a second execution and receipt authority. Its
+redacted-approval-preview fix (`c851c34`) has no equivalent gap here because this
+branch's approval `description` never contains tool arguments; tool inputs are
+already redacted at the event boundary by `redactToolInput`.
+
+Baseline reproduction was executed, not inferred: a clean worktree at `808dfd3`
+(`npm ci && npm run build`) ran the script preserved at
+`docs/evidence/baseline-808dfd3-repro.mjs` against the real services and gateway
+ports. Every result below was `true` on the baseline, meaning the defect was
+present; the corresponding regression test is green at the pushed head.
+
+```
+{
+  "A_private_conversation_crossed_into_cloud": true,
+  "B_private_task_sent_to_hosted_gateway": true,
+  "C_requireApproval_agent_ran_without_grant": true,
+  "D_reply_contains_credential": true,
+  "D_reply_contains_home_path": true,
+  "E_two_conversations_share_one_workspace": true
+}
+```
+
+## Findings and disposition
+
+### 1. Private/cloud conversation isolation — fixed
+
+**Path:** `src/persistence/conversations.ts`, `src/persistence/mongo-tables.ts`,
+`src/orchestration/service.ts`.
+
+`ensure` returned an existing conversation whenever the owner matched. It ignored
+the data mode and the kind of work, so a private conversation supplied as the
+`conversationId` of a cloud task was reused: the private transcript became the
+cloud run's history and the cloud answer was appended to it. The Mongo and memory
+implementations had the same hole.
+
+Now the repository refuses a collision on owner, `mode` or `isWork` with a typed
+`ConversationConflictError`, and the service maps it to `not_found` (foreign
+owner) or `conflict` (mode/kind) before any task is created. One owner cannot
+confirm another owner's conversation exists.
+
+**Regression test:** `tests/security/remediation.test.ts` — “a conversation is
+never reused across data modes”.
+
+### 2. External agents received the transcript — fixed
+
+**Path:** `src/orchestration/service.ts`.
+
+Every agent was given `historyFor(conversationId, objective)`, although an
+external agent's descriptor says `conversations: none`. The transcript was handed
+to the injected transport.
+
+History is now built only for `coderax`. An external agent receives the objective
+and nothing else, in both `submitWork` and `chat`.
+
+**Regression test:** “an external agent is never given the conversation
+transcript”.
+
+### 3. Unauthorized hosted inference in private mode — fixed
+
+**Path:** `src/models/router.ts`, `src/models/types.ts`, `src/bootstrap/compose.ts`,
+`src/security/endpoint.ts`.
+
+`resolve` and `plan` accepted a data mode and never read it. A private task was
+routed to whatever the zero-cost route selected, including a remote provider, so
+private data left the machine.
+
+Providers now carry `hosting`, derived from the parsed endpoint (`local` only for
+loopback). `eligible`, the pinned-model path of `plan`, and `resolve` refuse a
+hosted provider when the mode is `private` with `model_missing`; the request is
+never sent. An injected adapter defaults to `local` because it runs in-process;
+every real registration is classified from its URL.
+
+**Regression test:** “private execution refuses a hosted inference endpoint”.
+
+### 4. Plaintext and credential-bearing endpoints — fixed
+
+**Path:** `src/configuration/schema.ts`, `src/bootstrap/compose.ts`,
+`src/security/endpoint.ts`.
+
+`baseURL` fields used `z.string().url()`, so `http://api.provider.com` was
+accepted and the bearer key would cross the network in cleartext. A URL with
+`user:password@` would also land in logs and error text.
+
+A shared `SecureEndpoint` rule requires `https` unless the host is loopback
+(`127.0.0.0/8`, `::1`, `localhost`), and rejects embedded credentials, a query or
+a fragment. It applies to model providers, OpenCode and FreeBuff. The
+unvalidated `CODERAX_INFERENCE_BASE_URL` environment variable is checked with the
+same function in the composition root, and an unsafe value is a startup error.
+
+**Regression test:** “an inference endpoint that would leak a credential is
+refused at startup”.
+
+### 5. Credential leakage through replies, notifications and stored rows — fixed
+
+**Path:** `src/orchestration/service.ts`.
+
+Redaction covered streamed event text and `toStatus`, but three paths bypassed it:
+the chat reply and the assistant message stored from it, the completion
+notification summary, and the failure detail persisted on the task row. Provider
+or adapter text could carry a key or an owner path into all three.
+
+`chat` scrubs the summary and the failure detail before storing or returning them.
+`notifyTerminal` scrubs the summary. `settle` scrubs the failure detail before the
+fenced write, so a reader of the row does not depend on a later projection.
+
+**Regression test:** “provider text is scrubbed before it is stored, returned or
+notified”.
+
+### 6. Workspace confinement — fixed
+
+**Path:** `src/execution/workspace.ts`, `src/orchestration/service.ts`.
+
+Every conversation in a mode received the mode root as its workspace. Two runs
+could read each other's files, a resume could not be told apart from an unrelated
+conversation, and the supervisor's quarantine had to take the whole mode out of
+service.
+
+`resolveConversationWorkspace` derives `<modeRoot>/conversations/<sha256(id)>`
+inside the mode root from the conversation id (never from a request path), creates
+it `0700`, resolves it again through `realpath` and rejects anything that escapes
+the root. It is per conversation, not per generation, so a resume continues in the
+directory the previous generation wrote. Quarantine entries are now scoped to that
+directory: the abandoned conversation is refused at submit and at start, while
+other conversations continue.
+
+The supervisor remains the only quarantine authority; this change supplies the
+subdirectory it manages, it does not add a second one.
+
+**Regression test:** “each conversation has its own confined workspace and a
+resume reuses it”; the cancellation test in `tests/integration/work.test.ts` now
+asserts the refusal at submit and that another conversation is unaffected.
+
+### 7. Abandoned execution — resolved by the merged supervisor, verified
+
+**Path:** `src/execution/quarantine.ts`, `src/execution/runner.ts`,
+`src/bootstrap/compose.ts`.
+
+`feat/durable-events-integration` registers `onAbandoned`, poisons the workspace
+for `cancelQuarantineMs` and reports it in health. The runner seals the report
+channel and stops heartbeating after the grace period. This branch only scopes the
+poisoned root (finding 6) and verifies the behaviour end to end.
+
+**Regression tests:** `tests/unit/events-durable.test.ts` — “a quarantined
+workspace refuses new work until it expires or is released”;
+`tests/integration/work.test.ts` — “cancellation releases a hung adapter and
+ignores its late reports”.
+
+### 8. Stale-generation activity — resolved by the merged supervisor, verified
+
+**Path:** `src/events/log.ts`, `src/persistence/mongo-events.ts`,
+`src/events/bus.ts`.
+
+The durable log stores the highest generation per task and refuses an append from
+an older one; the Mongo head advances with `$max`, so a stale replica cannot lower
+it. A terminal task whose stream lost its terminal event is repaired from the task
+row, never the reverse.
+
+**Regression tests:** `tests/unit/events-durable.test.ts` — “a stale generation
+cannot append to a stream a newer generation owns”, plus the duplicate and
+out-of-order cases.
+
+### 9. Permission enforcement — fixed
+
+**Path:** `src/permissions/store.ts`, `src/orchestration/service.ts`,
+`src/persistence/tasks.ts`, `src/persistence/mongo-tables.ts`.
+
+`requireApproval` was recorded and never consulted. An external agent — which
+declares tool capability it executes outside this process — ran immediately, so
+the owner's "approve before it acts" was decorative. Decisions were also mutable
+(a denied request could be flipped to approved), expired requests still counted as
+pending, and nothing consumed a grant.
+
+Now an external agent's run is gated when `requireApproval` is true: without a
+grant the task is parked in `awaiting_approval`, a `command.execute` request bound
+to the task id is created and published, the lease is released, and no dispatch
+happens. The owner's decision is written durably on the task row
+(`recordApproval`); a resume consumes it exactly once (`consumeApproval`) before
+the run starts. A denial never dispatches, and the owner may reconsider through a
+new request. A spent grant cannot be replaced, so it cannot authorize a second
+run. A suspended task can now be cancelled without a live lease, and a terminal
+task's permissions cannot change.
+
+**Regression tests:** “an autonomous external agent runs only with a durable,
+single-use grant”; `tests/unit/mongo-stores.test.ts` — “an owner decision is
+durable and a grant is consumed exactly once”.
+
+### 10. Secret redaction — fixed
+
+Covered by finding 5, plus the pre-existing scrub of streamed text, tool input and
+output, approval descriptions and `toStatus`. The configured-secret list remains
+empty at the boundary because no value is read into configuration; the patterns
+cover bearer tokens, provider keys, GitHub tokens, JWTs, query credentials,
+`key=value` secrets and home paths.
+
+### 11. Persistent security state — fixed for approvals
+
+**Path:** `src/domain.ts`, `src/persistence/tasks.ts`,
+`src/persistence/mongo-tables.ts`.
+
+A permission decision lived only in a process-local map, so a restart lost the
+grant and left an `awaiting_approval` task with nothing to approve. The decision
+and its single-use consumption are now fields on the durable task row, written
+with conditional updates (non-terminal, not already spent). The in-process request
+list is only the prompt; a restart re-issues a pending request on the next resume
+and the recorded decision still authorizes exactly one run.
+
+**Remaining limitation:** the daily zero-cost budget ledger
+(`src/models/budget.ts`) is still process-local. A restart resets the counters, so
+a deployment that restarts mid-day can exceed its self-imposed free-tier ceiling
+before the provider does. The provider's own quota and the circuit breaker remain
+the backstop, and no paid route exists. Persisting the ledger needs an atomic
+reserve across replicas and is recorded as follow-up rather than half-implemented.
+
+### 12. Dependency vulnerability: zod — verified, mitigated, not upgraded
+
+**Advisory:** GHSA-mrhx-c7xc-m3w5 / CVE-2023-54404, “Zod can exhaust memory while
+validating oversized constrained collections”. GitHub reviewed it on 2026-10-23
+and lists **affected `< 4.6.6`, patched `4.6.6`** (CVSS 7.5 v3.1 / 8.2 v4,
+CWE-770). `npm audit` proposes `4.6.7` because that is the latest release, not
+because the advisory names it.
+
+Facts that decide the response:
+
+- The underlying CVE was rejected by its CNA on 2026-10-28; the GitHub advisory
+  still marks every release below 4.6.6 as affected.
+- The fix in 4.6.6 makes `.max()`, `.length()` and `.size()` reject an oversized
+  container **before** parsing elements. The advisory's own scope is “an array
+  schema without a length constraint”; the release notes state that unbounded
+  containers are unchanged.
+- There is no 3.x release with the fix and none is planned. This repository is on
+  `zod@3.25.76`, which the advisory range includes.
+
+Reachability in this target: no HTTP request schema has an unbounded array. The
+only request array is `NotificationReadRequest.taskIds` (1–100), and the 1 MiB
+transport cap bounds any body. Zod 3 still validates elements before applying
+`.max()`, so a body with hundreds of thousands of entries could allocate an issue
+per element even though the schema would reject it.
+
+Response: the body guard in `src/api/router.ts` refuses a JSON array longer than
+256 entries (and nesting deeper than 8) **before** schema validation, which
+removes the amplification regardless of zod version — the 4.6.6 fix does not
+protect unbounded containers either. A 4.6.6 upgrade would therefore not change
+this exposure, while forcing a major migration of `packages/contracts` (the
+`_def.typeName` walk in `json-schema.ts`, `.strict()` object semantics, record
+signatures) and a regeneration of `openapi.json` and the SDK. Per the brief, the
+dependency is not updated merely to clear an audit line.
+
+**Residual risk:** `npm audit` still reports one high advisory for zod 3. It is
+documented here rather than suppressed, and it is not exploitable through this
+engine's ingress after the guard. When the contracts package migrates to zod 4 for
+other reasons, 4.6.6 is the correct minimum, verified against the advisory rather
+than assumed from the suggested `4.6.7`.
+
+**Regression test:** “an oversized request array is refused before schema
+validation”.
+
+## Findings inspected in unmerged branches (not fixed here)
+
+These are recorded so the next integration does not inherit them silently.
+
+| Branch | Finding | Why not fixed here |
+| --- | --- | --- |
+| `feat/intelligence-core` | A second `src/models/router.ts` and `src/models/routed.ts` duplicate the verified router's exported names and gateway contract. | Two authorities for one routing decision. The verified router must win; the branch needs a rebase that deletes its copy and adapts its call sites. |
+| `feat/intelligence-core` | Tool approvals are persisted in a separate store; the tool runtime gates on the in-memory request, so a restart between decision and action loses the grant. | Depends on the tool lane, which is not on this target. `recordApproval`/`consumeApproval` here are the shape that lane should reuse. |
+| `feat/intelligence-core` | `src/tools/paths.ts` adds a second path-confinement authority. | The supervisor owns workspace confinement; a tool must consume `request.workspaceRoot`, not re-derive it. |
+| `feat/native-reasoning-planner` | `src/permissions/gate.ts` adds another approval gate. | Same reason: one permission authority. |
+| `feat/durable-events` | Carries the durable-events change only as base64 snapshots. | Superseded by the reconciled `feat/durable-events-integration`. |
+
+## Branch-level observations, superseded
+
+The branch-level notes that stood here were written before the authoritative
+pull requests were merged: they record an earlier 162-test run, a process-local
+budget and an uncontacted MongoDB. The consolidated verification below is the
+current evidence. The findings table above is history, not disposition.
+
+## Consolidated verification (2026-11-26)
+
+All results below were produced on this branch with a real MongoDB 7.0.14
+server, not with the collection fake. The fake remains the fast semantic suite;
+the live gate is the distributed evidence.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full compiled suite | `node --test "dist/tests/**/*.test.js"` with `CODERAX_REQUIRE_MONGO=1` | **350 passed, 0 failed, 0 skipped** |
+| Every permanent gate | `node dist/scripts/run-gates.js all` | **11/11 passed** |
+| Gate manifest coverage | `node dist/scripts/run-gates.js coverage` | 52 test files assigned, none unclaimed |
+| Dependency audit | `node dist/scripts/run-gates.js audit` | critical 0, high 0, moderate 0 |
+| OpenAPI drift | `node dist/scripts/run-gates.js openapi` | no drift |
+| Baseline reproduction | clean worktree at `808dfd3`, `npm ci && npm run build && node repro.mjs` | all six defects `true` |
+| Live quota race | `tests/live/mongo.test.ts` | two replicas race for the last request in one durable window: exactly one wins, the loser is refused with `requests`, the settlement replay is a no-op; three consecutive live-suite runs green |
+
+### Simplification pass
+
+A fresh-eyes review removed state and writes that no invariant needed:
+
+- `BudgetLedger.charge` had no production caller; external dispatch already
+  reserves and releases through the router. Removed with its unit test.
+- `lastReservationId` was written on every first reservation and never read.
+  Removed.
+- Settlement and release each performed a second `updateOne` to clamp a negative
+  reservation balance. The reservation-id guard inside the same atomic update
+  makes that state unreachable, so the clamp and its extra round-trip are gone.
+- The `budgetKey` re-export from `src/persistence/budgets.ts` had no importer and
+  was removed, leaving one import path for the key.
+- The stale branch-level verification, coordination and limitations sections of
+  this document were replaced by the consolidated evidence below; they described
+  a 162-test run, a process-local budget and an uncontacted MongoDB, none of
+  which is true at this head.
+
+### Concurrent live quota evidence
+
+The live quota test owns a database of its own and asserts the unique
+`budget_window` index. It then races two independent replicas for the only
+request slot of the day: both ledgers call `reserve` in the same tick against the
+same durable window. Which replica wins depends on scheduling, so the test
+asserts the invariant instead of the winner: exactly one outcome is `allowed`, the
+loser is refused with reason `requests` at `requests: 1`, and the durable window
+holds one reservation, not two. That is the production path — conditional update,
+first-row insert, duplicate-key retry — not a sequential stand-in.
+
+The winning reservation is then settled once; replaying that settlement through a
+fresh store returns `false`, and a fresh ledger process reads the same totals. The
+suite was run three times consecutively with a real MongoDB 7.0.14 server: 7
+passed, 0 failed, 0 skipped each time.
+
+### Authority consolidation
+
+- `src/models/policy.ts` and `src/models/router.ts` are the only provider
+  authorization and routing authority. PR #5's `src/models/routed.ts`,
+  `src/agents/native/gateway.ts` and its router test were removed.
+- `src/execution/supervisor.ts` is the only execution authority. Work and Chat
+  both run through it; termination evidence or a held workspace gates the next
+  conflicting run, and `submitWork` refuses a held root before creating a task.
+- `tests/architecture/capabilities.test.ts` and `graph.test.ts` fail on a second
+  router, planner, engine, server, task runner or provider call site. The
+  synthetic fixtures now name `createModelRouter`, the one authoritative factory.
+- `src/models/budget.ts` is a durable reservation ledger over either the shared
+  Mongo window or the same atomic window in-process. Reservation ids make
+  settlement and release exactly-once; the daily ceiling lives in the store, not
+  in a process map.
+- `src/security/network.ts` is the only outbound-fetch policy and
+  `src/security/shell.ts` the only command policy. `src/security/endpoint.ts`
+  remains the only credential-endpoint policy; the two do not overlap.
+
+### Dependency advisory
+
+The advisory is GHSA-mrhx-c7xc-m3w5 (Zod). Affected versions are `<4.6.6`; the
+patched release is `4.6.6` and the workspace uses `4.6.7` across every manifest.
+CVE-2023-54404 is recorded by the authoritative databases as **REJECTED**
+(2026-10-28) and is not an active advisory. OSV notes that no release changes the
+unbounded-default `z.record`/`z.tuple` behavior, so the transport-level JSON depth
+and container bounds in `src/api/router.ts` remain as defense in depth. No audit
+finding is suppressed and the audit threshold is unchanged (high and critical
+fail the gate).
+
+### Remaining external blockers
+
+- **PR creation:** the environment has no authorized GitHub token
+  (`POST /repos/.../pulls` returns `401 Requires authentication`), so the branch
+  is published and the compare link is provided instead of a fabricated PR.
+- **Hosted Actions at this SHA:** the `verify` workflow triggers on pull
+  requests to `main` and pushes to `main`; without an authorized PR the branch
+  cannot trigger it. Results above are local cloud-compute evidence.
+- **Independent approval:** not fabricated. A reviewer must open the PR and
+  approve it.
+- **Branch protection / secret scanning:** the unauthenticated rule-set read is
+  empty and classic protection requires authentication; see
+  `docs/governance.md`. No protection setting was changed.

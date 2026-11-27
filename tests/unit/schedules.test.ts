@@ -141,6 +141,7 @@ function testIds(): IdGenerator {
   return {
     conversationId: () => next('conv'),
     taskId: () => next('task'),
+    teamId: () => next('team'),
     messageId: () => next('msg'),
     eventId: () => next('evt'),
     scheduleId: () => next('sch'),

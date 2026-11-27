@@ -1,0 +1,68 @@
+{
+  "name": "coderax-zero-cost-smoke",
+  "version": 1,
+  "tasks": [
+    {
+      "id": "code-arithmetic",
+      "kind": "exact",
+      "category": "coding",
+      "prompt": "A function is defined as `const f = (n) => n * 3 + 1`. What does `f(7)` return? Answer with only the integer.",
+      "expected": "22"
+    },
+    {
+      "id": "code-off-by-one",
+      "kind": "exact",
+      "category": "coding",
+      "prompt": "How many times does the body of `for (let i = 0; i <= 3; i += 1) {}` execute? Answer with only the integer.",
+      "expected": "4"
+    },
+    {
+      "id": "code-complexity",
+      "kind": "contains",
+      "category": "coding",
+      "prompt": "What is the worst-case time complexity of merging two sorted arrays of total length n? Answer in one line.",
+      "contains": ["o(n)"]
+    },
+    {
+      "id": "code-string",
+      "kind": "exact",
+      "category": "coding",
+      "prompt": "In JavaScript, what is `'abc'.slice(1)`? Answer with only the resulting string without quotes.",
+      "expected": "bc"
+    },
+    {
+      "id": "reason-multi-step",
+      "kind": "numeric",
+      "category": "reasoning",
+      "prompt": "A box has 3 red and 5 blue balls. Two are drawn without replacement. What is the probability both are red, as a decimal to four places? Answer with the number only.",
+      "expected": 0.1071,
+      "tolerance": 0.001
+    },
+    {
+      "id": "reason-sequence",
+      "kind": "numeric",
+      "category": "reasoning",
+      "prompt": "The sequence starts 2, 6, 12, 20, 30. What is the next term? Answer with the number only.",
+      "expected": 42
+    },
+    {
+      "id": "reason-logic",
+      "kind": "exact",
+      "category": "reasoning",
+      "prompt": "All Coderax runs are isolated. This process is a Coderax run. Does it follow that the process is isolated? Answer yes or no.",
+      "expected": "yes"
+    },
+    {
+      "id": "tool-read",
+      "kind": "tool",
+      "category": "reasoning",
+      "prompt": "Call the read_file tool exactly once with path README.md. Do not answer in prose.",
+      "expectedTool": {
+        "name": "read_file",
+        "arguments": {
+          "path": "README.md"
+        }
+      }
+    }
+  ]
+}

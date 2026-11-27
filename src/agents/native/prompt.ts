@@ -1,3 +1,4 @@
+import type { PlanStep } from './types.js';
 import type { AgentHistoryTurn } from '../types.js';
 import type {
   ReasoningMode,
@@ -84,7 +85,7 @@ function renderPlan(plan: TaskPlan, completed: ReadonlySet<string>): string {
     .join('\n');
 }
 
-export function buildStepPrompt(input: {
+export function buildReasoningStepPrompt(input: {
   objective: string;
   step: TaskPlanStep;
   mode: ReasoningMode;
@@ -232,6 +233,24 @@ export function buildVerificationPrompt(input: {
       '- If evidence is missing, passed is false and "reason" states the gap.',
       '- Never cite an id that is not in the evidence list.',
     ].join('\n'),
+  );
+  return sections.join('\n\n');
+}
+
+export function buildStepPrompt(input: {
+  objective: string;
+  step: PlanStep;
+  completed: string[];
+  history: AgentHistoryTurn[];
+}): string {
+  const sections: string[] = [];
+  if (input.history.length > 0) {
+    sections.push(`Earlier in this conversation:\n\n${renderHistory(input.history)}`);
+  }
+  sections.push(`Objective:\n${input.objective}`);
+  sections.push(`Current step (${input.step.id}): ${input.step.title}`);
+  sections.push(
+    `Completed steps: ${input.completed.length > 0 ? input.completed.join(', ') : 'none'}`,
   );
   return sections.join('\n\n');
 }

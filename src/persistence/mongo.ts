@@ -33,7 +33,7 @@ export type MongoUpdate = {
   /** Used by the blob read leases: the array and its count change together. */
   $push?: Record<string, unknown>;
   $pull?: Record<string, unknown>;
-  $max?: Record<string, number>;
+  $max?: Record<string, unknown>;
 };
 
 /** A lazily executed query; the subset of the driver cursor these stores use. */
@@ -58,12 +58,27 @@ export type MongoCollectionLike = {
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;
   findOneAndUpdate: (
     filter: MongoFilter,
-    update: MongoUpdate,
+    update: {
+      $set?: Record<string, unknown>;
+      /** Atomic counters used by the durable quota windows. */
+      $inc?: Record<string, number>;
+      /** Reservation ids, which make settlement and release exactly-once. */
+      $push?: Record<string, unknown>;
+    },
     options: { returnDocument: 'after'; includeResultMetadata: false },
   ) => Promise<Record<string, unknown> | null>;
   updateOne: (
     filter: MongoFilter,
-    update: MongoUpdate,
+    update: {
+      $set?: Record<string, unknown>;
+      $setOnInsert?: Record<string, unknown>;
+      /** Atomic additive update used by quota counters. */
+      $inc?: Record<string, number>;
+      /** Monotonic update used by the event head; never lowers a value. */
+      $max?: Record<string, unknown>;
+      $push?: Record<string, unknown>;
+      $pull?: Record<string, unknown>;
+    },
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
   updateMany: (

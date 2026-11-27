@@ -23,6 +23,18 @@ import {
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 const covered = new Set<string>();
 
+/** Exact-resource check through the durable lookup, owner-scoped. */
+async function isApproved(
+  store: ReturnType<typeof createPermissionStore>,
+  taskId: string,
+  scope: Parameters<ReturnType<typeof createPermissionStore>['lookup']>[0]['scope'],
+  resource: string,
+  ownerId = 'owner-test',
+): Promise<boolean> {
+  const found = await store.lookup({ ownerId, taskId, scope, resource, binding: '', consume: false });
+  return found?.decision === 'granted';
+}
+
 /** Every finding from the independent review is a permanent named test. */
 function regression(id: string, title: string, body: () => Promise<void> | void): void {
   covered.add(id);
@@ -172,7 +184,7 @@ regression('F5', 'an approval is exact, owner/task scoped, expiring and never wi
   });
   assert.equal(recorded.decision, 'pending');
   assert.equal(
-    await store.isApproved('task_1', 'workspace.read', '/workspace/allowed.txt'),
+    await isApproved(store, 'task_1', 'workspace.read', '/workspace/allowed.txt'),
     false,
   );
 
@@ -201,22 +213,22 @@ regression('F5', 'an approval is exact, owner/task scoped, expiring and never wi
   });
   assert.equal(approved.ok, true);
   assert.equal(
-    await store.isApproved('task_1', 'workspace.read', '/workspace/allowed.txt'),
+    await isApproved(store, 'task_1', 'workspace.read', '/workspace/allowed.txt'),
     true,
   );
   // The exact resource and scope are part of the key: a grant is not a wildcard.
   assert.equal(
-    await store.isApproved('task_1', 'workspace.read', '/workspace/other.txt'),
+    await isApproved(store, 'task_1', 'workspace.read', '/workspace/other.txt'),
     false,
   );
   assert.equal(
-    await store.isApproved('task_1', 'workspace.write', '/workspace/allowed.txt'),
+    await isApproved(store, 'task_1', 'workspace.write', '/workspace/allowed.txt'),
     false,
   );
 
   now = new Date(now.getTime() + 10_000);
   assert.equal(
-    await store.isApproved('task_1', 'workspace.read', '/workspace/allowed.txt'),
+    await isApproved(store, 'task_1', 'workspace.read', '/workspace/allowed.txt'),
     false,
   );
   const expired = await store.decide({
@@ -281,6 +293,9 @@ regression('F6', 'cancellation is bounded and a late report never reaches the bu
       objective: 'bounded cancellation',
       model: { providerId: 'free', modelId: 'coderax-small' },
       mode: 'cloud',
+      routing: 'auto',
+      allowFallback: true,
+      operation: 'work',
       workspaceRoot: '/tmp',
       maxSteps: 1,
       budget: null,

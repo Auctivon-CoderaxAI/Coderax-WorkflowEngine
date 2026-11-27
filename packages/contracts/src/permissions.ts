@@ -15,14 +15,15 @@ import { ScheduleNotice } from './schedules.js';
  * and no conversations, and a grant is scoped to one request.
  */
 export const PermissionScope = z.enum([
+  'memory.write',
+  'knowledge.read',
+  'knowledge.write',
+  'browser.use',
   'workspace.read',
   'workspace.write',
   'command.execute',
   'network.access',
   'memory.read',
-  'memory.write',
-  'knowledge.read',
-  'knowledge.write',
   'conversation.read',
   'credential.use',
   'browser.use',

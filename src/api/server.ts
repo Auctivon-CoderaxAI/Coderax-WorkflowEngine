@@ -123,10 +123,11 @@ export function createHttpServer(input: {
         response.flushHeaders();
         for await (const frame of result.events) {
           if (response.destroyed || response.writableEnded) break;
+          const seq = frame.kind === 'event' && frame.event && typeof frame.event === 'object' ? (frame.event as { seq?: unknown }).seq : undefined;
           response.write(
             frame.kind === 'comment'
               ? `: ${frame.comment}\n\n`
-              : `data: ${JSON.stringify(frame.event)}\n\n`,
+              : `${typeof seq === 'number' && Number.isSafeInteger(seq) ? `id: ${seq}\n` : ''}data: ${JSON.stringify(frame.event)}\n\n`,
           );
         }
         response.end();

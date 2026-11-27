@@ -1,3 +1,5 @@
+import { sanitizeTaskPatch } from './tasks.js';
+import { redactContent } from '../observability/redact.js';
 import { isTerminalState, TERMINAL_TASK_STATES } from '@coderax/contracts';
 import type {
   ConversationRecord,
@@ -6,11 +8,17 @@ import type {
   StoredMessage,
   TaskRecord,
 } from '../domain.js';
-import type { ConversationBinding, ConversationRepository } from './conversations.js';
+import {
+  ConversationConflictError,
+  type ConversationRepository,
+} from './conversations.js';
 import type { NotificationStore } from './notifications.js';
-import { sanitizeTaskPatch } from './tasks.js';
-import { redactContent } from '../observability/redact.js';
-import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
+import type {
+  ApprovalWriteResult,
+  CreateTaskResult,
+  FencedWriteResult,
+  TaskRepository,
+} from './tasks.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { Clock } from '../support/clock.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
@@ -203,21 +211,56 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
-    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+    recordApproval: async ({
+      taskId,
+      requestId,
+      scope,
+      resource,
+      decision,
+      decidedAt,
+    }): Promise<ApprovalWriteResult> => {
+      // Conditional in the database: only a non-terminal task, and only when it
+      // has no other request recorded, accepts a new decision.
       const updated = await collection.findOneAndUpdate(
-        { taskId, generation, state: { $in: ['queued', 'interrupted'] }, handoffPending: true },
-        { $set: { state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt } },
-        { returnDocument: 'after', includeResultMetadata: false });
-      return updated ? toTask(updated) : null;
+        {
+          taskId,
+          state: { $nin: TERMINAL },
+          // An unconsumed decision may be replaced by a later, still-pending
+          // request; a spent grant may not be replaced at all.
+          $or: [{ approval: null }, { 'approval.consumedAt': { $exists: false } }],
+        },
+        { $set: { approval: { requestId, scope, resource, decision, decidedAt }, updatedAt: decidedAt } },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      if (updated) return { applied: true, task: toTask(updated) };
+      const current = await collection.findOne({ taskId });
+      if (!current) return { applied: false, reason: 'not_found' };
+      return {
+        applied: false,
+        reason: isTerminalState(toTask(current).state) ? 'terminal' : 'decided',
+      };
     },
-    claimScheduledRetry: async (taskId, generation) => !!await collection.findOneAndUpdate(
-      { taskId, state: 'failed', generation }, { $set: { scheduleRetryClaimed: true } },
-      { returnDocument: 'after', includeResultMetadata: false }),
-    reissue: async ({ taskId, token, now, leaseExpiresAt, from }): Promise<FencedWriteResult> => {
+
+    consumeApproval: async ({ taskId, requestId, now }) => {
+      const updated = await collection.findOneAndUpdate(
+        {
+          taskId,
+          'approval.requestId': requestId,
+          'approval.decision': 'approved',
+          'approval.consumedAt': { $exists: false },
+        },
+        { $set: { 'approval.consumedAt': now, updatedAt: now } },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      return updated !== null;
+    },
+
+    reissue: async ({ taskId, token, now, leaseExpiresAt, expected }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
       const task = toTask(current);
-      if (!from.includes(task.state)) {
+      if ((expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
+          (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
       // Generation and state are part of the filter: two replicas resuming the
@@ -228,7 +271,8 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
           $set: {
             state: 'queued',
             generation: task.generation + 1,
-            checkpoint: { ...task.checkpoint, text: '' },
+            checkpoint: expected?.state === 'awaiting_approval'
+              ? task.checkpoint : { ...task.checkpoint, text: '' },
             runToken: token,
             updatedAt: now,
             leaseExpiresAt,
@@ -243,6 +287,16 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return { applied: true, task: toTask(updated) };
     },
 
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const updated = await collection.findOneAndUpdate(
+        { taskId, generation, state: { $in: ['queued', 'interrupted'] }, handoffPending: true },
+        { $set: { state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt } },
+        { returnDocument: 'after', includeResultMetadata: false });
+      return updated ? toTask(updated) : null;
+    },
+    claimScheduledRetry: async (taskId, generation) => !!await collection.findOneAndUpdate(
+      { taskId, state: 'failed', generation }, { $set: { scheduleRetryClaimed: true } },
+      { returnDocument: 'after', includeResultMetadata: false }),
     allocateSeq: async ({ taskId, token }) => {
       // The increment is atomic in the database and the fence is part of the
       // filter: no read-then-compare window, and no way for a superseded
@@ -290,25 +344,31 @@ export function createMongoConversationRepository(input: {
 }): ConversationRepository {
   const { conversations, messages } = input;
 
-  function binding(found: ConversationRecord, record: ConversationRecord): ConversationBinding {
-    if (found.ownerId !== record.ownerId) return { ok: false, reason: 'owner' };
-    if (found.mode !== record.mode) return { ok: false, reason: 'mode' };
-    if (found.isWork !== record.isWork) return { ok: false, reason: 'surface' };
-    return { ok: true, record: found };
+  /** The row's identity is immutable; a different owner, mode or kind collides. */
+  function assertSameIdentity(found: ConversationRecord, record: ConversationRecord): void {
+    if (found.ownerId !== record.ownerId) throw new ConversationConflictError('owner');
+    if (found.mode !== record.mode) throw new ConversationConflictError('mode');
+    if (found.isWork !== record.isWork) throw new ConversationConflictError('kind');
   }
 
-  async function ensure(record: ConversationRecord): Promise<ConversationBinding> {
+  async function ensure(record: ConversationRecord): Promise<ConversationRecord> {
     const existing = await conversations.findOne({ conversationId: record.conversationId });
-    if (existing) return binding(toConversation(existing), record);
+    if (existing) {
+      const found = toConversation(existing);
+      assertSameIdentity(found, record);
+      return found;
+    }
     try {
       await conversations.insertOne({ ...record });
-      return { ok: true, record: { ...record } };
+      return { ...record };
     } catch (error) {
       if (!isDuplicateKey(error)) throw error;
       // Another replica created it between the read and the insert.
       const raced = await conversations.findOne({ conversationId: record.conversationId });
       if (!raced) throw error;
-      return binding(toConversation(raced), record);
+      const found = toConversation(raced);
+      assertSameIdentity(found, record);
+      return found;
     }
   }
 
@@ -381,6 +441,7 @@ export function createMongoConversationRepository(input: {
           createdAt: message.createdAt,
           ...(message.unfinished !== undefined ? { unfinished: message.unfinished } : {}),
           ...(message.agent ? { agent: message.agent } : {}),
+          ...(message.attachments ? { attachments: message.attachments } : {}),
         })),
       };
     },

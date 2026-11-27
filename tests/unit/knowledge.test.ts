@@ -89,4 +89,3 @@ test('private ingestion and retrieval stay lexical with a cloud embedding provid
   assert.equal(found.embedding, 'lexical');
   assert.equal(calls, 0);
 });
-

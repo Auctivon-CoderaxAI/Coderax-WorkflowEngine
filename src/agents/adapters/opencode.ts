@@ -1,3 +1,4 @@
+import { credentialEndpoint } from '../../security/endpoint.js';
 import type { AgentReport, AgentRunOutcome, AgentRunRequest } from '../types.js';
 import type { ExternalAgentTransport } from './external.js';
 
@@ -39,19 +40,19 @@ export function createOpenCodeHttpTransport(input: {
   baseURL: string;
   /** Read by the caller from the environment; never logged or put in a URL. */
   password?: string;
-  model?: { providerId: string; modelId: string };
   fetchImpl?: FetchLike;
   timeoutMs?: number;
 }): ExternalAgentTransport {
   const fetchImpl = input.fetchImpl ?? fetch;
-  const base = trimBase(input.baseURL);
+  const { password } = input;
+  const base = trimBase(password ? credentialEndpoint(input.baseURL).href : input.baseURL);
   const timeoutMs = input.timeoutMs ?? 120_000;
 
   function headers(extra?: Record<string, string>): Record<string, string> {
     return {
       accept: 'application/json, text/event-stream',
       'content-type': 'application/json',
-      ...(input.password ? { authorization: basicAuth(input.password) } : {}),
+      ...(password ? { authorization: basicAuth(password) } : {}),
       ...(extra ?? {}),
     };
   }
@@ -125,16 +126,10 @@ export function createOpenCodeHttpTransport(input: {
         sessionId = session.id;
         report({ type: 'step.started', stepId: 'opencode-1', title: 'Execute with OpenCode' });
 
-        const chosen = run.model ?? input.model ?? null;
-        if (!chosen) {
-          return {
-            ok: false,
-            code: 'not_configured',
-            detail: 'No verified zero-cost model was resolved for the OpenCode run.',
-            retryable: false,
-          };
-        }
-        const model = { providerId: chosen.providerId, modelId: chosen.modelId };
+        // The router already resolved and admitted this model. The adapter must
+        // not substitute a configured preference after admission.
+        const model = run.model;
+        if (!model) return { ok: false, code: 'not_configured', detail: 'OpenCode requires a resolved model.', retryable: false };
         const prompt = [
           `Objective:\n${run.objective}`,
           '',

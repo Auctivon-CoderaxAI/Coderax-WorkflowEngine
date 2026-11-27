@@ -3,6 +3,7 @@ import type {
   ArtifactKind,
   ArtifactMediaType,
   Budget,
+  CreativeArtifact,
   DataMode,
   EngineId,
   GameAction,
@@ -10,7 +11,6 @@ import type {
   IsoDateTime,
   MediaReference,
   MissedRunPolicy,
-  ModelRef,
   ScheduleCondition,
   ScheduleConditionState,
   ScheduleExecutionState,
@@ -20,7 +20,13 @@ import type {
   ScheduleState,
   ScheduleTiming,
   ScheduleTrigger,
+  ModelRef,
+  PermissionScope,
   TaskState,
+  TeamCheck,
+  TeamLimits,
+  TeamMemberState,
+  TeamState,
   Usage,
 } from '@coderax/contracts';
 
@@ -47,9 +53,9 @@ export type GameRunSpec = {
 export type ReasoningMode = 'fast' | 'complex';
 
 /**
- * Native may reason, read a confined workspace file, or call one registered
- * tool. A read and a tool call are the only side-effecting actions it plans, and
- * both always pass the permission layer before they execute.
+ * Native may reason or read a confined workspace file. A read is the only
+ * side-effecting-adjacent action it plans, and it always passes the permission
+ * layer before it executes.
  */
 export type PlanStepKind = 'reason' | 'read' | 'tool';
 
@@ -59,15 +65,11 @@ export type TaskPlanStep = {
   /** Ids of steps that must complete first. Empty means it is ready now. */
   dependsOn: string[];
   kind: PlanStepKind;
-  /**
-   * Exact workspace-relative resource for a read step, or the registered tool
-   * name for a tool step. Never a host path.
-   */
+  /** Exact workspace-relative resource for a read step; never a host path. */
   resource?: string;
-  /** Validated arguments for a tool step; the tool's own schema checks them. */
-  input?: Record<string, unknown>;
   /** What the step must prove to count as complete. */
   acceptance?: string;
+  input?: Record<string, unknown>;
 };
 
 /**
@@ -106,9 +108,20 @@ export type TaskEvidence = {
   attempts: number;
 };
 
+export type PendingAction = {
+  stepId: string;
+  json: string;
+  observations?: string[];
+  priorActions?: number;
+  invalidAnswers?: number;
+};
+
+export type StepOutput = { stepId: string; text: string };
+
 export type TaskCheckpoint = {
   /** Steps whose work is durably complete; a resume skips exactly these. */
   completedSteps: string[];
+  outputs?: StepOutput[];
   /** Partial assistant text already emitted, replayed on resume. */
   text: string;
   /** The dependency-aware plan this generation is executing. */
@@ -130,9 +143,29 @@ export type TaskVerification = {
   evidence: string[];
 };
 
+export type ExecutionReceipt = {
+  receiptId: string;
+  taskId: string;
+  generation: number;
+  agent: AgentId;
+  engine: EngineId;
+  mode: DataMode;
+  model?: ModelRef;
+  state: 'completed' | 'failed' | 'cancelled';
+  startedAt: IsoDateTime;
+  finishedAt: IsoDateTime;
+  usage?: Usage;
+  requests?: number;
+  steps: Array<{ id: string; title: string; state: TaskState }>;
+  toolCalls: Array<{ callId: string; tool: string; ok: boolean; digest: string }>;
+  planDigest: string;
+};
+
 export type TaskResult = {
   summary?: string;
   artifacts: Array<{ path: string; bytes?: number; digest?: string }>;
+  /** Validated or explicitly withheld SVG/HTML fragments from the agent output. */
+  creative?: CreativeArtifact[];
   verification?: TaskVerification;
 };
 
@@ -140,6 +173,20 @@ export type TaskFailure = {
   code: string;
   detail?: string;
   retryable?: boolean;
+};
+
+/**
+ * The owner's decision on one permission request, stored on the task row so it
+ * survives a restart and is consumed exactly once. The in-process request list is
+ * only the prompt; the durable row is the grant.
+ */
+export type TaskApproval = {
+  requestId: string;
+  scope: PermissionScope;
+  resource: string;
+  decision: 'approved' | 'denied';
+  decidedAt: IsoDateTime;
+  consumedAt?: IsoDateTime;
 };
 
 /**
@@ -163,7 +210,14 @@ export type TaskRecord = {
   kind?: TaskWorkload;
   game?: GameRunSpec | null;
   objective: string;
+  /** Owner-scoped media attached at submission; re-resolved under this task's mode. */
+  attachments: string[];
   model: ModelRef | null;
+  /**
+   * True only when the owner named the model. A route-chosen model stays
+   * replaceable by a bounded fallback, including after a resume.
+   */
+  modelPinned?: boolean;
   state: TaskState;
   generation: number;
   runToken: string | null;
@@ -176,12 +230,15 @@ export type TaskRecord = {
   /** Resolved on the first planning pass; never guessed by a client. */
   reasoning: ReasoningMode | null;
   steps: TaskStep[];
+  pendingAction?: PendingAction | null;
   checkpoint: TaskCheckpoint;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
   leaseExpiresAt: IsoDateTime | null;
   cancelRequested: boolean;
   requireApproval: boolean;
+  /** Durable owner decision; null until one is recorded. */
+  approval: TaskApproval | null;
   budget: Budget | null;
   usage: Usage | null;
   result: TaskResult | null;
@@ -195,16 +252,127 @@ export type TaskPatch = Partial<
     | 'handoffPending'
     | 'scheduleAdmission'
     | 'steps'
+    | 'pendingAction'
     | 'checkpoint'
     | 'updatedAt'
     | 'leaseExpiresAt'
     | 'cancelRequested'
     | 'runToken'
+    | 'approval'
     | 'usage'
     | 'result'
     | 'failure'
     | 'model'
     | 'reasoning'
+  >
+>;
+
+/**
+ * Reasoning and planning are data, never side effects. The team planner validates
+ * the owner's dependency graph with the same rules the Native planner uses; the
+ * schedule is derived from it and persisted, so a restart resumes the same plan.
+ */
+/** A file the engine read and hashed itself while executing this team. */
+export type TeamArtifact = {
+  path: string;
+  bytes: number;
+  sha256: string;
+  memberId: string;
+};
+
+export type TeamMemberRecord = {
+  memberId: string;
+  agent: AgentId;
+  objective: string;
+  dependsOn: string[];
+  resources: string[];
+  state: TeamMemberState;
+  attempts: number;
+  executionId?: string;
+  summary?: string;
+  /** Bounded text produced by the member; it is context, never a verdict. */
+  evidence?: string;
+  failure?: { code: string; detail?: string; retryable?: boolean };
+  usage?: Usage;
+  startedAt?: IsoDateTime;
+  finishedAt?: IsoDateTime;
+};
+
+export type TeamCheckpoint = {
+  /** Members whose work is durably complete; a resume skips exactly these. */
+  completedMembers: string[];
+  /** Per-member bounded output, reused as context by later members. */
+  outputs: Record<string, string>;
+  artifacts: TeamArtifact[];
+  /** Evidence ids the verifier may cite: one per completed member. */
+  evidence: TaskEvidence[];
+};
+
+export type TeamVerificationRecord = {
+  passed: boolean;
+  reason: string;
+  checks: Array<{ checkId: string; kind: TeamCheck['kind']; passed: boolean; detail: string }>;
+  artifacts: Array<{ path: string; bytes: number; sha256: string }>;
+};
+
+export type TeamFailure = {
+  code: string;
+  detail?: string;
+  retryable?: boolean;
+};
+
+/**
+ * The authoritative team snapshot. It is written only through `updateFenced`
+ * with the generation's run token, and it carries the completed members, their
+ * evidence and the artifacts, which is what makes a restart resume rather than
+ * repeat work.
+ */
+export type TeamRecord = {
+  teamId: string;
+  eventSeq?: number;
+  ownerId: string;
+  tenantId: string | null;
+  conversationId: string;
+  mode: DataMode;
+  objective: string;
+  reasoning: ReasoningMode;
+  state: TeamState;
+  generation: number;
+  runToken: string | null;
+  members: TeamMemberRecord[];
+  /** The validated dependency graph the members came from. */
+  plan: TaskPlan;
+  checks: TeamCheck[];
+  limits: TeamLimits;
+  checkpoint: TeamCheckpoint;
+  verification: TeamVerificationRecord | null;
+  failure: TeamFailure | null;
+  cancelRequested: boolean;
+  budget: Budget | null;
+  usage: Usage | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  startedAt: IsoDateTime | null;
+  finishedAt: IsoDateTime | null;
+  /** Heartbeat of the replica that owns the run; a stale one is interrupted. */
+  heartbeatAt: IsoDateTime | null;
+};
+
+export type TeamPatch = Partial<
+  Pick<
+    TeamRecord,
+    | 'state'
+    | 'members'
+    | 'checkpoint'
+    | 'verification'
+    | 'failure'
+    | 'cancelRequested'
+    | 'runToken'
+    | 'usage'
+    | 'updatedAt'
+    | 'startedAt'
+    | 'finishedAt'
+    | 'heartbeatAt'
   >
 >;
 
@@ -228,6 +396,7 @@ export type StoredMessage = {
   createdAt: IsoDateTime;
   unfinished?: boolean;
   agent?: AgentId;
+  attachments?: string[];
   /** Metadata for images accepted on this turn; never the encoded bytes. */
   media?: MediaReference[];
 };
@@ -395,9 +564,7 @@ export type ArtifactRecord = {
   mediaType: ArtifactMediaType;
   bytes: number;
   sha256: string;
-  /** Current version number. Immutable version rows live alongside. */
   version: number;
-  /** Retained version count, including the current one. */
   versions: number;
   projectId: string | null;
   conversationId: string | null;
@@ -416,9 +583,7 @@ export type ArtifactVersionRecord = {
   filename: string;
   relativePath?: string;
   mediaType: ArtifactMediaType;
-  /** Immutable per version, so a rollback restores the kind that version had. */
   kind: ArtifactKind;
-  /** Size and digest of this exact version, so history is independently auditable. */
   bytes: number;
   sha256: string;
   note?: string;

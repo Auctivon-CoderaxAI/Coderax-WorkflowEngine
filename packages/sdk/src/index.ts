@@ -1,3 +1,7 @@
+import { ChatFrame, RoutingReport, type RoutingMode } from '@coderax/contracts';
+import { CreativeValidation, MediaCapabilities, MediaDownload, MediaUploadResult, TeamAccepted, TeamControlResult, TeamStatus,
+  type CreativeValidationRequest, type MediaUploadRequest, type TeamSubmitRequest
+} from '@coderax/contracts';
 import type { z } from 'zod';
 import {
   AgentList,
@@ -150,6 +154,17 @@ export const SDK_OPERATIONS = Object.freeze({
   getReadiness: 'readiness',
   listAgents: 'agents',
   listModels: 'models',
+  getRouting: 'routing',
+  getMediaCapabilities: 'mediaCapabilities',
+  uploadMedia: 'uploadMedia',
+  getMedia: 'media',
+  validateCreative: 'validateCreative',
+  submitTeam: 'submitTeam',
+  getTeam: 'team',
+  cancelTeam: 'cancelTeam',
+  resumeTeam: 'resumeTeam',
+  listTeamPermissions: 'teamPermissions',
+  decideTeamPermission: 'decideTeamPermission',
   listTools: 'tools',
   ingestKnowledge: 'ingestKnowledge',
   listKnowledge: 'knowledge',
@@ -233,6 +248,7 @@ type RequestInput = {
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
+  accept?: string;
   signal?: AbortSignal;
 };
 
@@ -306,7 +322,7 @@ export class CoderaxClient {
       {
         method: input.method,
         headers: {
-          ...this.headers(),
+          ...this.headers(input.accept),
           ...(input.body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
@@ -386,6 +402,10 @@ export class CoderaxClient {
   }
 
   /** Registered tools with the scopes and approval policy each one requires. */
+  routing(mode: RoutingMode = 'auto'): Promise<RoutingReport> {
+    return this.request<RoutingReport>(RoutingReport, { method: 'GET', path: '/v1/routing', query: { mode } });
+  }
+
   tools(): Promise<ToolList> {
     return this.request<ToolList>(ToolList, { method: 'GET', path: '/v1/tools' });
   }
@@ -532,6 +552,23 @@ export class CoderaxClient {
       path: '/v1/chat',
       body: request,
     });
+  }
+
+  async *chatStream(request: ChatRequest, options: { signal?: AbortSignal } = {}): AsyncGenerator<ChatFrame> {
+    const path = '/v1/chat';
+    const response = await this.send({
+      method: 'POST', path, accept: 'text/event-stream', body: request,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!response.ok || !response.body) {
+      await this.parse(ChatReply, response, path);
+      throw new CoderaxContractError('the chat stream had no body');
+    }
+    for await (const frame of parseSse(response.body)) {
+      const parsed = ChatFrame.safeParse(frame);
+      if (!parsed.success) throw new CoderaxContractError('a chat frame did not match the published schema');
+      yield parsed.data;
+    }
   }
 
   /** Validates image attachments and returns metadata for a chat turn. */
@@ -1006,6 +1043,85 @@ export class CoderaxClient {
   }
 
   /** Replays and tails execution events from a sequence cursor. */
+  submitTeam(request: TeamSubmitRequest): Promise<TeamAccepted> {
+    return this.request<TeamAccepted>(TeamAccepted, {
+      method: 'POST',
+      path: '/v1/teams',
+      body: request,
+    });
+  }
+
+  team(teamId: string): Promise<TeamStatus> {
+    return this.request<TeamStatus>(TeamStatus, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}`,
+    });
+  }
+
+  cancelTeam(teamId: string): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/cancel`,
+      body: {},
+    });
+  }
+
+  resumeTeam(teamId: string, generation: number): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/resume`,
+      body: { generation },
+    });
+  }
+
+  teamPermissions(teamId: string): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
+    });
+  }
+
+  decideTeamPermission(
+    teamId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
+      body: request,
+    });
+  }
+
+  mediaCapabilities(): Promise<MediaCapabilities> {
+    return this.request<MediaCapabilities>(MediaCapabilities, {
+      method: 'GET',
+      path: '/v1/media/capabilities',
+    });
+  }
+
+  uploadMedia(request: MediaUploadRequest): Promise<MediaUploadResult> {
+    return this.request<MediaUploadResult>(MediaUploadResult, {
+      method: 'POST',
+      path: '/v1/media/uploads',
+      body: request,
+    });
+  }
+
+  media(mediaId: string): Promise<MediaDownload> {
+    return this.request<MediaDownload>(MediaDownload, {
+      method: 'GET',
+      path: `/v1/media/${encodeURIComponent(mediaId)}`,
+    });
+  }
+
+  validateCreative(request: CreativeValidationRequest): Promise<CreativeValidation> {
+    return this.request<CreativeValidation>(CreativeValidation, {
+      method: 'POST',
+      path: '/v1/creative/validate',
+      body: request,
+    });
+  }
+
   async *events(
     taskId: string,
     options: { after?: number; signal?: AbortSignal } = {},
@@ -1055,3 +1171,4 @@ export type {
   ArtifactVersionRequest,
   WorkSubmitRequest,
 };
+

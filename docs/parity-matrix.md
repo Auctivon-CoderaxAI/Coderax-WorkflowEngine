@@ -40,14 +40,14 @@ Status vocabulary:
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
 | 26 | Owner gating for Work ingress (ADMIN + config flag + body shape) | `workChat/gating.ts` | single-owner auth on every route | Strengthened (no role model to bypass) |
-| 27 | OpenCode transport (SDK, Basic auth, session, prompt, abort) | `opencode/adapter.ts`, `sdk.ts`, `auth.ts` | injected transport only | Missing (review F3) |
-| 28 | OpenCode protocol mapping | `opencode/protocol.ts` | none | Missing |
-| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/catalog.ts` + `routing` | Simplified — no multi-candidate auto fallback |
-| 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | none | Missing |
+| 27 | OpenCode transport (Basic auth, session, prompt, abort) | `opencode/adapter.ts` (SDK) | `src/agents/adapters/opencode.ts` (HTTP/SSE, session, abort, cleanup) | Preserved — transport differs; scripted-server verified, not live |
+| 28 | OpenCode protocol mapping | `opencode/protocol.ts` | text parts + SSE deltas | Simplified |
+| 29 | Zero-cost model plan with ordered candidates | `opencode/models.ts` | `src/models/router.ts` (discovery, pricing/attestation verification, per-operation provider policy, capability classification, Fast/Auto/Complex ranking) | Preserved and strengthened — paid or unknown cost is refused, not inferred |
+| 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | `src/models/router.ts` (bounded candidates, circuits, quota cooldown) | Preserved — bounded and free-only; no fallback after streamed output |
 | 31 | FreeBuff SDK loading, loopback restriction, context floor | `freebuff/adapter.ts` | injected transport only | Missing (review F3) |
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
-| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | independent reasoning loop: model-assisted decomposition, dependency-aware parallel scheduling, bounded replanning, evidence verification and approval suspension (`src/agents/native`) | Changed — not the same agent; see #34 |
-| 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | absent; `tools: false` | Missing |
+| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | model-assisted plan → act → observe → reflect loop (`src/agents/native`) | Changed — not the same implementation |
+| 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | tools, MCP and RAG implemented; skills, subagents and code execution absent | Simplified |
 | 35 | Secret redaction of provider text | `cloud/redact.ts` | `src/observability/redact.ts` | Preserved |
 | 36 | Private/cloud mode denial for providers | `cloud/mode.ts` | workspace + memory partitioning only | Simplified |
 | 37 | Durable cancellation | lease flag | lease flag + service cancel | Preserved |
@@ -57,8 +57,8 @@ Status vocabulary:
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
-| 44 | Schedules (cron) | `croner` + Mongo, in-process | `src/scheduling` (once, interval, hourly, calendar in an IANA zone, monthly, named events) + durable receipts and Mongo store | Strengthened — cross-replica idempotency, missed-run policy, pause/resume/cancel, edit with an immutable execution identity, upcoming preview, priorities, run and inference budgets, notices merged into `/v1/notifications` |
-| 45 | Cloud browser orchestration | none | contract v1, fail-closed adapter, approvals, receipts, takeover; no verified provider | Contract only |
+| 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
+| 45 | Cloud browser orchestration | none | attachable through a configured browser/computer-use MCP server with `browser.use`; no live server verified | Simplified |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
 | 47 | Tool/plugin execution | Coderax tools | none | Missing |
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
@@ -75,13 +75,12 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 24 |
-| Strengthened | 10 |
+| Preserved | 23 |
+| Strengthened | 13 |
 | Simplified | 5 |
-| Missing | 8 |
-| Changed (deliberate) | 6 |
-| Contract only (no verified provider) | 1 |
-| Not started (both) | 2 |
+| Missing | 7 |
+| Changed (deliberate) | 2 |
+| Not started (both) | 0 |
 
 ## What this means
 
@@ -90,17 +89,16 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 46 and 47 are
+capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 44, 46 and 47 are
 closed, migrating a client would remove functionality, which the brief forbids.
-Scheduling (row 44) is implemented here and no longer blocks a client cut-over,
-and persistent events with replay across restart (row 22) are durable as of the
-event-log branch.
 
 Dependency order for closing them:
 
-1. Fenced conversation writes (row 18). Persistent events and replay across
-   restart (row 22) are durable as of this branch.
-2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
+1. ~~Persistent execution events and replay across restart (row 22)~~ — closed
+   by the task sequence authority and durable replay in `src/events`; the remaining part of row 18 is an atomic fenced
+   conversation write.
+2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31). The
+   provider-independent model router (rows 29–30) is implemented in `src/models`.
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
    and the one that decides whether Coderax Native can replace the LibreChat
    agent stack.

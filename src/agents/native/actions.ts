@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
-import type { ActionExecution, ActionExecutor, ModelGateway } from './types.js';
-import { buildStepPrompt, STEP_SYSTEM } from './prompt.js';
+import type { ActionExecution, ActionExecutor, BasicModelGateway } from './types.js';
+import { buildReasoningStepPrompt, STEP_SYSTEM } from './prompt.js';
 
 /**
  * Native's action layer. A `reason` step is a model completion; a `read` step is
@@ -113,7 +113,7 @@ export async function readWorkspaceFile(input: {
   };
 }
 
-export function createNativeExecutor(gateway: ModelGateway): ActionExecutor {
+export function createNativeExecutor(gateway: BasicModelGateway): ActionExecutor {
   return {
     execute: async (input): Promise<ActionExecution> => {
       if (input.signal.aborted) {
@@ -151,7 +151,7 @@ export function createNativeExecutor(gateway: ModelGateway): ActionExecutor {
         const completion = await gateway.complete({
           model: input.model,
           system: STEP_SYSTEM,
-          prompt: buildStepPrompt({
+          prompt: buildReasoningStepPrompt({
             objective: input.objective,
             step: input.step,
             mode: input.mode,
