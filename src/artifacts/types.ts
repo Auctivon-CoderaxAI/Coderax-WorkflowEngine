@@ -143,4 +143,3 @@ export function slugOf(value: string, fallback = 'deliverable'): string {
     .slice(0, 60);
   return slug.length > 0 ? slug : fallback;
 }
-

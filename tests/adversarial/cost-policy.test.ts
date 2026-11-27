@@ -2,19 +2,13 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
+import { createBudgetLedger } from '../../src/models/budget.js';
 import { baseConfig, createWorkspaces, startTestApp } from '../helpers.js';
 
 const root = path.resolve(import.meta.dirname, '..', '..', '..');
 
 test('the token budget fails closed before the next request is sent', async () => {
-  const ledger = createBudgetLedger({
-    store: createMemoryBudgetStore(),
-    maxRequestsPerDay: 100,
-    maxTokensPerDay: 10,
-    taskMaxRequests: 100,
-    taskMaxTokens: 10,
-  });
+  const ledger = createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 10 });
   const now = new Date('2026-11-26T00:00:00.000Z');
   const held = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 6, outputTokens: 4 });
   assert.equal(held.allowed, true);

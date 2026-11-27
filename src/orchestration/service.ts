@@ -38,6 +38,8 @@ import type {
   GameSessionLogs,
   GameSessionVerification,
   IterateGameRequest,
+  MediaIntakeRequest,
+  MediaIntakeResult,
   KnowledgeIngestRequest,
   KnowledgeIngestResult,
   KnowledgeList,
@@ -72,6 +74,7 @@ import type {
 } from '@coderax/contracts';
 import {
   DeliverableRequest,
+  engineForAgent,
   isTerminalExecution,
   isTerminalState,
   modelKey,
@@ -102,6 +105,7 @@ import type { RunSupervisor } from '../execution/supervisor.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
+import { intakeMedia, mediaDataUrl } from '../media/intake.js';
 import type { ModelRouter } from '../models/router.js';
 import type { ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
@@ -139,6 +143,8 @@ export type ApplicationServiceDeps = {
   auth: AuthService;
   agents: AgentRegistry;
   models: ModelRouter;
+  tools: ToolRuntime | null;
+  knowledge: KnowledgeStore;
   budget: BudgetLedger;
   lease: LeaseStore;
   tasks: TaskRepository;
@@ -160,8 +166,6 @@ export type ApplicationServiceDeps = {
   gaming: GamingAgent;
   browser: BrowserService;
   supervisor: RunSupervisor;
-  tools: ToolRuntime | null;
-  knowledge: KnowledgeStore;
 };
 
 /**
@@ -281,6 +285,11 @@ export type ApplicationService = {
     generation: number,
   ) => Promise<ServiceResult<TaskControlResult>>;
   chat: (principal: Principal, request: ChatRequest) => Promise<ServiceResult<ChatReply>>;
+  /** Validates an attachment set without persisting it or calling a model. */
+  intakeMedia: (
+    principal: Principal,
+    request: MediaIntakeRequest,
+  ) => Promise<ServiceResult<MediaIntakeResult>>;
   conversations: (principal: Principal) => Promise<ConversationList>;
   conversation: (
     principal: Principal,
@@ -714,6 +723,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (outcome.kind === 'interrupted') {
       return;
     }
+    // Barrier: everything the run published is stored before the task record
+    // says the run is over, so a client cannot read a terminal task whose
+    // stream is missing the events that led to it.
     const now = deps.clock.iso();
     const failureDetail = outcome.kind === 'failed' ? redactText(outcome.detail, [], 1000) : undefined;
     const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
@@ -908,6 +920,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
     } finally {
+      // The terminal event is durable before the lease can be reissued, so a new
+      // generation never starts behind an unfinished stream.
       await releaseLease(task, token);
     }
   }
@@ -1074,6 +1088,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
     });
     if (!started.applied) return;
+    // Continue the sequence after anything a previous process already stored.
     await deps.supervisor.begin({
       taskId,
       token,
@@ -1412,6 +1427,45 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
   }
 
+  const TERMINAL_EVENT = new Set([
+    'task.completed',
+    'task.failed',
+    'task.cancelled',
+    'task.interrupted',
+  ]);
+
+  /**
+   * Repairs the one contradiction a crash can leave behind: a task record that
+   * says it finished, and a stream that never received the terminal event. The
+   * client reads the stream, so the stream is completed here from the
+   * authoritative task record — never the other way around.
+   */
+  async function ensureTerminalEvent(task: TaskRecord): Promise<void> {
+    if (!isTerminalState(task.state)) return;
+    const last = await deps.events.lastSeq(task.taskId);
+    const tail = await deps.events.replay(task.taskId, Math.max(0, last - 1));
+    if (tail.events.some((event) => TERMINAL_EVENT.has(event.type))) return;
+    if (task.state === 'completed') {
+      await publish(task, 'task.completed', {
+        ...(task.result?.summary ? { summary: task.result.summary } : {}),
+        ...(task.model ? { model: task.model } : {}),
+        ...(task.usage ? { usage: task.usage } : {}),
+      });
+    } else if (task.state === 'cancelled') {
+      await publish(task, 'task.cancelled', {});
+    } else if (task.state === 'failed') {
+      await publish(task, 'task.failed', {
+        code: task.failure?.code ?? 'provider_error',
+        ...(task.failure?.detail ? { detail: task.failure.detail } : {}),
+        retryable: task.failure?.retryable ?? false,
+      });
+    } else {
+      await publish(task, 'task.interrupted', {
+        detail: task.failure?.detail ?? 'The run stopped before it could report a terminal event.',
+      });
+    }
+  }
+
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
     if (isTerminalState(task.state) || task.state === 'awaiting_approval') {
       return task;
@@ -1605,7 +1659,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       conversationId,
     });
   }
-  
+
   async function lostCancellation(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
     const current = await deps.tasks.get(task.taskId);
     const cancelled = current?.runToken === task.runToken && current?.state === 'cancelled';
@@ -1684,17 +1738,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!bound.ok) return bound;
     const conversationId = bound.value.conversationId;
 
-    const reserve = async (): Promise<boolean> => {
+    const reserve = async () => {
       const held = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!held.allowed) return false;
       await held.commit();
       return true;
     };
-    if (
-      !(options.taskId
-        ? await deps.budget.available(principal.ownerId, deps.clock.now())
-        : await reserve())
-    ) {
+    if (!(options.taskId ? await deps.budget.available(principal.ownerId, deps.clock.now()) : await reserve())) {
       return fail(
         'budget_exhausted',
         'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -2355,9 +2405,29 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }),
 
     chat: trackAdmission<[Principal, ChatRequest], ChatReply>(async (principal, request) => {
+      // Validate attachments before model routing or persistence.
+      const validated = intakeMedia(request.attachments);
+      if (!validated.ok) return validated;
+      const media = validated.value;
+
+      if (media.length > 0 && engineForAgent(request.agent) !== 'native') {
+        return fail(
+          'unsupported_media_type',
+          'The selected agent cannot accept image attachments; use Coderax Native.',
+        );
+      }
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model, request.mode, { operation: 'chat' });
+      // An image turn may only route to a model the catalogue verified for
+      // image input. With no such route the turn is refused before the
+      // conversation is bound or a message is appended.
+      const model = deps.models.resolve(
+        request.model,
+        request.mode,
+        media.length > 0
+          ? { operation: 'chat', requireVision: true }
+          : { operation: 'chat' },
+      );
       if (!model.ok) return model;
 
       const reservation = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
@@ -2396,6 +2466,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           role: 'user',
           text: request.message,
           createdAt: now,
+          ...(media.length > 0
+            ? { media: media.map((entry) => entry.reference) }
+            : {}),
         });
 
         const history = await historyFor(conversation, request.message, adapter.value);
@@ -2421,6 +2494,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               reasoning: 'fast',
               completedSteps: [],
               plan: null,
+              ...(media.length > 0
+                ? {
+                    media: media.map((entry) => ({
+                      reference: entry.reference,
+                      dataUrl: mediaDataUrl(entry),
+                    })),
+                  }
+                : {}),
             },
             () => undefined,
           );
@@ -2435,8 +2516,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           );
         }
         await deps.budget.settle(reservation.reservationId, outcome.usage ?? {});
-        // Chat output is adapter text too: scrub it before storage and before it is
-        // returned, so a provider echoing a credential cannot persist it.
         const reply = redactContent(outcome.summary);
         const messageId = deps.ids.messageId();
         await deps.conversations.appendMessage({
@@ -2461,6 +2540,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         else await reservation.release();
       }
     }),
+
+    intakeMedia: async (_principal, request) => {
+      const validated = intakeMedia(request.attachments);
+      if (!validated.ok) return validated;
+      return ok({ media: validated.value.map((entry) => entry.reference) });
+    },
 
     conversations: (principal) => deps.conversations.list(principal.ownerId),
 
@@ -2523,6 +2608,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
+      // A terminal task must always have a terminal event; if the writer died
+      // before publishing it, complete the log from the authoritative record.
+      await ensureTerminalEvent(found.value);
       const replay = await deps.events.replay(taskId, after);
       // Tail strictly after what was replayed; a poll re-reads the log from that
       // cursor, so an event that lands between the read and the subscription is

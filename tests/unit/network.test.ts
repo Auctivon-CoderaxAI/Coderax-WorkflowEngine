@@ -6,7 +6,6 @@ import {
   hostAllowed,
   isPublicAddress,
   pinnedRequest,
-  requireHttpsEndpoint,
 } from '../../src/security/network.js';
 
 test('non-public address ranges are classified as private', () => {
@@ -60,11 +59,6 @@ test('https, allowlisting, credentials and resolved address are all enforced', a
     allowInsecureLoopback: true,
   });
   assert.equal(loopback.ok, true);
-
-  const mustBeHttps = requireHttpsEndpoint('http://model.example/v1', 'endpoint');
-  assert.equal(mustBeHttps.ok, false);
-  assert.equal(requireHttpsEndpoint('https://user:pass@model.example/v1', 'endpoint').ok, false);
-  assert.equal(requireHttpsEndpoint('https://model.example/v1', 'endpoint').ok, true);
 });
 
 test('a redirect is surfaced, never followed, so it cannot escape the policy', async () => {

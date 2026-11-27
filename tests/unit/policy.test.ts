@@ -116,8 +116,6 @@ function router(input: {
       store: createMemoryBudgetStore(),
       maxRequestsPerDay: 100,
       maxTokensPerDay: 1_000_000,
-      taskMaxRequests: 100,
-      taskMaxTokens: 1_000_000,
     }),
     maxFallbacks: 2,
     maxCandidates: 4,

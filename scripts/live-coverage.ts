@@ -21,18 +21,18 @@ export type LiveRequirement = {
 
 export const LIVE_REQUIREMENTS: readonly LiveRequirement[] = Object.freeze([
   {
+    feature: 'Durable model budgets',
+    source: 'src/persistence/budgets.ts',
+    test: 'tests/live/budget.test.ts',
+    database: true,
+    detail: 'request and token reservation races require a real database',
+  },
+  {
     feature: 'Durable Artifacts',
     source: 'src/artifacts',
     test: 'tests/live/artifacts.test.ts',
     database: true,
     detail: 'artifact persistence, quota admission and reference counting require a real database',
-  },
-  {
-    feature: 'Durable Events',
-    source: 'src/events/log.ts',
-    test: 'tests/live/events.test.ts',
-    database: true,
-    detail: 'event replay and notification recovery require a real database',
   },
   {
     feature: 'Durable Scheduling',

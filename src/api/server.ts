@@ -90,6 +90,9 @@ export function createHttpServer(input: {
           bodyText,
           signal: AbortSignal.any([streamShutdown.signal, disconnected.signal]),
           accept: request.headers.accept ?? '',
+          lastEventId: Array.isArray(request.headers['last-event-id'])
+            ? request.headers['last-event-id'][0]
+            : request.headers['last-event-id'],
         });
 
         if (result.kind === 'json') {

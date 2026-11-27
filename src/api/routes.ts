@@ -172,6 +172,12 @@ async function* chatFrames<T extends { text: string }>(reply: T): AsyncIterable<
   yield { kind: 'event', event: { type: 'chat.completed', reply } };
 }
 
+  registry.register('intakeMedia', async (context) => {
+    const result = await service.intakeMedia(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('submitChat', async (context) => {
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -228,7 +234,11 @@ async function* chatFrames<T extends { text: string }>(reply: T): AsyncIterable<
 
   registry.register('streamTaskEvents', async (context) => {
     const after = context.query.after;
-    const cursor = typeof after === 'number' ? after : 0;
+    const fromQuery = typeof after === 'number' ? after : 0;
+    const fromHeader = Number(context.lastEventId ?? 0);
+    const cursor = Number.isSafeInteger(fromHeader) && fromHeader >= 0
+      ? Math.max(fromQuery, fromHeader)
+      : fromQuery;
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'sse', status: 200, events: toEventStream(result.value) };

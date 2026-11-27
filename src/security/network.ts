@@ -5,15 +5,15 @@ import { isIP } from 'node:net';
 import type { IncomingHttpHeaders } from 'node:http';
 
 /**
- * Outbound network policy.
+ * Outbound network policy for model-initiated fetches.
  *
  * A hostname allowlist alone is not SSRF protection: an allow-listed name can
  * resolve to a link-local metadata service, a loopback admin port or a private
  * network, and a redirect can move the request there after the check. This
  * module therefore validates the scheme, resolves the destination, refuses every
- * non-public address, and pins the resolved address into the TLS request so the
- * connection cannot be redirected by a second DNS answer. Redirects are not
- * followed at all; a caller that needs one must ask again through this policy.
+ * non-public address, and pins the resolved address into the TLS request so a
+ * second DNS answer cannot redirect the connection. Redirects are surfaced to the
+ * caller, never followed.
  */
 
 export type DestinationPolicy = {
@@ -23,12 +23,7 @@ export type DestinationPolicy = {
   allowInsecureLoopback?: boolean;
   maxBytes?: number;
   timeoutMs?: number;
-  maxRedirects?: number;
 };
-
-export type NetworkFailure =
-  | { code: 'blocked'; detail: string }
-  | { code: 'failed'; detail: string };
 
 export type NetworkResponse = {
   status: number;
@@ -139,8 +134,7 @@ export async function authorizeUrl(
 /**
  * A pinned HTTPS request. The `lookup` callback always returns the address that
  * was validated, so a DNS answer that changes between validation and connection
- * cannot redirect the request. Redirects are surfaced to the caller, never
- * followed; a caller that wants the new location must authorize it itself.
+ * cannot redirect the request. Redirects are not followed.
  */
 export async function pinnedRequest(
   input: {
@@ -148,6 +142,7 @@ export async function pinnedRequest(
     method: string;
     headers?: Record<string, string>;
     body?: string;
+    signal?: AbortSignal;
   },
   policy: DestinationPolicy,
 ): Promise<NetworkResponse> {
@@ -166,10 +161,11 @@ export async function pinnedRequest(
         method: input.method,
         headers: input.headers ?? {},
         lookup: (_hostname, _options, callback) => {
-          callback(null, pinned, isIP(pinned));
+          callback(null, pinned as string, isIP(pinned as string) as 4 | 6);
         },
         timeout: timeoutMs,
         rejectUnauthorized: true,
+        ...(input.signal ? { signal: input.signal } : {}),
       },
       (response) => {
         const status = response.statusCode ?? 0;
@@ -209,27 +205,4 @@ export async function pinnedRequest(
     if (input.body !== undefined) request.write(input.body);
     request.end();
   });
-}
-
-/** Refuses a URL that would carry a credential over cleartext. */
-export function requireHttpsEndpoint(
-  raw: string,
-  label: string,
-): { ok: true; url: URL } | { ok: false; detail: string } {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return { ok: false, detail: `${label} is not a valid URL.` };
-  }
-  if (url.protocol !== 'https:') {
-    return {
-      ok: false,
-      detail: `${label} must use https so a credential or document is never sent in cleartext.`,
-    };
-  }
-  if (url.username.length > 0 || url.password.length > 0) {
-    return { ok: false, detail: `${label} may not carry credentials in the URL.` };
-  }
-  return { ok: true, url };
 }

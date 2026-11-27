@@ -36,6 +36,7 @@ import {
   GameSessionLogs,
   GameSessionVerification,
   HealthReport,
+  MediaIntakeResult,
   MemoryList,
   KnowledgeIngestRequest,
   KnowledgeIngestResult,
@@ -59,6 +60,7 @@ import {
   TaskControlResult,
   TaskStatus,
 } from '@coderax/contracts';
+import type { MediaIntakeRequest } from '@coderax/contracts';
 import type {
   BuildGameRequest,
   BrowserAction,
@@ -153,6 +155,7 @@ export const SDK_OPERATIONS = Object.freeze({
   listKnowledge: 'knowledge',
   searchKnowledge: 'searchKnowledge',
   submitChat: 'chat',
+  intakeMedia: 'intakeMedia',
   submitWork: 'submitWork',
   getTask: 'task',
   cancelTask: 'cancel',
@@ -527,6 +530,15 @@ export class CoderaxClient {
     return this.request<ChatReply>(ChatReply, {
       method: 'POST',
       path: '/v1/chat',
+      body: request,
+    });
+  }
+
+  /** Validates image attachments and returns metadata for a chat turn. */
+  intakeMedia(request: MediaIntakeRequest): Promise<MediaIntakeResult> {
+    return this.request<MediaIntakeResult>(MediaIntakeResult, {
+      method: 'POST',
+      path: '/v1/media',
       body: request,
     });
   }

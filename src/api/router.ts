@@ -13,6 +13,7 @@ export type RequestContext = {
   signal?: AbortSignal;
   /** The raw Accept header, so a negotiated stream can answer JSON too. */
   accept: string;
+  lastEventId?: string | undefined;
 };
 
 /**
@@ -40,6 +41,7 @@ export type RawRequest = {
   bodyText: string;
   signal?: AbortSignal;
   accept?: string;
+  lastEventId?: string | undefined;
 };
 
 export type RouterResult =
@@ -242,6 +244,7 @@ export function createRouter(input: {
             requestId,
             signal: raw.signal,
             accept: raw.accept ?? '',
+            lastEventId: raw.lastEventId,
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);

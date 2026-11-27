@@ -67,8 +67,6 @@ function budget(maxRequests = 100, maxTokens = 1_000_000) {
     store: createMemoryBudgetStore(),
     maxRequestsPerDay: maxRequests,
     maxTokensPerDay: maxTokens,
-    taskMaxRequests: maxRequests,
-    taskMaxTokens: maxTokens,
   });
 }
 

@@ -1,18 +1,11 @@
 import path from 'node:path';
 import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
 import type { AgentIsolation, EngineCapabilities } from '@coderax/contracts';
+import { modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
 import { createNativeAgent } from '../agents/native/agent.js';
-import { createKnowledgeStore } from '../knowledge/store.js';
-import type { KnowledgeStore } from '../knowledge/store.js';
-import { createBuiltinTools } from '../tools/builtin.js';
-import { createToolRuntime } from '../tools/runtime.js';
-import type { ToolRuntime } from '../tools/types.js';
-import { attachMcpServers } from '../tools/mcp.js';
-import { loadPlugins } from '../plugins/manifest.js';
-import { createApprovalGate } from '../permissions/approval.js';
 import { createOpenAiCompatibleGateway } from '../agents/native/gateway.js';
 import type { ModelGateway } from '../agents/native/types.js';
 import { createExternalAgentAdapter } from '../agents/adapters/external.js';
@@ -34,6 +27,14 @@ import { createProviderPolicyRegistry } from '../models/policy.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
 import { createGeminiProvider } from '../models/providers/gemini.js';
 import type { ProviderAdapter, RegisteredProvider } from '../models/types.js';
+import { createKnowledgeStore } from '../knowledge/store.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import { createBuiltinTools } from '../tools/builtin.js';
+import { createToolRuntime } from '../tools/runtime.js';
+import type { ToolRuntime } from '../tools/types.js';
+import { attachMcpServers } from '../tools/mcp.js';
+import { loadPlugins } from '../plugins/manifest.js';
+import { createApprovalGate } from '../permissions/approval.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionGate } from '../permissions/gate.js';
 import { createAuditLog } from '../observability/audit.js';
@@ -160,6 +161,7 @@ function gatewayProvider(input: {
   config: EngineConfig;
 }): ProviderAdapter {
   const route = input.config.models.route;
+  const vision = new Set(input.config.models.vision.map((ref) => modelKey(ref)));
   return {
     id: route[0]?.providerId ?? 'gateway',
     kind: 'openai',
@@ -170,7 +172,7 @@ function gatewayProvider(input: {
         contextTokens: 32_768,
         maxOutputTokens: 4_096,
         capabilities: {
-          vision: false,
+          vision: vision.has(modelKey(ref)),
           toolCalling: true,
           reasoning: true,
           streaming: false,
@@ -341,9 +343,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
-  // The reservation ledger is only as durable as its store, so persistence is
-  // built first. One task may claim at most half the owner's daily allowance,
-  // which stops a single runaway run from consuming the whole free budget.
   const persistence = await buildPersistence({
     config,
     env,
@@ -351,12 +350,16 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ids,
     ...(input.persistence ?? {}),
   });
+  const lease = persistence.lease;
+  const tasks = persistence.tasks;
+  const conversations = persistence.conversations;
+  const memory = persistence.memory;
+  const permissions = persistence.permissions;
+  const permissionsGate = createPermissionGate({ permissions, clock });
   const budget = createBudgetLedger({
-    store: persistence.budgets,
     maxRequestsPerDay: config.models.dailyRequestBudget,
     maxTokensPerDay: config.models.dailyTokenBudget,
-    taskMaxRequests: Math.max(1, Math.ceil(config.models.dailyRequestBudget / 2)),
-    taskMaxTokens: Math.max(1, Math.ceil(config.models.dailyTokenBudget / 2)),
+    store: persistence.budget,
   });
 
   // One model authority: the router owns discovery, zero-cost verification,
@@ -367,10 +370,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     gateway,
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
   });
-  const benchmarks = loadBenchmarkInput(input);
   const models = createModelRouter({
     providers,
-    benchmarks,
+    benchmarks: loadBenchmarkInput(input),
     attestations: config.models.attestations,
     preferredRoute: config.models.route,
     budget,
@@ -383,13 +385,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   // deployment with no verified free model fails closed at the first submit
   // instead of discovering availability later.
   await models.refresh();
-  // Native reaches a provider through the configured gateway, exactly as before;
-  // the router owns resolution, zero-cost verification and health. With no
-  // provider registered, no route resolves and the agent is honestly unavailable.
-  const agentGateway = gateway;
 
   const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
-  const assistant = createDesignAssistant({ models, gateway: agentGateway, budget, clock });
+  const assistant = createDesignAssistant({ models, gateway, budget, clock });
   const studio = createGameStudio({
     store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
     artifacts,
@@ -404,13 +402,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ids,
     maxPauseMs: config.games.maxPauseMs,
   });
-
-  const lease = persistence.lease;
-  const tasks = persistence.tasks;
-  const conversations = persistence.conversations;
-  const memory = persistence.memory;
-  const permissions = persistence.permissions;
-  const permissionsGate = createPermissionGate({ permissions, clock });
 
   // Tools are data plus one function, and only the ones admitted by configuration
   // are registered. MCP servers and plugin manifests contribute more tools through
@@ -443,9 +434,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         catalogueMaxChars: config.tools.catalogueMaxChars,
       })
     : null;
+
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
-    gateway: agentGateway,
+    gateway,
     authorizer: permissionsGate,
     tools,
     approvals: ({ ownerId, taskId }) =>

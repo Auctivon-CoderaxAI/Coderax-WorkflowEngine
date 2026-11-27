@@ -23,6 +23,7 @@ import {
   SaveGameSpecRequest,
 } from './games.js';
 import { HealthReport, ReadinessReport } from './health.js';
+import { MediaIntakeRequest, MediaIntakeResult } from './media.js';
 import { CapabilityHandshake, HandshakeQuery } from './handshake.js';
 import { ModelList } from './models.js';
 import {
@@ -282,6 +283,21 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
       })
       .strict(),
     response: { status: 200, description: 'Knowledge hits', schema: KnowledgeSearchResult },
+  },
+  {
+    operationId: 'intakeMedia',
+    method: 'POST',
+    path: '/v1/media',
+    summary: 'Validate image attachments and return metadata for a chat turn.',
+    tags: ['media'],
+    auth: 'owner',
+    body: MediaIntakeRequest,
+    maxBodyBytes: 8 * 1024 * 1024,
+    response: {
+      status: 200,
+      description: 'Validated image metadata',
+      schema: MediaIntakeResult,
+    },
   },
   {
     operationId: 'submitChat',

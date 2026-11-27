@@ -1,14 +1,6 @@
 import type { EngineConfig } from '../configuration/schema.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { LeaseStore } from '../execution/lease.js';
-import type { BudgetStore } from '../models/budget.js';
-import { createMemoryBudgetStore } from '../models/budget.js';
-import {
-  budgetReservationCollection,
-  budgetWindowCollection,
-  createMongoBudgetStore,
-  ensureBudgetIndexes,
-} from '../persistence/budgets.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { EventStore } from '../events/store.js';
 import { createMemoryEventStore, createMongoEventStore, ensureEventIndexes } from '../events/store.js';
@@ -50,6 +42,8 @@ import {
   ensureCapacityIndexes,
 } from '../persistence/capacity.js';
 import type { CapacityStore } from '../persistence/capacity.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/budgets.js';
+import { createMemoryBudgetStore, type BudgetWindowStore } from '../models/budget.js';
 import {
   createMongoArtifactRepository,
   createMongoBlobStore,
@@ -69,9 +63,6 @@ import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
-  permissionCollection?: MongoCollectionLike;
-  /** Durable request and token budget windows, shared by every replica. */
-  budgets: BudgetStore;
   lease: LeaseStore;
   tasks: TaskRepository;
   events: EventStore;
@@ -90,6 +81,7 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
+  budget: BudgetWindowStore;
   close: () => Promise<void>;
 };
 
@@ -152,7 +144,6 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   if (settings.driver === 'memory') {
     return {
       driver: 'memory',
-      budgets: createMemoryBudgetStore(),
       lease: createLeaseStore(createInMemoryWorkRunTable()),
       tasks: createTaskRepository(),
       events: createMemoryEventStore({ maxPerTask: config.execution.eventBufferSize }),
@@ -163,6 +154,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      budget: createMemoryBudgetStore(),
       schedules: createScheduleRepository(),
       scheduleNotices: createScheduleNoticeStore(),
       close: NO_CLOSE,
@@ -189,6 +181,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
+  const budgetWindows = database.collection(collectionName(config, 'budget_windows'));
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -196,14 +189,9 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     chunks: artifactChunks,
   };
 
-  const permissionCollection = database.collection(collectionName(config, 'permissions'));
-  const budgetWindows = database.collection(budgetWindowCollection(config.persistence.collectionPrefix));
-  const budgetReservations = database.collection(
-    budgetReservationCollection(config.persistence.collectionPrefix),
-  );
   try {
-    await ensureBudgetIndexes({ windows: budgetWindows, reservations: budgetReservations });
     await ensureWorkRunIndexes(workRuns);
+    await ensureBudgetIndexes(budgetWindows);
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
@@ -231,8 +219,6 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   return {
     driver: 'mongo',
-    permissionCollection,
-    budgets: createMongoBudgetStore({ windows: budgetWindows, reservations: budgetReservations }),
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
     events: createMongoEventStore({
@@ -267,6 +253,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
+    budget: createMongoBudgetStore(budgetWindows),
     close: database.close,
   };
 }
