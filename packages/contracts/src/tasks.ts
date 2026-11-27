@@ -52,6 +52,12 @@ export const WorkSubmitRequest = z
     budget: Budget.optional(),
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
+    /**
+     * `auto` lets Native choose from the objective's structure. `fast` plans and
+     * executes directly; `complex` decomposes, parallelises and replans within
+     * the configured bounds. The resolved mode is reported on the task.
+     */
+    reasoning: z.enum(['auto', 'fast', 'complex']).optional(),
   })
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
@@ -79,13 +85,33 @@ export const TaskStatus = z
     updatedAt: IsoDateTime,
     leaseExpiresAt: IsoDateTime.optional(),
     cancelRequested: z.boolean(),
+    /** The resolved reasoning mode, published once the plan exists. */
+    reasoning: z.enum(['fast', 'complex']).optional(),
     steps: z.array(
-      z.object({ id: z.string().min(1).max(80), title: z.string().max(200), state: TaskState }).strict(),
+      z
+        .object({
+          id: z.string().min(1).max(80),
+          title: z.string().max(200),
+          state: TaskState,
+          /** Dependencies make the execution plan observable, not implied. */
+          dependsOn: z.array(z.string().min(1).max(80)).max(64).optional(),
+          attempts: z.number().int().nonnegative().optional(),
+        })
+        .strict(),
     ),
     result: z
       .object({
         summary: z.string().max(20_000).optional(),
         artifacts: z.array(Artifact),
+        /** Present only when the objective was assessed against evidence. */
+        verification: z
+          .object({
+            passed: z.boolean(),
+            reason: z.string().max(1000),
+            evidence: z.array(z.string().max(500)).max(20),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

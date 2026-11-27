@@ -1,5 +1,5 @@
 import type { RouteSpec } from '@coderax/contracts';
-import { ROUTE_INDEX } from '@coderax/contracts';
+import { HTTP_STATUS_FOR_CODE, ROUTE_INDEX } from '@coderax/contracts';
 import { buildOpenApiDocument, type OpenApiDocument } from '@coderax/contracts';
 import type { ProblemCode } from '@coderax/contracts';
 import type { AuthService, Principal } from '../security/auth.js';
@@ -93,28 +93,9 @@ function problem(
   requestId: string,
   retryable = false,
 ): { kind: 'json'; status: number; body: unknown } {
-  const status =
-    code === 'unauthorized'
-      ? 401
-      : code === 'forbidden' || code === 'workspace_denied'
-        ? 403
-        : code === 'not_found'
-          ? 404
-          : code === 'validation_failed'
-            ? 400
-            : code === 'conflict' || code === 'busy' || code === 'permission_required' || code === 'cancelled'
-              ? 409
-              : code === 'budget_exhausted'
-                ? 429
-                : code === 'paid_model_refused'
-                  ? 402
-                  : code === 'not_ready' ||
-                      code === 'engine_unavailable' ||
-                      code === 'engine_not_configured'
-                    ? 503
-                    : code === 'protocol_error'
-                      ? 502
-                      : 500;
+  // One table decides the status for both the router and any handler, so a new
+  // failure code cannot mean two different HTTP statuses in two places.
+  const status = HTTP_STATUS_FOR_CODE[code];
   return {
     kind: 'json',
     status,
@@ -147,6 +128,12 @@ export const problemResult = problem;
 export type Router = {
   handle: (request: RawRequest) => Promise<RouterResult>;
   registry: RouteRegistry;
+  /**
+   * The body ceiling for the operation that matches this method and path, or
+   * `undefined` for the transport default. The server reads the body before a
+   * handler runs, so only the route that carries file content may raise it.
+   */
+  bodyLimit: (method: string, path: string) => number | undefined;
 };
 
 export function createRouter(input: {
@@ -162,10 +149,20 @@ export function createRouter(input: {
 
   return {
     registry: input.registry,
+    bodyLimit: (method, path) => {
+      const [pathname = ''] = path.split('?');
+      const upper = method.toUpperCase();
+      for (const route of routes) {
+        if (route.spec.method !== upper) continue;
+        if (!route.matcher.test(pathname)) continue;
+        return route.spec.maxBodyBytes;
+      }
+      return undefined;
+    },
     handle: async (raw) => {
       const requestId = input.requestId();
       const [pathname, search = ''] = raw.path.split('?');
-      const query = Object.fromEntries(new URLSearchParams(search).entries());
+      const rawQuery = Object.fromEntries(new URLSearchParams(search).entries());
       const method = raw.method.toUpperCase();
 
       for (const route of routes) {
@@ -178,18 +175,23 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = (match.groups ?? {}) as Record<string, string>;
+        let params = (match.groups ?? {}) as Record<string, string>;
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
+          params = parsed.data as Record<string, string>;
         }
+        // Handlers receive the coerced data, not the raw query string: a numeric
+        // `after` or `limit` must be a number before any service sees it.
+        let query: Record<string, unknown> = rawQuery;
         if (route.spec.query) {
-          const parsed = route.spec.query.safeParse(query);
+          const parsed = route.spec.query.safeParse(rawQuery);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
+          query = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;

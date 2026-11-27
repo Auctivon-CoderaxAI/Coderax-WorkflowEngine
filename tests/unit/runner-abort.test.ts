@@ -34,6 +34,7 @@ function adapter(run: AgentAdapter['run']): AgentAdapter {
   return {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities: {
       streaming: true,
       tools: false,
@@ -85,6 +86,7 @@ test('an adapter that throws on abort is cancelled, not reported as a provider f
   assert.deepEqual(await running, {
     outcome: { kind: 'cancelled' },
     ownershipLost: false,
+    terminated: true,
   });
 });
 

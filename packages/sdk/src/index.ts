@@ -1,6 +1,23 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserCapabilities,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionList,
+  BrowserTakeoverResult,
+  ArtifactContent,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactGenerationResult,
+  ArtifactProjectManifest,
+  ArtifactPruneResult,
+  ArtifactUploadResult,
+  ArtifactVersionList,
   ChatReply,
   Conversation,
   ConversationList,
@@ -22,14 +39,32 @@ import {
   ModelList,
   NotificationList,
   PermissionList,
+  PermissionRequest,
   Problem,
   ReadinessReport,
+  Schedule,
+  ScheduleControlResult,
+  ScheduleDispatch,
+  ScheduleEventResult,
+  ScheduleExecutionList,
+  ScheduleList,
+  ScheduleUpcoming,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
 } from '@coderax/contracts';
 import type {
   BuildGameRequest,
+  BrowserAction,
+  BrowserActionInput,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateInput,
+  BrowserTakeoverRequest,
+  ArtifactGenerationRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
   ChatRequest,
   CreateGameRequest,
   CreateGameSessionRequest,
@@ -39,6 +74,10 @@ import type {
   PermissionDecisionRequest,
   RestoreGameBuildRequest,
   SaveGameSpecRequest,
+  ScheduleCreateInput,
+  ScheduleUpdateRequest,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 
@@ -89,7 +128,7 @@ export type CoderaxClientOptions = {
 };
 
 type RequestInput = {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PATCH';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
@@ -233,6 +272,115 @@ export class CoderaxClient {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
   }
 
+  browserCapabilities(): Promise<BrowserCapabilities> {
+    return this.request<BrowserCapabilities>(BrowserCapabilities, {
+      method: 'GET',
+      path: '/v1/browser/capabilities',
+    });
+  }
+
+  browserSessions(): Promise<BrowserSessionList> {
+    return this.request<BrowserSessionList>(BrowserSessionList, {
+      method: 'GET',
+      path: '/v1/browser/sessions',
+    });
+  }
+
+  browserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  createBrowserSession(request: BrowserSessionCreateInput): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: '/v1/browser/sessions',
+      body: request,
+    });
+  }
+
+  browserAction(sessionId: string, action: BrowserActionInput): Promise<BrowserActionResult> {
+    return this.request<BrowserActionResult>(BrowserActionResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/actions`,
+      body: action,
+    });
+  }
+
+  pauseBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/pause`,
+    });
+  }
+
+  resumeBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/resume`,
+    });
+  }
+
+  takeoverBrowserSession(
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ): Promise<BrowserTakeoverResult> {
+    return this.request<BrowserTakeoverResult>(BrowserTakeoverResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/takeover`,
+      body: request,
+    });
+  }
+
+  closeBrowserSession(
+    sessionId: string,
+    request: BrowserCloseRequest = {},
+  ): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/close`,
+      body: request,
+    });
+  }
+
+  authorizeBrowserSession(
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ): Promise<PermissionRequest> {
+    return this.request<PermissionRequest>(PermissionRequest, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize`,
+      body: request,
+    });
+  }
+
+  decideBrowserAuthorization(
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize/decision`,
+      body: request,
+    });
+  }
+
+  browserReceipts(sessionId: string): Promise<BrowserReceiptList> {
+    return this.request<BrowserReceiptList>(BrowserReceiptList, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/receipts`,
+    });
+  }
+
+  browserArtifact(artifactId: string): Promise<BrowserArtifactContent> {
+    return this.request<BrowserArtifactContent>(BrowserArtifactContent, {
+      method: 'GET',
+      path: `/v1/browser/artifacts/${encodeURIComponent(artifactId)}`,
+    });
+  }
+
   chat(request: ChatRequest): Promise<ChatReply> {
     return this.request<ChatReply>(ChatReply, {
       method: 'POST',
@@ -324,6 +472,231 @@ export class CoderaxClient {
     return this.request<NotificationList>(NotificationList, {
       method: 'GET',
       path: '/v1/notifications',
+      query: { includeSchedules: 'true' },
+    });
+  }
+
+  createSchedule(request: ScheduleCreateInput): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'POST',
+      path: '/v1/schedules',
+      body: request,
+    });
+  }
+
+  schedules(): Promise<ScheduleList> {
+    return this.request<ScheduleList>(ScheduleList, { method: 'GET', path: '/v1/schedules' });
+  }
+
+  schedule(scheduleId: string): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+    });
+  }
+
+  pauseSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/pause`,
+    });
+  }
+
+  resumeSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/resume`,
+    });
+  }
+
+  cancelSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+    });
+  }
+
+  triggerSchedule(
+    scheduleId: string,
+    request: ScheduleTriggerRequest = {},
+  ): Promise<ScheduleDispatch> {
+    return this.request<ScheduleDispatch>(ScheduleDispatch, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/trigger`,
+      body: request,
+    });
+  }
+
+  scheduleExecutions(scheduleId: string, limit?: number): Promise<ScheduleExecutionList> {
+    return this.request<ScheduleExecutionList>(ScheduleExecutionList, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/executions`,
+      query: { limit },
+    });
+  }
+
+  scheduleEvent(request: ScheduleEventRequest): Promise<ScheduleEventResult> {
+    return this.request<ScheduleEventResult>(ScheduleEventResult, {
+      method: 'POST',
+      path: '/v1/schedule-events',
+      body: request,
+    });
+  }
+
+  updateSchedule(scheduleId: string, request: ScheduleUpdateRequest): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'PATCH',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+      body: request,
+    });
+  }
+
+  scheduleUpcoming(scheduleId: string, limit?: number): Promise<ScheduleUpcoming> {
+    return this.request<ScheduleUpcoming>(ScheduleUpcoming, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/upcoming`,
+      query: { limit },
+    });
+  }
+
+  markNotificationsRead(): Promise<NotificationList> {
+    return this.request<NotificationList>(NotificationList, {
+      method: 'POST',
+      path: '/v1/notifications/read',
+      query: { includeSchedules: 'true' },
+    });
+  }
+
+  /** Durable artifacts in one data-mode partition, with the storage quota. */
+  artifacts(
+    query: {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<ArtifactDescriptorList> {
+    return this.request<ArtifactDescriptorList>(ArtifactDescriptorList, {
+      method: 'GET',
+      path: '/v1/artifacts',
+      query,
+    });
+  }
+
+  artifact(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactDescriptor> {
+    return this.request<ArtifactDescriptor>(ArtifactDescriptor, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+      query: { mode },
+    });
+  }
+
+  artifactVersions(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactVersionList> {
+    return this.request<ArtifactVersionList>(ArtifactVersionList, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      query: { mode },
+    });
+  }
+
+  artifactManifest(
+    projectId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactProjectManifest> {
+    return this.request<ArtifactProjectManifest>(ArtifactProjectManifest, {
+      method: 'GET',
+      path: '/v1/artifacts/manifest',
+      query: { projectId, mode },
+    });
+  }
+
+  /**
+   * Renders a deliverable and persists it as a durable project tree. The
+   * response is the manifest, so every file can then be downloaded by artifact
+   * id and immutable version.
+   */
+  generateArtifact(request: ArtifactGenerationRequest): Promise<ArtifactGenerationResult> {
+    return this.request<ArtifactGenerationResult>(ArtifactGenerationResult, {
+      method: 'POST',
+      path: '/v1/artifacts/generate',
+      body: request,
+    });
+  }
+
+  uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: '/v1/artifacts',
+      body: request,
+    });
+  }
+
+  uploadArtifactVersion(
+    artifactId: string,
+    request: ArtifactVersionRequest,
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      body: request,
+    });
+  }
+
+  restoreArtifactVersion(
+    artifactId: string,
+    request: { mode?: DataMode; version: number; expectedVersion: number },
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/restore`,
+      body: {
+        mode: request.mode ?? 'private',
+        version: request.version,
+        expectedVersion: request.expectedVersion,
+      },
+    });
+  }
+
+  downloadArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactContent> {
+    return this.request<ArtifactContent>(ArtifactContent, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  exportArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactExport> {
+    return this.request<ArtifactExport>(ArtifactExport, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  deleteArtifact(
+    artifactId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactDeleteResult> {
+    return this.request<ArtifactDeleteResult>(ArtifactDeleteResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/delete`,
+      body: { mode },
+    });
+  }
+
+  pruneArtifacts(mode: DataMode = 'private'): Promise<ArtifactPruneResult> {
+    return this.request<ArtifactPruneResult>(ArtifactPruneResult, {
+      method: 'POST',
+      path: '/v1/artifacts/prune',
+      body: { mode },
     });
   }
 
@@ -508,4 +881,23 @@ export class CoderaxClient {
   }
 }
 
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };
+export type {
+  BrowserAction,
+  BrowserActionInput,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateInput,
+  BrowserTakeoverRequest,
+  ChatRequest,
+  DataMode,
+  PermissionDecisionRequest,
+  ScheduleCreateInput,
+  ScheduleUpdateRequest,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
+  ArtifactGenerationRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
+  WorkSubmitRequest,
+};

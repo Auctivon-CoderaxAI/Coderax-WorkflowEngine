@@ -11,6 +11,12 @@ import type {
   Usage,
 } from '@coderax/contracts';
 import type { GameRunSpec, TaskWorkload } from '../domain.js';
+import type {
+  ReasoningMode,
+  TaskEvidence,
+  TaskPlan,
+  TaskVerification,
+} from '../domain.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -51,11 +57,32 @@ export type AgentRunRequest = {
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
+  /** `auto` lets the agent choose; a resumed task passes its resolved mode. */
+  reasoning?: 'auto' | 'fast' | 'complex';
+  /** Steps the durable checkpoint already completed; resume skips exactly these. */
+  completedSteps?: string[];
+  /** The persisted dependency-aware plan, reused on resume or retry. */
+  plan?: TaskPlan | null;
+  /** Evidence already produced by completed steps in an earlier generation. */
+  evidence?: TaskEvidence[];
+  /** Iterations already consumed by a suspended generation; a resume continues the same bound. */
+  iterationsUsed?: number;
 };
 
 export type AgentReportEvent =
-  | { type: 'step.started'; stepId: string; title: string }
-  | { type: 'step.completed'; stepId: string; title: string }
+  /** The planner produced or revised a dependency-aware plan; nothing ran yet. */
+  | { type: 'plan.ready'; plan: TaskPlan; iterations?: number }
+  | { type: 'budget'; iterations: number }
+  | { type: 'step.started'; stepId: string; title: string; iterations?: number }
+  | {
+      type: 'step.completed';
+      stepId: string;
+      title: string;
+      attempts?: number;
+      evidence?: TaskEvidence;
+      iterations?: number;
+    }
+  | { type: 'step.failed'; stepId: string; title: string; detail: string; iterations?: number }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
@@ -76,15 +103,34 @@ export type AgentRunOutcome =
       ok: true;
       summary: string;
       usage?: Usage;
-      /** Recorded in the task result; game sessions report their verified evidence here. */
-      artifacts?: Array<{ path: string; bytes?: number; digest?: string }>;
+      verification?: TaskVerification;
+      artifacts?: Array<{
+        path: string;
+        bytes?: number;
+        digest?: string;
+      }>;
     }
-  | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
+  | {
+      ok: false;
+      code: EngineFailureCode;
+      detail: string;
+      retryable: boolean;
+      usage?: Usage;
+    };
+
+export type { ReasoningMode };
 
 export type AgentAdapter = {
   agent: AgentId;
   engine: EngineId;
   capabilities: EngineCapabilities;
+  /**
+   * How this adapter's side effects are authorized. `none` means it has no side
+   * effects at all; `gated` means every one goes through the permission store;
+   * `ungated` means it can act without a scoped owner decision. A durable
+   * schedule may only target `none` or `gated`, because nobody is watching it.
+   */
+  sideEffects: 'none' | 'gated' | 'ungated';
   isolation: AgentIsolation;
   availability: () => Availability;
   /**

@@ -46,7 +46,7 @@ Status vocabulary:
 | 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | none | Missing |
 | 31 | FreeBuff SDK loading, loopback restriction, context floor | `freebuff/adapter.ts` | injected transport only | Missing (review F3) |
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
-| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | new deterministic planner + gateway (`src/agents/native`) | Changed — not the same agent; see #34 |
+| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | independent reasoning loop: model-assisted decomposition, dependency-aware parallel scheduling, bounded replanning, evidence verification and approval suspension (`src/agents/native`) | Changed — not the same agent; see #34 |
 | 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | absent; `tools: false` | Missing |
 | 35 | Secret redaction of provider text | `cloud/redact.ts` | `src/observability/redact.ts` | Preserved |
 | 36 | Private/cloud mode denial for providers | `cloud/mode.ts` | workspace + memory partitioning only | Simplified |
@@ -57,8 +57,8 @@ Status vocabulary:
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
-| 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
-| 45 | Cloud browser orchestration | none | none | Not started (both) |
+| 44 | Schedules (cron) | `croner` + Mongo, in-process | `src/scheduling` (once, interval, hourly, calendar in an IANA zone, monthly, named events) + durable receipts and Mongo store | Strengthened — cross-replica idempotency, missed-run policy, pause/resume/cancel, edit with an immutable execution identity, upcoming preview, priorities, run and inference budgets, notices merged into `/v1/notifications` |
+| 45 | Cloud browser orchestration | none | contract v1, fail-closed adapter, approvals, receipts, takeover; no verified provider | Contract only |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
 | 47 | Tool/plugin execution | Coderax tools | none | Missing |
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
@@ -75,12 +75,13 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 22 |
+| Preserved | 23 |
 | Strengthened | 10 |
 | Simplified | 5 |
-| Missing | 10 |
+| Missing | 9 |
 | Changed (deliberate) | 6 |
-| Not started (both) | 3 |
+| Contract only (no verified provider) | 1 |
+| Not started (both) | 2 |
 
 ## What this means
 
@@ -89,9 +90,9 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 44, 46 and 47
-are closed, migrating a client would remove functionality, which the brief
-forbids.
+capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 46 and 47 are
+closed, migrating a client would remove functionality, which the brief forbids.
+Scheduling (row 44) is implemented here and no longer blocks a client cut-over.
 
 Dependency order for closing them:
 
@@ -103,26 +104,18 @@ Dependency order for closing them:
    agent stack.
 4. Approvals bound to a resource (40), provider mode denial (36), caller-supplied
    workspace confinement (13).
-5. Schedules (44) and DeploymentPlatformAI (46).
+5. DeploymentPlatformAI (46) and a verified zero-cost browser
+   provider for the contract in `docs/browser.md` (45).
 6. Only then Phase 5/6 client migration, Phase 8 deployment, Phase 9 removal.
 
 ## Verification status
 
-- `npm run verify` at the delivery head: **132/132 tests**, OpenAPI drift clean.
-- Durable stores are verified against a semantics-faithful collection fake in
-  the default suite, and separately against a real MongoDB 8.0.4 server: a
-  completed task and transcript survived a server restart, and two clients
-  racing one lease produced exactly one winner. See `docs/evidence/mongo/`.
-  Game project/build bytes remain file-backed, so cross-replica game artifact
-  concurrency is not claimed.
-- No hosted CI run exists at the pushed head: the workflow triggers on a pull
-  request or a `main` push, and no pull request could be opened from this
-  environment. The local run above is the only executed evidence.
-- The default gate's browser-boot check executes the exact inline preview
-  document in a bounded DOM harness and presses its on-screen controls. It is
-  not a real browser.
-- Real Chromium acceptance was captured separately for the platformer and puzzle:
-  rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart,
-  audio synthesis, a 390×844 layout and owner-only 403/200 access. The report is
-  in `docs/evidence/browser/`. Safari, Firefox and physical mobile devices were
-  not tested, and the browser test controller is not the Gaming Agent.
+- Integrated revision: exact-head hosted verification pending.
+- The Game Studio branch reports 132/132 passing tests and a clean OpenAPI drift check before integration.
+- The branch reports separate MongoDB 8.0.4 durability and concurrency verification. See `docs/evidence/mongo/`.
+- Game project and build bytes remain file-backed. Cross-replica game artifact concurrency is not claimed.
+- Real Chromium acceptance was reported for the platformer and puzzle, including rendering, controls, scoring, collision, restart, audio and owner-only access.
+- See `docs/evidence/browser/` for the acceptance reports.
+- Safari, Firefox and physical mobile devices remain unverified.
+- Autonomous cloud-browser gameplay remains blocked pending a verified zero-cost provider.
+- All verification gates must be rerun against the final integrated revision.
