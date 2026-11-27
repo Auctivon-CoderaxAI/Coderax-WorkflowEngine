@@ -2,45 +2,21 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Router } from './router.js';
 
 const MAX_BODY_BYTES = 1_048_576;
-/** A client that ignores the bound is cut off rather than read forever. */
-const HARD_BODY_BYTES = MAX_BODY_BYTES * 8;
 
-type BodyRead = { text: string } | { tooLarge: true };
-
-/**
- * Reads a request body under a hard bound.
- *
- * An oversized body is drained rather than having its socket destroyed: a client
- * that sent too much must receive the typed 413 that says so, not a reset
- * connection it can only report as a transport failure. Buffering stops as soon
- * as the bound is crossed, and a client that keeps going past the hard limit is
- * disconnected.
- */
-function readBody(request: IncomingMessage): Promise<BodyRead> {
+function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
-    let tooLarge = false;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > HARD_BODY_BYTES) {
-        request.destroy();
+      if (size > limit) {
         reject(new Error('request body is too large'));
-        return;
-      }
-      if (size > MAX_BODY_BYTES) {
-        tooLarge = true;
+        request.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    request.on('end', () => {
-      if (tooLarge) {
-        resolve({ tooLarge: true });
-        return;
-      }
-      resolve({ text: Buffer.concat(chunks).toString('utf8') });
-    });
+    request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     request.on('error', reject);
   });
 }
@@ -70,26 +46,19 @@ export function createHttpServer(input: {
       let bodyText = '';
       try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          const body = await readBody(request);
-          if ('tooLarge' in body) {
-            sendJson(response, 413, {
-              type: 'https://coderax.dev/problems/validation_failed',
-              title: 'validation failed',
-              status: 413,
-              code: 'validation_failed',
-              detail: 'The request body is too large.',
-              retryable: false,
-            });
-            return;
-          }
-          bodyText = body.text;
+          const limit =
+            input.router.bodyLimit(
+              request.method ?? 'GET',
+              request.url ?? '/',
+            ) ?? MAX_BODY_BYTES;
+          bodyText = await readBody(request, limit);
         }
       } catch {
         sendJson(response, 413, {
-          type: 'https://coderax.dev/problems/validation_failed',
-          title: 'validation failed',
+          type: 'https://coderax.dev/problems/payload_too_large',
+          title: 'payload too large',
           status: 413,
-          code: 'validation_failed',
+          code: 'payload_too_large',
           detail: 'The request body is too large.',
           retryable: false,
         });
@@ -101,12 +70,25 @@ export function createHttpServer(input: {
           method: request.method ?? 'GET',
           path: request.url ?? '/',
           authorization: request.headers.authorization,
-          accept: typeof request.headers.accept === 'string' ? request.headers.accept : undefined,
           bodyText,
         });
 
         if (result.kind === 'json') {
           sendJson(response, result.status, result.body);
+          return;
+        }
+
+        if (result.kind === 'text') {
+          response.writeHead(result.status, {
+            'content-type': result.contentType,
+            'cache-control': 'no-store',
+            // The preview is a self-contained document with no external loads.
+            'content-security-policy':
+              "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'",
+            'x-content-type-options': 'nosniff',
+            'content-length': Buffer.byteLength(result.body),
+          });
+          response.end(result.body);
           return;
         }
 
@@ -116,10 +98,7 @@ export function createHttpServer(input: {
           connection: 'keep-alive',
         });
         for await (const event of result.events) {
-          if (response.destroyed || response.writableEnded) {
-            if (result.drainOnDisconnect) continue;
-            break;
-          }
+          if (response.destroyed || response.writableEnded) break;
           response.write(`data: ${JSON.stringify(event)}\n\n`);
         }
         response.end();

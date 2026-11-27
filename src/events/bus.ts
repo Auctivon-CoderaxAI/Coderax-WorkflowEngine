@@ -4,7 +4,7 @@ import type {
   ExecutionEventType,
 } from '@coderax/contracts';
 import { EVENT_SCHEMA_VERSION } from '@coderax/contracts';
-import type { EventLog } from './log.js';
+import { redactValue } from '../observability/redact.js';
 
 export type EventDraft = {
   taskId: string;
@@ -36,11 +36,6 @@ export type Unsubscribe = () => void;
  * beyond what has been seen; anything else is reported rather than applied. A
  * subscriber that disconnects does not stop the run: publishing is independent
  * of any listener.
- *
- * A durable `log` receives every published event. Writes are queued rather than
- * awaited so publishing stays synchronous for the runner; `flush` is what a
- * shutdown awaits before the connection closes, and it rethrows a write that
- * failed so lost history is never reported as stored.
  */
 export type EventBus = {
   publish: (draft: EventDraft) => ExecutionEvent;
@@ -49,14 +44,6 @@ export type EventBus = {
   replay: (taskId: string, after: number) => Replay;
   subscribe: (taskId: string, after: number, listener: (event: ExecutionEvent) => void) => Unsubscribe;
   lastSeq: (taskId: string) => number;
-  /**
-   * Continues numbering from history a previous process stored. Without this a
-   * resumed run in a new process would publish `seq` 1 again over events that
-   * already exist.
-   */
-  adopt: (taskId: string, seq: number) => void;
-  /** Resolves once every published event has reached the durable log. */
-  flush: () => Promise<void>;
 };
 
 type Stream = {
@@ -70,11 +57,8 @@ export function createEventBus(input: {
   bufferSize: number;
   eventId: () => string;
   iso: () => string;
-  log?: EventLog;
 }): EventBus {
   const streams = new Map<string, Stream>();
-  const pending = new Set<Promise<void>>();
-  const failures: Error[] = [];
 
   function stream(taskId: string): Stream {
     const existing = streams.get(taskId);
@@ -84,33 +68,12 @@ export function createEventBus(input: {
     return created;
   }
 
-  function persist(event: ExecutionEvent): void {
-    if (!input.log) return;
-    const write = input.log.append(event).then(
-      (outcome) => {
-        if (!outcome.stored && outcome.reason === 'conflict') {
-          failures.push(
-            new Error(
-              `Event ${event.eventId} collides with another event on ${event.taskId} seq ${event.seq}.`,
-            ),
-          );
-        }
-      },
-      (error: unknown) => {
-        failures.push(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
-    pending.add(write);
-    void write.then(() => pending.delete(write));
-  }
-
   function append(state: Stream, event: ExecutionEvent): void {
     state.events.push(event);
     state.seen.add(event.eventId);
     if (state.events.length > input.bufferSize) {
       state.events.splice(0, state.events.length - input.bufferSize);
     }
-    persist(event);
     for (const subscriber of state.listeners) {
       if (event.seq > subscriber.cursor) {
         subscriber.cursor = event.seq;
@@ -132,7 +95,9 @@ export function createEventBus(input: {
         agent: draft.agent,
         generation: draft.generation,
         type: draft.type,
-        ...(draft.payload === undefined ? {} : { payload: draft.payload }),
+        // Redaction is enforced here, not by each producer: every event that is
+        // streamed or persisted has already crossed this line.
+        ...(draft.payload === undefined ? {} : { payload: redactValue(draft.payload) }),
       } as ExecutionEvent;
       append(state, event);
       return event;
@@ -146,8 +111,14 @@ export function createEventBus(input: {
         return { accepted: false, reason: 'out_of_order' };
       }
       state.seq = event.seq;
-      append(state, event);
-      return { accepted: true, event };
+      // Some event variants have no payload at all, so the field is read
+      // through a shape check rather than a discriminated-union member access.
+      const payload = (event as { payload?: unknown }).payload;
+      const safe = (
+        payload === undefined ? event : { ...event, payload: redactValue(payload) }
+      ) as ExecutionEvent;
+      append(state, safe);
+      return { accepted: true, event: safe };
     },
     replay: (taskId, after) => {
       const state = streams.get(taskId);
@@ -156,7 +127,7 @@ export function createEventBus(input: {
       // The consumer's next needed sequence is `after + 1`; if that predates the
       // retained window, some events are gone and the caller must be told.
       if (oldest > 1 && after + 1 < oldest) {
-        return { events: [...state.events], truncated: true };
+        return { events: state.events, truncated: true };
       }
       return {
         events: state.events.filter((event) => event.seq > after),
@@ -172,15 +143,5 @@ export function createEventBus(input: {
       };
     },
     lastSeq: (taskId) => streams.get(taskId)?.seq ?? 0,
-    adopt: (taskId, seq) => {
-      if (seq <= 0) return;
-      const state = stream(taskId);
-      if (seq > state.seq) state.seq = seq;
-    },
-    flush: async () => {
-      while (pending.size > 0) await Promise.all([...pending]);
-      const [failure] = failures.splice(0, failures.length);
-      if (failure) throw failure;
-    },
   };
 }

@@ -8,6 +8,7 @@ import {
   Sha256,
   TaskId,
 } from './primitives.js';
+import { DurableDeliverableRequest, VerificationCheck } from './deliverables.js';
 
 /**
  * Durable artifacts.
@@ -187,7 +188,6 @@ export const ArtifactUploadRequest = z
   })
   .strict();
 export type ArtifactUploadRequest = z.infer<typeof ArtifactUploadRequest>;
-export type ArtifactUploadRequestInput = z.input<typeof ArtifactUploadRequest>;
 
 export const ArtifactVersionRequest = z
   .object({
@@ -203,20 +203,6 @@ export const ArtifactVersionRequest = z
   })
   .strict();
 export type ArtifactVersionRequest = z.infer<typeof ArtifactVersionRequest>;
-export type ArtifactVersionRequestInput = z.input<typeof ArtifactVersionRequest>;
-
-/**
- * The task-scoped projection of an upload. Mode, task and conversation are
- * derived from the task, never stated by the caller: a client cannot attach
- * bytes to a task in another owner's partition by supplying an id.
- */
-export const TaskArtifactUploadRequest = ArtifactUploadRequest.omit({
-  mode: true,
-  taskId: true,
-  conversationId: true,
-});
-export type TaskArtifactUploadRequest = z.infer<typeof TaskArtifactUploadRequest>;
-export type TaskArtifactUploadRequestInput = z.input<typeof TaskArtifactUploadRequest>;
 
 export const ArtifactUploadResult = z
   .object({ artifact: ArtifactDescriptor, version: ArtifactVersionDescriptor })
@@ -250,6 +236,97 @@ export type ArtifactExport = z.infer<typeof ArtifactExport>;
 
 export const ArtifactModeRequest = z.object({ mode: DataMode.default('private') }).strict();
 export type ArtifactModeRequest = z.infer<typeof ArtifactModeRequest>;
+
+/**
+ * Restoring points an artifact back at an existing immutable version. It does
+ * not delete the newer versions and it does not move bytes. `expectedVersion`
+ * is the current version the caller saw, so a concurrent edit fails the restore
+ * instead of silently overwriting it.
+ */
+export const ArtifactRestoreRequest = z
+  .object({
+    mode: DataMode.default('private'),
+    version: z.number().int().positive(),
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict();
+export type ArtifactRestoreRequest = z.infer<typeof ArtifactRestoreRequest>;
+
+export const ArtifactManifestEntry = z
+  .object({
+    relativePath: z.string().min(1).max(1024),
+    artifactId: ArtifactId,
+    version: z.number().int().positive(),
+    sha256: Sha256,
+    bytes: z.number().int().nonnegative(),
+    mediaType: ArtifactMediaType,
+    kind: ArtifactKind,
+  })
+  .strict();
+export type ArtifactManifestEntry = z.infer<typeof ArtifactManifestEntry>;
+
+/**
+ * A project manifest pins every file to one immutable artifact version and
+ * carries a digest over the canonical entry list. It is the restoration unit
+ * for a generated tree; the files are read by artifact id and version, never by
+ * a workspace path.
+ */
+export const ArtifactProjectManifest = z
+  .object({
+    projectId: ProjectId,
+    mode: DataMode,
+    files: z.array(ArtifactManifestEntry),
+    digest: Sha256,
+    generatedAt: IsoDateTime,
+  })
+  .strict();
+export type ArtifactProjectManifest = z.infer<typeof ArtifactProjectManifest>;
+
+export const ArtifactManifestQuery = z
+  .object({ mode: DataMode.default('private'), projectId: ProjectId })
+  .strict();
+export type ArtifactManifestQuery = z.infer<typeof ArtifactManifestQuery>;
+
+/**
+ * Durable generation. The request names a deliverable that artifact
+ * intelligence can render; the engine generates, verifies and persists it
+ * through the same tree adapter as an upload.
+ *
+ * `mode` is read from the deliverable rather than repeated on the envelope, so
+ * a request cannot name two data partitions. The response is the persisted
+ * project manifest: every file is pinned to an artifact id and immutable
+ * version, and `checks` is the verification the producer actually ran.
+ */
+export const ArtifactGenerationRequest = z
+  .object({
+    projectId: ProjectId,
+    deliverable: DurableDeliverableRequest,
+    conversationId: ConversationId.optional(),
+    taskId: TaskId.optional(),
+    /** 0 keeps generated artifacts until they are deleted. */
+    retentionDays: z.number().int().min(0).max(3650).optional(),
+  })
+  .strict();
+export type ArtifactGenerationRequest = z.infer<typeof ArtifactGenerationRequest>;
+
+export const GeneratedArtifactKind = z.enum([
+  'document',
+  'spreadsheet',
+  'presentation',
+  'software',
+]);
+export type GeneratedArtifactKind = z.infer<typeof GeneratedArtifactKind>;
+
+export const ArtifactGenerationResult = z
+  .object({
+    projectId: ProjectId,
+    kind: GeneratedArtifactKind,
+    title: z.string().min(1).max(200),
+    manifest: ArtifactProjectManifest,
+    checks: z.array(VerificationCheck).min(1).max(60),
+  })
+  .strict();
+export type ArtifactGenerationResult = z.infer<typeof ArtifactGenerationResult>;
 
 export const ArtifactDeleteResult = z
   .object({

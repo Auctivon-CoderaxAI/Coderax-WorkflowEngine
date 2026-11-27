@@ -1,15 +1,12 @@
-import type { CapabilityFlags, ChatStreamEvent, DataMode } from '@coderax/contracts';
-import {
-  API_PREFIX,
-  CHAT_STREAM_VERSION,
-  CONTRACT_FINGERPRINT,
-  CONTRACT_MAJOR,
-  CONTRACT_VERSION,
-  EVENT_SCHEMA_VERSION,
-  negotiateContract,
-  supportedContractVersions,
+import type {
+  ArtifactGenerationRequest,
+  ArtifactKind,
+  ArtifactModeRequest,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
+  DataMode,
 } from '@coderax/contracts';
-import type { ApplicationService, EventStream } from '../orchestration/service.js';
+import type { ApplicationService } from '../orchestration/service.js';
 import type { RouteRegistry } from './router.js';
 import { problemResult } from './router.js';
 import type { ServiceFailure } from '../support/result.js';
@@ -23,39 +20,34 @@ import type { ServiceFailure } from '../support/result.js';
  * reaches a repository, an adapter or a provider directly.
  */
 
-export type HandshakeInfo = {
-  server: { name: string; version: string; startedAt: string };
-  limits: {
-    maxBodyBytes: number;
-    eventBufferSize: number;
-    maxConcurrentTasks: number;
-    scheduleMinIntervalMs: number;
-    artifactMaxBytes: number;
-    memoryMaxValueLength: number;
-  };
-};
-
-const TERMINAL_EVENT_TYPES = new Set([
-  'task.completed',
-  'task.failed',
-  'task.cancelled',
-  'task.interrupted',
-]);
+/** The router validates a query string but hands handlers the raw values. */
+function queryNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
 
 function fromFailure(failure: ServiceFailure, requestId: string) {
   return problemResult(failure.code, failure.detail, requestId, failure.retryable);
 }
 
+/** The query schema already validated the enum; this only names the default. */
+function modeFrom(value: unknown): DataMode {
+  return value === 'cloud' ? 'cloud' : 'private';
+}
+
 function isTerminalPayload(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false;
   const type = (value as { type?: unknown }).type;
-  return typeof type === 'string' && TERMINAL_EVENT_TYPES.has(type);
-}
-
-function isTerminalChatPayload(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) return false;
-  const type = (value as { type?: unknown }).type;
-  return type === 'chat.completed' || type === 'chat.failed';
+  return (
+    type === 'task.completed' ||
+    type === 'task.failed' ||
+    type === 'task.cancelled' ||
+    type === 'task.interrupted'
+  );
 }
 
 function eventId(value: unknown): string {
@@ -66,40 +58,21 @@ function eventId(value: unknown): string {
   return '';
 }
 
-function acceptsEventStream(accept: string | undefined): boolean {
-  if (!accept) return false;
-  return accept.split(',').some((entry) => {
-    const [mediaType, ...params] = entry
-      .trim()
-      .toLowerCase()
-      .split(';')
-      .map((part) => part.trim());
-    if (mediaType !== 'text/event-stream') return false;
-    // `q=0` means the client explicitly refuses this media type (RFC 9110), so
-    // `application/json, text/event-stream;q=0` must still get JSON.
-    const quality = params.find((param) => param.startsWith('q='));
-    return quality === undefined || Number(quality.slice(2)) > 0;
-  });
-}
-
 /**
  * Replays retained events, then tails the live ones. The stream closes on a
  * terminal event so a client never waits for a task that already finished; a
  * disconnected client stops consuming without stopping the run.
  */
-async function* toEventStream(stream: EventStream, signalTruncation: boolean): AsyncIterable<unknown> {
+async function* toEventStream(stream: {
+  replay: { events: unknown[] };
+  subscribe: (listener: (event: unknown) => void) => () => void;
+}): AsyncIterable<unknown> {
   const seen = new Set<string>();
-  if (signalTruncation && stream.truncatedEvent) {
-    seen.add(stream.truncatedEvent.eventId);
-    yield stream.truncatedEvent;
-  }
   for (const event of stream.replay.events) {
     seen.add(eventId(event));
     yield event;
+    if (isTerminalPayload(event)) return;
   }
-  // A task that already finished will never publish again, so a cursor past the
-  // terminal frame must close the stream instead of holding it open.
-  if (stream.closedAfterReplay) return;
 
   const pending: unknown[] = [];
   let wake: (() => void) | null = null;
@@ -131,25 +104,7 @@ async function* toEventStream(stream: EventStream, signalTruncation: boolean): A
   }
 }
 
-/**
- * Chat frames are already ordered by the turn itself, so this only has to stop
- * at the terminal frame. A client that disconnects mid-turn does not affect the
- * turn: the reply is still persisted once the adapter finishes.
- */
-async function* toChatStream(
-  events: AsyncIterable<ChatStreamEvent>,
-): AsyncIterable<unknown> {
-  for await (const frame of events) {
-    yield frame;
-    if (isTerminalChatPayload(frame)) return;
-  }
-}
-
-export function registerRoutes(
-  registry: RouteRegistry,
-  service: ApplicationService,
-  info: HandshakeInfo,
-): void {
+export function registerRoutes(registry: RouteRegistry, service: ApplicationService): void {
   registry.register('getHealth', async () => ({
     kind: 'json',
     status: 200,
@@ -161,82 +116,6 @@ export function registerRoutes(
     status: 200,
     body: await service.readiness(),
   }));
-
-  /**
-   * The handshake is built from the registry, not from the catalogue, so the
-   * operations it reports are exactly the ones a handler exists for.
-   */
-  registry.register('getHandshake', async (context) => {
-    const requested =
-      typeof context.query.contract === 'string' ? context.query.contract : undefined;
-    const fingerprint =
-      typeof context.query.fingerprint === 'string' ? context.query.fingerprint : undefined;
-    const negotiation = negotiateContract(requested, {
-      ...(fingerprint !== undefined ? { provided: fingerprint } : {}),
-      expected: CONTRACT_FINGERPRINT,
-    });
-    const registered = registry.list().map((route) => route.spec);
-    const operationIds = new Set(registered.map((spec) => spec.operationId));
-    const has = (operationId: string): boolean => operationIds.has(operationId);
-    const chatRoute = registered.find((spec) => spec.operationId === 'submitChat');
-    const agents = service.agents();
-
-    const capabilities: CapabilityFlags = {
-      health: has('getHealth') && has('getReadiness'),
-      discovery: has('listAgents') && has('listModels'),
-      chat: has('submitChat'),
-      chatStreaming: has('submitChat') && chatRoute?.negotiated === true,
-      work: has('submitWork') && has('getTask'),
-      workStreaming: has('streamTaskEvents'),
-      cursorReplay: has('streamTaskEvents'),
-      cancellation: has('cancelTask'),
-      resume: has('resumeTask'),
-      retry: has('retryTask'),
-      permissions: has('listPermissions') && has('decidePermission'),
-      notifications: has('listNotifications'),
-      notificationRead: has('markNotificationRead'),
-      schedules: has('listSchedules') && has('createSchedule'),
-      artifacts: has('listArtifacts') && has('getArtifact') && has('uploadArtifact'),
-      memory: has('listMemory') && has('writeMemory') && has('deleteMemory'),
-      memorySearch: has('searchMemory'),
-      conversations: has('listConversations') && has('getConversation'),
-      taskList: has('listTasks'),
-      idempotentSubmission: has('submitWork'),
-      externalAgents: agents.agents.some(
-        (agent) => agent.external && agent.availability.available,
-      ),
-      paidModels: false,
-    };
-
-    return {
-      kind: 'json',
-      status: 200,
-      body: {
-        contractVersion: CONTRACT_VERSION,
-        contractMajor: CONTRACT_MAJOR,
-        eventSchemaVersion: EVENT_SCHEMA_VERSION,
-        chatStreamVersion: CHAT_STREAM_VERSION,
-        apiPrefix: API_PREFIX,
-        contractFingerprint: CONTRACT_FINGERPRINT,
-        supportedContractVersions: supportedContractVersions(),
-        ...(requested ? { requestedContractVersion: requested } : {}),
-        compatible: negotiation.compatible,
-        negotiatedContractVersion: negotiation.negotiatedContractVersion,
-        negotiation: negotiation.negotiation,
-        server: info.server,
-        operations: registered.map((spec) => ({
-          operationId: spec.operationId,
-          method: spec.method,
-          path: spec.path,
-          tags: spec.tags,
-          auth: spec.auth,
-          stream: spec.stream === true,
-        })),
-        capabilities,
-        limits: info.limits,
-      },
-    };
-  });
 
   registry.register('listAgents', async () => ({
     kind: 'json',
@@ -251,13 +130,7 @@ export function registerRoutes(
   }));
 
   registry.register('submitChat', async (context) => {
-    const request = context.body as never;
-    if (acceptsEventStream(context.accept)) {
-      const streamed = await service.chatStream(context.principal, request);
-      if (!streamed.ok) return fromFailure(streamed, context.requestId);
-      return { kind: 'sse', status: 200, drainOnDisconnect: true, events: toChatStream(streamed.value) };
-    }
-    const result = await service.chat(context.principal, request);
+    const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
@@ -267,19 +140,6 @@ export function registerRoutes(
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 202, body: result.value };
   });
-
-  registry.register('listTasks', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.tasks(context.principal, context.query as never),
-  }));
-
-  // The compatibility address for the same read model. One handler, two specs.
-  registry.register('listWork', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.tasks(context.principal, context.query as never),
-  }));
 
   registry.register('getTask', async (context) => {
     const result = await service.task(context.principal, context.params.taskId ?? '');
@@ -325,120 +185,7 @@ export function registerRoutes(
     const cursor = typeof after === 'number' ? after : 0;
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
-    const signalTruncation = context.accept?.split(',').some((entry) => {
-      const [mediaType, ...params] = entry.toLowerCase().split(';').map((part) => part.trim());
-      return mediaType === 'text/event-stream' && params.includes('truncation=signal');
-    }) ?? false;
-    return { kind: 'sse', status: 200, events: toEventStream(result.value, signalTruncation) };
-  });
-
-  registry.register('listArtifacts', async (context) => {
-    const result = await service.artifacts.list(context.principal, context.query as never);
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('uploadArtifact', async (context) => {
-    const result = await service.artifacts.upload(context.principal, context.body as never);
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 201, body: result.value };
-  });
-
-  registry.register('pruneArtifacts', async (context) => {
-    const body = context.body as { mode?: DataMode };
-    const result = await service.artifacts.prune(context.principal, body.mode ?? 'private');
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('getArtifact', async (context) => {
-    const query = context.query as { mode?: DataMode };
-    const result = await service.artifacts.get(
-      context.principal,
-      context.params.artifactId ?? '',
-      query.mode ?? 'private',
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('uploadArtifactVersion', async (context) => {
-    const result = await service.artifacts.addVersion(
-      context.principal,
-      context.params.artifactId ?? '',
-      context.body as never,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 201, body: result.value };
-  });
-
-  registry.register('listArtifactVersions', async (context) => {
-    const query = context.query as { mode?: DataMode };
-    const result = await service.artifacts.versions(
-      context.principal,
-      context.params.artifactId ?? '',
-      query.mode ?? 'private',
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('downloadArtifact', async (context) => {
-    const result = await service.artifacts.download(
-      context.principal,
-      context.params.artifactId ?? '',
-      context.query as never,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('exportArtifact', async (context) => {
-    const result = await service.artifacts.exportBundle(
-      context.principal,
-      context.params.artifactId ?? '',
-      context.query as never,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('deleteArtifact', async (context) => {
-    const body = context.body as { mode?: DataMode };
-    const result = await service.artifacts.remove(
-      context.principal,
-      context.params.artifactId ?? '',
-      body.mode ?? 'private',
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  // Task routes project the same durable store; they add scoping, not storage.
-  registry.register('listTaskArtifacts', async (context) => {
-    const result = await service.taskArtifacts(context.principal, context.params.taskId ?? '');
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('createTaskArtifact', async (context) => {
-    const result = await service.createTaskArtifact(
-      context.principal,
-      context.params.taskId ?? '',
-      context.body as never,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 201, body: result.value };
-  });
-
-  registry.register('getTaskArtifact', async (context) => {
-    const result = await service.taskArtifact(
-      context.principal,
-      context.params.taskId ?? '',
-      context.params.artifactId ?? '',
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
+    return { kind: 'sse', status: 200, events: toEventStream(result.value) };
   });
 
   registry.register('listConversations', async (context) => ({
@@ -461,24 +208,6 @@ export function registerRoutes(
     return { kind: 'json', status: 200, body: await service.memory(context.principal, mode) };
   });
 
-  registry.register('writeMemory', async (context) => {
-    const result = await service.writeMemory(context.principal, context.body as never);
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('deleteMemory', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.deleteMemory(context.principal, context.body as never),
-  }));
-
-  registry.register('searchMemory', async (context) => ({
-    kind: 'json',
-    status: 200,
-    body: await service.searchMemory(context.principal, context.query as never),
-  }));
-
   registry.register('listPermissions', async (context) => {
     const result = await service.permissions(context.principal, context.params.taskId ?? '');
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -495,19 +224,262 @@ export function registerRoutes(
     return { kind: 'json', status: 200, body: result.value };
   });
 
-  registry.register('listNotifications', async (context) => ({
+  registry.register('browserCapabilities', async () => ({
     kind: 'json',
     status: 200,
-    body: await service.notifications(context.principal),
+    body: await service.browserCapabilities(),
   }));
 
-  registry.register('markNotificationRead', async (context) => {
-    const result = await service.markNotificationRead(
+  registry.register('listBrowserSessions', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.browserSessions(context.principal),
+  }));
+
+  registry.register('createBrowserSession', async (context) => {
+    const result = await service.createBrowserSession(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('getBrowserSession', async (context) => {
+    const result = await service.browserSession(
       context.principal,
-      context.params.taskId ?? '',
+      context.params.sessionId ?? '',
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('browserAction', async (context) => {
+    const result = await service.browserAction(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('pauseBrowserSession', async (context) => {
+    const result = await service.pauseBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('resumeBrowserSession', async (context) => {
+    const result = await service.resumeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('takeoverBrowserSession', async (context) => {
+    const result = await service.takeoverBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('closeBrowserSession', async (context) => {
+    const result = await service.closeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      (context.body ?? {}) as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('authorizeBrowserSession', async (context) => {
+    const result = await service.authorizeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('decideBrowserAuthorization', async (context) => {
+    const result = await service.decideBrowserAuthorization(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listBrowserReceipts', async (context) => {
+    const result = await service.browserReceipts(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getBrowserArtifact', async (context) => {
+    const result = await service.browserArtifact(
+      context.principal,
+      context.params.artifactId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listArtifacts', async (context) => {
+    const query = context.query as {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    };
+    const result = await service.artifacts.list(context.principal, query);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('artifactProjectManifest', async (context) => {
+    const query = context.query as { mode?: DataMode; projectId: string };
+    const result = await service.artifacts.manifest(context.principal, {
+      mode: modeFrom(query.mode),
+      projectId: query.projectId,
+    });
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('generateArtifact', async (context) => {
+    const result = await service.generateArtifact(
+      context.principal,
+      context.body as ArtifactGenerationRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('uploadArtifact', async (context) => {
+    const result = await service.artifacts.upload(
+      context.principal,
+      context.body as ArtifactUploadRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('pruneArtifacts', async (context) => {
+    const body = context.body as ArtifactModeRequest;
+    const result = await service.artifacts.prune(context.principal, modeFrom(body.mode));
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getArtifact', async (context) => {
+    const result = await service.artifacts.get(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(context.query.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('uploadArtifactVersion', async (context) => {
+    const result = await service.artifacts.addVersion(
+      context.principal,
+      context.params.artifactId ?? '',
+      context.body as ArtifactVersionRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('restoreArtifactVersion', async (context) => {
+    const body = context.body as { mode?: DataMode; version: number; expectedVersion: number };
+    const result = await service.artifacts.restore(
+      context.principal,
+      context.params.artifactId ?? '',
+      {
+        mode: modeFrom(body.mode),
+        version: body.version,
+        expectedVersion: body.expectedVersion,
+      },
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listArtifactVersions', async (context) => {
+    const result = await service.artifacts.versions(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(context.query.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('downloadArtifact', async (context) => {
+    const query = context.query as { mode?: DataMode; version?: number };
+    const result = await service.artifacts.download(
+      context.principal,
+      context.params.artifactId ?? '',
+      query,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('exportArtifact', async (context) => {
+    const query = context.query as { mode?: DataMode; version?: number };
+    const result = await service.artifacts.exportBundle(
+      context.principal,
+      context.params.artifactId ?? '',
+      query,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('deleteArtifact', async (context) => {
+    const body = context.body as ArtifactModeRequest;
+    const result = await service.artifacts.remove(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(body.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listNotifications', async (context) => {
+    const include = context.query.includeSchedules === 'true';
+    const list = await service.notifications(context.principal, include);
+    return { kind: 'json', status: 200, body: include ? list : { notifications: list.notifications, unread: list.unread } };
+  });
+
+  registry.register('markNotificationsRead', async (context) => {
+    const include = context.query.includeSchedules === 'true';
+    const list = await service.markNotificationsRead(context.principal, include);
+    return { kind: 'json', status: 200, body: include ? list : { notifications: list.notifications, unread: list.unread } };
+  });
+
+  registry.register('createSchedule', async (context) => {
+    const result = await service.createSchedule(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
   });
 
   registry.register('listSchedules', async (context) => ({
@@ -516,14 +488,51 @@ export function registerRoutes(
     body: await service.schedules(context.principal),
   }));
 
-  registry.register('createSchedule', async (context) => {
-    const result = await service.createSchedule(context.principal, context.body as never);
+  registry.register('getGameCapabilities', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: service.gameCapabilities(context.principal),
+  }));
+
+  registry.register('listGames', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.listGames(context.principal, {
+      ...(typeof context.query.cursor === 'string' ? { cursor: context.query.cursor } : {}),
+      ...(typeof context.query.limit === 'number' ? { limit: context.query.limit } : {}),
+    }),
+  }));
+
+  registry.register('createGame', async (context) => {
+    const result = await service.createGame(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 201, body: result.value };
   });
 
+  registry.register('getGame', async (context) => {
+    const result = await service.getGame(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('dispatchScheduleEvent', async (context) => {
+    const result = await service.scheduleEvent(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
   registry.register('getSchedule', async (context) => {
     const result = await service.schedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('saveGameSpec', async (context) => {
+    const result = await service.saveGameSpec(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
@@ -538,48 +547,165 @@ export function registerRoutes(
     return { kind: 'json', status: 200, body: result.value };
   });
 
-  registry.register('pauseSchedule', async (context) => {
-    const result = await service.pauseSchedule(
+  registry.register('buildGame', async (context) => {
+    const result = await service.buildGame(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getScheduleUpcoming', async (context) => {
+    const limit = queryNumber(context.query.limit);
+    const result = await service.scheduleUpcoming(
       context.principal,
       context.params.scheduleId ?? '',
+      limit,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listGameBuilds', async (context) => {
+    const result = await service.listGameBuilds(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('pauseSchedule', async (context) => {
+    const result = await service.pauseSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('restoreGameBuild', async (context) => {
+    const result = await service.restoreGameBuild(
+      context.principal,
+      context.params.gameId ?? '',
+      context.params.buildId ?? '',
+      context.body as never,
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
 
   registry.register('resumeSchedule', async (context) => {
-    const result = await service.resumeSchedule(
+    const result = await service.resumeSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('iterateGame', async (context) => {
+    const result = await service.iterateGame(
       context.principal,
-      context.params.scheduleId ?? '',
+      context.params.gameId ?? '',
+      context.body as never,
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
 
   registry.register('cancelSchedule', async (context) => {
-    const result = await service.cancelSchedule(
+    const result = await service.cancelSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('previewGame', async (context) => {
+    const result = await service.gamePreview(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return {
+      kind: 'text',
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: result.value,
+    };
+  });
+
+  registry.register('exportGame', async (context) => {
+    const result = await service.exportGame(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('createGameSession', async (context) => {
+    const result = await service.createGameSession(
       context.principal,
-      context.params.scheduleId ?? '',
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('listGameSessions', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.listGameSessions(context.principal),
+  }));
+
+  registry.register('getGameSession', async (context) => {
+    const result = await service.getGameSession(context.principal, context.params.sessionId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('observeGameSession', async (context) => {
+    const result = await service.observeGameSession(
+      context.principal,
+      context.params.sessionId ?? '',
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('controlGameSession', async (context) => {
+    const result = await service.controlGameSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('gameSessionLogs', async (context) => {
+    const result = await service.gameSessionLogs(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('gameSessionVerification', async (context) => {
+    const result = await service.gameSessionVerification(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('triggerSchedule', async (context) => {
+    const body = (context.body ?? {}) as { idempotencyKey?: string };
+    const result = await service.triggerSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+      body,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
   });
 
   registry.register('listScheduleExecutions', async (context) => {
-    const query = context.query as { limit?: number };
+    const limit = queryNumber(context.query.limit);
     const result = await service.scheduleExecutions(
       context.principal,
       context.params.scheduleId ?? '',
-      query.limit ?? 50,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('deleteSchedule', async (context) => {
-    const result = await service.removeSchedule(
-      context.principal,
-      context.params.scheduleId ?? '',
+      limit,
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };

@@ -1,13 +1,15 @@
 import type { DataMode } from '@coderax/contracts';
 import type { ArtifactRecord, ArtifactVersionRecord } from '../domain.js';
-import type {
-  AppendVersionOutcome,
-  ArtifactKey,
-  ArtifactListFilter,
-  ArtifactRepository,
-  ArtifactUsage,
-  CreateArtifactOutcome,
-  RemoveArtifactOutcome,
+import {
+  artifactPathKey,
+  type AppendVersionOutcome,
+  type ArtifactKey,
+  type ArtifactListFilter,
+  type ArtifactRepository,
+  type ArtifactUsage,
+  type CreateArtifactOutcome,
+  type RemoveArtifactOutcome,
+  type RestoreVersionOutcome,
 } from './artifacts.js';
 import { blobKey, BlobIntegrityError, verifyContent, type BlobStore } from './blobs.js';
 import { isDuplicateKey, type MongoCollectionLike } from './mongo.js';
@@ -100,6 +102,18 @@ export async function ensureArtifactIndexes(
     { ownerId: 1, mode: 1, projectId: 1 },
     { name: 'artifact_project' },
   );
+  // A project path is unique per owner, mode and project. The partial filter
+  // excludes flat artifacts (no relativePath); the case-folded pathKey makes
+  // `README.md` and `readme.md` collide before a case-insensitive filesystem
+  // ever sees them.
+  await artifacts.createIndex(
+    { ownerId: 1, mode: 1, projectId: 1, pathKey: 1 },
+    {
+      unique: true,
+      name: 'artifact_project_path',
+      partialFilterExpression: { relativePath: { $type: 'string' } },
+    },
+  );
   await artifacts.createIndex({ expiresAtMs: 1 }, { name: 'artifact_expiry' });
   await versions.createIndex(
     { ownerId: 1, mode: 1, artifactId: 1, version: 1 },
@@ -169,11 +183,19 @@ export function createMongoArtifactRepository(
 
       // The version number is part of the filter: two replicas that both read
       // version N cannot both write N+1.
-      const updated = await artifacts.updateOne(
-        { ...key, version: expectedVersion },
-        { $set: artifactDocument(artifact) },
-        { upsert: false },
-      );
+      let updated: { matchedCount?: number; upsertedCount?: number };
+      try {
+        updated = await artifacts.updateOne(
+          { ...key, version: expectedVersion },
+          { $set: artifactDocument(artifact) },
+          { upsert: false },
+        );
+      } catch (error) {
+        // The project-path unique index is the race arbiter. A concurrent file
+        // at the same case-folded path is a conflict, not an ambiguous write.
+        if (isDuplicateKey(error)) return { ok: false, reason: 'conflict' };
+        throw error;
+      }
       if ((updated.matchedCount ?? 0) !== 1) return { ok: false, reason: 'conflict' };
 
       try {
@@ -292,6 +314,8 @@ export function createMongoArtifactRepository(
           $set: {
             kind: previous.kind,
             filename: previous.filename,
+            relativePath: previous.relativePath ?? null,
+            pathKey: previous.relativePath ? artifactPathKey(previous.relativePath) : null,
             mediaType: previous.mediaType,
             bytes: previous.bytes,
             sha256: previous.sha256,
@@ -303,6 +327,54 @@ export function createMongoArtifactRepository(
         { upsert: false },
       );
       return toVersion(row);
+    },
+
+    restoreVersion: async (input): Promise<RestoreVersionOutcome> => {
+      const key = identity(input);
+      const stored = await artifacts.findOne(key);
+      if (!stored) return { ok: false, reason: 'not_found' };
+      const artifact = toArtifact(stored);
+      if (artifact.version !== input.expectedVersion) {
+        return { ok: false, reason: 'conflict' };
+      }
+      const row = await versions.findOne({ ...key, version: input.version });
+      if (!row) return { ok: false, reason: 'not_found' };
+      const target = toVersion(row);
+      const updated = await artifacts.updateOne(
+        { ...key, version: input.expectedVersion },
+        {
+          $set: {
+            kind: target.kind,
+            filename: target.filename,
+            relativePath: target.relativePath ?? null,
+            pathKey: target.relativePath ? artifactPathKey(target.relativePath) : null,
+            mediaType: target.mediaType,
+            bytes: target.bytes,
+            sha256: target.sha256,
+            version: target.version,
+            updatedAt: input.now,
+          },
+        },
+        { upsert: false },
+      );
+      if ((updated.matchedCount ?? 0) !== 1) return { ok: false, reason: 'conflict' };
+      const restored: ArtifactRecord = {
+        ...artifact,
+        kind: target.kind,
+        filename: target.filename,
+        mediaType: target.mediaType,
+        bytes: target.bytes,
+        sha256: target.sha256,
+        version: target.version,
+        updatedAt: input.now,
+      };
+      delete restored.relativePath;
+      delete restored.pathKey;
+      if (target.relativePath) {
+        restored.relativePath = target.relativePath;
+        restored.pathKey = artifactPathKey(target.relativePath);
+      }
+      return { ok: true, artifact: restored, version: target };
     },
 
     listExpired: async ({ now, limit, ownerId, mode }) => {

@@ -10,13 +10,12 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
-  /** Raw `Accept` header, so a negotiated operation can pick SSE or JSON. */
-  accept: string | undefined;
 };
 
 export type HandlerResult =
   | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'sse'; status: number; drainOnDisconnect?: boolean; events: AsyncIterable<unknown> };
+  | { kind: 'text'; status: number; contentType: string; body: string }
+  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
 
 export type RouteHandler = (context: RequestContext) => Promise<HandlerResult>;
 
@@ -26,13 +25,13 @@ export type RawRequest = {
   method: string;
   path: string;
   authorization: string | undefined;
-  accept: string | undefined;
   bodyText: string;
 };
 
 export type RouterResult =
   | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'sse'; status: number; drainOnDisconnect?: boolean; events: AsyncIterable<unknown> };
+  | { kind: 'text'; status: number; contentType: string; body: string }
+  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
 
 export type RouteRegistry = {
   register: (operationId: string, handler: RouteHandler) => void;
@@ -81,7 +80,9 @@ export function createRouteRegistry(): RouteRegistry {
     missing: () => [...ROUTE_INDEX.keys()].filter((operationId) => !handlers.has(operationId)),
     openapi: () =>
       buildOpenApiDocument(
-        [...handlers.keys()].map((operationId) => ROUTE_INDEX.get(operationId) as RouteSpec),
+        [...ROUTE_INDEX.keys()]
+          .filter((operationId) => handlers.has(operationId))
+          .map((operationId) => ROUTE_INDEX.get(operationId) as RouteSpec),
       ),
   };
 }
@@ -92,8 +93,8 @@ function problem(
   requestId: string,
   retryable = false,
 ): { kind: 'json'; status: number; body: unknown } {
-  // One mapping, in the contracts, so a client never has to guess a status for a
-  // code and the router cannot drift from the published table.
+  // One table decides the status for both the router and any handler, so a new
+  // failure code cannot mean two different HTTP statuses in two places.
   const status = HTTP_STATUS_FOR_CODE[code];
   return {
     kind: 'json',
@@ -121,24 +122,18 @@ function compilePath(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-function decodeParams(groups: Record<string, string>): Record<string, string> {
-  const decoded: Record<string, string> = {};
-  for (const [key, value] of Object.entries(groups)) {
-    try {
-      decoded[key] = decodeURIComponent(value);
-    } catch {
-      decoded[key] = value;
-    }
-  }
-  return decoded;
-}
-
 /** Exported so a route can answer with the problem body without restating statuses. */
 export const problemResult = problem;
 
 export type Router = {
   handle: (request: RawRequest) => Promise<RouterResult>;
   registry: RouteRegistry;
+  /**
+   * The body ceiling for the operation that matches this method and path, or
+   * `undefined` for the transport default. The server reads the body before a
+   * handler runs, so only the route that carries file content may raise it.
+   */
+  bodyLimit: (method: string, path: string) => number | undefined;
 };
 
 export function createRouter(input: {
@@ -154,10 +149,20 @@ export function createRouter(input: {
 
   return {
     registry: input.registry,
+    bodyLimit: (method, path) => {
+      const [pathname = ''] = path.split('?');
+      const upper = method.toUpperCase();
+      for (const route of routes) {
+        if (route.spec.method !== upper) continue;
+        if (!route.matcher.test(pathname)) continue;
+        return route.spec.maxBodyBytes;
+      }
+      return undefined;
+    },
     handle: async (raw) => {
       const requestId = input.requestId();
       const [pathname, search = ''] = raw.path.split('?');
-      const query = Object.fromEntries(new URLSearchParams(search).entries());
+      const rawQuery = Object.fromEntries(new URLSearchParams(search).entries());
       const method = raw.method.toUpperCase();
 
       for (const route of routes) {
@@ -170,26 +175,23 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = decodeParams((match.groups ?? {}) as Record<string, string>);
-        let parsedParams: Record<string, string> = params;
+        let params = (match.groups ?? {}) as Record<string, string>;
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
-          parsedParams = parsed.data as Record<string, string>;
+          params = parsed.data as Record<string, string>;
         }
-
-        let parsedQuery: Record<string, unknown> = query;
+        // Handlers receive the coerced data, not the raw query string: a numeric
+        // `after` or `limit` must be a number before any service sees it.
+        let query: Record<string, unknown> = rawQuery;
         if (route.spec.query) {
-          // The parsed value is what the handler receives: handing it the raw
-          // string map would silently defeat every coercion in the schema, which
-          // is exactly how an event cursor collapsed to zero.
-          const parsed = route.spec.query.safeParse(query);
+          const parsed = route.spec.query.safeParse(rawQuery);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
-          parsedQuery = parsed.data as Record<string, unknown>;
+          query = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;
@@ -220,11 +222,10 @@ export function createRouter(input: {
         try {
           result = await route.handler({
             principal: principal ?? { ownerId: input.auth.ownerId, isOwner: true },
-            params: parsedParams,
-            query: parsedQuery,
+            params,
+            query,
             body,
             requestId,
-            accept: raw.accept,
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);
@@ -244,7 +245,10 @@ export function createRouter(input: {
           }
           return { kind: 'json', status: result.status, body: parsed.data };
         }
-        return result;
+        if (result.kind === 'text') {
+          return result;
+        }
+        return { kind: 'sse', status: result.status, events: result.events };
       }
 
       return problem('not_found', 'No operation matches that method and path.', requestId);

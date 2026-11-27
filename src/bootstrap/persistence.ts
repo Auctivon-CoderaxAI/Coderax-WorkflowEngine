@@ -1,19 +1,17 @@
 import type { EngineConfig } from '../configuration/schema.js';
-import type { Clock } from '../support/clock.js';
+import type { Clock, IdGenerator } from '../support/clock.js';
 import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
-import type { EventLog } from '../events/log.js';
-import type { IdempotencyStore } from '../persistence/idempotency.js';
-import { createIdempotencyStore } from '../persistence/idempotency.js';
+import type { PermissionStore } from '../permissions/store.js';
+import { createPermissionStore } from '../permissions/store.js';
 import {
-  createMongoEventLog,
-  createMongoIdempotencyStore,
-  ensureEventIndexes,
-  ensureIdempotencyIndexes,
-} from '../persistence/mongo-state.js';
+  createMongoPermissionStore,
+  ensurePermissionIndexes,
+} from '../persistence/mongo-permissions.js';
 import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
 import type { MongoCollectionLike } from '../persistence/mongo.js';
@@ -22,6 +20,15 @@ import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect
 import { createTaskRepository } from '../persistence/tasks.js';
 import { createConversationRepository } from '../persistence/conversations.js';
 import { createNotificationStore } from '../persistence/notifications.js';
+import {
+  createScheduleNoticeStore,
+  createScheduleRepository,
+} from '../persistence/schedules.js';
+import {
+  createMongoScheduleNoticeStore,
+  createMongoScheduleRepository,
+  ensureScheduleIndexes,
+} from '../persistence/mongo-schedules.js';
 import { createMemoryStore } from '../memory/store.js';
 import { createArtifactRepository } from '../persistence/artifacts.js';
 import type { ArtifactRepository } from '../persistence/artifacts.js';
@@ -56,7 +63,10 @@ export type PersistenceStores = {
   tasks: TaskRepository;
   conversations: ConversationRepository;
   memory: MemoryStore;
+  permissions: PermissionStore;
   notifications: NotificationStore;
+  schedules: ScheduleRepository;
+  scheduleNotices: ScheduleNoticeStore;
   /** Artifact descriptors and immutable version rows. */
   artifacts: ArtifactRepository;
   /**
@@ -66,14 +76,6 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
-  /** Submission keys, so a retry after a restart still replays one task. */
-  idempotency: IdempotencyStore;
-  /**
-   * Published execution events, so a cursor can still be replayed after the
-   * process that published them is gone. Absent on the memory driver, where the
-   * live bus is the only history there is.
-   */
-  eventLog: EventLog | null;
   close: () => Promise<void>;
 };
 
@@ -81,6 +83,7 @@ export type PersistenceInput = {
   config: EngineConfig;
   env: NodeJS.ProcessEnv;
   clock: Clock;
+  ids: IdGenerator;
   /** An opened database from a test, or from a host that owns its own driver. */
   database?: MongoDatabase;
   /** Replaces the driver loader; the default imports `mongodb` at startup. */
@@ -89,8 +92,7 @@ export type PersistenceInput = {
 
 const NO_CLOSE = async (): Promise<void> => undefined;
 
-/** Shared with the handshake so a client learns the bound before writing. */
-export const MEMORY_VALUE_LIMIT = 20_000;
+const MEMORY_VALUE_LIMIT = 20_000;
 
 function collectionName(config: EngineConfig, base: string): string {
   return `${config.persistence.collectionPrefix}${base}`;
@@ -122,12 +124,12 @@ async function openDatabase(input: PersistenceInput): Promise<MongoDatabase> {
 /**
  * Builds every store from the validated persistence setting.
  *
- * `memory` is a single process and forgets tasks, transcripts, memory,
- * notifications and artifacts on restart. `mongo` is the production path;
- * selecting it without a reachable, indexable database is a startup failure,
- * never a silent downgrade. The stores are returned together so the composition
- * root cannot mix a durable lease with a process-local task record, which would
- * make fencing meaningless after a restart.
+ * `memory` is a single process and forgets tasks, transcripts, memory and
+ * notifications on restart. `mongo` is the production path; selecting it without
+ * a reachable, indexable database is a startup failure, never a silent downgrade.
+ * The stores are returned together so the composition root cannot mix a durable
+ * lease with a process-local task record, which would make fencing meaningless
+ * after a restart.
  */
 export async function buildPersistence(input: PersistenceInput): Promise<PersistenceStores> {
   const { config, clock } = input;
@@ -140,12 +142,13 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       tasks: createTaskRepository(),
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
+      permissions: createPermissionStore({ clock, ids: input.ids }),
       notifications: createNotificationStore(),
+      schedules: createScheduleRepository(),
+      scheduleNotices: createScheduleNoticeStore(),
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
-      idempotency: createIdempotencyStore({ clock }),
-      eventLog: null,
       close: NO_CLOSE,
     };
   }
@@ -156,7 +159,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const conversations = database.collection(collectionName(config, 'conversations'));
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
+  const permissions = database.collection(collectionName(config, 'permissions'));
   const notifications = database.collection(collectionName(config, 'notifications'));
+  const schedules = database.collection(collectionName(config, 'schedules'));
+  const scheduleExecutions = database.collection(collectionName(config, 'schedule_executions'));
+  const scheduleNotices = database.collection(collectionName(config, 'schedule_notices'));
   const artifacts = database.collection(collectionName(config, 'artifacts'));
   const artifactVersions = database.collection(collectionName(config, 'artifact_versions'));
   const artifactBlobs = database.collection(collectionName(config, 'artifact_blobs'));
@@ -165,8 +172,6 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
-  const idempotency = database.collection(collectionName(config, 'idempotency'));
-  const eventLog = database.collection(collectionName(config, 'events'));
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -179,14 +184,18 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
+    await ensurePermissionIndexes(permissions);
     await ensureNotificationIndexes(notifications);
+    await ensureScheduleIndexes({
+      schedules,
+      executions: scheduleExecutions,
+      notices: scheduleNotices,
+    });
     await ensureArtifactIndexes(artifactCollections);
     await ensureCapacityIndexes({
       capacity: artifactCapacity,
       reservations: artifactReservations,
     });
-    await ensureIdempotencyIndexes(idempotency);
-    await ensureEventIndexes(eventLog);
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -204,7 +213,17 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       clock,
       maxValueLength: MEMORY_VALUE_LIMIT,
     }),
+    permissions: createMongoPermissionStore({
+      collection: permissions,
+      clock,
+      ids: input.ids,
+    }),
     notifications: createMongoNotificationStore(notifications),
+    schedules: createMongoScheduleRepository({
+      schedules,
+      executions: scheduleExecutions,
+    }),
+    scheduleNotices: createMongoScheduleNoticeStore(scheduleNotices),
     artifacts: createMongoArtifactRepository(artifactCollections),
     blobs: createMongoBlobStore({
       collections: { blobs: artifactBlobs, chunks: artifactChunks },
@@ -215,8 +234,6 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
-    idempotency: createMongoIdempotencyStore({ collection: idempotency, clock }),
-    eventLog: createMongoEventLog(eventLog),
     close: database.close,
   };
 }

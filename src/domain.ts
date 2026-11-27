@@ -5,16 +5,99 @@ import type {
   Budget,
   DataMode,
   EngineId,
+  GameAction,
+  GameObjective,
   IsoDateTime,
+  MissedRunPolicy,
   ModelRef,
+  ScheduleCondition,
+  ScheduleConditionState,
+  ScheduleExecutionState,
+  ScheduleLimits,
+  ScheduleNoticeKind,
+  ScheduleRetry,
+  ScheduleState,
+  ScheduleTiming,
+  ScheduleTrigger,
   TaskState,
   Usage,
 } from '@coderax/contracts';
+
+/**
+ * A game session runs as a durable Work task. The workload discriminator is what
+ * lets the same lease, fencing, cancellation and event machinery supervise a
+ * gaming-agent session without a second executor.
+ */
+export type TaskWorkload = 'work' | 'game';
+
+export type GameRunSpec = {
+  sessionId: string;
+  gameId: string;
+  buildId: string;
+  objective: GameObjective;
+  allowedActions: GameAction[];
+  maxTicks: number;
+};
+
+/**
+ * Fast reasoning answers directly; complex reasoning decomposes, parallelises
+ * independent work, verifies per objective and may replan within a bound.
+ */
+export type ReasoningMode = 'fast' | 'complex';
+
+/**
+ * Native may reason or read a confined workspace file. A read is the only
+ * side-effecting-adjacent action it plans, and it always passes the permission
+ * layer before it executes.
+ */
+export type PlanStepKind = 'reason' | 'read';
+
+export type TaskPlanStep = {
+  id: string;
+  title: string;
+  /** Ids of steps that must complete first. Empty means it is ready now. */
+  dependsOn: string[];
+  kind: PlanStepKind;
+  /** Exact workspace-relative resource for a read step; never a host path. */
+  resource?: string;
+  /** What the step must prove to count as complete. */
+  acceptance?: string;
+};
+
+/**
+ * The persisted plan is data, not process state. A resumed generation reads it
+ * back instead of asking a model to plan the same objective again, so a replay
+ * executes the plan the owner was shown.
+ */
+export type TaskPlan = {
+  revision: number;
+  mode: ReasoningMode;
+  steps: TaskPlanStep[];
+  /** Why the planner chose a deterministic fallback, when it did. */
+  note?: string;
+};
 
 export type TaskStep = {
   id: string;
   title: string;
   state: TaskState;
+  dependsOn?: string[];
+  attempts?: number;
+};
+
+/**
+ * A bounded record of what a step actually produced. Verification and later
+ * steps read this, and it is persisted so a resumed generation does not have to
+ * invent evidence for work that finished in a previous process.
+ */
+export type TaskEvidence = {
+  stepId: string;
+  title: string;
+  /** User-safe citation of the produced result. */
+  citation: string;
+  /** Bounded output used as context by dependent steps. */
+  output: string;
+  attempts: number;
 };
 
 export type TaskCheckpoint = {
@@ -22,11 +105,29 @@ export type TaskCheckpoint = {
   completedSteps: string[];
   /** Partial assistant text already emitted, replayed on resume. */
   text: string;
+  /** The dependency-aware plan this generation is executing. */
+  plan: TaskPlan | null;
+  /** Evidence produced by completed steps, bounded per step. */
+  evidence: TaskEvidence[];
+  /** Iterations consumed before a suspension; a resume continues this bound. */
+  iterations?: number;
+};
+
+/**
+ * Completion is only reported after evidence was collected and a verifier
+ * checked it. `evidence` is bounded, user-safe text and never a fabricated
+ * claim; an empty list means the objective was not verified.
+ */
+export type TaskVerification = {
+  passed: boolean;
+  reason: string;
+  evidence: string[];
 };
 
 export type TaskResult = {
   summary?: string;
   artifacts: Array<{ path: string; bytes?: number; digest?: string }>;
+  verification?: TaskVerification;
 };
 
 export type TaskFailure = {
@@ -42,6 +143,9 @@ export type TaskFailure = {
  * newer one.
  */
 export type TaskRecord = {
+  scheduleRetryClaimed?: boolean;
+  handoffPending?: boolean;
+  scheduleAdmission?: { scheduleId: string; executionId: string; complete?: boolean };
   taskId: string;
   ownerId: string;
   tenantId: string | null;
@@ -49,11 +153,16 @@ export type TaskRecord = {
   agent: AgentId;
   engine: EngineId;
   mode: DataMode;
+  /** Absent on records written before game sessions existed: read it as 'work'. */
+  kind?: TaskWorkload;
+  game?: GameRunSpec | null;
   objective: string;
   model: ModelRef | null;
   state: TaskState;
   generation: number;
   runToken: string | null;
+  /** Resolved on the first planning pass; never guessed by a client. */
+  reasoning: ReasoningMode | null;
   steps: TaskStep[];
   checkpoint: TaskCheckpoint;
   createdAt: IsoDateTime;
@@ -71,6 +180,8 @@ export type TaskPatch = Partial<
   Pick<
     TaskRecord,
     | 'state'
+    | 'handoffPending'
+    | 'scheduleAdmission'
     | 'steps'
     | 'checkpoint'
     | 'updatedAt'
@@ -81,6 +192,7 @@ export type TaskPatch = Partial<
     | 'result'
     | 'failure'
     | 'model'
+    | 'reasoning'
   >
 >;
 
@@ -115,9 +227,143 @@ export type MemoryRecord = {
   updatedAt: IsoDateTime;
 };
 
+export type NotificationRecord = {
+  taskId: string;
+  ownerId: string;
+  conversationId: string;
+  agent: AgentId;
+  mode: DataMode;
+  state: 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  summary?: string;
+  createdAt: IsoDateTime;
+  read: boolean;
+};
+
+export type ScheduleRecord = {
+  scheduleId: string;
+  ownerId: string;
+  name: string;
+  objective: string;
+  agent: AgentId;
+  model: ModelRef | null;
+  mode: DataMode;
+  timing: ScheduleTiming;
+  timingRevision?: number;
+  condition: ScheduleCondition;
+  retry: ScheduleRetry;
+  priority: number;
+  limits: ScheduleLimits;
+  /** Literal: a scheduled run always routes side effects through permissions. */
+  requireApproval: true;
+  missedRunPolicy: MissedRunPolicy;
+  state: ScheduleState;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  nextRunAt: IsoDateTime | null;
+  lastRunAt: IsoDateTime | null;
+  lastExecutionId: string | null;
+  runsTotal: number;
+  acceptedDay?: { start: string; count: number };
+  consecutiveFailures: number;
+  accountedFailures?: string[];
+  /** Compare-and-swap generation: only one replica advances a schedule once. */
+  version: number;
+  pausedAt: IsoDateTime | null;
+  cancelledAt: IsoDateTime | null;
+  cancelReason: string | null;
+};
+
+export type SchedulePatch = Partial<
+  Pick<
+    ScheduleRecord,
+    | 'name'
+    | 'timingRevision'
+    | 'timing'
+    | 'condition'
+    | 'retry'
+    | 'priority'
+    | 'limits'
+    | 'missedRunPolicy'
+    | 'state'
+    | 'nextRunAt'
+    | 'lastRunAt'
+    | 'lastExecutionId'
+    | 'runsTotal'
+    | 'acceptedDay'
+    | 'consecutiveFailures'
+    | 'accountedFailures'
+    | 'updatedAt'
+    | 'pausedAt'
+    | 'cancelledAt'
+    | 'cancelReason'
+  >
+>;
+
 /**
- * A durable artifact. The bytes live in the content-addressed blob store; this
- * row is the authoritative metadata and names the current immutable version.
+ * One durable execution receipt. `executionKey` is unique across replicas and
+ * occurrences, and `taskId` is deterministic, so a retried dispatch of the same
+ * occurrence cannot create a second Work task.
+ */
+export type ScheduleExecutionRecord = {
+  executionId: string;
+  executionKey: string;
+  claimGeneration?: number;
+  admissionStarted?: boolean;
+  failureAccountingPending?: boolean;
+  noticePending?: boolean;
+  completionNoticeSummary?: string;
+  selectedTimingRevision?: number;
+  scheduleId: string;
+  ownerId: string;
+  occurrenceKey: string;
+  trigger: ScheduleTrigger;
+  scheduledFor: IsoDateTime;
+  state: ScheduleExecutionState;
+  attempt: number;
+  maxAttempts: number;
+  taskId: string | null;
+  conversationId: string;
+  priority: number;
+  detail: string | null;
+  nextAttemptAt: IsoDateTime | null;
+  condition: ScheduleConditionState;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  finishedAt: IsoDateTime | null;
+};
+
+export type ScheduleExecutionPatch = Partial<
+  Pick<
+    ScheduleExecutionRecord,
+    | 'state'
+    | 'admissionStarted'
+    | 'failureAccountingPending'
+    | 'noticePending'
+    | 'completionNoticeSummary'
+    | 'attempt'
+    | 'taskId'
+    | 'detail'
+    | 'nextAttemptAt'
+    | 'condition'
+    | 'updatedAt'
+    | 'finishedAt'
+  >
+>;
+
+export type ScheduleNoticeRecord = {
+  noticeId: string;
+  scheduleId: string;
+  executionId: string;
+  ownerId: string;
+  kind: ScheduleNoticeKind;
+  summary: string;
+  createdAt: IsoDateTime;
+  read: boolean;
+};
+
+/**
+ * Durable artifact metadata. The bytes live in a content-addressed blob and are
+ * named only by `sha256`; the file name here is metadata and never a path.
  */
 export type ArtifactRecord = {
   artifactId: string;
@@ -128,6 +374,8 @@ export type ArtifactRecord = {
   filename: string;
   /** Metadata only; never a filesystem path. Basename equals `filename`. */
   relativePath?: string;
+  /** Normalized, case-folded path identity used only for collision checks. */
+  pathKey?: string;
   mediaType: ArtifactMediaType;
   bytes: number;
   sha256: string;
@@ -158,58 +406,6 @@ export type ArtifactVersionRecord = {
   sha256: string;
   note?: string;
   createdAt: IsoDateTime;
-};
-
-/**
- * One firing of a schedule, kept so the owner can read what the engine did
- * without reconstructing it from task history.
- */
-export type ScheduleExecutionRecord = {
-  at: IsoDateTime;
-  outcome: 'submitted' | 'skipped';
-  /** The slot the schedule moved to after this firing. */
-  nextRunAt: IsoDateTime;
-  taskId: string | null;
-  /** Stable refusal code for a skipped firing. */
-  code: string | null;
-};
-
-/**
- * A durable schedule. It holds no lease and owns no run: a firing submits Work
- * and the ordinary execution invariants take over from there.
- */
-export type ScheduleRecord = {
-  scheduleId: string;
-  ownerId: string;
-  objective: string;
-  agent: AgentId;
-  mode: DataMode;
-  intervalMs: number;
-  enabled: boolean;
-  conversationId: string | null;
-  createdAt: IsoDateTime;
-  updatedAt: IsoDateTime;
-  nextRunAt: IsoDateTime | null;
-  /** Start instant requested while paused; consumed by the next resume. */
-  pendingStartAt: IsoDateTime | null;
-  lastRunAt: IsoDateTime | null;
-  lastTaskId: string | null;
-  runs: number;
-  skipped: number;
-  /** Newest first, bounded by the store. */
-  executions: ScheduleExecutionRecord[];
-};
-
-export type NotificationRecord = {
-  taskId: string;
-  ownerId: string;
-  conversationId: string;
-  agent: AgentId;
-  mode: DataMode;
-  state: 'completed' | 'failed' | 'cancelled' | 'interrupted';
-  summary?: string;
-  createdAt: IsoDateTime;
-  read: boolean;
 };
 
 export type AuditRecord = {

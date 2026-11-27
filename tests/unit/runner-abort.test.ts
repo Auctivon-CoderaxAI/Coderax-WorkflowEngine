@@ -18,6 +18,8 @@ function request(signal: AbortSignal): AgentRunRequest {
     ownerId: 'owner',
     tenantId: null,
     conversationId: 'conversation',
+    workload: 'work',
+    game: null,
     objective: 'stop',
     model: { providerId: 'free', modelId: 'coderax-small' },
     mode: 'cloud',
@@ -32,6 +34,7 @@ function adapter(run: AgentAdapter['run']): AgentAdapter {
   return {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities: {
       streaming: true,
       tools: false,
@@ -83,6 +86,7 @@ test('an adapter that throws on abort is cancelled, not reported as a provider f
   assert.deepEqual(await running, {
     outcome: { kind: 'cancelled' },
     ownershipLost: false,
+    terminated: true,
   });
 });
 

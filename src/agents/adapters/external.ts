@@ -66,6 +66,9 @@ export function createExternalAgentAdapter(options: ExternalAdapterOptions): Age
     agent: options.agent,
     engine: options.engine,
     capabilities: options.capabilities,
+    // An external adapter acts inside its own runtime; this engine has no
+    // per-action approval hook into it, so scheduling must refuse it.
+    sideEffects: 'ungated',
     isolation: {
       workspace: 'isolated',
       memory: 'none',

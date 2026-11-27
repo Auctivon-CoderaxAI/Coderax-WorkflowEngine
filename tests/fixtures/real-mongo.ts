@@ -1,28 +1,58 @@
 /**
- * A real MongoDB deployment for integration tests, never the driver fake.
+ * A real MongoDB server for integration tests, never the driver fake.
  *
- * The connection string comes from `CODERAX_TEST_MONGODB_URI`; the verify
- * workflow points it at a MongoDB service container. A local run without a
- * server skips with this reason instead of quietly reporting durability as
- * passing. `CODERAX_REQUIRE_MONGODB=1` turns the absence into a failure, which
- * is what the CI lane sets so a lost service cannot produce a green skip.
+ * It prefers an explicitly supplied deployment. Otherwise it starts a real
+ * mongod through the optional test-only `mongodb-memory-server` package. If
+ * neither is available the caller skips with a reason. A skip is not evidence
+ * that durability works, so `CODERAX_REQUIRE_MONGODB=1` turns the absence into a
+ * failure for a CI lane that must enforce the real-database check.
  */
 export type RealMongo = {
   uri: string;
+  describe: string;
+  stop: () => Promise<void>;
 };
 
 export const REAL_MONGO_SKIP =
-  'No real MongoDB: set CODERAX_TEST_MONGODB_URI to a reachable server.';
+  'No real MongoDB: set CODERAX_TEST_MONGODB_URI or install mongodb-memory-server.';
 
-export function configuredMongo(): RealMongo | null {
-  const uri = process.env.CODERAX_TEST_MONGODB_URI?.trim();
-  return uri ? { uri } : null;
+export async function startRealMongo(): Promise<RealMongo | null> {
+  const configured = process.env.CODERAX_TEST_MONGODB_URI?.trim();
+  if (configured) {
+    return {
+      uri: configured,
+      describe: 'CODERAX_TEST_MONGODB_URI',
+      stop: async () => undefined,
+    };
+  }
+
+  const specifier = 'mongodb-memory-server';
+  try {
+    const module = (await import(specifier)) as {
+      MongoMemoryServer: {
+        create: (options?: unknown) => Promise<{
+          getUri: () => string;
+          stop: () => Promise<boolean>;
+        }>;
+      };
+    };
+    const server = await module.MongoMemoryServer.create();
+    return {
+      uri: server.getUri(),
+      describe: 'mongodb-memory-server (real mongod)',
+      stop: async () => {
+        await server.stop();
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function requireRealMongo(real: RealMongo | null): void {
   if (real === null && process.env.CODERAX_REQUIRE_MONGODB === '1') {
     throw new Error(
-      'CODERAX_REQUIRE_MONGODB=1 but CODERAX_TEST_MONGODB_URI is not set; the real-database lane must not skip.',
+      'CODERAX_REQUIRE_MONGODB=1 but no real MongoDB is available; set CODERAX_TEST_MONGODB_URI or install mongodb-memory-server.',
     );
   }
 }

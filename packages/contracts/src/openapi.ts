@@ -62,33 +62,38 @@ function queryParameters(route: RouteSpec): Array<Record<string, unknown>> | und
   }));
 }
 
-function successContent(route: RouteSpec): Record<string, unknown> {
-  const json = {
-    'application/json': { schema: toJsonSchema(route.response.schema) },
-  };
-  const sse = { 'text/event-stream': { schema: { type: 'string' } } };
-  // A negotiated operation serves both: the client picks with `Accept`, and the
-  // document must not advertise only one of the two shapes it really returns.
-  if (route.stream && route.negotiated) return { ...sse, ...json };
-  if (route.stream) return sse;
-  return json;
-}
-
 export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): OpenApiDocument {
   const paths: Record<string, Record<string, OpenApiOperation>> = {};
   const schemas: Record<string, unknown> = { Problem: toJsonSchema(Problem) };
 
-  for (const route of routes) {
+  // The document is a function of the catalogue, not of registration order. The
+  // registry can register a valid subset in any order; the served document must
+  // still equal the published one byte for byte.
+  const ordered = [...routes].sort(
+    (left, right) =>
+      left.path.localeCompare(right.path) || left.method.localeCompare(right.method),
+  );
+
+  for (const route of ordered) {
     const operation: OpenApiOperation = {
       operationId: route.operationId,
       summary: route.summary,
       tags: route.tags,
       security: route.auth === 'owner' ? [{ bearerAuth: [] }] : [],
       responses: {
-        [String(route.response.status)]: {
-          description: route.response.description,
-          content: successContent(route),
-        },
+        [String(route.response.status)]: route.stream
+          ? {
+              description: route.response.description,
+              content: { 'text/event-stream': { schema: { type: 'string' } } },
+            }
+          : {
+              description: route.response.description,
+              content: {
+                [route.response.contentType ?? 'application/json']: {
+                  schema: toJsonSchema(route.response.schema),
+                },
+              },
+            },
         '4XX': ERROR_RESPONSE,
         '5XX': ERROR_RESPONSE,
       },

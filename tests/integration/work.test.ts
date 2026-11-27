@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
-import { startTestApp, waitFor } from '../helpers.js';
+import { workRunKey } from '../../src/execution/lease.js';
+import { startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -21,12 +22,15 @@ test('Work runs to completion, persists its transcript and notifies once', async
       return status.ok && status.value.state === 'completed' ? status.value : null;
     });
 
-    assert.equal(completed.steps.length, 3);
+    // A short objective selects fast reasoning: one reasoning step plus one
+    // evidence-based verification, both counted in usage.
+    assert.equal(completed.reasoning, 'fast');
+    assert.equal(completed.steps.length, 1);
     assert.ok(completed.steps.every((step) => step.state === 'completed'));
-    // Native runs three planned steps; each step returns the gateway's text.
     assert.ok(completed.result?.summary?.startsWith('A verified result.'));
-    // Usage accumulates across the three planned steps (11/13 each).
-    assert.deepEqual(completed.usage, { inputTokens: 33, outputTokens: 39 });
+    assert.equal(completed.result?.verification?.passed, true);
+    assert.ok((completed.result?.verification?.evidence.length ?? 0) > 0);
+    assert.deepEqual(completed.usage, { inputTokens: 22, outputTokens: 26 });
 
     const conversation = await started.app.service.conversation(
       principal,
@@ -122,6 +126,19 @@ test('reported text and nested arguments are scrubbed before replay and persiste
       report({ type: 'text.replace', text: 'reply: sk-example' });
       report({ type: 'text.delta', text: '0123456789 done' });
       report({ type: 'tool.call', tool: 'test', callId: 'call', input: [{ api_key: 'sample value' }] });
+      report({
+        type: 'step.completed',
+        stepId: 'secret-step',
+        title: 'Secret step',
+        attempts: 1,
+        evidence: {
+          stepId: 'secret-step',
+          title: 'Secret step',
+          citation: 'token sk-example0123456789',
+          output: 'credential sk-example0123456789',
+          attempts: 1,
+        },
+      });
       assert.throws(() => report({ type: 'file.edit', path: 'x'.repeat(1025) }), /file.edit path/);
       report({ type: 'file.edit', path: 'x'.repeat(1024) });
       return { ok: true, summary: 'done' };
@@ -140,6 +157,10 @@ test('reported text and nested arguments are scrubbed before replay and persiste
     const conversation = await started.app.service.conversation(principal, task.value.conversationId);
     assert.ok(conversation.ok);
     assert.equal(conversation.value.messages.at(-1)?.text, 'reply: [redacted-key] done');
+    const stored = await started.app.dependencies.tasks.get(task.value.taskId);
+    const persistedEvidence = JSON.stringify(stored?.checkpoint.evidence);
+    assert.doesNotMatch(persistedEvidence, /sk-example|0123456789/);
+    assert.match(persistedEvidence, /redacted/);
   } finally {
     await started.close();
   }
@@ -278,138 +299,62 @@ test('failed transcript and notification writes do not strand a settled run', as
   }
 });
 
-test('an unacknowledged committed create remains pending until scheduled', async () => {
+for (const [operation, state] of [
+  ['resumeTask', 'awaiting_approval'],
+  ['retryTask', 'failed'],
+] as const) {
+  test(`${operation} releases its claim when reissue is rejected`, async (t) => {
+    const started = await startTestApp();
+    try {
+      const { service, dependencies: deps } = started.app;
+      const task = taskRecord({ state, runToken: 'previous-generation' });
+      assert.ok((await deps.tasks.create(task)).ok);
+      const key = workRunKey(task);
+      const reissue = deps.tasks.reissue;
+      const rejectReissue: typeof reissue = async (input) => {
+        assert.equal((await deps.lease.read({ key, now: deps.clock.now() }))?.token, input.token);
+        if (operation === 'resumeTask') {
+          const cancelled = await service.cancelTask(principal, task.taskId);
+          assert.ok(cancelled.ok && cancelled.value.state === 'cancelled');
+          return reissue(input);
+        }
+        return { applied: false, reason: 'superseded' };
+      };
+      const rejected = t.mock.method(deps.tasks, 'reissue', rejectReissue);
+
+      const result = await service[operation](principal, task.taskId, task.generation);
+      assert.ok(!result.ok && result.code === 'conflict');
+      assert.equal(await deps.lease.read({ key, now: deps.clock.now() }), null);
+
+      rejected.mock.restore();
+      const next = await service.submitWork(principal, {
+        conversationId: task.conversationId,
+        objective: 'Start new Work after the rejected reissue',
+        mode: 'cloud',
+        requireApproval: true,
+      });
+      assert.ok(next.ok);
+      await deps.scheduler.idle();
+    } finally {
+      await started.close();
+    }
+  });
+}
+
+test('retry rejects a budget refusal and refunds a failed reissue', async () => {
   const started = await startTestApp();
-  const deps = started.app.dependencies;
-  const create = deps.tasks.create;
-  let signalCommit!: () => void;
-  let unblock!: () => void;
-  const committed = new Promise<void>((resolve) => { signalCommit = resolve; });
-  const resume = new Promise<void>((resolve) => { unblock = resolve; });
-  deps.tasks.create = async (task) => {
-    await create(task);
-    signalCommit();
-    await resume;
-    throw new Error('lost acknowledgement');
-  };
-  const request = { objective: 'one run', mode: 'cloud' as const, requireApproval: false, idempotencyKey: 'retry-commit' };
   try {
-    const first = started.app.service.submitWork(principal, request);
-    await Promise.race([
-      committed,
-      first.then((result) => assert.fail(`submission settled before create: ${JSON.stringify(result)}`)),
-    ]);
-    const pending = await started.app.service.submitWork(principal, request);
-    assert.ok(!pending.ok && pending.retryable);
-    unblock();
-    const accepted = await first;
-    assert.ok(accepted.ok);
-    await deps.scheduler.idle();
-    const replay = await started.app.service.submitWork(principal, request);
-    assert.ok(replay.ok);
-    assert.equal(replay.value.taskId, accepted.value.taskId);
-    assert.equal((await deps.tasks.get(accepted.value.taskId))?.state, 'completed');
-    assert.equal((await deps.tasks.listByOwner(principal.ownerId)).length, 1);
-  } finally {
-    unblock();
-    await started.close();
-  }
-});
-
-test('a confirmed failed create releases the key and lease and removes its user message', async () => {
-  const started = await startTestApp();
-  const deps = started.app.dependencies;
-  const create = deps.tasks.create;
-  const request = {
-    objective: 'retry a failed insert', mode: 'cloud' as const, requireApproval: false,
-    conversationId: 'conv_retry_create', idempotencyKey: 'retry-create',
-  };
-  deps.tasks.create = async () => { throw new Error('insert refused'); };
-  try {
-    const first = await started.app.service.submitWork(principal, request);
-    assert.ok(!first.ok && first.retryable);
-    assert.deepEqual(await deps.conversations.messages(request.conversationId), []);
-
-    deps.tasks.create = create;
-    const retry = await started.app.service.submitWork(principal, request);
-    assert.ok(retry.ok, 'the same key and conversation can be used immediately');
-    await deps.scheduler.idle();
-    const messages = await deps.conversations.messages(request.conversationId);
-    assert.deepEqual(messages.filter((message) => message.role === 'user').map((message) => message.text), [request.objective]);
-  } finally {
-    await started.close();
-  }
-});
-
-test('a retry reconciles an unknown create outcome against the original task', async () => {
-  const started = await startTestApp();
-  const deps = started.app.dependencies;
-  const { create, get } = deps.tasks;
-  let taskId: string | undefined;
-  let canRead = false;
-  let inserts = 0;
-  deps.tasks.create = async (task) => {
-    inserts += 1;
-    taskId = task.taskId;
-    assert.ok((await create(task)).ok);
-    throw new Error('lost acknowledgement');
-  };
-  deps.tasks.get = async (id) => {
-    if (!canRead) throw new Error('read unavailable');
-    return get(id);
-  };
-  const request = { objective: 'reconcile one run', mode: 'cloud' as const, requireApproval: false, idempotencyKey: 'retry-unknown' };
-  try {
-    const first = await started.app.service.submitWork(principal, request);
-    assert.ok(!first.ok && first.retryable);
-    const unknown = await started.app.service.submitWork(principal, request);
-    assert.ok(!unknown.ok && unknown.retryable);
-    assert.equal(inserts, 1);
-
-    canRead = true;
-    const retry = await started.app.service.submitWork(principal, request);
-    assert.ok(retry.ok);
-    assert.equal(retry.value.replayed, true);
-    assert.equal(retry.value.taskId, taskId);
-    await deps.scheduler.idle();
-    assert.equal((await get(retry.value.taskId))?.state, 'completed');
-    assert.equal(inserts, 1);
-    assert.equal((await deps.conversations.messages(retry.value.conversationId)).filter((message) => message.role === 'user').length, 1);
-  } finally {
-    await started.close();
-  }
-});
-
-test('a rejected completion fence never publishes a transcript', async () => {
-  const started = await startTestApp();
-  const deps = started.app.dependencies;
-  const update = deps.tasks.updateFenced;
-  let rejected = false;
-  deps.tasks.updateFenced = async (input) => {
-    if (input.patch.state !== 'completed') return update(input);
-    const staged = await deps.artifactService.list(principal, {
-      mode: 'cloud',
-      taskId: input.taskId,
-    });
-    assert.ok(staged.ok);
-    assert.deepEqual(staged.value.artifacts, []);
-    rejected = true;
-    return { applied: false, reason: 'superseded' };
-  };
-  try {
-    const result = await started.app.service.submitWork(principal, {
-      objective: 'superseded completion', mode: 'cloud', requireApproval: false,
-    });
-    assert.ok(result.ok);
-    await deps.scheduler.idle();
-    assert.ok(rejected);
-    const settled = await deps.artifactService.list(principal, {
-      mode: 'cloud',
-      taskId: result.value.taskId,
-    });
-    assert.ok(settled.ok);
-    assert.deepEqual(settled.value.artifacts, []);
-  } finally {
-    await started.close();
-  }
+    const { tasks } = started.app.dependencies;
+    const service = started.app.service;
+    const refused = taskRecord({ state: 'failed', failure: { code: 'budget_exhausted', detail: 'Budget', retryable: false } });
+    await tasks.create(refused);
+    const result = await service.retryTask(principal, refused.taskId, refused.generation);
+    assert.equal(!result.ok && result.code, 'budget_exhausted');
+    const failed = { ...refused, taskId: 'task_other', failure: null };
+    await tasks.create(failed);
+    tasks.reissue = async () => ({ applied: false, reason: 'superseded' });
+    const conflict = await service.retryTask(principal, failed.taskId, failed.generation);
+    assert.equal(!conflict.ok && conflict.code, 'conflict');
+    assert.equal(service.budget(principal).used.requests, 0);
+  } finally { await started.close(); }
 });

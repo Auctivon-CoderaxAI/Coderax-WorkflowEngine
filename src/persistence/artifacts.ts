@@ -39,6 +39,15 @@ export type RemoveArtifactOutcome = {
   versions: ArtifactVersionRecord[];
 };
 
+export type RestoreVersionOutcome =
+  | { ok: true; artifact: ArtifactRecord; version: ArtifactVersionRecord }
+  | { ok: false; reason: 'not_found' | 'conflict' };
+
+/** Case-folded identity so `README.md` and `readme.md` cannot coexist. */
+export function artifactPathKey(relativePath: string): string {
+  return relativePath.normalize('NFC').toLowerCase();
+}
+
 export type ArtifactRepository = {
   create: (input: {
     artifact: ArtifactRecord;
@@ -69,6 +78,10 @@ export type ArtifactRepository = {
   rollbackVersion: (
     input: ArtifactKey & { version: number },
   ) => Promise<ArtifactVersionRecord | null>;
+  /** Points the artifact at an existing version without deleting any version. */
+  restoreVersion: (
+    input: ArtifactKey & { version: number; expectedVersion: number; now: string },
+  ) => Promise<RestoreVersionOutcome>;
   listExpired: (input: {
     now: string;
     limit: number;
@@ -93,6 +106,25 @@ export function createArtifactRepository(): ArtifactRepository {
     return created;
   }
 
+  function pathTaken(
+    candidate: ArtifactRecord,
+    exclude?: string,
+  ): boolean {
+    if (!candidate.pathKey) return false;
+    for (const record of artifacts.values()) {
+      if (partition(record) === exclude) continue;
+      if (
+        record.ownerId === candidate.ownerId &&
+        record.mode === candidate.mode &&
+        record.projectId === candidate.projectId &&
+        record.pathKey === candidate.pathKey
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function matches(record: ArtifactRecord, filter: ArtifactListFilter): boolean {
     if (record.mode !== filter.mode) return false;
     if (filter.kind && record.kind !== filter.kind) return false;
@@ -106,6 +138,7 @@ export function createArtifactRepository(): ArtifactRepository {
     create: async ({ artifact, version }) => {
       const key = partition(artifact);
       if (artifacts.has(key)) return { ok: false, reason: 'exists' };
+      if (pathTaken(artifact)) return { ok: false, reason: 'exists' };
       artifacts.set(key, { ...artifact });
       versionsFor(key).set(version.version, { ...version });
       return { ok: true, artifact: { ...artifact }, version: { ...version } };
@@ -118,6 +151,7 @@ export function createArtifactRepository(): ArtifactRepository {
       if (current.version !== expectedVersion) return { ok: false, reason: 'conflict' };
       const rows = versionsFor(key);
       if (rows.has(version.version)) return { ok: false, reason: 'conflict' };
+      if (pathTaken(artifact, key)) return { ok: false, reason: 'conflict' };
       rows.set(version.version, { ...version });
       artifacts.set(key, { ...artifact });
       return { ok: true, artifact: { ...artifact }, version: { ...version } };
@@ -210,7 +244,7 @@ export function createArtifactRepository(): ArtifactRepository {
         versions.delete(id);
         return { ...row };
       }
-      artifacts.set(id, {
+      const restored: ArtifactRecord = {
         ...artifact,
         kind: newest.kind,
         filename: newest.filename,
@@ -220,8 +254,42 @@ export function createArtifactRepository(): ArtifactRepository {
         version: newest.version,
         versions: remaining.length,
         updatedAt: newest.createdAt,
-      });
+      };
+      delete restored.relativePath;
+      delete restored.pathKey;
+      if (newest.relativePath) {
+        restored.relativePath = newest.relativePath;
+        restored.pathKey = artifactPathKey(newest.relativePath);
+      }
+      artifacts.set(id, restored);
       return { ...row };
+    },
+
+    restoreVersion: async (input) => {
+      const id = partition(input);
+      const artifact = artifacts.get(id);
+      if (!artifact) return { ok: false, reason: 'not_found' };
+      if (artifact.version !== input.expectedVersion) return { ok: false, reason: 'conflict' };
+      const target = versions.get(id)?.get(input.version);
+      if (!target) return { ok: false, reason: 'not_found' };
+      const restored: ArtifactRecord = {
+        ...artifact,
+        kind: target.kind,
+        filename: target.filename,
+        mediaType: target.mediaType,
+        bytes: target.bytes,
+        sha256: target.sha256,
+        version: target.version,
+        updatedAt: input.now,
+      };
+      delete restored.relativePath;
+      delete restored.pathKey;
+      if (target.relativePath) {
+        restored.relativePath = target.relativePath;
+        restored.pathKey = artifactPathKey(target.relativePath);
+      }
+      artifacts.set(id, restored);
+      return { ok: true, artifact: { ...restored }, version: { ...target } };
     },
 
     listExpired: async ({ now, limit, ownerId, mode }) =>
