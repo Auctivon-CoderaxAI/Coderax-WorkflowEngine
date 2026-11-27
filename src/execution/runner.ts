@@ -32,6 +32,8 @@ function isAgentOutcome(value: unknown): value is AgentRunOutcome {
   if (outcome.ok !== false) return false;
   return (
     typeof outcome.code === 'string' &&
+    outcome.code.length >= 1 &&
+    outcome.code.length <= 60 &&
     typeof outcome.detail === 'string' &&
     typeof outcome.retryable === 'boolean'
   );
@@ -191,7 +193,7 @@ export function createTaskRunner(input: {
             ownershipLost: true,
           };
         }
-        if (cancelRequested || (!outcome.ok && outcome.code === 'cancelled')) {
+        if (cancelRequested) {
           return { outcome: { kind: 'cancelled' }, ownershipLost: false };
         }
         if (!isAgentOutcome(outcome)) {
@@ -204,6 +206,9 @@ export function createTaskRunner(input: {
             },
             ownershipLost: false,
           };
+        }
+        if (!outcome.ok && outcome.code === 'cancelled') {
+          return { outcome: { kind: 'cancelled' }, ownershipLost: false };
         }
         if (outcome.ok) {
           return {

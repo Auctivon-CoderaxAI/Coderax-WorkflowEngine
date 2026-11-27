@@ -205,3 +205,53 @@ test('shutdown keeps persistence open for an admitted submitWork call', { skip }
     rmSync(dirs.root, { recursive: true, force: true });
   }
 });
+
+test('shutdown drains admitted chat through its assistant write', { skip }, async () => {
+  requiresDatabase();
+  const dirs = workspace();
+  const database = await createMongoConnector()({ uri: uri as string, database: databaseName });
+  let signalEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let closed = false;
+  const app = await composeApplication({
+    config: baseConfig(dirs, {
+      persistence: { driver: 'mongo', uriEnv: 'CODERAX_TEST_MONGO_URI', database: databaseName },
+    }),
+    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+    gateway: fakeGateway({ beforeReturn: async () => { signalEntered(); await released; } }),
+    persistence: { database: { collection: database.collection, close: () => {
+      closed = true;
+      return database.close();
+    } } },
+  });
+  try {
+    const request = { message: 'finish before closing', mode: 'cloud' as const, agent: 'coderax' as const };
+    const chat = app.service.chat(principal, request);
+    await entered;
+    const stopped = app.stop();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(closed, false);
+    const refused = await app.service.chat(principal, request);
+    assert.ok(!refused.ok && refused.code === 'not_ready');
+    release();
+    const reply = await chat;
+    assert.ok(reply.ok);
+    await stopped;
+    assert.equal(closed, true);
+    const reader = await createMongoConnector()({ uri: uri as string, database: databaseName });
+    try {
+      const saved = await reader.collection('messages').findOne({ messageId: reply.value.messageId });
+      assert.equal(saved?.role, 'assistant');
+      assert.equal(saved?.text, reply.value.text);
+    } finally {
+      await reader.close();
+    }
+  } finally {
+    release();
+    await app.stop().catch(() => undefined);
+    await cleanDatabase();
+    rmSync(dirs.root, { recursive: true, force: true });
+  }
+});

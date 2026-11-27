@@ -15,27 +15,35 @@ import { OWNER_TOKEN, slowGateway, startTestApp, waitFor } from '../helpers.js';
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 const TERMINAL = new Set(['task.completed', 'task.failed', 'task.cancelled', 'task.interrupted']);
 
-test('a malformed adapter outcome becomes a settled protocol failure', async () => {
+test('malformed adapter outcomes become readable terminal protocol failures', async () => {
   const started = await startTestApp();
   try {
     const agent = started.app.dependencies.agents.get('coderax');
     assert.ok(agent);
-    agent.run = async () => ({}) as never;
-    const submitted = await started.app.service.submitWork(principal, {
-      objective: 'malformed adapter',
-      mode: 'cloud',
-      requireApproval: true,
-    });
-    assert.ok(submitted.ok);
-    await started.app.dependencies.scheduler.idle();
+    for (const outcome of [
+      {},
+      null,
+      undefined,
+      { ok: false, code: 'cancelled' },
+      ...['', 'x'.repeat(61)].map((code) => ({ ok: false, code, detail: 'failed', retryable: false })),
+    ]) {
+      agent.run = async () => outcome as never;
+      const submitted = await started.app.service.submitWork(principal, {
+        objective: 'malformed adapter',
+        mode: 'cloud',
+        requireApproval: true,
+      });
+      assert.ok(submitted.ok);
+      await started.app.dependencies.scheduler.idle();
 
-    const status = await started.app.service.task(principal, submitted.value.taskId);
-    assert.ok(status.ok);
-    assert.equal(status.value.state, 'failed');
-    assert.equal(status.value.failure?.code, 'protocol_error');
-    assert.equal(TaskStatus.safeParse(status.value).success, true);
-    const raw = await started.app.dependencies.tasks.get(submitted.value.taskId);
-    assert.notEqual(raw?.state, 'running');
+      const response = await fetch(`${started.url}/v1/work/${submitted.value.taskId}`, {
+        headers: { authorization: `Bearer ${OWNER_TOKEN}` },
+      });
+      assert.equal(response.status, 200);
+      const status = TaskStatus.parse(await response.json());
+      assert.equal(status.state, 'failed');
+      assert.equal(status.failure?.code, 'protocol_error');
+    }
   } finally {
     await started.close();
   }

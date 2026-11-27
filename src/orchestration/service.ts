@@ -274,6 +274,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const now = deps.clock.iso();
+    const failureDetail = outcome.kind === 'failed' ? redactText(outcome.detail, [], 1000) : undefined;
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -293,7 +294,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               failure: {
                 code: outcome.code,
                 // Provider text is redacted before it is stored, not only on read.
-                detail: redactText(outcome.detail, [], 1000),
+                detail: failureDetail,
                 retryable: outcome.retryable,
               },
             };
@@ -337,8 +338,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           agent: task.agent,
         }).catch(() => undefined);
       }
-      const detail = outcome.kind === 'completed' ? outcome.summary
-        : outcome.kind === 'failed' ? outcome.detail : undefined;
+      const detail = outcome.kind === 'completed' ? outcome.summary : failureDetail;
       await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
       deps.audit.record({
         actor: task.ownerId,
@@ -605,7 +605,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
-  function trackAdmission(admit: ApplicationService['submitWork']): ApplicationService['submitWork'] {
+  function trackAdmission<Request, Reply>(
+    admit: (principal: Principal, request: Request) => Promise<ServiceResult<Reply>>,
+  ): (principal: Principal, request: Request) => Promise<ServiceResult<Reply>> {
     return async (principal, request) => {
       if (shuttingDown) return unavailable();
       // Register before admission can call any collaborator.
@@ -625,7 +627,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
-    submitWork: trackAdmission(async (principal, request) => {
+    submitWork: trackAdmission<WorkSubmitRequest, TaskAccepted>(async (principal, request) => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
@@ -924,8 +926,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    chat: async (principal, request) => {
-      if (shuttingDown) return unavailable();
+    chat: trackAdmission<ChatRequest, ChatReply>(async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
       const model = deps.models.resolve(request.model, request.mode);
@@ -1008,7 +1009,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(outcome.usage ? { usage: outcome.usage } : {}),
         createdAt: deps.clock.iso(),
       });
-    },
+    }),
 
     conversations: (principal) => deps.conversations.list(principal.ownerId),
 

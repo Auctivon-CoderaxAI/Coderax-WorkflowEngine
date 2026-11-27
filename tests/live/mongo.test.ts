@@ -64,23 +64,26 @@ test(
         env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
         gateway: fakeGateway(),
       });
-      assert.deepEqual(app.persistence, { driver: 'mongo' });
+      try {
+        assert.deepEqual(app.persistence, { driver: 'mongo' });
 
-      const indexes = await client
-        .db(databaseName)
-        .collection('live_work_runs')
-        .listIndexes()
-        .toArray();
-      assert.ok(
-        indexes.some(
-          (index) =>
-            index.key.key === 1 &&
-            index.unique === true &&
-            index.name === 'work_run_key',
-        ),
-        JSON.stringify(indexes),
-      );
-      await app.stop();
+        const indexes = await client
+          .db(databaseName)
+          .collection('live_work_runs')
+          .listIndexes()
+          .toArray();
+        assert.ok(
+          indexes.some(
+            (index) =>
+              index.key.key === 1 &&
+              index.unique === true &&
+              index.name === 'work_run_key',
+          ),
+          JSON.stringify(indexes),
+        );
+      } finally {
+        await app.stop();
+      }
     } finally {
       await client.db(databaseName).dropDatabase().catch(() => undefined);
       await client.close();
@@ -96,56 +99,59 @@ test(
     requiresDatabase();
     const connector = createMongoConnector();
     const first = await connector({ uri: uri as string, database: databaseName });
-    const second = await connector({ uri: uri as string, database: databaseName });
-    const collection = first.collection('live_lease_race');
-    await ensureWorkRunIndexes(collection);
-    const a = createLeaseStore(createMongoWorkRunTable(collection));
-    const b = createLeaseStore(createMongoWorkRunTable(second.collection('live_lease_race')));
-    const key = '["","owner","conversation"]';
-    const now = new Date();
     try {
-      assert.equal(
-        await a.claim({
-          key,
-          owner: 'owner',
-          token: 'token-a',
-          now,
-          expiresAt: new Date(now.getTime() + 30_000),
-        }),
-        true,
-      );
-      assert.equal(
-        await b.claim({
-          key,
-          owner: 'owner',
-          token: 'token-b',
-          now,
-          expiresAt: new Date(now.getTime() + 30_000),
-        }),
-        false,
-      );
-      assert.equal(
-        (await b.renew({
-          key,
-          token: 'token-b',
-          now,
-          expiresAt: new Date(now.getTime() + 30_000),
-        })).renewed,
-        false,
-      );
-      assert.equal(await a.cancel({ key, now }), 'requested');
-      assert.equal(
-        (await a.renew({
-          key,
-          token: 'token-a',
-          now,
-          expiresAt: new Date(now.getTime() + 30_000),
-        })).cancelRequested,
-        true,
-      );
+      const second = await connector({ uri: uri as string, database: databaseName });
+      try {
+        const collection = first.collection('live_lease_race');
+        await ensureWorkRunIndexes(collection);
+        const a = createLeaseStore(createMongoWorkRunTable(collection));
+        const b = createLeaseStore(createMongoWorkRunTable(second.collection('live_lease_race')));
+        const key = '["","owner","conversation"]';
+        const now = new Date();
+        assert.equal(
+          await a.claim({
+            key,
+            owner: 'owner',
+            token: 'token-a',
+            now,
+            expiresAt: new Date(now.getTime() + 30_000),
+          }),
+          true,
+        );
+        assert.equal(
+          await b.claim({
+            key,
+            owner: 'owner',
+            token: 'token-b',
+            now,
+            expiresAt: new Date(now.getTime() + 30_000),
+          }),
+          false,
+        );
+        assert.equal(
+          (await b.renew({
+            key,
+            token: 'token-b',
+            now,
+            expiresAt: new Date(now.getTime() + 30_000),
+          })).renewed,
+          false,
+        );
+        assert.equal(await a.cancel({ key, now }), 'requested');
+        assert.equal(
+          (await a.renew({
+            key,
+            token: 'token-a',
+            now,
+            expiresAt: new Date(now.getTime() + 30_000),
+          })).cancelRequested,
+          true,
+        );
+      } finally {
+        await second.close();
+      }
     } finally {
       await first.close();
-      await second.close();
     }
   },
 );

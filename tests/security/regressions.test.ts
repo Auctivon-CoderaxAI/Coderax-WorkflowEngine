@@ -29,7 +29,7 @@ function regression(id: string, title: string, body: () => Promise<void> | void)
   test(`[SEC-${id}] ${title}`, body);
 }
 
-regression('F1', 'provider and adapter text is redacted before persistence, events and status', async () => {
+regression('F1', 'provider and adapter text is redacted before persistence, events, status and notifications', async () => {
   const started = await startTestApp();
   try {
     const agent = started.app.dependencies.agents.get('coderax');
@@ -59,6 +59,10 @@ regression('F1', 'provider and adapter text is redacted before persistence, even
       started.app.dependencies.events.replay(submitted.value.taskId, 0).events,
     );
     assert.doesNotMatch(frames, /sk-|owner|\/home\//);
+    const notifications = await started.app.service.notifications(principal);
+    const notice = notifications.notifications.find(({ taskId }) => taskId === submitted.value.taskId);
+    assert.ok(notice?.summary);
+    assert.doesNotMatch(notice.summary, /sk-|owner|\/home\//);
   } finally {
     await started.close();
   }
