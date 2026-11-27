@@ -45,8 +45,21 @@ export type PermissionStore = {
   lookup: (input: {
     ownerId: string; taskId: string; scope: PermissionScope; resource: string; binding: string; consume: boolean;
   }) => Promise<{ decision: 'granted' | 'denied' | 'pending'; requestId?: string } | null>;
+  get: (ownerId: string, taskId: string, requestId: string) => Promise<PermissionRequest | null>;
+  isApproved: (taskId: string, scope: PermissionScope, resource: string) => Promise<boolean>;
+  hasPending: (taskId: string) => Promise<boolean>;
   /** Drop the in-process prompt list for a settled task; durable rows remain. */
   clear: (taskId: string) => void;
+};
+
+export type PermissionRow = PermissionRequest & { ownerId: string; binding: string; consumed: boolean };
+export type PermissionTable = {
+  insert: (row: PermissionRow) => Promise<void>;
+  get: (requestId: string) => Promise<PermissionRow | null>;
+  listTask: (ownerId: string, taskId: string) => Promise<PermissionRow[]>;
+  listPending: (ownerId: string) => Promise<PermissionRow[]>;
+  listByTask: (taskId: string) => Promise<PermissionRow[]>;
+  updateDecision: (input: { requestId: string; ownerId: string; taskId: string; decision: PermissionRequest['decision']; decidedAt: string }) => Promise<PermissionRow | null>;
 };
 
 export function createPermissionStore(input: {
@@ -56,7 +69,7 @@ export function createPermissionStore(input: {
   /** Prompt lifetime when a request does not name one. */
   defaultTtlMs?: number;
 }): PermissionStore {
-  type Row = PermissionRequest & { ownerId: string; binding: string; consumed: boolean };
+  type Row = PermissionRow;
   const rows = new Map<string, Row>();
   const collection = input.collection;
   async function scoped(ownerId: string, taskId: string): Promise<Row[]> {
@@ -97,6 +110,18 @@ export function createPermissionStore(input: {
       return publicRow(row);
     },
     list,
+    get: async (ownerId, taskId, requestId) => {
+      const row = (await scoped(ownerId, taskId)).find((entry) => entry.requestId === requestId);
+      return row ? publicRow(row) : null;
+    },
+    isApproved: async (taskId, scope, resource) => {
+      const now = input.clock.iso();
+      if (collection) {
+        return !!await collection.findOne({ taskId, scope, resource, decision: 'approved', validUntil: { $gt: new Date(now) }, consumed: false });
+      }
+      return [...rows.values()].some((row) => row.taskId === taskId && row.scope === scope && row.resource === resource &&
+        row.decision === 'approved' && row.expiresAt > now && !row.consumed);
+    },
     decide: async ({ ownerId, taskId, requestId, decision }) => {
       const row = (await scoped(ownerId, taskId)).find(r => r.requestId === requestId);
       if (!row) return fail('not_found', 'That permission request does not exist for this task.');
@@ -113,6 +138,11 @@ export function createPermissionStore(input: {
       if (row.decision !== 'approved') return { decision: row.decision, requestId: row.requestId };
       if (consume && !await update(row, 'approved', { consumed: true })) return null;
       return { decision: 'granted' };
+    },
+    hasPending: async (taskId) => {
+      const now = input.clock.iso();
+      if (collection) return !!await collection.findOne({ taskId, decision: 'pending', validUntil: { $gt: new Date(now) } });
+      return [...rows.values()].some((row) => row.taskId === taskId && row.decision === 'pending' && row.expiresAt > now);
     },
     clear: (taskId) => {
       for (const [key, row] of rows) {

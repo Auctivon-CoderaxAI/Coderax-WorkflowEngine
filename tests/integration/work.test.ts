@@ -1,3 +1,5 @@
+import { workRunKey } from '../../src/execution/lease.js';
+import { OWNER_TOKEN, taskRecord } from '../helpers.js';
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
@@ -26,10 +28,10 @@ test('Work runs to completion, persists its transcript and notifies once', async
     assert.equal(completed.reasoning, 'fast');
     assert.equal(completed.steps.length, 1);
     assert.ok(completed.steps.every((step) => step.state === 'completed'));
-    // Native runs one planning call and three planned steps; each returns text.
     assert.ok(completed.result?.summary?.startsWith('A verified result.'));
-    // Usage accumulates across all four real model calls (11/13 each).
-    assert.deepEqual(completed.usage, { inputTokens: 44, outputTokens: 52 });
+    assert.equal(completed.result?.verification?.passed, true);
+    assert.ok((completed.result?.verification?.evidence.length ?? 0) > 0);
+    assert.deepEqual(completed.usage, { inputTokens: 22, outputTokens: 26 });
 
     const conversation = await started.app.service.conversation(
       principal,
@@ -399,6 +401,6 @@ test('retry rejects a budget refusal and refunds a failed reissue', async () => 
     tasks.reissue = async () => ({ applied: false, reason: 'superseded' });
     const conflict = await service.retryTask(principal, failed.taskId, failed.generation);
     assert.equal(!conflict.ok && conflict.code, 'conflict');
-    assert.equal(service.budget(principal).used.requests, 0);
+    assert.equal((await service.budget(principal)).used.requests, 0);
   } finally { await started.close(); }
 });

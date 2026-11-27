@@ -1,3 +1,5 @@
+import { sanitizeTaskPatch } from './tasks.js';
+import { redactContent } from '../observability/redact.js';
 import { isTerminalState, TERMINAL_TASK_STATES } from '@coderax/contracts';
 import type {
   ConversationRecord,
@@ -285,6 +287,16 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return { applied: true, task: toTask(updated) };
     },
 
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const updated = await collection.findOneAndUpdate(
+        { taskId, generation, state: { $in: ['queued', 'interrupted'] }, handoffPending: true },
+        { $set: { state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt } },
+        { returnDocument: 'after', includeResultMetadata: false });
+      return updated ? toTask(updated) : null;
+    },
+    claimScheduledRetry: async (taskId, generation) => !!await collection.findOneAndUpdate(
+      { taskId, state: 'failed', generation }, { $set: { scheduleRetryClaimed: true } },
+      { returnDocument: 'after', includeResultMetadata: false }),
     allocateSeq: async ({ taskId, token }) => {
       // The increment is atomic in the database and the fence is part of the
       // filter: no read-then-compare window, and no way for a superseded
@@ -339,7 +351,7 @@ export function createMongoConversationRepository(input: {
     if (found.isWork !== record.isWork) throw new ConversationConflictError('kind');
   }
 
-  async function ensure(record: ConversationRecord): Promise<ConversationBinding> {
+  async function ensure(record: ConversationRecord): Promise<ConversationRecord> {
     const existing = await conversations.findOne({ conversationId: record.conversationId });
     if (existing) {
       const found = toConversation(existing);
@@ -348,7 +360,7 @@ export function createMongoConversationRepository(input: {
     }
     try {
       await conversations.insertOne({ ...record });
-      return { ok: true, record: { ...record } };
+      return { ...record };
     } catch (error) {
       if (!isDuplicateKey(error)) throw error;
       // Another replica created it between the read and the insert.

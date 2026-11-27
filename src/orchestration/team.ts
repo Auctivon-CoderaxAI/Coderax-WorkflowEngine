@@ -151,13 +151,14 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
   }
 
   function publish(record: TeamRecord, type: Parameters<EventBus['publish']>[0]['type'], payload?: unknown): void {
-    deps.events.publish({
+    void deps.events.publish({
       taskId: record.teamId,
+      runToken: record.runToken ?? '',
       agent: 'coderax',
       generation: record.generation,
       type,
       ...(payload === undefined ? {} : { payload }),
-    });
+    }).catch(() => undefined);
   }
 
   function statusOf(record: TeamRecord): TeamStatus {
@@ -389,12 +390,21 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
       history: [],
       model: input.model,
       mode: input.record.mode,
+      routing: 'auto', allowFallback: false, operation: 'work',
       workspaceRoot: input.workspaceRoot,
       maxSteps: input.record.limits.maxStepsPerMember,
       budget: input.record.budget,
       signal: input.context.controller.signal,
     };
 
+    const reservation = input.adapter.engine === 'native' ? null : await deps.budget.reserve({
+      ownerId: input.record.ownerId, at: deps.clock.now(), inputTokens: Math.ceil(request.objective.length / 4),
+      outputTokens: request.budget?.maxOutputTokens ?? 1024,
+    });
+    if (reservation && !reservation.allowed) return { ok: false, code: 'budget_exhausted', detail: reservation.detail, retryable: true, executionId };
+    const held = reservation?.allowed ? reservation.reservation : null;
+    let dispatched = false;
+    let chargedUsage: { inputTokens?: number; outputTokens?: number } = {};
     const supervised = deps.supervisor.run({
       identity,
       adapter: input.adapter,
@@ -407,7 +417,9 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
         const outcome: AgentRunOutcome = await input.adapter.run(
           { ...request, signal: execution.signal },
           execution.report,
+          () => { dispatched = !execution.signal.aborted; return dispatched; },
         );
+        if (outcome.ok) chargedUsage = outcome.usage ?? {};
         if (outcome.ok) {
           return {
             outcome: {
@@ -432,6 +444,10 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
           },
         };
       },
+    }).finally(async () => {
+      if (!held) return;
+      if (dispatched) await deps.budget.settle(held.id, chargedUsage);
+      else await deps.budget.release(held.id);
     });
 
     /**
@@ -598,9 +614,6 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
       ...(input.memberPatch ?? {}),
     });
     if (!applied) return;
-    // Charge the same quota a Work task uses. A failed finish before any model
-    // call reports zero tokens, which is truthful rather than a second counter.
-    await deps.budget.consume(input.record.ownerId, input.usage ?? {}, deps.clock.now());
     const type =
       input.state === 'completed'
         ? 'task.completed'
@@ -609,7 +622,7 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
           : input.state === 'interrupted'
             ? 'task.interrupted'
             : 'task.failed';
-    publish({ ...input.record, ...(input.memberPatch ?? {}), state: input.state }, type, {
+    publish({ ...input.record, ...(input.memberPatch ?? {}), state: input.state, runToken: null }, type, {
       ...(input.state === 'completed' ? { summary: 'Team completed with verified evidence.' } : {}),
       ...(input.failure ? { failure: input.failure } : {}),
     });
@@ -793,34 +806,6 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
           });
           await deps.events.flush(record.teamId).catch(() => undefined);
           return;
-        }
-
-        // Every dispatched member spends one request slot from the same durable
-        // quota Work uses. The reservation happens after approvals are settled,
-        // so a suspended team never holds quota, and a partial failure returns
-        // the slots that were not going to run.
-        let reservedMembers = 0;
-        for (const _member of admitted) {
-          const reservation = await deps.budget.reserve(record.ownerId, deps.clock.now());
-          if (!reservation.allowed) {
-            if (reservedMembers > 0) {
-              await deps.budget.release(record.ownerId, reservedMembers, deps.clock.now());
-            }
-            await finish({
-              record,
-              token,
-              state: 'failed',
-              failure: {
-                code: 'budget_exhausted',
-                detail: 'The daily zero-cost request budget is exhausted for this wave; the team was refused rather than routed to a paid path.',
-                retryable: true,
-              },
-              usage,
-              memberPatch: { members, checkpoint },
-            });
-            return;
-          }
-          reservedMembers += 1;
         }
 
         const prepared: Array<{ member: TeamMemberRecord; artifacts: TeamArtifact[]; lockOwner: string }> = [];
@@ -1119,6 +1104,7 @@ export function createTeamService(deps: TeamServiceDeps): TeamService {
         return fail('conflict', 'That team already exists.');
       }
       publish(record, 'task.queued');
+      await deps.events.flush(record.teamId);
 
       const token = deps.ids.runToken();
       const claimed = await deps.teams.claim({

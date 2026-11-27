@@ -1,7 +1,5 @@
 import type { ModelCatalog } from '../models/catalog.js';
-import type { BudgetLedger } from '../models/budget.js';
 import type { ModelGateway } from '../agents/native/types.js';
-import type { Clock } from '../support/clock.js';
 import type { DesignAssistant } from './studio.js';
 
 /**
@@ -16,8 +14,6 @@ import type { DesignAssistant } from './studio.js';
 export function createDesignAssistant(input: {
   models: ModelCatalog;
   gateway: ModelGateway | null;
-  budget: BudgetLedger;
-  clock: Clock;
   timeoutMs?: number;
 }): DesignAssistant {
   const available = input.gateway !== null;
@@ -28,12 +24,10 @@ export function createDesignAssistant(input: {
       if (!input.gateway) return null;
       const resolved = input.models.resolve(null, 'cloud');
       if (!resolved.ok) return null;
-      const reservation = input.budget.reserve(ownerId, input.clock.now());
-      if (!reservation.allowed) return null;
-
       try {
         const completion = await input.gateway.complete({
           model: resolved.value.ref,
+          ownerId, mode: 'cloud', operation: 'work',
           system:
             'You write short design narrative for a deterministic game generator. Reply with JSON only: {"logline": string, "pillars": string[]}. Never claim a mechanic that is not listed.',
           prompt: `Spec: ${JSON.stringify({
@@ -47,7 +41,6 @@ export function createDesignAssistant(input: {
           signal: AbortSignal.timeout(input.timeoutMs ?? 20_000),
           maxOutputTokens: 320,
         });
-        input.budget.consume(ownerId, completion.usage ?? {}, input.clock.now());
         const parsed = JSON.parse(completion.text.trim()) as {
           logline?: unknown;
           pillars?: unknown;

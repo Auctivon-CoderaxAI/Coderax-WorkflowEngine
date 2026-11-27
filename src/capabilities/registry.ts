@@ -1,5 +1,3 @@
-import type { CapabilityEntry, CapabilityName, CapabilityReport, CapabilityState } from '@coderax/contracts';
-import { summarizeCapabilities } from '@coderax/contracts';
 import type { ArtifactService } from '../artifacts/service.js';
 import type { ProviderPolicyRegistry, ProcessingOperation } from '../models/policy.js';
 import type { ModelRouter } from '../models/router.js';
@@ -17,6 +15,15 @@ import type { ModelRouter } from '../models/router.js';
  * reported as `unavailable`, `unconfigured`, `blocked` or `unverified`; a
  * provider's documentation is never used as evidence of working execution.
  */
+
+type CapabilityName = 'audio.transcription' | 'audio.understanding' | 'browser.intelligence' | 'data.analysis' | 'document.intelligence' | 'game.studio' | 'gaming.agent' | 'image.editing' | 'image.generation' | 'image.understanding' | 'presentation.intelligence' | 'software.engineering' | 'speech.generation' | 'spreadsheet.intelligence' | 'text.intelligence' | 'video.understanding';
+type CapabilityState = 'available' | 'blocked' | 'unconfigured' | 'unavailable' | 'unverified';
+type CapabilityEntry = {
+  name: CapabilityName; state: CapabilityState; implementation: string | null;
+  provider: string | null; providerConfigured: boolean; operational: boolean;
+  operationalDetail: string; privacyEligible: boolean; zeroCost: boolean; detail: string;
+};
+type CapabilityReport = { capabilities: CapabilityEntry[]; checkedAt: string };
 
 export type CapabilityRegistry = {
   report: () => CapabilityReport;
@@ -150,7 +157,7 @@ export function createCapabilityRegistry(input: {
         detail: 'Unavailable: Native Gaming Agent is not part of this engine.',
       },
     ];
-    return summarizeCapabilities(capabilities, input.now().toISOString());
+    return { capabilities, checkedAt: input.now().toISOString() };
   }
 
   const noAdapter = (name: CapabilityName, detail: string): CapabilityEntry => ({

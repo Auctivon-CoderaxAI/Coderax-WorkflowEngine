@@ -48,6 +48,8 @@ export type TeamRepository = {
     teamId: string;
     at: string;
   }) => Promise<TeamRecord | null>;
+  allocateSeq: (input: { taskId: string; token: string; generation?: number }) => Promise<number | null>;
+  adoptSeq: (input: { taskId: string; seq: number }) => Promise<void>;
   listByOwner: (ownerId: string) => Promise<TeamRecord[]>;
   listActive: () => Promise<TeamRecord[]>;
   retireStale: (input: { before: string; at: string }) => Promise<number>;
@@ -137,6 +139,16 @@ export function createTeamRepository(): TeamRepository {
       return clone(record);
     },
 
+    allocateSeq: async ({ taskId, token, generation }) => {
+      const row = teams.get(taskId);
+      if (!row || row.generation !== generation || (row.runToken ?? '') !== token) return null;
+      row.eventSeq = (row.eventSeq ?? 0) + 1;
+      return row.eventSeq;
+    },
+    adoptSeq: async ({ taskId, seq }) => {
+      const row = teams.get(taskId);
+      if (row) row.eventSeq = Math.max(row.eventSeq ?? 0, seq);
+    },
     listByOwner: async (ownerId) =>
       [...teams.values()]
         .filter((record) => record.ownerId === ownerId)
@@ -296,6 +308,14 @@ export function createMongoTeamRepository(input: {
       return document ? fromDocument(document) : null;
     },
 
+    allocateSeq: async ({ taskId, token, generation }) => {
+      const row = await collection.findOneAndUpdate({ teamId: taskId, generation, runToken: token || null },
+        { $inc: { eventSeq: 1 } }, { returnDocument: 'after', includeResultMetadata: false });
+      return typeof row?.eventSeq === 'number' ? row.eventSeq : null;
+    },
+    adoptSeq: async ({ taskId, seq }) => {
+      await collection.updateOne({ teamId: taskId }, { $max: { eventSeq: seq } }, { upsert: false });
+    },
     listByOwner: async (ownerId) => {
       const documents = await collection.find({ ownerId }).sort({ createdAt: -1 }).toArray();
       return documents.map(fromDocument);

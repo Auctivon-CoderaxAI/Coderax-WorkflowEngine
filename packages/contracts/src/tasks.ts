@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CreativeArtifact, MediaAttachmentInput, MediaId, MediaReference } from './media.js';
 import { Budget } from './models.js';
 import {
   AgentId,
@@ -15,6 +16,11 @@ import {
 export const ChatRequest = z
   .object({
     message: z.string().min(1).max(200_000),
+    /**
+     * Optional image attachments. Validated against their own bytes before a
+     * provider is called; the accepted references are part of the stored turn.
+     */
+    attachments: z.array(z.union([MediaId, MediaAttachmentInput])).max(4).optional(),
     conversationId: ConversationId.optional(),
     agent: AgentId.default('coderax'),
     model: ModelRef.optional(),
@@ -31,6 +37,7 @@ export const ChatReply = z
     agent: AgentId,
     model: ModelRef,
     usage: Usage.optional(),
+    creative: z.array(CreativeArtifact).optional(),
     createdAt: IsoDateTime,
   })
   .strict();
@@ -44,6 +51,7 @@ export type ChatReply = z.infer<typeof ChatReply>;
 export const WorkSubmitRequest = z
   .object({
     objective: z.string().min(1).max(200_000),
+    attachments: z.array(MediaId).max(4).optional(),
     conversationId: ConversationId.optional(),
     /** Omitted means Coderax Native. An external agent must be named explicitly. */
     agent: AgentId.optional(),
@@ -103,6 +111,7 @@ export const TaskStatus = z
       .object({
         summary: z.string().max(20_000).optional(),
         artifacts: z.array(Artifact),
+        creative: z.array(CreativeArtifact).optional(),
         /** Present only when the objective was assessed against evidence. */
         verification: z
           .object({
@@ -168,6 +177,9 @@ export const Message = z
     createdAt: IsoDateTime,
     unfinished: z.boolean().optional(),
     agent: AgentId.optional(),
+    /** Metadata for images accepted on this turn; never the bytes. */
+    media: z.array(MediaReference).optional(),
+    attachments: z.array(MediaId).optional(),
   })
   .strict();
 export type Message = z.infer<typeof Message>;

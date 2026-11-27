@@ -1,9 +1,11 @@
 import type { AgentIsolation, DataMode, EngineCapabilities } from '@coderax/contracts';
+import path from 'node:path';
+import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
 import { createNativeAgent } from '../agents/native/agent.js';
-import { createNativePlanner } from '../agents/native/planner.js';
+import { createDeterministicPlanner } from '../agents/native/planner.js';
 import { createOpenCodeHttpTransport } from '../agents/adapters/opencode.js';
 import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
@@ -17,10 +19,17 @@ import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
 import { createRouterCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
-import { createMongoQuotaStore } from '../models/quota.js';
-import { createRouter as createModelRouter, type ProviderDescriptor } from '../models/router.js';
-import { createRoutedGateway } from '../models/routed.js';
-import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
+import { createModelRouter, type ModelRouter } from '../models/router.js';
+import type { ProviderAdapter, ProviderSettings, RegisteredProvider, FreeTierAttestation, BenchmarkScore } from '../models/types.js';
+import type { ModelGateway } from '../agents/native/types.js';
+import { createProviderPolicyRegistry, type ProviderPolicy, type ProviderPolicyRegistry } from '../models/policy.js';
+import { createOpenAiProvider } from '../models/providers/openai.js';
+import { createGeminiProvider } from '../models/providers/gemini.js';
+import { loadBenchmarkScores, BenchmarkFileError } from '../models/benchmark.js';
+import { createKnowledgeStore } from '../knowledge/store.js';
+import { createDeliverableService } from '../artifacts/deliver.js';
+import { createArtifactToolkit } from '../artifacts/toolkit.js';
+import { createArtifactStore } from '../artifacts/store.js';
 import { createBuiltinTools } from '../tools/builtin.js';
 import { createToolRuntime } from '../tools/runtime.js';
 import { attachMcpServers } from '../mcp/client.js';
@@ -55,7 +64,6 @@ import {
 } from './container.js';
 import { buildPersistence } from './persistence.js';
 import { StartupError } from './startup-error.js';
-import { createArtifactStore } from '../artifacts/store.js';
 import { createGameStore } from '../games/store.js';
 import { createGameStudio } from '../games/studio.js';
 import { createDesignAssistant } from '../games/assistant.js';
@@ -334,16 +342,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     config,
     env,
     clock,
+    ids,
     ...(input.persistence ?? {}),
   });
   const budget = createBudgetLedger({
     maxRequestsPerDay: config.models.dailyRequestBudget,
     maxTokensPerDay: config.models.dailyTokenBudget,
-    // One ledger, two storage choices: the shared Mongo window when the driver
-    // is durable, otherwise the same atomic window inside this process.
-    store: persistence.budgetCollection
-      ? createMongoBudgetStore(persistence.budgetCollection)
-      : createMemoryBudgetStore(),
+    store: persistence.budget,
   });
 
   const providerBuild = input.providers
@@ -393,7 +398,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     );
   }
 
-  const models: ModelRouter = createModelRouter({
+  const modelRouter: ModelRouter = createModelRouter({
     providers: providerBuild.registrations,
     policy,
     attestations,
@@ -409,7 +414,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     contextMarginTokens: config.models.routing.contextMarginTokens,
     now: () => clock.now(),
   });
-  await models.refresh();
+  await modelRouter.refresh();
 
   // Production reaches inference only through the router above. A gateway
   // fixture is a test seam and never becomes a second production authority.
@@ -417,18 +422,18 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     input.gateway !== undefined
       ? input.gateway
       : providerBuild.registrations.length > 0
-        ? models
+        ? modelRouter
         : null;
 
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
     gateway,
-    planner: createNativePlanner(),
+    planner: createDeterministicPlanner(),
     // An injected transport is a test seam. A real provider registration only
     // counts once the router has verified a zero-cost route; a key alone never
     // makes a model free.
     modelsAvailable: () =>
-      (input.gateway !== undefined && input.gateway !== null) || models.hasVerifiedFreeRoute(),
+      (input.gateway !== undefined && input.gateway !== null) || modelRouter.hasVerifiedFreeRoute(),
     unavailableDetail:
       providerBuild.registrations.length === 0
         ? 'No inference provider is configured; add a provider credential or models.providers entry. A key alone would not make a model free.'
@@ -503,35 +508,26 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     }
   }
 
-  const persistence = await buildPersistence({
-    config,
-    env,
-    clock,
-    ...(input.persistence ?? {}),
-  });
-  // The quota store is chosen by the persistence driver: mongo shares one
-  // durable account per owner and day across replicas, memory is the explicit
-  // single-process mode.
-  const budget = createBudgetLedger({
-    maxRequestsPerDay: config.models.dailyRequestBudget,
-    maxTokensPerDay: config.models.dailyTokenBudget,
-    ...(persistence.quotaCollection
-      ? { store: createMongoQuotaStore({ collection: persistence.quotaCollection }) }
-      : {}),
-  });
-  const lease = persistence.lease;
-  const tasks = persistence.tasks;
-  const conversations = persistence.conversations;
-  const memory = persistence.memory;
-  const permissions = createPermissionStore({
-    clock,
-    ids,
-    ...(persistence.permissionCollection
-      ? { collection: persistence.permissionCollection }
-      : {}),
-  });
+  const { lease, tasks, conversations, memory, permissions, scheduleNotices } = persistence;
   const notifications = persistence.notifications;
   const schedules = persistence.schedules;
+  const mcp = await attachMcpServers(config.mcp.servers);
+  const knowledge = createKnowledgeStore({ clock, ids, embeddings: null, maxDocuments: config.knowledge.maxDocuments });
+  const builtinTools = config.tools.enabled
+    ? createBuiltinTools({
+        shellEnabled: config.tools.shellEnabled,
+        allowedCommands: config.tools.allowedCommands,
+        networkEnabled: config.tools.networkEnabled,
+        allowedHosts: config.tools.allowedHosts,
+        maxOutputBytes: config.tools.maxOutputBytes,
+        commandTimeoutMs: config.tools.commandTimeoutMs,
+        maxSearchFiles: config.tools.maxSearchFiles,
+        memory,
+        knowledge: config.knowledge.enabled ? knowledge : null,
+      })
+    : [];
+  const tools = createToolRuntime({ tools: [...builtinTools, ...mcp.tools] });
+
   const audit = createAuditLog({ clock, ids });
   const artifactService = createArtifactService({
     artifacts: persistence.artifacts,
@@ -555,12 +551,14 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     store: persistence.events,
     // The task row is the fenced sequence authority; the bus never numbers an
     // event on its own, so a superseded generation cannot append one.
-    seq: tasks,
+    seq: {
+      allocateSeq: (request) => request.taskId.startsWith('team_') ? persistence.teams.allocateSeq(request) : tasks.allocateSeq(request),
+      adoptSeq: (request) => request.taskId.startsWith('team_') ? persistence.teams.adoptSeq(request) : tasks.adoptSeq(request),
+    },
     pollMs: config.execution.eventPollMs,
+    generation: async (taskId) => (await tasks.get(taskId))?.generation ?? null,
     eventId: ids.eventId,
     iso: clock.iso,
-    log: persistence.events,
-    retain: config.execution.eventRetain,
   });
   const runner = createTaskRunner({
     lease,
@@ -653,7 +651,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         name: 'models',
         required: false,
         check: async () => {
-          const snapshot = models.health();
+          const snapshot = modelRouter.health();
           return snapshot.verifiedFree > 0
             ? {
                 status: 'ok' as const,
@@ -740,7 +738,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: async () => ({
           status: 'ok' as const,
-          detail: `${tools.list().length} tool(s); ${models.health().route.length} routed model(s); ${
+          detail: `${tools.list().length} tool(s); ${modelRouter.health().route.length} routed model(s); ${
             mcp.names.length
           } MCP server(s)${mcp.failures.length > 0 ? `; ${mcp.failures.length} unavailable` : ''}.`,
         }),
@@ -784,9 +782,46 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
   const infrastructure: InfrastructureDependencies = container.dependencies;
 
+  const gameArtifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
+  const studio = createGameStudio({
+    store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
+    artifacts: gameArtifacts, clock, ids,
+    assistant: createDesignAssistant({ models, gateway }),
+    maxProjects: config.games.maxProjectsPerOwner,
+  });
+  const { sessions, agent: gaming } = createGameSessions({ artifacts: gameArtifacts, clock, ids, maxPauseMs: config.games.maxPauseMs });
+  const artifactRoots = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
+  if (!artifactRoots.ok) {
+    throw new StartupError([artifactRoots.detail]);
+  }
+  const deliverables = createDeliverableService({
+    toolkit: createArtifactToolkit(),
+    artifacts: artifactService,
+    audit,
+    clock,
+    ids,
+    roots: artifactRoots.value,
+  });
+  const browserProvider =
+    input.browserProvider ??
+    buildBrowserProvider({
+      config,
+      env,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    });
+  const browser = createBrowserService({
+    config,
+    clock,
+    ids,
+    permissions,
+    audit,
+    provider: browserProvider,
+    store: createBrowserStore(),
+  });
   const service = createApplicationService({
     ...infrastructure,
     externalPolicy,
+    studio, sessions, gaming, deliverables, browser, scheduleNotices,
   });
 
   const registry = createRouteRegistry();
@@ -840,7 +875,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
   health.markReady();
 
-  let scheduleTimer: NodeJS.Timeout | null = null;
   const server = createHttpServer({
     router,
     host: config.server.host,
@@ -852,34 +886,28 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     service,
     router,
     server,
-    modelRouter: models,
+    modelRouter,
     providerPolicy: policy,
     persistence: { driver: persistence.driver },
     start: async () => {
       const { url } = await server.listen();
-      models.start();
+      modelRouter.start();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.artifacts.reconcile();
       await service.artifacts.sweepExpiredArtifacts();
       await service.recoverInterrupted();
-      if (config.schedules.enabled) {
-        scheduleTimer = setInterval(() => {
-          void service.tickSchedules().catch(() => undefined);
-        }, config.schedules.tickIntervalMs);
-        scheduleTimer.unref();
-      }
+      service.startSchedules();
       return { url };
     },
     stop: async () => {
-      if (scheduleTimer) {
-        clearInterval(scheduleTimer);
-        scheduleTimer = null;
-      }
-      models.stop();
+      service.beginShutdown();
+      const serverClosed = server.close();
+      await service.stopSchedules();
+      modelRouter.stop();
       await service.shutdown();
       await mcp.close();
-      await server.close();
+      await serverClosed;
       await persistence.close();
     },
   };

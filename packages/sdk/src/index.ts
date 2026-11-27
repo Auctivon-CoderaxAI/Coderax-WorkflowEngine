@@ -1,3 +1,6 @@
+import { CreativeValidation, MediaCapabilities, MediaDownload, MediaUploadResult, TeamAccepted, TeamControlResult, TeamStatus,
+  type CreativeValidationRequest, type MediaUploadRequest, type TeamSubmitRequest
+} from '@coderax/contracts';
 import type { z } from 'zod';
 import {
   AgentList,
@@ -36,6 +39,7 @@ import {
   GameSessionLogs,
   GameSessionVerification,
   HealthReport,
+  MediaIntakeResult,
   MemoryList,
   ModelList,
   NotificationList,
@@ -54,6 +58,7 @@ import {
   TaskControlResult,
   TaskStatus,
 } from '@coderax/contracts';
+import type { MediaIntakeRequest } from '@coderax/contracts';
 import type {
   BuildGameRequest,
   BrowserAction,
@@ -486,6 +491,15 @@ export class CoderaxClient {
     return this.request<ChatReply>(ChatReply, {
       method: 'POST',
       path: '/v1/chat',
+      body: request,
+    });
+  }
+
+  /** Validates image attachments and returns metadata for a chat turn. */
+  intakeMedia(request: MediaIntakeRequest): Promise<MediaIntakeResult> {
+    return this.request<MediaIntakeResult>(MediaIntakeResult, {
+      method: 'POST',
+      path: '/v1/media',
       body: request,
     });
   }
@@ -953,6 +967,85 @@ export class CoderaxClient {
   }
 
   /** Replays and tails execution events from a sequence cursor. */
+  submitTeam(request: TeamSubmitRequest): Promise<TeamAccepted> {
+    return this.request<TeamAccepted>(TeamAccepted, {
+      method: 'POST',
+      path: '/v1/teams',
+      body: request,
+    });
+  }
+
+  team(teamId: string): Promise<TeamStatus> {
+    return this.request<TeamStatus>(TeamStatus, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}`,
+    });
+  }
+
+  cancelTeam(teamId: string): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/cancel`,
+      body: {},
+    });
+  }
+
+  resumeTeam(teamId: string, generation: number): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/resume`,
+      body: { generation },
+    });
+  }
+
+  teamPermissions(teamId: string): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
+    });
+  }
+
+  decideTeamPermission(
+    teamId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
+      body: request,
+    });
+  }
+
+  mediaCapabilities(): Promise<MediaCapabilities> {
+    return this.request<MediaCapabilities>(MediaCapabilities, {
+      method: 'GET',
+      path: '/v1/media/capabilities',
+    });
+  }
+
+  uploadMedia(request: MediaUploadRequest): Promise<MediaUploadResult> {
+    return this.request<MediaUploadResult>(MediaUploadResult, {
+      method: 'POST',
+      path: '/v1/media/uploads',
+      body: request,
+    });
+  }
+
+  media(mediaId: string): Promise<MediaDownload> {
+    return this.request<MediaDownload>(MediaDownload, {
+      method: 'GET',
+      path: `/v1/media/${encodeURIComponent(mediaId)}`,
+    });
+  }
+
+  validateCreative(request: CreativeValidationRequest): Promise<CreativeValidation> {
+    return this.request<CreativeValidation>(CreativeValidation, {
+      method: 'POST',
+      path: '/v1/creative/validate',
+      body: request,
+    });
+  }
+
   async *events(
     taskId: string,
     options: { after?: number; signal?: AbortSignal } = {},

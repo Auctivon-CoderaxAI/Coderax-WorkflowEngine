@@ -269,9 +269,9 @@ test('conversations are created once, listed and never shared across owners', as
   const conversations = createMongoConversationRepository(input);
 
   const first = await conversations.ensure(conversation());
-  assert.equal(first.ok && first.record.conversationId, 'conv_1');
+  assert.equal(first.conversationId, 'conv_1');
   const again = await conversations.ensure(conversation({ title: 'Different title' }));
-  assert.equal(again.ok && again.record.title, 'Persisted');
+  assert.equal(again.title, 'Persisted');
 
   await assert.rejects(
     () => conversations.ensure(conversation({ ownerId: 'someone-else' })),

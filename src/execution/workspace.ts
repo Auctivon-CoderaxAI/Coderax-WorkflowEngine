@@ -46,9 +46,6 @@ export type RunWorkspace = ResolvedWorkspace & {
 const isWindows = process.platform === 'win32';
 
 /** A run id becomes a directory name, so it is an allow-list, not a filter. */
-const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
-const RUN_DIR = '.coderax-runs';
-const QUARANTINE_DIR = '.coderax-quarantine';
 
 function normalize(value: string): string {
   const resolved = path.resolve(value);

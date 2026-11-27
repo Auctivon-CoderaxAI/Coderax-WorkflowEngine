@@ -28,6 +28,9 @@ export const ProblemCode = z.enum([
   'permission_required',
   'cancelled',
   'protocol_error',
+  'media_invalid',
+  'media_too_large',
+  'media_unsupported',
   'internal_error',
 ]);
 export type ProblemCode = z.infer<typeof ProblemCode>;
@@ -67,5 +70,8 @@ export const HTTP_STATUS_FOR_CODE: Readonly<Record<ProblemCode, number>> = Objec
   permission_required: 409,
   cancelled: 409,
   protocol_error: 502,
+  media_invalid: 400,
+  media_too_large: 413,
+  media_unsupported: 415,
   internal_error: 500,
 });

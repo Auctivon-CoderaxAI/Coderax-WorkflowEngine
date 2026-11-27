@@ -1,13 +1,25 @@
-import type { TaskEvidence, TaskPlan, TaskPlanStep, TaskVerification } from '../../domain.js';
+import type { Usage } from '@coderax/contracts';
+import type { TaskPlan, TaskVerification } from '../../domain.js';
+import type {
+  BasicModelGateway,
+  ReasoningMode,
+  StepEvidence,
+  TaskPlanStep,
+} from './types.js';
+import {
+  buildVerificationPrompt,
+  renderEvidence,
+  VERIFY_SYSTEM,
+} from './prompt.js';
 
 /**
  * Completion is a claim about evidence, not about a model's confidence.
  *
- * The deterministic assessment runs first: every planned step must be complete
- * and must have produced non-empty evidence. A model may then assess whether the
- * evidence proves the objective, but its answer is accepted only when it cites
- * real evidence ids. An uncited pass is a failed verification. Teams use the
- * structural half only and never ask a model for a verdict.
+ * A deterministic assessment runs first: every planned step must be complete,
+ * every step must have produced evidence, and the evidence must be non-empty.
+ * Only then is a model asked whether that evidence proves the objective, and its
+ * answer is accepted only when it cites real evidence ids. A malformed answer or
+ * an uncited "passed" is a failed verification, never a success.
  */
 
 const MAX_EVIDENCE = 20;
@@ -22,7 +34,7 @@ export function clamp(text: string, max: number): string {
 export function structuralAssessment(input: {
   plan: TaskPlan;
   completed: ReadonlySet<string>;
-  evidence: TaskEvidence[];
+  evidence: StepEvidence[];
 }): TaskVerification {
   const byId = new Map(input.evidence.map((entry) => [entry.stepId, entry]));
   const missing: TaskPlanStep[] = [];
@@ -34,14 +46,17 @@ export function structuralAssessment(input: {
       continue;
     }
     const entry = byId.get(step.id);
-    if (!entry || entry.citation.trim().length === 0 || entry.output.trim().length === 0) {
+    if (!entry || entry.citation.trim().length === 0) {
       withoutEvidence.push(step);
     }
   }
 
   const citations = input.plan.steps
     .map((step) => byId.get(step.id))
-    .filter((entry): entry is TaskEvidence => Boolean(entry))
+    .filter(
+      (entry): entry is StepEvidence =>
+        entry !== undefined && entry.citation.trim().length > 0,
+    )
     .map((entry) => clamp(`${entry.stepId}: ${entry.citation}`, MAX_EVIDENCE_CHARS))
     .slice(0, MAX_EVIDENCE);
 
@@ -91,10 +106,6 @@ function extractJson(text: string): string | null {
   return trimmed.slice(start, end + 1);
 }
 
-/**
- * A pass is accepted only with a bounded reason and citations of evidence that
- * actually exists. `VERDICT: PASS` in prose has no path through this parser.
- */
 export function parseVerification(
   text: string,
   knownSteps: ReadonlySet<string>,
@@ -119,4 +130,119 @@ export function parseVerification(
   if (Array.isArray(record.cited) && cited.length !== record.cited.length) return null;
   if (cited.some((id) => !knownSteps.has(id))) return null;
   return { passed: record.passed, reason, cited: [...new Set(cited)] };
+}
+
+function citedEvidence(
+  cited: string[],
+  evidence: StepEvidence[],
+): string[] {
+  const byId = new Map(evidence.map((entry) => [entry.stepId, entry]));
+  return cited
+    .map((id) => byId.get(id))
+    .filter((entry): entry is StepEvidence => Boolean(entry))
+    .map((entry) => clamp(`${entry.stepId}: ${entry.citation}`, MAX_EVIDENCE_CHARS))
+    .slice(0, MAX_EVIDENCE);
+}
+
+export type VerificationResult = {
+  verification: TaskVerification;
+  usage?: Usage;
+};
+
+export async function verifyObjective(input: {
+  gateway: BasicModelGateway;
+  model: Parameters<BasicModelGateway['complete']>[0]['model'];
+  signal: AbortSignal;
+  objective: string;
+  mode: ReasoningMode;
+  maxOutputTokens?: number;
+  plan: TaskPlan;
+  completed: ReadonlySet<string>;
+  evidence: StepEvidence[];
+}): Promise<VerificationResult> {
+  const structural = structuralAssessment({
+    plan: input.plan,
+    completed: input.completed,
+    evidence: input.evidence,
+  });
+  if (!structural.passed) return { verification: structural };
+
+  // A blank citation cannot support a verdict. Keep it out of the prompt, the
+  // citable set and the returned evidence alike.
+  const usable = input.evidence.filter((entry) => entry.citation.trim().length > 0);
+
+  try {
+    const completion = await input.gateway.complete({
+      model: input.model,
+      system: VERIFY_SYSTEM,
+      prompt: buildVerificationPrompt({
+        objective: input.objective,
+        mode: input.mode,
+        plan: input.plan,
+        completed: input.completed,
+        evidence: usable,
+        structuralReason: structural.reason,
+      }),
+      signal: input.signal,
+      ...(input.maxOutputTokens ? { maxOutputTokens: input.maxOutputTokens } : {}),
+    });
+    const parsed = parseVerification(
+      completion.text,
+      new Set(usable.map((entry) => entry.stepId)),
+    );
+    if (!parsed) {
+      return {
+        verification: {
+          passed: false,
+          reason: 'The verifier did not return a valid evidence-based assessment.',
+          evidence: structural.evidence,
+        },
+        ...(completion.usage ? { usage: completion.usage } : {}),
+      };
+    }
+    if (!parsed.passed) {
+      return {
+        verification: {
+          passed: false,
+          reason: clamp(parsed.reason, 1000),
+          evidence: structural.evidence,
+        },
+        ...(completion.usage ? { usage: completion.usage } : {}),
+      };
+    }
+    if (parsed.cited.length === 0) {
+      return {
+        verification: {
+          passed: false,
+          reason: 'The verifier passed the objective without citing any evidence.',
+          evidence: structural.evidence,
+        },
+        ...(completion.usage ? { usage: completion.usage } : {}),
+      };
+    }
+    return {
+      verification: {
+        passed: true,
+        reason: clamp(parsed.reason, 1000),
+        evidence: citedEvidence(parsed.cited, usable),
+      },
+      ...(completion.usage ? { usage: completion.usage } : {}),
+    };
+  } catch {
+    return {
+      verification: {
+        passed: false,
+        reason: 'The verification call failed, so completion could not be assessed.',
+        evidence: structural.evidence,
+      },
+    };
+  }
+}
+
+export function verificationSummaryText(verification: TaskVerification): string {
+  return `Verification: ${verification.passed ? 'passed' : 'failed'} — ${verification.reason}`;
+}
+
+export function evidenceForPrompt(evidence: StepEvidence[]): string {
+  return renderEvidence(evidence);
 }

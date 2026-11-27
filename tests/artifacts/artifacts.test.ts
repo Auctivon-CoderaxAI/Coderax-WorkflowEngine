@@ -3,7 +3,6 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { CONTRACT_VERSION } from '@coderax/contracts';
 
 const root = path.resolve(import.meta.dirname, '..', '..', '..');
 

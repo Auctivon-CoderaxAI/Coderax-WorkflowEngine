@@ -1,3 +1,4 @@
+import { artifactSettings } from '../fixtures/artifacts.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';

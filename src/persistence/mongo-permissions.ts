@@ -149,6 +149,18 @@ export function createMongoPermissionStore(input: {
       return document !== null;
     },
 
+    lookup: async ({ ownerId, taskId, scope, resource, binding, consume }) => {
+      const query = { ownerId, taskId, scope, resource, binding, consumed: { $ne: true }, expiresAtMs: { $gt: input.clock.now().getTime() } };
+      const row = await input.collection.findOne(query);
+      if (!row || typeof row.requestId !== 'string') return null;
+      if (row.decision === 'approved') {
+        if (consume && !(await input.collection.updateOne({ ...query, requestId: row.requestId, decision: 'approved' }, { $set: { consumed: true } }, { upsert: false })).matchedCount) return null;
+        return { decision: 'granted' };
+      }
+      if (row.decision === 'pending' || row.decision === 'denied') return { decision: row.decision, requestId: row.requestId };
+      return null;
+    },
+    clear: () => undefined,
     hasPending: async (taskId) => {
       const document = await input.collection.findOne({ taskId, decision: 'pending' });
       return document !== null;

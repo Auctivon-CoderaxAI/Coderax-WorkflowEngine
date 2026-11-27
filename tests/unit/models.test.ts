@@ -120,6 +120,39 @@ test('discovery never advertises paid routing', async () => {
   assert.equal(router.list().models[0]?.availability.available, ready.available);
 });
 
+test('an image turn only routes to a model with verified vision', () => {
+  const visionModel: ModelDescriptor = {
+    ...descriptor({ providerId: 'openrouter', modelId: 'coderax-vision:free' }, 'free'),
+    vision: true,
+  };
+  const catalog = createModelCatalog({
+    descriptors: [free, visionModel],
+    route: [free.ref, visionModel.ref],
+    allowPaid: false,
+  });
+  const chosen = catalog.resolve(null, 'cloud', { requireVision: true });
+  assert.equal(chosen.ok, true);
+  assert.deepEqual(chosen.ok && chosen.value.ref, visionModel.ref);
+
+  const textOnly = createModelCatalog({
+    descriptors: [free],
+    route: [free.ref],
+    allowPaid: false,
+  });
+  const refused = textOnly.resolve(null, 'cloud', { requireVision: true });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.ok === false && refused.code, 'model_missing');
+  // An explicit model is refused the same way; capability is not bypassed.
+  const explicit = textOnly.resolve(free.ref, 'cloud', { requireVision: true });
+  assert.equal(explicit.ok, false);
+  assert.equal(explicit.ok === false && explicit.code, 'model_missing');
+});
+
+test('discovery never advertises paid routing', () => {
+  const catalog = createModelCatalog({ descriptors: [free], route: [free.ref], allowPaid: false });
+  assert.equal(catalog.list().allowPaid, false);
+});
+
 test('an exhausted daily budget fails closed', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 100 });
   const now = new Date('2026-11-26T10:00:00.000Z');

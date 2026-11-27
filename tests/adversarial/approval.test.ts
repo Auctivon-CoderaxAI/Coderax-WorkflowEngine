@@ -25,6 +25,8 @@ async function hasPending(
   return listed.requests.some((request) => request.decision === 'pending');
 }
 
+const principal = { ownerId: 'owner-test', isOwner: true as const };
+
 test('a request is pending until the owner decides it, and a denial is final', async () => {
   const clock = createClock();
   const store = createPermissionStore({ clock, ids: createIdGenerator() });

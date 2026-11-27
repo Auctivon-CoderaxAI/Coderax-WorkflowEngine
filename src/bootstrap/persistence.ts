@@ -1,3 +1,6 @@
+import { createMongoScheduleNoticeStore, createMongoScheduleRepository, ensureScheduleIndexes } from '../persistence/mongo-schedules.js';
+import { createMemoryBudgetStore, type BudgetWindowStore } from '../models/budget.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/budgets.js';
 import type { EngineConfig } from '../configuration/schema.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { LeaseStore } from '../execution/lease.js';
@@ -9,7 +12,6 @@ import type { NotificationStore } from '../persistence/notifications.js';
 import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
-import type { ScheduleRepository } from '../persistence/schedules.js';
 import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
 import type { MongoCollectionLike } from '../persistence/mongo.js';
@@ -32,14 +34,10 @@ import type { BlobStore } from '../persistence/blobs.js';
 import { createInMemoryCapacityStore, createMongoCapacityStore, ensureCapacityIndexes } from '../persistence/capacity.js';
 import type { CapacityStore } from '../persistence/capacity.js';
 import { createMongoArtifactRepository, createMongoBlobStore, ensureArtifactIndexes } from '../persistence/mongo-artifacts.js';
-import { createPermissionTable } from '../persistence/permissions.js';
 import { createPermissionStore } from '../permissions/store.js';
-import { createScheduleRepository } from '../persistence/schedules.js';
+import { createScheduleNoticeStore, createScheduleRepository } from '../persistence/schedules.js';
 import {
-  createMongoPermissionTable,
-  createMongoScheduleRepository,
   ensurePermissionIndexes,
-  ensureScheduleIndexes,
 } from '../persistence/mongo-records.js';
 import {
   createMongoConversationRepository,
@@ -62,9 +60,10 @@ import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
-  permissionCollection?: MongoCollectionLike;
-  /** Present only for the durable driver; the quota window is shared state. */
-  budgetCollection?: MongoCollectionLike;
+  events: EventStore;
+  teams: TeamRepository;
+  lockCollection?: MongoCollectionLike;
+  scheduleNotices: ScheduleNoticeStore;
   lease: LeaseStore;
   tasks: TaskRepository;
   executions: ExecutionRepository;
@@ -76,6 +75,7 @@ export type PersistenceStores = {
   artifacts: ArtifactRepository;
   blobs: BlobStore;
   capacity: CapacityStore;
+  budget: BudgetWindowStore;
   close: () => Promise<void>;
 };
 
@@ -132,7 +132,7 @@ async function openDatabase(input: PersistenceInput): Promise<MongoDatabase> {
  * after a restart.
  */
 export async function buildPersistence(input: PersistenceInput): Promise<PersistenceStores> {
-  const { config, clock } = input;
+  const { config, clock, ids } = input;
   const settings = config.persistence;
 
   if (settings.driver === 'memory') {
@@ -143,16 +143,15 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       executions: createExecutionRepository(),
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
-      permissions: createPermissionStore({ clock, ids: input.ids }),
+      events: createMemoryEventStore({ maxPerTask: config.execution.eventBufferSize }),
+      teams: createTeamRepository(),
+      budget: createMemoryBudgetStore(),
+      scheduleNotices: createScheduleNoticeStore(),
       notifications: createNotificationStore(),
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
-      permissions: createPermissionStore({
-        clock,
-        ids,
-        table: createPermissionTable(),
-      }),
+      permissions: createPermissionStore({ clock, ids }),
       schedules: createScheduleRepository(),
       close: NO_CLOSE,
     };
@@ -175,14 +174,20 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const permissions = database.collection(collectionName(config, 'permissions'));
   const schedules = database.collection(collectionName(config, 'schedules'));
 
-  const permissionCollection = database.collection(collectionName(config, 'permissions'));
+  const events = database.collection(collectionName(config, 'events'));
+  const budgetWindows = database.collection(collectionName(config, 'budget_windows'));
   const teamCollection = database.collection(collectionName(config, 'teams'));
   const lockCollection = database.collection(collectionName(config, 'resource_locks'));
-  const quotaCollection = database.collection(collectionName(config, 'quota'));
+  const scheduleExecutions = database.collection(collectionName(config, 'schedule_executions'));
+  const scheduleNotices = database.collection(collectionName(config, 'schedule_notices'));
   try {
-    await permissionCollection.createIndex({ requestId: 1 }, { unique: true, name: 'permission_request' });
-    await permissionCollection.createIndex({ ownerId: 1, taskId: 1 }, { name: 'permission_task' });
+    await ensureTeamIndexes({ collection: teamCollection });
+    await ensureResourceLockIndexes({ collection: lockCollection });
+    await ensureEventIndexes(events, {
+      retentionSeconds: Math.floor(config.execution.eventRetentionMs / 1000),
+    });
     await ensureWorkRunIndexes(workRuns);
+    await ensureBudgetIndexes(budgetWindows);
     await ensureTaskIndexes(tasks);
     await ensureExecutionIndexes(executions);
     await ensureConversationIndexes({ conversations, messages });
@@ -191,7 +196,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     await ensureArtifactIndexes({ artifacts, versions: artifactVersions, blobs: artifactBlobs, chunks: artifactChunks });
     await ensureCapacityIndexes({ capacity: artifactCapacity, reservations: artifactReservations });
     await ensurePermissionIndexes(permissions);
-    await ensureScheduleIndexes(schedules);
+    await ensureScheduleIndexes({ schedules, executions: scheduleExecutions, notices: scheduleNotices });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -201,8 +206,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   return {
     driver: 'mongo',
-    permissionCollection,
-    budgetCollection,
+    events: createMongoEventStore({ collection: events, pageSize: config.execution.eventBufferSize, now: clock.now }),
+    teams: createMongoTeamRepository({ collection: teamCollection }),
+    lockCollection,
+    budget: createMongoBudgetStore(budgetWindows),
+    scheduleNotices: createMongoScheduleNoticeStore(scheduleNotices),
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
     executions: createMongoExecutionRepository(executions),
@@ -212,11 +220,6 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       clock,
       maxValueLength: MEMORY_VALUE_LIMIT,
     }),
-    permissions: createMongoPermissionStore({
-      collection: permissions,
-      clock,
-      ids: input.ids,
-    }),
     notifications: createMongoNotificationStore(notifications),
     artifacts: createMongoArtifactRepository({ artifacts, versions: artifactVersions, blobs: artifactBlobs, chunks: artifactChunks }),
     blobs: createMongoBlobStore({ collections: { blobs: artifactBlobs, chunks: artifactChunks }, clock, chunkBytes: config.artifacts.chunkBytes }),
@@ -224,9 +227,9 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     permissions: createPermissionStore({
       clock,
       ids,
-      table: createMongoPermissionTable(permissions),
+      collection: permissions,
     }),
-    schedules: createMongoScheduleRepository(schedules),
+    schedules: createMongoScheduleRepository({ schedules, executions: scheduleExecutions }),
     close: database.close,
   };
 }

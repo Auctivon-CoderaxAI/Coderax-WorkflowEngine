@@ -17,7 +17,7 @@ import {
 /**
  * Media is a view over the artifact authority, proven on a real server.
  *
- * `POST /v1/media` performs media-specific validation and then writes an
+ * `POST /v1/media/uploads` performs media-specific validation and then writes an
  * immutable artifact version; it owns no collection, no blob store and no
  * quota. These tests exercise the public API against a real MongoDB and assert
  * the consequences: the media id is an artifact id, a version added through

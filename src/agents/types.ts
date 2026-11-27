@@ -8,12 +8,13 @@ import type {
   EngineFailureCode,
   EngineId,
   KnowledgeSearchResult,
+  MediaReference,
   ModelRef,
   Usage,
 } from '@coderax/contracts';
 import type { ProcessingOperation } from '../models/policy.js';
 import type { RoutingMode } from '../models/types.js';
-import type { PendingAction, StepOutput } from '../domain.js';
+import type { GameRunSpec, PendingAction, StepOutput, TaskEvidence, TaskPlan, TaskVerification, TaskWorkload } from '../domain.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 import type { ToolExecutionGuard } from '../execution/guard.js';
 
@@ -63,8 +64,8 @@ export type AgentRunRequest = {
   /** Absent for a synchronous Chat turn, which is not a durable task. */
   taskId?: string;
   /** `work` is the ordinary agent loop; `game` is a Native gaming-agent session. */
-  workload: TaskWorkload;
-  game: GameRunSpec | null;
+  workload?: TaskWorkload;
+  game?: GameRunSpec | null;
   objective: string;
   /** Owner media resolved for this run, as data URLs. Never logged or persisted. */
   images?: string[];
@@ -73,12 +74,17 @@ export type AgentRunRequest = {
    * is passed separately so an agent never answers the same message twice.
    */
   history?: AgentHistoryTurn[];
-  /** Already resolved by the model catalogue; never a raw provider override. */
-  model: ModelRef;
   /** Automatic, Fast or Complex ranking, chosen by the engine from the task. */
   routing: RoutingMode;
   /** False pins the owner's explicit model; a route-chosen model may fall back. */
   allowFallback: boolean;
+  /**
+   * Validated images for this turn. Only a native adapter may receive them; an
+   * adapter that cannot carry an image is refused instead of dropping it.
+   */
+  media?: Array<{ reference: MediaReference; dataUrl: string }>;
+  /** Already resolved by the model catalogue; null for a deterministic game session. */
+  model: ModelRef | null;
   mode: DataMode;
   /** The exact processing operation this run performs through the gateway. */
   operation: ProcessingOperation;
@@ -86,12 +92,20 @@ export type AgentRunRequest = {
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
+  reasoning?: 'auto' | 'fast' | 'complex';
+  completedSteps?: string[];
+  plan?: TaskPlan | null;
+  evidence?: TaskEvidence[];
+  iterationsUsed?: number;
   context?: AgentContext;
 };
 
 export type AgentReportEvent =
-  | { type: 'step.started'; stepId: string; title: string }
-  | { type: 'step.completed'; stepId: string; title: string; output?: string }
+  | { type: 'plan.ready'; plan: TaskPlan; iterations?: number }
+  | { type: 'budget'; iterations: number }
+  | { type: 'step.failed'; stepId: string; title?: string; detail?: string; iterations?: number }
+  | { type: 'step.started'; stepId: string; title: string; iterations?: number }
+  | { type: 'step.completed'; stepId: string; title: string; output?: string; evidence?: TaskEvidence; attempts?: number; iterations?: number }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
@@ -108,8 +122,8 @@ export type AgentReportEvent =
 export type AgentReport = (event: AgentReportEvent) => void;
 
 export type AgentRunOutcome =
-  | { ok: true; summary: string; usage?: Usage; model?: ModelRef }
-  | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
+  | { ok: true; summary: string; usage?: Usage; model?: ModelRef; artifacts?: Array<{ path: string; bytes?: number; digest?: string }>; verification?: TaskVerification }
+  | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean; usage?: Usage };
 
 export type AgentWorkload = 'in-process' | 'external';
 

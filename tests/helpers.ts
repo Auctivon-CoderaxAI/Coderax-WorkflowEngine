@@ -1,13 +1,14 @@
+import type { ModelGateway } from '../src/agents/native/types.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ProviderAdapter, ProviderCompletionRequest } from '../src/models/types.js';
+import type { GatewayCompletion, GatewayRequest, ProviderAdapter, ProviderCompletionRequest, ProviderSettings } from '../src/models/types.js';
 import { ProviderError } from '../src/models/types.js';
-import type { ProviderPolicy } from '../src/models/policy.js';
-import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
+import type { ProviderPolicy } from '../src/models/policy.js';
+import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
 
 export const OWNER_TOKEN = 'test-owner-token-0123456789abcdef';
 export const OWNER_ID = 'owner-test';
@@ -125,11 +126,19 @@ function verificationText(
  * router verifies it like any other provider; the fixture never bypasses cost,
  * context, budget or fallback logic.
  */
+function fixtureText(turn: string, input: { text?: string; plan?: FakePlan; verification?: { passed: boolean; reason?: string; cited?: string[] } }): string {
+  if (turn.includes('CODERAX_PLAN_V1')) return JSON.stringify(input.plan ?? DEFAULT_TEST_PLAN);
+  if (turn.includes('CODERAX_VERIFY_V1')) return verificationText(turn, input.verification);
+  return input.text ?? 'A verified result.';
+}
+
 export function fakeProvider(input: {
   text?: string;
   beforeReturn?: () => Promise<void>;
   modelId?: string;
   vision?: boolean;
+  plan?: FakePlan;
+  verification?: { passed: boolean; reason?: string; cited?: string[] };
 } = {}): ProviderAdapter & { calls: number } {
   const provider = {
     id: 'free',
@@ -150,12 +159,13 @@ export function fakeProvider(input: {
         pricing: { prompt: '0', completion: '0', request: '0' },
       },
     ],
-    complete: async ({ signal }: ProviderCompletionRequest) => {
+    complete: async ({ signal, system, prompt, messages }: ProviderCompletionRequest) => {
       provider.calls += 1;
       if (input.beforeReturn) await input.beforeReturn();
       if (signal.aborted) throw new ProviderError('cancelled', 'aborted', { retryable: false });
+      const turn = [system, prompt, ...(messages ?? []).map((message) => message.text)].join('\n');
       return {
-        text: input.text ?? 'A verified result.',
+        text: fixtureText(turn, input),
         toolCalls: [],
         usage: { inputTokens: 11, outputTokens: 13 },
       };
@@ -185,7 +195,7 @@ export function failingProvider(failures: number): ProviderAdapter & { calls: nu
  * router is composed; this only replaces the transport for a unit-level turn.
  */
 export function fakeGateway(
-  input: { text?: string; beforeReturn?: () => Promise<void> } = {},
+  input: { text?: string; beforeReturn?: () => Promise<void>; plan?: FakePlan; verification?: { passed: boolean; reason?: string; cited?: string[] } } = {},
 ): ModelGateway & { calls: number } {
   const gateway = {
     id: 'fake-gateway',
@@ -195,7 +205,7 @@ export function fakeGateway(
       if (input.beforeReturn) await input.beforeReturn();
       if (request.signal.aborted) throw new Error('The request was aborted.');
       return {
-        text: input.text ?? 'A verified result.',
+        text: fixtureText(`${request.system}\n${request.prompt}`, input),
         toolCalls: [],
         model: request.model,
         attempts: [request.model],
@@ -239,8 +249,42 @@ export function slowProvider(delayMs: number): ProviderAdapter & { calls: number
   return provider;
 }
 
+export function failingGateway(failures: number): ModelGateway & { calls: number } {
+  const gateway = fakeGateway({ text: 'Recovered result.' });
+  let calls = 0;
+  return { id: 'failing-gateway', get calls() { return calls; },
+    complete: async (request) => {
+      if (++calls <= failures) throw new Error('provider unavailable');
+      return gateway.complete(request);
+    },
+  };
+}
+
+export function slowGateway(delayMs: number): ModelGateway & { calls: number } {
+  const gateway = fakeGateway({ text: 'Slow result.' });
+  return {
+    id: 'slow-gateway',
+    get calls() { return gateway.calls; },
+    complete: async (request) => {
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(new Error('aborted')); };
+        const timer = setTimeout(() => {
+          request.signal.removeEventListener('abort', abort);
+          resolve();
+        }, delayMs);
+        if (request.signal.aborted) abort();
+        else request.signal.addEventListener('abort', abort, { once: true });
+      });
+      return gateway.complete(request);
+    },
+  };
+}
+
 export async function startTestApp(options: {
   provider?: ProviderAdapter;
+  env?: NodeJS.ProcessEnv;
+  browserProvider?: Parameters<typeof composeApplication>[0]['browserProvider'];
+  browser?: Parameters<typeof composeApplication>[0]['browserProvider'];
   /** Defaults to a local endpoint; a test may declare a hosted one. */
   providerSettings?: Partial<ProviderSettings>;
   /** A transport fixture for the agent loop; not a routing authority. */
@@ -261,8 +305,10 @@ export async function startTestApp(options: {
   });
   const app = await composeApplication({
     config,
-    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    providers: [{ adapter: options.provider ?? fakeProvider() }],
+    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, ...options.env },
+    ...((options.browserProvider ?? options.browser) ? { browserProvider: options.browserProvider ?? options.browser } : {}),
+    providers: [{ adapter: options.provider ?? fakeProvider(), ...(options.providerSettings ? { settings: options.providerSettings } : {}) }],
+    ...(options.gateway !== undefined ? { gateway: options.gateway } : {}),
     ...(options.externals ? { externals: options.externals } : {}),
     ...(options.persistence ? { persistence: options.persistence } : {}),
   });

@@ -15,6 +15,12 @@ export const ModelDescriptor = z
     contextTokens: z.number().int().positive().optional(),
     toolCalling: z.boolean(),
     streaming: z.boolean(),
+    /**
+     * Verified to accept image input. Absent means the engine has no evidence
+     * that the model is vision-capable, so an image turn may not route to it.
+     */
+    inputModalities: z.array(z.enum(['text', 'image'])).max(2).optional(),
+    vision: z.boolean().optional(),
     availability: Availability,
   })
   .strict();

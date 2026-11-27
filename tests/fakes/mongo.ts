@@ -27,6 +27,13 @@ function atPath(document: Document, field: string): unknown {
   return current;
 }
 
+function compare(value: unknown, bound: unknown): number | undefined {
+  if (value instanceof Date && bound instanceof Date) return value.getTime() - bound.getTime();
+  if (typeof value === 'number' && typeof bound === 'number') return value - bound;
+  if (typeof value === 'string' && typeof bound === 'string') return value < bound ? -1 : value > bound ? 1 : 0;
+  return undefined;
+}
+
 function matches(document: Document, filter: MongoFilter): boolean {
   const anyOf = (filter as Record<string, unknown>).$or;
   if (Array.isArray(anyOf)) {
@@ -38,13 +45,8 @@ function matches(document: Document, filter: MongoFilter): boolean {
     const value = atPath(document, field);
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
+      if ('$exists' in operators && (value !== undefined) !== operators.$exists) return false;
       if ('$ne' in operators && value === operators.$ne) return false;
-      const compare = (bound: unknown): number => {
-        if (value instanceof Date && bound instanceof Date) return value.getTime() - bound.getTime();
-        if (typeof value === 'number' && typeof bound === 'number') return value - bound;
-        if (typeof value === 'string' && typeof bound === 'string') return value < bound ? -1 : value > bound ? 1 : 0;
-        return Number.NaN;
-      };
       if ('$lte' in operators) {
         const bound = operators.$lte as Date | string | number;
         const left = value instanceof Date ? value.getTime() : value;
@@ -99,8 +101,9 @@ function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
   return JSON.stringify(Object.keys(keys).map((field) => document[field] ?? null));
 }
 
-function applyUpdate(document: Document, update: Record<string, unknown>): Document {
-  const next: Document = { ...document, ...(update.$set as Document | undefined) };
+function applyUpdate(document: Document, update: MongoUpdate): Document {
+  const next = structuredClone(document);
+  for (const [field, value] of Object.entries(update.$set ?? {})) setPath(next, field, value);
   for (const [field, delta] of Object.entries((update.$inc as Record<string, number>) ?? {})) {
     const current = typeof next[field] === 'number' ? (next[field] as number) : 0;
     next[field] = current + delta;
@@ -222,24 +225,6 @@ export function createFakeCollection(): FakeCollection {
       return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {
-      const apply = (document: Document): Document => {
-        const next = { ...document, ...update.$set };
-        for (const [field, value] of Object.entries(update.$inc ?? {})) {
-          next[field] = (typeof next[field] === 'number' ? next[field] : 0) + value;
-        }
-        // `$max` is monotonic under concurrency, which is exactly what the event
-        // head and the generation guard rely on.
-        for (const [field, value] of Object.entries(update.$max ?? {})) {
-          const current = next[field];
-          next[field] =
-            typeof current === 'number' && typeof value === 'number'
-              ? Math.max(current, value)
-              : current === undefined
-                ? value
-                : current;
-        }
-        return next;
-      };
       const index = firstIndex(filter);
       if (index !== -1) {
         const next = applyUpdate(documents[index] ?? {}, update);

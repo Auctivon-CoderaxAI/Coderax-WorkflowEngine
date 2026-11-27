@@ -129,6 +129,7 @@ export function createOpenCodeHttpTransport(input: {
         // The router already resolved and admitted this model. The adapter must
         // not substitute a configured preference after admission.
         const model = run.model;
+        if (!model) return { ok: false, code: 'not_configured', detail: 'OpenCode requires a resolved model.', retryable: false };
         const prompt = [
           `Objective:\n${run.objective}`,
           '',

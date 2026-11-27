@@ -60,7 +60,7 @@ test('the composed application exposes one route table, one model router and one
     assert.equal(deps.agents.defaultAgent, 'coderax');
 
     // The configured route is the only route; no fallback catalogue appears.
-    assert.deepEqual(deps.models.route('auto'), models.route);
+    assert.deepEqual(deps.models.route('cloud'), models.route);
   } finally {
     await started.close();
   }

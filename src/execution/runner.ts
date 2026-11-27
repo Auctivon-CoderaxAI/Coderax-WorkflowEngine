@@ -1,17 +1,18 @@
-import type { EngineFailureCode, ModelRef, Usage } from '@coderax/contracts';
+import type { AgentRunOutcome as AdapterOutcome } from '../agents/types.js';
+import type { EngineFailureCode, Usage } from '@coderax/contracts';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore, RunScope } from './lease.js';
 import { workRunKey } from './lease.js';
 import type { AgentAdapter, AgentReport, AgentRunOutcome, AgentRunRequest } from '../agents/types.js';
 
 export type RunOutcome =
-  | { kind: 'completed'; summary: string; usage?: Usage; model?: ModelRef }
-  | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
+  | ({ kind: 'completed' } & Omit<Extract<AdapterOutcome, { ok: true }>, 'ok'>)
+  | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean; usage?: Usage }
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
   | { kind: 'interrupted'; detail: string }
   /** The run needs an owner decision; its checkpoint is durable and resumable. */
-  | { kind: 'suspended'; detail: string };
+  | { kind: 'suspended'; detail: string; usage?: Usage };
 
 export type RunResult = {
   outcome: RunOutcome;
@@ -55,6 +56,8 @@ export type TaskRunner = {
     request: AgentRunRequest;
     report: AgentReport;
     admitDispatch?: () => boolean;
+    cancellationRequested?: () => Promise<boolean>;
+    onSettled?: (result: RunResult, signal: AbortSignal, ownershipLost: () => boolean) => Promise<void>;
     /** The fencing generation this run belongs to (used when it is abandoned). */
     generation?: number;
     /** The directory the run may write, quarantined if the adapter is abandoned. */
@@ -104,6 +107,8 @@ export function createTaskRunner(input: {
       request,
       report,
       admitDispatch,
+      cancellationRequested,
+      onSettled,
       generation = 0,
       workspaceRoot = '',
     }) => {
@@ -185,63 +190,65 @@ export function createTaskRunner(input: {
               terminated: !abandoned,
             };
 
-      try {
-        const running = adapter.run({ ...request, signal: controller.signal }, guardedReport, admitDispatch);
-        const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
-        if (settled === null) {
-          // The adapter ignored the abort. Its eventual rejection must not become
-          // an unhandled one, and its result must never be applied: the lease and
-          // the task record already say this run is over.
-          void running.catch(() => undefined);
-          if (!ownershipLost) {
-            input.onAbandoned?.({ scope, token, generation, workspaceRoot });
+      const dispatch = async (): Promise<RunResult> => {
+        if (controller.signal.aborted) return cancelled(false);
+        if (cancellationRequested) {
+          const waitForAbort = new Promise<null>((resolve) => {
+            controller.signal.addEventListener('abort', () => resolve(null), { once: true });
+          });
+          try {
+            const blocked = await Promise.race([cancellationRequested(), waitForAbort]);
+            if (controller.signal.aborted) return cancelled(false);
+            if (blocked) { onExternalAbort(); return cancelled(false); }
+          } catch {
+            return { outcome: { kind: 'interrupted', detail: 'Could not verify cancellation before dispatch.' }, ownershipLost: false, terminated: true };
           }
-          return {
-            outcome: {
-              kind: 'failed',
-              code: outcome.code,
-              detail: outcome.detail,
-              retryable: outcome.retryable,
-              ...(outcome.usage ? { usage: outcome.usage } : {}),
-              ...(outcome.model ? { model: outcome.model } : {}),
-            },
-            ownershipLost: false,
-            terminated: true,
-          };
         }
-        if (outcome.code === 'approval_required') {
-          return {
-            outcome: { kind: 'suspended', detail: outcome.detail },
-            ownershipLost: false,
+        try {
+          const running = adapter.run({ ...request, signal: controller.signal }, guardedReport, admitDispatch);
+          const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
+          if (settled === null) {
+            // The adapter ignored the abort. Its eventual rejection must not become
+            // an unhandled one, and its result must never be applied: the lease and
+            // the task record already say this run is over.
+            void running.catch(() => undefined);
+            if (!ownershipLost) {
+              input.onAbandoned?.({ scope, token, generation, workspaceRoot });
+            }
+            return cancelled(true);
+          }
+          if (ownershipLost || cancelRequested) return cancelled(false);
+          const { outcome } = settled;
+          if (!isAgentOutcome(outcome)) {
+            return {
+              outcome: { kind: 'failed', code: 'provider_error', detail: 'The agent returned an invalid result.', retryable: false },
+              ownershipLost: false,
+              terminated: true,
+            };
+          }
+          if (outcome.ok) return {
+            outcome: { kind: 'completed', summary: outcome.summary, ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.model ? { model: outcome.model } : {}), ...(outcome.artifacts ? { artifacts: outcome.artifacts } : {}), ...(outcome.verification ? { verification: outcome.verification } : {}) },
+            ownershipLost: false, terminated: true,
           };
-        }
-        return {
-          outcome: {
-            kind: 'failed',
-            code: outcome.code,
-            detail: outcome.detail,
-            retryable: outcome.retryable,
-          },
-          ownershipLost: false,
-        };
-      } catch {
-        if (ownershipLost) {
+          if (outcome.code === 'cancelled') return cancelled(false);
           return {
-            outcome: {
-              kind: 'failed',
-              code: 'provider_error',
-              detail: 'The agent failed unexpectedly.',
-              retryable: false,
-            },
-            ownershipLost: false,
-            terminated: true,
+            outcome: outcome.code === 'approval_required'
+              ? { kind: 'suspended', detail: outcome.detail, ...(outcome.usage ? { usage: outcome.usage } : {}) }
+              : { kind: 'failed', code: outcome.code, detail: outcome.detail, retryable: outcome.retryable, ...(outcome.usage ? { usage: outcome.usage } : {}) },
+            ownershipLost: false, terminated: true,
+          };
+        } catch {
+          if (ownershipLost || cancelRequested) return cancelled(false);
+          return {
+            outcome: { kind: 'failed', code: 'provider_error', detail: 'The agent failed unexpectedly.', retryable: false },
+            ownershipLost: false, terminated: true,
           };
         }
       };
       try {
-        const result = await executeAdapter();
+        const result = await dispatch();
         await onSettled?.(result, controller.signal, () => ownershipLost);
-        return result;
+        return ownershipLost ? cancelled(false) : result;
       } finally {
         clearInterval(timer);
         if (graceTimer) clearTimeout(graceTimer);

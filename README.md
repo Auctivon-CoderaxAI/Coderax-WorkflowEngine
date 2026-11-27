@@ -42,13 +42,24 @@ are clients of the same versioned API.
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent: plan, tool actions, reflection, recovery | Implemented | `src/agents/native` |
-| Provider-independent zero-cost router with ranked modes + bounded fallback | Implemented | `src/models/router.ts`, `src/models/routed.ts` |
+| Provider-independent zero-cost router with ranked modes + bounded fallback | Implemented | `src/models/router.ts` |
 | Built-in tools behind exact-resource permission gates | Implemented | `src/tools`, `tests/unit/tools.test.ts` |
 | Durable approval suspension and resume | Implemented | `src/agents/native/agent.ts`, `src/execution/runner.ts`, `tests/integration/intelligence.test.ts` |
 | MCP tools over HTTP and stdio | Implemented; scripted-server verified | `src/mcp/client.ts` |
 | Retrieval with semantic embeddings or honest lexical fallback | Implemented | `src/knowledge/store.ts` |
 | OpenCode HTTP/SSE transport | Implemented; not live-verified | `src/agents/adapters/opencode.ts` |
 | FreeBuff transport | Injection only — no authorized endpoint | `src/agents/adapters/external.ts` |
+| Native Game Studio | Implemented | `src/games/studio.ts`: NL specs, design plans, original source, 8 genres, 12 composable mechanics, seeded levels, browser-boot verification, build history/restore, export, `docs/evidence/game-studio/` |
+| Native Game Studio — real-browser acceptance | Verified for two reference builds | `scripts/browser-acceptance.mjs`: desktop/mobile Chromium rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart and audio; `docs/evidence/browser/` |
+| Native Game Studio — AI-assisted generation | **Blocked** | no verified model participation, executed model-assisted build or zero-cost model credential; a configured route or test narrative is not proof; deterministic generation remains operational |
+| Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`: durable Work task with `kind: game`, observed state/frames, bounded controls, pause/resume, takeover, cancellation, memory, measured completion |
+| Native Gaming Agent — cloud browser | **Blocked** | no verified zero-cost browser session/observation interface; the browser acceptance controller is test code, not the agent |
+| Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
+| Coderax Native reasoning and planning | Implemented — fast/complex modes, dependency-aware plans, parallel execution, bounded replanning, evidence-based verification, approval escalation | `src/agents/native`, `tests/unit/native-reasoning.test.ts`, `tests/integration/approval.test.ts` |
+| Validated image attachments on Chat | Implemented, fail-closed — PNG/JPEG/WebP identified from their own bytes, metadata stored, metadata-only `POST /v1/media`, image turns require a `models.vision` route and external engines reject them | `src/media/intake.ts`, `tests/e2e/media.test.ts` |
+| Cloud browser surface (sessions, navigation, inspection, screenshots, inputs, tabs, files, takeover, receipts) | Implemented, fail-closed | `packages/contracts/src/browser.ts`, `src/browser`, `src/orchestration/browser.ts` |
+| Verified zero-cost cloud browser provider | **Not configured** | no provider endpoint exists here; capabilities report `not_configured` |
+| External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
 | Durable artifacts (metadata, versions, content, manifests) | Implemented; MongoDB-backed, verified across a real engine restart, two-replica concurrency, renewable read leases, project manifests, restoration and injected metadata failures | `docs/artifacts.md`, `tests/integration/artifacts-durable.test.ts`, `tests/integration/artifacts-concurrency.test.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
@@ -136,6 +147,7 @@ Gemini, Groq and Cerebras publish no machine-readable price and therefore need a
 attestation per exact model. See [`docs/model-routing.md`](docs/model-routing.md)
 for the verification rules, routing modes, budgets, rate limits, circuits,
 fallback, streaming normalization and benchmarks.
+Image turns require a verified vision route and a processing grant for multimodal input. A text-only route continues to serve text turns.
 
 The engine binds `127.0.0.1` by default and is never public-facing.
 

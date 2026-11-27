@@ -54,6 +54,7 @@ function toMessage(message: StoredMessage): Message {
     ...(message.unfinished !== undefined ? { unfinished: message.unfinished } : {}),
     ...(message.agent ? { agent: message.agent } : {}),
     ...(message.attachments ? { attachments: message.attachments } : {}),
+    ...(message.media && message.media.length > 0 ? { media: message.media } : {}),
   };
 }
 
@@ -72,7 +73,7 @@ export function createConversationRepository(): ConversationRepository {
       }
       conversations.set(record.conversationId, { ...record });
       messages.set(record.conversationId, []);
-      return { ok: true, record: { ...record } };
+      return { ...record };
     },
     get: async (ownerId, conversationId) => {
       const record = conversations.get(conversationId);

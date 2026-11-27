@@ -1,3 +1,6 @@
+import { TeamAccepted, TeamControlResult, TeamId, TeamStatus, TeamSubmitRequest } from './team.js';
+import { CreativeValidation, CreativeValidationRequest, MediaCapabilities, MediaDownload, MediaId, MediaUploadRequest, MediaUploadResult } from './media.js';
+import { KnowledgeIngestRequest, KnowledgeIngestResult, KnowledgeList, KnowledgeSearchResult, RoutingReport, ToolList } from './intelligence.js';
 import type { z } from 'zod';
 import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
@@ -23,6 +26,7 @@ import {
   SaveGameSpecRequest,
 } from './games.js';
 import { HealthReport, ReadinessReport } from './health.js';
+import { MediaIntakeRequest, MediaIntakeResult } from './media.js';
 import { CapabilityHandshake, HandshakeQuery } from './handshake.js';
 import { ModelList } from './models.js';
 import {
@@ -189,7 +193,168 @@ const ArtifactContentQuery = zod
   })
   .strict();
 
+const TeamParams = zod.object({ teamId: TeamId }).strict();
+const MediaParams = zod.object({ mediaId: MediaId }).strict();
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
+  {
+    operationId: 'searchKnowledge',
+    method: 'GET',
+    path: '/v1/knowledge/search',
+    summary: 'Retrieve the most relevant stored passages for a query.',
+    tags: ['knowledge'],
+    auth: 'owner',
+    query: zod
+      .object({
+        q: zod.string().min(1).max(2000),
+        k: zod.coerce.number().int().min(1).max(20).optional(),
+        mode: zod.enum(['private', 'cloud']).optional(),
+      })
+      .strict(),
+    response: { status: 200, description: 'Knowledge hits', schema: KnowledgeSearchResult },
+  },
+  {
+    operationId: 'listKnowledge',
+    method: 'GET',
+    path: '/v1/knowledge',
+    summary: 'Documents stored for owner-scoped retrieval.',
+    tags: ['knowledge'],
+    auth: 'owner',
+    query: zod.object({ mode: zod.enum(['private', 'cloud']).optional() }).strict(),
+    response: { status: 200, description: 'Knowledge list', schema: KnowledgeList },
+  },
+  {
+    operationId: 'ingestKnowledge',
+    method: 'POST',
+    path: '/v1/knowledge',
+    summary: 'Store one document for retrieval in a data mode.',
+    tags: ['knowledge'],
+    auth: 'owner',
+    body: KnowledgeIngestRequest,
+    response: { status: 202, description: 'Stored document', schema: KnowledgeIngestResult },
+  },
+  {
+    operationId: 'getRouting',
+    method: 'GET',
+    path: '/v1/routing',
+    summary: 'Provider quotas, verified cost evidence and the ranked zero-cost route.',
+    tags: ['discovery'],
+    auth: 'owner',
+    query: zod
+      .object({ mode: zod.enum(['auto', 'fast', 'complex']).optional() })
+      .strict(),
+    response: { status: 200, description: 'Routing report', schema: RoutingReport },
+  },
+  {
+    operationId: 'listTools',
+    method: 'GET',
+    path: '/v1/tools',
+    summary: 'Tools Coderax Native may call, with their scopes and approval policy.',
+    tags: ['discovery'],
+    auth: 'owner',
+    response: { status: 200, description: 'Tool list', schema: ToolList },
+  },
+  {
+    operationId: 'validateCreative',
+    method: 'POST',
+    path: '/v1/creative/validate',
+    summary: 'Validate a generated SVG or HTML draft against the sandboxed-render allowlist.',
+    tags: ['creative'],
+    auth: 'owner',
+    body: CreativeValidationRequest,
+    response: { status: 200, description: 'Validation result', schema: CreativeValidation },
+  },
+  {
+    operationId: 'uploadMedia',
+    method: 'POST',
+    path: '/v1/media/uploads',
+    summary: 'Upload one owner-scoped image; the format is identified from its header.',
+    tags: ['media'],
+    auth: 'owner',
+    body: MediaUploadRequest,
+    response: { status: 201, description: 'Stored media', schema: MediaUploadResult },
+  },
+  {
+    operationId: 'getMediaCapabilities',
+    method: 'GET',
+    path: '/v1/media/capabilities',
+    summary: 'What image, audio, video, document and creative handling is actually available.',
+    tags: ['media'],
+    auth: 'owner',
+    response: { status: 200, description: 'Media capabilities', schema: MediaCapabilities },
+  },
+  {
+    operationId: 'getMedia',
+    method: 'GET',
+    path: '/v1/media/{mediaId}',
+    summary: 'Read one owner-scoped media item and its canonical base64 bytes.',
+    tags: ['media'],
+    auth: 'owner',
+    params: MediaParams,
+    response: { status: 200, description: 'Media bytes', schema: MediaDownload },
+  },
+  {
+    operationId: 'decideTeamPermission',
+    method: 'POST',
+    path: '/v1/teams/{teamId}/permissions',
+    summary: 'Approve or deny one member-scoped resource grant.',
+    tags: ['teams', 'permissions'],
+    auth: 'owner',
+    params: TeamParams,
+    body: PermissionDecisionRequest,
+    response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'listTeamPermissions',
+    method: 'GET',
+    path: '/v1/teams/{teamId}/permissions',
+    summary: 'Scoped permission requests for the team and its members.',
+    tags: ['teams', 'permissions'],
+    auth: 'owner',
+    params: TeamParams,
+    response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'resumeTeam',
+    method: 'POST',
+    path: '/v1/teams/{teamId}/resume',
+    summary: 'Resume an interrupted or approval-suspended team from its snapshot.',
+    tags: ['teams'],
+    auth: 'owner',
+    params: TeamParams,
+    body: ResumeRequest,
+    response: { status: 200, description: 'Resume outcome', schema: TeamControlResult },
+  },
+  {
+    operationId: 'cancelTeam',
+    method: 'POST',
+    path: '/v1/teams/{teamId}/cancel',
+    summary: 'Cancel every member of a team; durable across replicas.',
+    tags: ['teams'],
+    auth: 'owner',
+    params: TeamParams,
+    body: CancelRequest,
+    response: { status: 200, description: 'Cancellation outcome', schema: TeamControlResult },
+  },
+  {
+    operationId: 'getTeam',
+    method: 'GET',
+    path: '/v1/teams/{teamId}',
+    summary: 'Authoritative team snapshot, members and evidence verification.',
+    tags: ['teams'],
+    auth: 'owner',
+    params: TeamParams,
+    response: { status: 200, description: 'Team status', schema: TeamStatus },
+  },
+  {
+    operationId: 'submitTeam',
+    method: 'POST',
+    path: '/v1/teams',
+    summary: 'Submit a bounded multi-agent team with a dependency graph.',
+    tags: ['teams'],
+    auth: 'owner',
+    body: TeamSubmitRequest,
+    response: { status: 202, description: 'Team accepted', schema: TeamAccepted },
+  },
   {
     operationId: 'getHealth',
     method: 'GET',
@@ -225,6 +390,21 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['discovery'],
     auth: 'owner',
     response: { status: 200, description: 'Model list', schema: ModelList },
+  },
+  {
+    operationId: 'intakeMedia',
+    method: 'POST',
+    path: '/v1/media',
+    summary: 'Validate image attachments and return metadata for a chat turn.',
+    tags: ['media'],
+    auth: 'owner',
+    body: MediaIntakeRequest,
+    maxBodyBytes: 8 * 1024 * 1024,
+    response: {
+      status: 200,
+      description: 'Validated image metadata',
+      schema: MediaIntakeResult,
+    },
   },
   {
     operationId: 'submitChat',

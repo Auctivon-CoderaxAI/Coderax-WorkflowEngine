@@ -88,9 +88,7 @@ export function createHttpServer(input: {
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
-          accept: Array.isArray(request.headers.accept)
-            ? request.headers.accept.join(', ')
-            : request.headers.accept,
+          signal: AbortSignal.any([streamShutdown.signal, disconnected.signal]),
           lastEventId: Array.isArray(request.headers['last-event-id'])
             ? request.headers['last-event-id'][0]
             : request.headers['last-event-id'],
@@ -118,12 +116,18 @@ export function createHttpServer(input: {
         response.writeHead(result.status, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',
-          connection: 'keep-alive',
+          // Closing the response must also release its connection during shutdown.
+          connection: 'close',
         });
-        for await (const event of result.events) {
+        response.flushHeaders();
+        for await (const frame of result.events) {
           if (response.destroyed || response.writableEnded) break;
-          if (event.id) response.write(`id: ${event.id}\n`);
-          response.write(`data: ${JSON.stringify(event.data)}\n\n`);
+          const seq = frame.kind === 'event' && frame.event && typeof frame.event === 'object' ? (frame.event as { seq?: unknown }).seq : undefined;
+          response.write(
+            frame.kind === 'comment'
+              ? `: ${frame.comment}\n\n`
+              : `${typeof seq === 'number' && Number.isSafeInteger(seq) ? `id: ${seq}\n` : ''}data: ${JSON.stringify(frame.event)}\n\n`,
+          );
         }
         response.end();
       } catch {

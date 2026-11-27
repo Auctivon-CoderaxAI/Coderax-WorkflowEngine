@@ -1,3 +1,4 @@
+import { createModelCatalog } from '../../src/models/catalog.js';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -143,7 +144,8 @@ test('the composed engine advertises allowPaid false and one zero-cost route', a
 // the request budget fails closed at the service boundary, and a refused model
 // creates neither a task nor a conversation.
 test('a paid model is not usable for private execution either', () => {
-  const paid = descriptor('openai', 'premium', 'paid');
+  const paid = { ref: { providerId: 'openai', modelId: 'premium' }, label: 'Premium', costClass: 'paid' as const,
+    toolCalling: false, streaming: false, availability: { available: true, reason: 'ready' as const } };
   const catalog = createModelCatalog({
     descriptors: [paid],
     route: [paid.ref],

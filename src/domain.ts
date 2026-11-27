@@ -9,7 +9,17 @@ import type {
   GameAction,
   GameObjective,
   IsoDateTime,
+  MediaReference,
   MissedRunPolicy,
+  ScheduleCondition,
+  ScheduleConditionState,
+  ScheduleExecutionState,
+  ScheduleLimits,
+  ScheduleNoticeKind,
+  ScheduleRetry,
+  ScheduleState,
+  ScheduleTiming,
+  ScheduleTrigger,
   ModelRef,
   PermissionScope,
   TaskState,
@@ -132,11 +142,30 @@ export type TaskVerification = {
   evidence: string[];
 };
 
+export type ExecutionReceipt = {
+  receiptId: string;
+  taskId: string;
+  generation: number;
+  agent: AgentId;
+  engine: EngineId;
+  mode: DataMode;
+  model?: ModelRef;
+  state: 'completed' | 'failed' | 'cancelled';
+  startedAt: IsoDateTime;
+  finishedAt: IsoDateTime;
+  usage?: Usage;
+  requests?: number;
+  steps: Array<{ id: string; title: string; state: TaskState }>;
+  toolCalls: Array<{ callId: string; tool: string; ok: boolean; digest: string }>;
+  planDigest: string;
+};
+
 export type TaskResult = {
   summary?: string;
   artifacts: Array<{ path: string; bytes?: number; digest?: string }>;
   /** Validated or explicitly withheld SVG/HTML fragments from the agent output. */
   creative?: CreativeArtifact[];
+  verification?: TaskVerification;
 };
 
 export type TaskFailure = {
@@ -242,39 +271,6 @@ export type TaskPatch = Partial<
  * the owner's dependency graph with the same rules the Native planner uses; the
  * schedule is derived from it and persisted, so a restart resumes the same plan.
  */
-export type ReasoningMode = 'fast' | 'complex';
-export type PlanStepKind = 'reason' | 'read';
-
-export type TaskPlanStep = {
-  id: string;
-  title: string;
-  dependsOn: string[];
-  kind: PlanStepKind;
-  resource?: string;
-  acceptance?: string;
-};
-
-export type TaskPlan = {
-  revision: number;
-  mode: ReasoningMode;
-  steps: TaskPlanStep[];
-  note?: string;
-};
-
-export type TaskEvidence = {
-  stepId: string;
-  title: string;
-  output: string;
-  citation: string;
-  attempts: number;
-};
-
-export type TaskVerification = {
-  passed: boolean;
-  reason: string;
-  evidence: string[];
-};
-
 /** A file the engine read and hashed itself while executing this team. */
 export type TeamArtifact = {
   path: string;
@@ -332,6 +328,7 @@ export type TeamFailure = {
  */
 export type TeamRecord = {
   teamId: string;
+  eventSeq?: number;
   ownerId: string;
   tenantId: string | null;
   conversationId: string;
@@ -399,6 +396,8 @@ export type StoredMessage = {
   unfinished?: boolean;
   agent?: AgentId;
   attachments?: string[];
+  /** Metadata for images accepted on this turn; never the encoded bytes. */
+  media?: MediaReference[];
 };
 
 export type MemoryRecord = {
@@ -456,6 +455,98 @@ export type ScheduleRecord = {
   cancelReason: string | null;
 };
 
+export type SchedulePatch = Partial<
+  Pick<
+    ScheduleRecord,
+    | 'name'
+    | 'timingRevision'
+    | 'timing'
+    | 'condition'
+    | 'retry'
+    | 'priority'
+    | 'limits'
+    | 'missedRunPolicy'
+    | 'state'
+    | 'nextRunAt'
+    | 'lastRunAt'
+    | 'lastExecutionId'
+    | 'runsTotal'
+    | 'acceptedDay'
+    | 'consecutiveFailures'
+    | 'accountedFailures'
+    | 'updatedAt'
+    | 'pausedAt'
+    | 'cancelledAt'
+    | 'cancelReason'
+  >
+>;
+
+/**
+ * One durable execution receipt. `executionKey` is unique across replicas and
+ * occurrences, and `taskId` is deterministic, so a retried dispatch of the same
+ * occurrence cannot create a second Work task.
+ */
+export type ScheduleExecutionRecord = {
+  executionId: string;
+  executionKey: string;
+  claimGeneration?: number;
+  admissionStarted?: boolean;
+  failureAccountingPending?: boolean;
+  noticePending?: boolean;
+  completionNoticeSummary?: string;
+  selectedTimingRevision?: number;
+  scheduleId: string;
+  ownerId: string;
+  occurrenceKey: string;
+  trigger: ScheduleTrigger;
+  scheduledFor: IsoDateTime;
+  state: ScheduleExecutionState;
+  attempt: number;
+  maxAttempts: number;
+  taskId: string | null;
+  conversationId: string;
+  priority: number;
+  detail: string | null;
+  nextAttemptAt: IsoDateTime | null;
+  condition: ScheduleConditionState;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  finishedAt: IsoDateTime | null;
+};
+
+export type ScheduleExecutionPatch = Partial<
+  Pick<
+    ScheduleExecutionRecord,
+    | 'state'
+    | 'admissionStarted'
+    | 'failureAccountingPending'
+    | 'noticePending'
+    | 'completionNoticeSummary'
+    | 'attempt'
+    | 'taskId'
+    | 'detail'
+    | 'nextAttemptAt'
+    | 'condition'
+    | 'updatedAt'
+    | 'finishedAt'
+  >
+>;
+
+export type ScheduleNoticeRecord = {
+  noticeId: string;
+  scheduleId: string;
+  executionId: string;
+  ownerId: string;
+  kind: ScheduleNoticeKind;
+  summary: string;
+  createdAt: IsoDateTime;
+  read: boolean;
+};
+
+/**
+ * Durable artifact metadata. The bytes live in a content-addressed blob and are
+ * named only by `sha256`; the file name here is metadata and never a path.
+ */
 export type ArtifactRecord = {
   mutationRevision?: number;
   slotTracked?: boolean;

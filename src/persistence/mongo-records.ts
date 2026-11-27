@@ -1,6 +1,4 @@
-import type { ScheduleRecord } from '../domain.js';
 import type { PermissionRow, PermissionTable } from '../permissions/store.js';
-import { MAX_ACTIVE_SCHEDULES, type ScheduleRepository } from './schedules.js';
 import { isDuplicateKey } from './mongo.js';
 import type { MongoCollectionLike } from './mongo.js';
 
@@ -18,17 +16,6 @@ function strip(document: Record<string, unknown>): Record<string, unknown> {
   return copy;
 }
 
-function toSchedule(document: Record<string, unknown>): ScheduleRecord {
-  if (
-    typeof document.scheduleId !== 'string' ||
-    typeof document.ownerId !== 'string' ||
-    typeof document.state !== 'string'
-  ) {
-    throw new Error('A stored schedule row is malformed.');
-  }
-  return strip(document) as unknown as ScheduleRecord;
-}
-
 function toPermission(document: Record<string, unknown>): PermissionRow {
   if (
     typeof document.requestId !== 'string' ||
@@ -38,67 +25,6 @@ function toPermission(document: Record<string, unknown>): PermissionRow {
     throw new Error('A stored permission row is malformed.');
   }
   return strip(document) as unknown as PermissionRow;
-}
-
-export async function ensureScheduleIndexes(collection: MongoCollectionLike): Promise<void> {
-  await collection.createIndex({ scheduleId: 1 }, { unique: true, name: 'schedule_id' });
-  await collection.createIndex(
-    { state: 1, nextRunAt: 1 },
-    { name: 'schedule_due' },
-  );
-  await collection.createIndex({ ownerId: 1, createdAt: -1 }, { name: 'schedule_owner' });
-}
-
-export function createMongoScheduleRepository(
-  collection: MongoCollectionLike,
-): ScheduleRepository {
-  return {
-    create: async (record) => {
-      const active = await collection
-        .find({ ownerId: record.ownerId, state: 'scheduled' })
-        .limit(MAX_ACTIVE_SCHEDULES)
-        .toArray();
-      if (active.length >= MAX_ACTIVE_SCHEDULES) {
-        return { ok: false, reason: 'limit' };
-      }
-      await collection.insertOne({ ...record });
-      return { ok: true };
-    },
-    get: async (ownerId, scheduleId) => {
-      const document = await collection.findOne({ scheduleId, ownerId });
-      return document ? toSchedule(document) : null;
-    },
-    list: async (ownerId) => {
-      const documents = await collection
-        .find({ ownerId })
-        .sort({ createdAt: -1 })
-        .toArray();
-      return documents.map(toSchedule);
-    },
-    due: async (nowIso, limit) => {
-      const documents = await collection
-        .find({ state: 'scheduled', nextRunAt: { $lte: nowIso } })
-        .sort({ nextRunAt: 1 })
-        .limit(Math.max(0, limit))
-        .toArray();
-      return documents.map(toSchedule);
-    },
-    update: async (record) => {
-      const updated = await collection.findOneAndUpdate(
-        { scheduleId: record.scheduleId, ownerId: record.ownerId },
-        { $set: { ...record } },
-        { returnDocument: 'after', includeResultMetadata: false },
-      );
-      return updated !== null;
-    },
-    activeCount: async (ownerId) => {
-      const documents = await collection
-        .find({ ownerId, state: 'scheduled' })
-        .limit(MAX_ACTIVE_SCHEDULES)
-        .toArray();
-      return documents.length;
-    },
-  };
 }
 
 export function createMongoPermissionTable(

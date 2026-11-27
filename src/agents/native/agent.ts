@@ -5,7 +5,8 @@ import type {
   AgentRunOutcome,
   AgentRunRequest,
 } from '../types.js';
-import type { ModelGateway, Planner } from './types.js';
+import type { ActionAuthorizer, ActionExecutor, BasicModelGateway, ModelGateway, NativeLimits, Planner, ReasoningPlanner } from './types.js';
+import { createReasoningNativeAgent } from './reasoning-agent.js';
 import { createDeterministicPlanner } from './planner.js';
 import { buildStepPrompt } from './prompt.js';
 import { estimateTokens } from '../../models/verify.js';
@@ -25,13 +26,16 @@ const NATIVE_SYSTEM =
  */
 export function createNativeAgent(input: {
   enabled: boolean;
-  gateway: ModelGateway | null;
-  planner?: Planner;
+  gateway: ModelGateway | BasicModelGateway | null;
+  planner?: Planner | ReasoningPlanner;
+  authorizer?: ActionAuthorizer;
+  executor?: ActionExecutor;
+  limits?: Partial<NativeLimits>;
   unavailableDetail?: string;
   /** Live route admission; a gateway may exist while every endpoint is excluded. */
   modelsAvailable?: () => boolean;
 }): AgentAdapter {
-  const planner = input.planner ?? createDeterministicPlanner();
+  const planner = input.planner && !('replan' in input.planner) ? input.planner : createDeterministicPlanner();
 
   const capabilities: EngineCapabilities = {
     streaming: true,
@@ -69,6 +73,7 @@ export function createNativeAgent(input: {
   return {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities,
     isolation: {
       workspace: 'isolated',
@@ -98,8 +103,36 @@ export function createNativeAgent(input: {
           retryable: false,
         };
       }
-      const gateway = input.gateway;
-      if (!gateway) {
+      const configuredGateway = input.gateway;
+      if (configuredGateway && (request.reasoning !== undefined || input.executor || input.authorizer || input.limits || (input.planner && 'replan' in input.planner))) {
+        const gateway: BasicModelGateway = {
+          id: configuredGateway.id,
+          complete: async ({ images, ...call }) => configuredGateway.complete({
+            ...call, ownerId: request.ownerId, mode: request.mode, operation: request.operation,
+            routing: request.routing, allowFallback: request.allowFallback,
+            ...(images?.length ? { messages: [{ role: 'user' as const, text: call.prompt, images }], images } : {}),
+          }),
+        };
+        const authorizer: ActionAuthorizer = input.authorizer ?? {
+          authorize: async ({ scope, resource, description }) => {
+            if (!scope) return { decision: 'allowed' };
+            const gate = request.context?.tools?.gate;
+            if (!gate) return { decision: 'denied' };
+            const result = await gate.ensure({ scope, resource, description, tool: 'native.read', binding: resource, consume: false });
+            return result.decision === 'granted' ? { decision: 'approved' }
+              : result.requestId && result.decision === 'pending' ? { decision: 'pending', requestId: result.requestId }
+              : { decision: 'denied' };
+          },
+        };
+        return createReasoningNativeAgent({
+          enabled: true, gateway, authorizer,
+          ...(input.planner && 'replan' in input.planner ? { planner: input.planner } : {}),
+          ...(input.executor ? { executor: input.executor } : {}),
+          ...(input.limits ? { limits: input.limits } : {}),
+        }).run(request, report);
+      }
+      const gateway = configuredGateway as ModelGateway | null;
+      if (!gateway || !request.model) {
         return {
           ok: false,
           code: 'not_configured',

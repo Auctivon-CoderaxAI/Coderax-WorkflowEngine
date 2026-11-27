@@ -35,7 +35,7 @@ Status vocabulary:
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/store.ts` (one row per event, unique `(taskId, seq)` and `eventId`, TTL retention) with the sequence allocated on the fenced task row and an SSE metadata frame | Preserved (fake-verified; no live DB, TTL expiry not exercised) |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/store.ts` (one row per event, unique `(taskId, seq)` and `eventId`, TTL retention) with the sequence allocated on the fenced task row and an SSE metadata frame | Preserved (real MongoDB replay and TTL expiry covered; see verification status) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
@@ -95,7 +95,7 @@ closed, migrating a client would remove functionality, which the brief forbids.
 Dependency order for closing them:
 
 1. ~~Persistent execution events and replay across restart (row 22)~~ — closed
-   by `docs/durable-events.md`; the remaining part of row 18 is an atomic fenced
+   by the task sequence authority and durable replay in `src/events`; the remaining part of row 18 is an atomic fenced
    conversation write.
 2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31). The
    provider-independent model router (rows 29–30) is implemented in `src/models`.
@@ -110,17 +110,19 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at this merge head: 398 tests, 398 passing, 0 failing, 0
+- `npm run verify` at this merge head: 401 tests, 401 passing, 0 failing, 0
   skipped with a real `mongod` reachable (`CODERAX_TEST_MONGODB_URI` set,
   `CODERAX_REQUIRE_MONGODB=1`), OpenAPI drift clean. The same command without a
-  database reports 382 passing and 16 skipped, all of them MongoDB suites.
+  database reports 382 passing and 19 skipped, all of them MongoDB suites.
 - Durable execution events are covered by store-contract, fenced-allocation,
   replay-across-restart and SSE-metadata tests, and by a real-MongoDB suite
-  (`tests/integration/event-log-mongo.test.ts`) that proves the fenced `$inc`
-  allocation, unique-sequence refusal, two replicas appending concurrently, and
-  replay after an engine restart against a real `mongod`. TTL expiry is still not
-  executed: the retention index is asserted on the server, not its deletion
-  timing.
+  (`tests/integration/event-log-mongo.test.ts`) that proves, against a real
+  `mongod`: the fenced `$inc` allocation, unique-sequence refusal, two replicas
+  appending concurrently, replay after an engine restart, a second replica
+  tailing a run that is still `running`, a stale generation refused on both
+  replicas, and retention — the server's TTL monitor expires old rows and a
+  cursor older than the retained window is reported as truncated. The retention
+  test waits for one TTL sweep, which is about 30 s of the suite's runtime.
 - Durable stores are verified against a semantics-faithful collection fake in
   the default offline run. The real-MongoDB suites run when
   `CODERAX_TEST_MONGODB_URI` is set (the CI lane supplies one) and are skipped,

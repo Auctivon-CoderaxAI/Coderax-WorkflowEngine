@@ -89,6 +89,13 @@ export type TaskRepository = {
     requestId: string;
     now: string;
   }) => Promise<boolean>;
+  allocateSeq: (input: { taskId: string; token: string }) => Promise<number | null>;
+  /**
+   * Raises the durable head to an externally adopted sequence. It never lowers
+   * the head, so adopting a replayed event cannot make the allocator hand out a
+   * sequence the log already contains.
+   */
+  adoptSeq: (input: { taskId: string; seq: number }) => Promise<void>;
   listByConversation: (conversationId: string) => Promise<TaskRecord[]>;
   /** Tasks that are not terminal, used by startup ownership verification. */
   listUnsettled: () => Promise<TaskRecord[]>;
@@ -159,6 +166,33 @@ export function createTaskRepository(): TaskRepository {
       const next: TaskRecord = { ...task, ...patch };
       tasks.set(taskId, next);
       if (isTerminalState(next.state)) settle(next);
+      return true;
+    },
+    allocateSeq: async ({ taskId, token }) => {
+      const task = tasks.get(taskId);
+      if (!task || task.runToken !== token) return null;
+      const next: TaskRecord = { ...task, eventSeq: (task.eventSeq ?? 0) + 1 };
+      tasks.set(taskId, next);
+      return next.eventSeq;
+    },
+    adoptSeq: async ({ taskId, seq }) => {
+      const task = tasks.get(taskId);
+      if (!task) return;
+      tasks.set(taskId, { ...task, eventSeq: Math.max(task.eventSeq ?? 0, seq) });
+    },
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const task = tasks.get(taskId);
+      if (!task?.handoffPending || task.generation !== generation ||
+          (task.state !== 'queued' && task.state !== 'interrupted')) return null;
+      const next: TaskRecord = { ...task, state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt };
+      tasks.set(taskId, next);
+      activeByConversation.set(task.conversationId, taskId);
+      return { ...next };
+    },
+    claimScheduledRetry: async (taskId, generation) => {
+      const task = tasks.get(taskId);
+      if (!task || task.state !== 'failed' || task.generation !== generation || task.scheduleRetryClaimed) return false;
+      tasks.set(taskId, { ...task, scheduleRetryClaimed: true });
       return true;
     },
     reissue: async ({ taskId, token, now, leaseExpiresAt, expected }) => {
