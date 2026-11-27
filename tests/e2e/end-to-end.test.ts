@@ -107,6 +107,7 @@ test('a failure the adapter marked retryable is retried on the same agent with a
           code: 'server_unavailable',
           detail: 'The endpoint refused the connection before dispatch.',
           retryable: true,
+          preDispatch: true,
         };
       }
       return nativeRun(request, report);

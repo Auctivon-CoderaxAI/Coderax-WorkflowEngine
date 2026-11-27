@@ -265,11 +265,27 @@ test('cancellation after the runner returns wins over suspension while reports d
   const reports = new Promise<void>(resolve => { releaseReports = resolve; });
   let settlementStarted = false;
   try {
-    const { tasks, runner, scheduler } = started.app.dependencies;
+    const { tasks, runner, scheduler, agents } = started.app.dependencies;
     const update = tasks.updateFenced;
     tasks.updateFenced = async (input) => {
       if (input.patch.steps && input.patch.updatedAt && !input.patch.state) await reports;
       return update(input);
+    };
+    // The adapter surface is what this test pins: it reports a step and then
+    // suspends without waiting on the engine's checkpoint writes, so settlement
+    // is the thing that drains that report. The native adapter waits for its own
+    // durable writes, which would keep the run from ever reaching settlement and
+    // is covered by the approval tests above instead.
+    const agent = agents.get('coderax');
+    assert.ok(agent);
+    agent.run = async (_request, report) => {
+      report({ type: 'step.started', stepId: 'step-1', title: 'Write the report' });
+      return {
+        ok: false,
+        code: 'approval_required',
+        detail: 'Owner approval is required to continue this run.',
+        retryable: true,
+      };
     };
     const run = runner.run;
     runner.run = input => run({ ...input, settle: async current => {
