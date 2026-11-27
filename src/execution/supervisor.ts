@@ -289,7 +289,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         (scope) => scope === 'workspace.write' || scope === 'command.execute',
       );
       const busy = exclusive ? activeRoots.get(root) : undefined;
-      let replacing = false;
+      let replaced: ActiveExecution | undefined;
       if (busy) {
         const running = active.get(busy);
         // A newer generation of the same task is a supersession, not a conflict:
@@ -310,7 +310,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
             input.identity.executionId,
           );
         }
-        replacing = true;
+        replaced = running;
         if (running.requested !== 'shutdown') {
           running.requested = 'interrupt';
           running.controller.abort();
@@ -337,7 +337,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
        */
       if (exclusive) {
         const reserved = activeRoots.get(root);
-        if (reserved !== undefined && !(replacing && reserved === busy)) {
+        if (reserved !== undefined && !(replaced && reserved === busy)) {
           return refused(
             'workspace_busy',
             'Another supervised execution currently holds this workspace root.',
@@ -349,6 +349,17 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
       const releaseReservation = (): void => {
         if (exclusive && activeRoots.get(root) === input.identity.executionId) {
           activeRoots.delete(root);
+        }
+      };
+
+      const rollbackReservation = (): void => {
+        if (exclusive && activeRoots.get(root) === input.identity.executionId) {
+          // The old execution may have finished while the durable create was pending.
+          if (busy !== undefined && replaced !== undefined && active.get(busy) === replaced) {
+            activeRoots.set(root, busy);
+          } else {
+            releaseReservation();
+          }
         }
       };
 
@@ -368,11 +379,11 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
       try {
         created = await deps.executions.create(record);
       } catch (error) {
-        releaseReservation();
+        rollbackReservation();
         throw error;
       }
       if (!created) {
-        releaseReservation();
+        rollbackReservation();
         return refused(
           'execution_duplicate',
           'That execution identity already exists.',

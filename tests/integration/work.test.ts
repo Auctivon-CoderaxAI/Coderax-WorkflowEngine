@@ -277,3 +277,116 @@ test('failed transcript and notification writes do not strand a settled run', as
     await started.close();
   }
 });
+
+function barrier() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const checkpointFails of [false, true]) {
+  test(`pending action waits for a ${checkpointFails ? 'failing' : 'successful'} checkpoint`, async () => {
+    const started = await startTestApp();
+    const checkpointEntered = barrier();
+    const continueCheckpoint = barrier();
+    const actionRequested = barrier();
+    let pendingWrites = 0;
+    try {
+      const { agents, tasks, scheduler, events } = started.app.dependencies;
+      const update = tasks.updateFenced;
+      tasks.updateFenced = async (input) => {
+        if (input.patch.checkpoint && !input.patch.state) {
+          checkpointEntered.resolve();
+          await continueCheckpoint.promise;
+          if (checkpointFails) throw new Error('checkpoint storage unavailable');
+        }
+        if (input.patch.pendingAction) {
+          pendingWrites++;
+          assert.deepEqual((await tasks.get(input.taskId))?.checkpoint.completedSteps, ['first']);
+        }
+        return update(input);
+      };
+      const agent = agents.get('coderax');
+      assert.ok(agent);
+      agent.run = async (request, report) => {
+        report({ type: 'step.completed', stepId: 'first', title: 'First step' });
+        report({ type: 'step.started', stepId: 'second', title: 'Second step' });
+        assert.ok(request.context?.savePendingAction);
+        actionRequested.resolve();
+        assert.equal(await request.context.savePendingAction({ stepId: 'second', json: '{}' }), true);
+        return { ok: false, code: 'approval_required', detail: 'Approval required', retryable: true };
+      };
+      const task = await started.app.service.submitWork(principal, {
+        objective: 'Save a later pending action', mode: 'cloud', requireApproval: true,
+      });
+      assert.ok(task.ok);
+      await Promise.all([checkpointEntered.promise, actionRequested.promise]);
+      assert.equal(pendingWrites, 0);
+      continueCheckpoint.resolve();
+      await scheduler.idle();
+      const record = await tasks.get(task.value.taskId);
+      assert.equal(record?.state, checkpointFails ? 'failed' : 'awaiting_approval');
+      assert.deepEqual(record?.checkpoint.completedSteps, ['first']);
+      assert.equal(record?.pendingAction?.stepId, checkpointFails ? undefined : 'second');
+      assert.equal(pendingWrites, checkpointFails ? 0 : 1);
+      assert.equal(events.replay(task.value.taskId, 0).events.some(event => event.type === 'task.interrupted'), false);
+    } finally {
+      continueCheckpoint.resolve();
+      await started.close();
+    }
+  });
+}
+
+test('Work retains its lease while reports and terminal settlement are being persisted', async () => {
+  const started = await startTestApp();
+  const checkpointEntered = barrier();
+  const continueCheckpoint = barrier();
+  const settlementEntered = barrier();
+  const continueSettlement = barrier();
+  try {
+    const { agents, tasks, scheduler, events } = started.app.dependencies;
+    const update = tasks.updateFenced;
+    tasks.updateFenced = async (input) => {
+      if (input.patch.checkpoint && !input.patch.state) {
+        checkpointEntered.resolve();
+        await continueCheckpoint.promise;
+      }
+      if (input.patch.state === 'completed') {
+        settlementEntered.resolve();
+        await continueSettlement.promise;
+      }
+      return update(input);
+    };
+    const agent = agents.get('coderax');
+    assert.ok(agent);
+    agent.run = async (_request, report) => {
+      report({ type: 'step.completed', stepId: 'first', title: 'First step' });
+      return { ok: true, summary: 'done' };
+    };
+    const task = await started.app.service.submitWork(principal, {
+      objective: 'Settle slowly', mode: 'cloud', requireApproval: true,
+    });
+    assert.ok(task.ok);
+    const { taskId } = task.value;
+    const checkRunningBeyondTtl = async () => {
+      await new Promise(resolve => setTimeout(resolve, 3_100));
+      const status = await started.app.service.task(principal, taskId);
+      assert.equal(status.ok && status.value.state, 'running');
+    };
+    await checkpointEntered.promise;
+    await checkRunningBeyondTtl();
+    continueCheckpoint.resolve();
+    await settlementEntered.promise;
+    await checkRunningBeyondTtl();
+    continueSettlement.resolve();
+    await scheduler.idle();
+    assert.equal((await tasks.get(taskId))?.state, 'completed');
+    assert.equal(events.replay(taskId, 0).events.some(event => event.type === 'task.interrupted'), false);
+    const notifications = await started.app.service.notifications(principal);
+    assert.deepEqual(notifications.notifications.map(notification => notification.state), ['completed']);
+  } finally {
+    continueCheckpoint.resolve();
+    continueSettlement.resolve();
+    await started.close();
+  }
+});

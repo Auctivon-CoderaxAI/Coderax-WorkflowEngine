@@ -592,10 +592,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outputs = [...(started.task.checkpoint.outputs ?? (started.task.checkpoint.text
       ? [{ stepId: completed.join(', '), text: started.task.checkpoint.text }] : []))];
     let reports = Promise.resolve();
+    let checkpointDurable = Promise.resolve(true);
     const saveReport = (patch: TaskPatch): void => {
-      reports = reports.then(async () => {
-        await deps.tasks.updateFenced({ taskId, token, patch });
-      }).catch(() => { /* The settlement checkpoint includes all completed steps. */ });
+      const saved = reports.then(() => deps.tasks.updateFenced({ taskId, token, patch }));
+      // Each checkpoint includes all completed steps, so a newer successful
+      // snapshot can cover a failed earlier write.
+      if (patch.checkpoint) checkpointDurable = saved.then(({ applied }) => applied, () => false);
+      reports = saved.then(() => undefined, () => undefined);
     };
     let text = '';
     let visible = text;
@@ -692,101 +695,116 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // Work and Chat now share one execution path. The runner keeps its lease
     // heartbeat and bounded cancellation; the supervisor owns the identity, the
     // capability grant, revocation and the termination record around it.
-    const supervised = await deps.supervisor.run({
-      identity,
-      adapter: adapter.value,
-      workspaceRoot: workspace.value.root,
-      scopes: WORK_SCOPES,
-      report,
-      launch: async (execution) => {
-        const result = await deps.runner.run({
-          scope: scopeOf(started.task),
-          token,
-          adapter: adapter.value as AgentAdapter,
-          request: {
-            ownerId: task.ownerId,
-            tenantId: task.tenantId,
-            conversationId: task.conversationId,
-            objective: task.objective,
-            history,
-            model: model.value.ref,
-            mode: task.mode,
-            workspaceRoot: execution.workspaceRoot,
-            maxSteps: deps.config.engines.native.maxSteps,
-            budget: task.budget,
-            signal: execution.signal,
-            ...(started.task.agent === 'coderax'
-              ? {
-                  context: {
-                    ...await nativeContext({
-                      ownerId: task.ownerId,
-                      mode: task.mode,
-                      task: started.task,
-                      guard: execution.guard,
-                    }),
-                    pendingAction: started.task.pendingAction ?? null,
-                    savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
-                      taskId,
-                      token,
-                      patch: {
-                        pendingAction: pendingAction?.observations
-                          ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) }
-                          : pendingAction,
+    const settlement = new AbortController();
+    let leaseLost = false;
+    try {
+      const supervised = await deps.supervisor.run({
+        identity,
+        adapter: adapter.value,
+        workspaceRoot: workspace.value.root,
+        scopes: WORK_SCOPES,
+        report,
+        launch: async (execution) => {
+          const result = await deps.runner.run({
+            scope: scopeOf(started.task),
+            token,
+            adapter: adapter.value as AgentAdapter,
+            request: {
+              ownerId: task.ownerId,
+              tenantId: task.tenantId,
+              conversationId: task.conversationId,
+              objective: task.objective,
+              history,
+              model: model.value.ref,
+              mode: task.mode,
+              workspaceRoot: execution.workspaceRoot,
+              maxSteps: deps.config.engines.native.maxSteps,
+              budget: task.budget,
+              signal: execution.signal,
+              ...(started.task.agent === 'coderax'
+                ? {
+                    context: {
+                      ...await nativeContext({
+                        ownerId: task.ownerId,
+                        mode: task.mode,
+                        task: started.task,
+                        guard: execution.guard,
+                      }),
+                      pendingAction: started.task.pendingAction ?? null,
+                      savePendingAction: async (pendingAction) => {
+                        await reports;
+                        if (pendingAction && !await checkpointDurable) {
+                          throw new Error('Could not persist the checkpoint before saving a pending action.');
+                        }
+                        if (execution.signal.aborted || leaseLost) return false;
+                        return (await deps.tasks.updateFenced({
+                          taskId,
+                          token,
+                          patch: {
+                            pendingAction: pendingAction?.observations
+                              ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) }
+                              : pendingAction,
+                          },
+                        })).applied;
                       },
-                    })).applied,
-                    savePlan: async (plan) => {
-                      const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
-                      const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
-                      if (saved.applied) steps.splice(0, steps.length, ...planned);
-                      return saved.applied;
+                      savePlan: async (plan) => {
+                        const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
+                        const saved = await deps.tasks.updateFenced({ taskId, token, patch: { steps: planned } });
+                        if (saved.applied) steps.splice(0, steps.length, ...planned);
+                        return saved.applied;
+                      },
                     },
-                  },
-                }
-              : {}),
-          },
-          report: execution.report,
-        });
-        return {
-          outcome: result.outcome,
-          ownershipLost: result.ownershipLost,
-          abandoned: result.outcome.kind === 'cancelled' && result.outcome.abandoned === true,
-        };
-      },
-    });
-    // Only the attempt that still owns this mapping may remove it: a superseded
-    // run can finish after its replacement has already registered itself.
-    if (executionsByTask.get(taskId) === identity.executionId) {
-      executionsByTask.delete(taskId);
-    }
-
-    if (!supervised.admitted) {
-      await settle(started.task, token, {
-        kind: 'failed',
-        code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
-        detail: supervised.detail,
-        retryable: supervised.code !== 'workspace_denied',
+                  }
+                : {}),
+            },
+            report: execution.report,
+            settlementLease: { until: settlement.signal, onLost: () => { leaseLost = true; } },
+          });
+          return {
+            outcome: result.outcome,
+            ownershipLost: result.ownershipLost,
+            abandoned: result.outcome.kind === 'cancelled' && result.outcome.abandoned === true,
+          };
+        },
       });
-      return;
+      // Only the attempt that still owns this mapping may remove it: a superseded
+      // run can finish after its replacement has already registered itself.
+      if (executionsByTask.get(taskId) === identity.executionId) {
+        executionsByTask.delete(taskId);
+      }
+
+      if (!supervised.admitted) {
+        await settle(started.task, token, {
+          kind: 'failed',
+          code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
+          detail: supervised.detail,
+          retryable: supervised.code !== 'workspace_denied',
+        });
+        return;
+      }
+      if (leaseLost || supervised.ownershipLost || supervised.cause === 'interrupted') {
+        // Deliberately no terminal write and no notification: this run no longer
+        // owns the task, and the new owner is the only writer of its state.
+        return;
+      }
+      if (supervised.cause === 'shutdown') {
+        // The process is stopping; the task is left for startup reconciliation and
+        // this generation does not settle it.
+        return;
+      }
+      const safeText = redactContent(text);
+      emitText(safeText);
+      const outcome = supervised.outcome.kind === 'completed'
+        ? { ...supervised.outcome, summary: redactContent(supervised.outcome.summary) }
+        : supervised.outcome;
+      // The run's own durable reports must land before settlement, and the final
+      // checkpoint carries the step outputs the newer resume path depends on.
+      await reports;
+      if (leaseLost) return;
+      await settle(started.task, token, outcome, { completedSteps: completed, text: safeText, outputs });
+    } finally {
+      settlement.abort();
     }
-    if (supervised.ownershipLost || supervised.cause === 'interrupted') {
-      // Deliberately no terminal write and no notification: this run no longer
-      // owns the task, and the new owner is the only writer of its state.
-      return;
-    }
-    if (supervised.cause === 'shutdown') {
-      // The process is stopping; the task is left for startup reconciliation and
-      // this generation does not settle it.
-      return;
-    }
-    const safeText = redactContent(text);
-    emitText(safeText);
-    const outcome = supervised.outcome.kind === 'completed'
-      ? { ...supervised.outcome, summary: redactContent(supervised.outcome.summary) }
-      : supervised.outcome;
-    // The run's own durable reports must land before settlement, and the final
-    // checkpoint carries the step outputs the newer resume path depends on.
-    await reports;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText, outputs });
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {

@@ -29,6 +29,8 @@ export type TaskRunner = {
     adapter: AgentAdapter;
     request: AgentRunRequest;
     report: AgentReport;
+    /** Keep renewing after the adapter returns, until the caller finishes settlement. */
+    settlementLease?: { until: AbortSignal; onLost: () => void };
     /** The fencing generation this run belongs to (used when it is abandoned). */
     generation?: number;
     /** The directory the run may write, quarantined if the adapter is abandoned. */
@@ -77,6 +79,7 @@ export function createTaskRunner(input: {
       adapter,
       request,
       report,
+      settlementLease,
       generation = 0,
       workspaceRoot = '',
     }) => {
@@ -94,6 +97,14 @@ export function createTaskRunner(input: {
       if (request.signal.aborted) onExternalAbort();
       request.signal.addEventListener('abort', onExternalAbort, { once: true });
 
+      const loseOwnership = (): void => {
+        if (ownershipLost) return;
+        ownershipLost = true;
+        stopHeartbeat();
+        controller.abort();
+        settlementLease?.onLost();
+      };
+
       const heartbeat = async (): Promise<void> => {
         const now = input.clock.now();
         const result = await input.lease.renew({
@@ -103,8 +114,7 @@ export function createTaskRunner(input: {
           expiresAt: new Date(now.getTime() + input.leaseTtlMs),
         });
         if (!result.renewed) {
-          ownershipLost = true;
-          controller.abort();
+          loseOwnership();
           return;
         }
         if (result.cancelRequested) {
@@ -114,12 +124,12 @@ export function createTaskRunner(input: {
       };
 
       const timer = setInterval(() => {
-        void heartbeat().catch(() => {
-          ownershipLost = true;
-          controller.abort();
-        });
+        void heartbeat().catch(loseOwnership);
       }, input.heartbeatIntervalMs);
       timer.unref();
+      const stopHeartbeat = (): void => clearInterval(timer);
+      if (settlementLease?.until.aborted) stopHeartbeat();
+      else settlementLease?.until.addEventListener('abort', stopHeartbeat, { once: true });
 
       // The grace clock starts when the run is aborted, not when it starts, so a
       // long legitimate run is never cut short.
@@ -228,7 +238,7 @@ export function createTaskRunner(input: {
           ownershipLost: false,
         };
       } finally {
-        clearInterval(timer);
+        if (!settlementLease) stopHeartbeat();
         if (graceTimer) clearTimeout(graceTimer);
         request.signal.removeEventListener('abort', onExternalAbort);
       }

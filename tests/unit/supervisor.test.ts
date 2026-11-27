@@ -438,3 +438,73 @@ test('a second writer is refused while the first admission is still being persis
   release();
   assert.equal((await firstRun).admitted, true);
 });
+
+function barrier() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const finishFirst of [false, true]) {
+  for (const createThrows of [false, true]) {
+    test(`failed supersession (${createThrows ? 'throw' : 'duplicate'}) with old execution ${finishFirst ? 'settled' : 'unwinding'}`, async () => {
+      const h = harness();
+      const first = identity({ executionId: 'exec_old' });
+      const replacement = identity({ executionId: 'exec_replacement', generation: 2 });
+      const third = identity({ executionId: 'exec_other', taskId: 'task_other' });
+      const createEntered = barrier();
+      const failCreate = barrier();
+      const finishEntered = barrier();
+      const finishOld = barrier();
+      const create = h.executions.create;
+      const finish = h.executions.finish;
+      h.executions.create = async (record) => {
+        if (record.executionId !== replacement.executionId) return create(record);
+        createEntered.resolve();
+        await failCreate.promise;
+        if (createThrows) throw new Error('storage unavailable');
+        return false;
+      };
+      h.executions.finish = async (input) => {
+        if (input.executionId === first.executionId) {
+          finishEntered.resolve();
+          await finishOld.promise;
+        }
+        return finish(input);
+      };
+      const run = (id: ExecutionIdentity) => h.supervisor.run({
+        identity: id,
+        adapter: { agent: 'coderax', workload: 'in-process' },
+        workspaceRoot: '/work/cloud',
+        scopes: SCOPES,
+        launch: async () => ({ outcome: { kind: 'completed', summary: 'done' } }),
+      });
+
+      const oldRun = run(first);
+      await finishEntered.promise;
+      const newRun = run(replacement);
+      await createEntered.promise;
+      try {
+        if (finishFirst) {
+          finishOld.resolve();
+          await oldRun;
+        }
+        failCreate.resolve();
+        if (createThrows) {
+          await assert.rejects(newRun, /storage unavailable/);
+        } else {
+          const result = await newRun;
+          assert.equal(!result.admitted && result.code, 'execution_duplicate');
+        }
+        if (!finishFirst) {
+          const result = await run(third);
+          assert.equal(!result.admitted && result.code, 'workspace_busy');
+        }
+      } finally {
+        finishOld.resolve();
+        await oldRun;
+      }
+      assert.equal((await run(third)).admitted, true);
+    });
+  }
+}
