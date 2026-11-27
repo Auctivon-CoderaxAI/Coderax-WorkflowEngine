@@ -63,12 +63,20 @@ Every event is an envelope plus a payload:
 }
 ```
 
-- `seq` is assigned only by the event bus and increases by one per task.
+- `seq` is allocated atomically on the task row, whose `runToken` fences it:
+  only the generation that currently owns the task can append, two replicas
+  cannot allocate the same number, and a superseded generation appends nothing.
+- The log is durable (one row per event, unique on `(taskId, seq)` and `eventId`)
+  and survives a restart. Retention is by age (`execution.eventRetentionMs`), so
+  an old cursor can outlive its events.
 - A consumer that has already seen an `eventId` must ignore it.
 - A consumer that receives `seq <= lastSeen` must ignore it and resync from
   `GET /v1/work/{taskId}/events?after=<lastSeen>`.
-- A bounded per-task buffer means an old cursor can be truncated; the replay
-  response says so, and the client must re-read task state.
+- The stream opens with an SSE comment frame, `: coderax-meta {"lastSeq":N,
+  "truncated":true|false}`. Comments are ignored by every SSE client, so the
+  deployed SDK keeps working; a client that reads it can tell that its cursor is
+  older than retention (or ahead of the log) and must re-read task state instead
+  of assuming it missed nothing.
 
 ## Browser operations
 
