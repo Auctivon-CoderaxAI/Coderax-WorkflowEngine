@@ -7,7 +7,8 @@
  * cannot exhaust the host or the free-inference budget at once.
  */
 export type TaskScheduler = {
-  enqueue: (job: () => Promise<void>) => void;
+  /** Returns false if the scheduler has stopped accepting work. */
+  enqueue: (job: () => Promise<void>) => boolean;
   active: () => number;
   pending: () => number;
   /** Test and shutdown support: resolves once the queue and pool are empty. */
@@ -36,9 +37,10 @@ export function createTaskScheduler(input: { maxConcurrent: number }): TaskSched
 
   return {
     enqueue: (job) => {
-      if (stopped) return;
+      if (stopped) return false;
       queue.push(job);
       pump();
+      return true;
     },
     active: () => running.size,
     pending: () => queue.length,

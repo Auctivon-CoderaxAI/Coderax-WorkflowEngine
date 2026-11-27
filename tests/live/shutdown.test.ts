@@ -141,7 +141,24 @@ test('a delayed checkpoint write is drained before persistence closes', { skip }
   }
 });
 
-test('shutdown keeps persistence open for an admitted submitWork call', { skip }, async () => {
+async function assertRejectedRun(query: { conversationId: string } | { taskId: string }, generation: number): Promise<void> {
+  const reader = await createMongoConnector()({ uri: uri as string, database: databaseName });
+  try {
+    const task = await reader.collection('tasks').findOne(query);
+    assert.equal(task?.state, 'failed');
+    assert.equal(task.generation, generation);
+    assert.deepEqual(task.failure, {
+      code: 'server_unavailable',
+      detail: 'The engine shut down before the run could be scheduled.',
+      retryable: true,
+    });
+    assert.equal(await reader.collection('work_runs').findOne({ token: task.runToken }), null);
+  } finally {
+    await reader.close();
+  }
+}
+
+test('shutdown settles a rejected submitWork before closing persistence', { skip }, async () => {
   requiresDatabase();
   const dirs = workspace();
   const database = await createMongoConnector()({ uri: uri as string, database: databaseName });
@@ -186,7 +203,8 @@ test('shutdown keeps persistence open for an admitted submitWork call', { skip }
     persistence: { database: delayed },
   });
   try {
-    const request = { objective: 'finish admitting work during shutdown', mode: 'cloud' as const, requireApproval: true };
+    const conversationId = 'conv_shutdown_submit';
+    const request = { conversationId, objective: 'finish admitting work during shutdown', mode: 'cloud' as const, requireApproval: true };
     const admission = app.service.submitWork(principal, request);
     await entered;
     const stopped = app.stop();
@@ -195,9 +213,11 @@ test('shutdown keeps persistence open for an admitted submitWork call', { skip }
     const refused = await app.service.submitWork(principal, request);
     assert.ok(!refused.ok && refused.code === 'not_ready');
     release();
-    assert.equal((await admission).ok, true);
+    const reply = await admission;
+    assert.ok(!reply.ok && reply.code === 'not_ready');
     await stopped;
     assert.equal(closed, true);
+    await assertRejectedRun({ conversationId }, 1);
   } finally {
     release();
     await app.stop().catch(() => undefined);
@@ -301,11 +321,10 @@ for (const method of ['resumeTask', 'retryTask'] as const) {
       assert.ok(!refused.ok && refused.code === 'not_ready');
       release();
       const reply = await admission;
-      assert.ok(reply.ok);
-      assert.equal(reply.value.outcome, 'accepted');
-      assert.equal(reply.value.generation, task.generation + 1);
+      assert.ok(!reply.ok && reply.code === 'not_ready');
       await stopping;
       assert.equal(closed, true);
+      await assertRejectedRun({ taskId: task.taskId }, task.generation + 1);
     } finally {
       release();
       await admission?.catch(() => undefined);

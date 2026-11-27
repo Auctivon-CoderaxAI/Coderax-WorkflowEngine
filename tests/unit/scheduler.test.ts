@@ -17,9 +17,9 @@ test('the scheduler bounds concurrency, drains accepted work and refuses new wor
     finished.push(name);
   };
 
-  scheduler.enqueue(job('a'));
-  scheduler.enqueue(job('b'));
-  scheduler.enqueue(job('c'));
+  assert.equal(scheduler.enqueue(job('a')), true);
+  assert.equal(scheduler.enqueue(job('b')), true);
+  assert.equal(scheduler.enqueue(job('c')), true);
   assert.equal(scheduler.active(), 2);
   assert.equal(scheduler.pending(), 1);
   assert.deepEqual(started, ['a', 'b']);
@@ -31,7 +31,7 @@ test('the scheduler bounds concurrency, drains accepted work and refuses new wor
   assert.equal(scheduler.pending(), 0);
 
   scheduler.stop();
-  scheduler.enqueue(job('late'));
+  assert.equal(scheduler.enqueue(job('late')), false);
   await scheduler.idle();
   assert.deepEqual(started.sort(), ['a', 'b', 'c']);
 });

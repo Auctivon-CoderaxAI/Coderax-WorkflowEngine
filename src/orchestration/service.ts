@@ -353,6 +353,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
   }
 
+  async function rejectUnscheduledRun(task: TaskRecord, token: string): Promise<ServiceResult<never>> {
+    await settle(task, token, {
+      kind: 'failed',
+      code: 'server_unavailable',
+      detail: 'The engine shut down before the run could be scheduled.',
+      retryable: true,
+    });
+    return unavailable();
+  }
+
   async function execute(taskId: string, token: string): Promise<void> {
     const task = await deps.tasks.get(taskId);
     if (!task || task.runToken !== token) return;
@@ -729,6 +739,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
 
       publish(created.task, 'task.queued');
+      if (!deps.scheduler.enqueue(() => execute(task.taskId, token))) {
+        return rejectUnscheduledRun(created.task, token);
+      }
       deps.audit.record({
         actor: principal.ownerId,
         action: 'work.accepted',
@@ -737,8 +750,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         outcome: 'accepted',
         detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
       });
-
-      deps.scheduler.enqueue(() => execute(task.taskId, token));
 
       return ok({
         taskId: task.taskId,
@@ -866,7 +877,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
-      deps.scheduler.enqueue(() => execute(taskId, token));
+      if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+        return rejectUnscheduledRun(applied.task, token);
+      }
       return ok({
         taskId,
         state: 'queued',
@@ -915,7 +928,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
-      deps.scheduler.enqueue(() => execute(taskId, token));
+      if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+        return rejectUnscheduledRun(applied.task, token);
+      }
       return ok({
         taskId,
         state: 'queued',
