@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { CoderaxClient } from '@coderax/sdk';
+import type { DeliverableRequestInput } from '@coderax/contracts';
+import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';
 import { createFakeDatabase } from '../fakes/mongo.js';
 import { restoreTree, type TreeManifest } from '../../src/artifacts/tree.js';
 import { OWNER_TOKEN, startTestApp, waitFor } from '../helpers.js';
@@ -216,6 +217,36 @@ test('a generated source tree is durable, manifest-linked and restorable by arti
     assert.equal(existsSync(path.join(root, manifest.entry)), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    await started.close();
+  }
+});
+
+test('deliverable generation reports exhausted artifact quota as HTTP 507', async () => {
+  const started = await startTestApp({
+    config: { persistence: { driver: 'mongo' }, artifacts: { maxArtifactsPerOwner: 2 } },
+    persistence: { database: createFakeDatabase() },
+  });
+  const api = client(started.url);
+  try {
+    const request: DeliverableRequestInput = {
+      kind: 'document',
+      mode: 'cloud',
+      filename: 'quota-document',
+      title: 'Quota document',
+      formats: ['markdown'],
+      blocks: [{ type: 'paragraph', text: 'This document uses the two available artifact slots.' }],
+    };
+    assert.equal((await api.deliver(request)).artifacts.length, 2);
+    await assert.rejects(
+      api.deliver({ ...request, filename: 'over-quota' }),
+      (error: unknown) => {
+        assert.ok(error instanceof CoderaxApiError);
+        assert.equal(error.status, 507);
+        assert.equal(error.code, 'quota_exceeded');
+        return true;
+      },
+    );
+  } finally {
     await started.close();
   }
 });

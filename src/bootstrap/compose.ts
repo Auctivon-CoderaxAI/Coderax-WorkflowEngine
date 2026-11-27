@@ -441,7 +441,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
                   : { projectId: generated.projectId }),
               },
             );
-            if (!uploaded.ok) throw new ArtifactPersistError(uploaded.detail);
+            if (!uploaded.ok) throw new ArtifactPersistError(uploaded);
             return uploaded.value.artifact;
           },
         },

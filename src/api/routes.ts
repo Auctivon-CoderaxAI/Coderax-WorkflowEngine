@@ -169,7 +169,8 @@ export function registerRoutes(
       memorySearch: false,
       conversations: has('listConversations') && has('getConversation'),
       taskList: false,
-      idempotentSubmission: has('submitWork'),
+      // A replay without a conversation ID creates a new conversation and task.
+      idempotentSubmission: false,
       capabilities: has('listCapabilities'),
       media: has('intakeMedia'),
       deliverables: has('generateDeliverable'),

@@ -7,7 +7,7 @@ import type {
   DeliverableRequestInput,
   VerificationCheck,
 } from '@coderax/contracts';
-import type { ServiceResult } from '../support/result.js';
+import type { ServiceFailure, ServiceResult } from '../support/result.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 
 /**
@@ -53,8 +53,8 @@ export type PersistArtifact = (input: {
 }) => Promise<ArtifactDescriptor>;
 
 export class ArtifactPersistError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(readonly failure: ServiceFailure) {
+    super(failure.detail);
     this.name = 'ArtifactPersistError';
   }
 }

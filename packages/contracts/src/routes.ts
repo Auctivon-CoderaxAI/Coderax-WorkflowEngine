@@ -180,11 +180,10 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     operationId: 'submitChat',
     method: 'POST',
     path: '/v1/chat',
-    summary: 'One Chat turn. Streams SSE frames when the client accepts them.',
+    summary: 'Submit one Chat turn and receive a JSON reply.',
     tags: ['chat'],
     auth: 'owner',
     body: ChatRequest,
-    stream: true,
     response: { status: 200, description: 'Chat reply', schema: ChatReply },
   },
   {

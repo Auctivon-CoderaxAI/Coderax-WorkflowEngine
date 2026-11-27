@@ -91,7 +91,7 @@ export function createCapabilityRegistry(input: {
         operationalDetail: freeRoute
           ? 'Executed through the routed gateway in the router and native test suites.'
           : 'No verified zero-cost route is available, so no inference has been executed.',
-        privacyEligible: freeRoute,
+        privacyEligible: input.models.route().length > 0,
         zeroCost: freeRoute,
         detail: freeRoute
           ? 'At least one verified zero-cost model is routable for chat and work.'

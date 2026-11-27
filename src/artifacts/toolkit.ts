@@ -23,7 +23,7 @@ import type {
   ProduceInput,
   ToolkitContext,
 } from './types.js';
-import { checksPass, runFolder } from './types.js';
+import { ArtifactPersistError, checksPass, runFolder } from './types.js';
 import { ArtifactPathError, digestOf, readArtifact, writeArtifact } from './file.js';
 import {
   analyzeDocx,
@@ -868,6 +868,14 @@ export function createArtifactToolkit(): ArtifactToolkit {
             return await produceMedia(normalised, context);
         }
       } catch (error) {
+        if (error instanceof ArtifactPersistError && error.failure.code === 'quota_exceeded') {
+          context.receipts({
+            action: 'deliverable.refused',
+            outcome: 'refused',
+            detail: `${normalised.kind} refused by artifact quota`,
+          });
+          return error.failure;
+        }
         if (error instanceof PermissionError) {
           context.receipts({
             action: 'deliverable.refused',
