@@ -2,23 +2,25 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Router } from './router.js';
 
 const MAX_BODY_BYTES = 1_048_576;
+const OVERFLOW_DRAIN_MS = 1_000;
 
 function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
-    request.on('data', (chunk: Buffer) => {
+    const onData = (chunk: Buffer): void => {
       size += chunk.length;
       if (size > limit) {
-        reject(new Error('request body is too large'));
-        // Do not destroy the socket before the typed 413 is written. Pause the
-        // stream here; the request handler drains or closes it after responding.
         request.pause();
+        request.off('data', onData);
+        chunks.length = 0;
+        reject(new Error('request body is too large'));
         return;
       }
       chunks.push(chunk);
-    });
-    request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    };
+    request.on('data', onData);
+    request.once('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     request.on('error', reject);
   });
 }
@@ -58,8 +60,13 @@ export function createHttpServer(input: {
           bodyText = await readBody(request, limit);
         }
       } catch {
-        // The client may still be writing. Drain it so the response is not lost,
-        // then close the connection instead of keeping an oversized request open.
+        // Give the 413 a chance to flush while discarding in-flight bytes.
+        // Closing the connection normally cancels this deadline; a peer that
+        // keeps the connection open cannot make the drain run indefinitely.
+        const socket = request.socket;
+        const deadline = setTimeout(() => socket.destroy(), OVERFLOW_DRAIN_MS);
+        deadline.unref();
+        socket.once('close', () => clearTimeout(deadline));
         request.resume();
         response.setHeader('connection', 'close');
         sendJson(response, 413, {
