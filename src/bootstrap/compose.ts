@@ -211,12 +211,26 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     allowPaid: false,
   });
 
+  const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
+
+  const persistence = await buildPersistence({
+    config,
+    env,
+    clock,
+    ids,
+    ...(input.persistence ?? {}),
+  });
+  const lease = persistence.lease;
+  const tasks = persistence.tasks;
+  const conversations = persistence.conversations;
+  const memory = persistence.memory;
+  const permissions = persistence.permissions;
+  const permissionsGate = createPermissionGate({ permissions, clock });
   const budget = createBudgetLedger({
     maxRequestsPerDay: config.models.dailyRequestBudget,
     maxTokensPerDay: config.models.dailyTokenBudget,
+    store: persistence.budget,
   });
-
-  const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
   const assistant = createDesignAssistant({ models, gateway, budget, clock });
   const studio = createGameStudio({
     store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
@@ -232,20 +246,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ids,
     maxPauseMs: config.games.maxPauseMs,
   });
-
-  const persistence = await buildPersistence({
-    config,
-    env,
-    clock,
-    ids,
-    ...(input.persistence ?? {}),
-  });
-  const lease = persistence.lease;
-  const tasks = persistence.tasks;
-  const conversations = persistence.conversations;
-  const memory = persistence.memory;
-  const permissions = persistence.permissions;
-  const permissionsGate = createPermissionGate({ permissions, clock });
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
     gateway,

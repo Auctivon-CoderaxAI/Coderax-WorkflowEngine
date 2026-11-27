@@ -42,6 +42,9 @@ import {
   ensureCapacityIndexes,
 } from '../persistence/capacity.js';
 import type { CapacityStore } from '../persistence/capacity.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/budgets.js';
+import { createMemoryBudgetStore } from '../models/budget.js';
+import type { BudgetWindowStore } from '../models/budget.js';
 import {
   createMongoArtifactRepository,
   createMongoBlobStore,
@@ -79,6 +82,8 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
+  /** The durable daily request and token window shared by every replica. */
+  budget: BudgetWindowStore;
   close: () => Promise<void>;
 };
 
@@ -153,6 +158,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      budget: createMemoryBudgetStore(),
       close: NO_CLOSE,
     };
   }
@@ -177,6 +183,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
+  const budgetWindows = database.collection(collectionName(config, 'budget_windows'));
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -204,6 +211,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     });
+    await ensureBudgetIndexes(budgetWindows);
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -247,6 +255,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
+    budget: createMongoBudgetStore(budgetWindows),
     close: database.close,
   };
 }

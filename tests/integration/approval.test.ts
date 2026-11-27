@@ -129,7 +129,7 @@ test('a scoped read suspends for owner approval, then resumes with the real gran
     const settled = await started.app.dependencies.tasks.get(taskId);
     assert.equal(settled?.checkpoint.iterations, 4);
     // Work usage is charged to the daily ledger exactly once per generation.
-    assert.deepEqual(started.app.service.budget(principal).used.usage, completed.usage);
+    assert.deepEqual((await started.app.service.budget(principal)).used.usage, completed.usage);
     assert.ok(
       completed.result?.verification?.evidence.some((entry) => entry.includes('read notes.txt')),
       `evidence was ${JSON.stringify(completed.result?.verification?.evidence)}`,

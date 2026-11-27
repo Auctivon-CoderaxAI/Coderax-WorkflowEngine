@@ -28,7 +28,7 @@ export function createDesignAssistant(input: {
       if (!input.gateway) return null;
       const resolved = input.models.resolve(null, 'cloud');
       if (!resolved.ok) return null;
-      const reservation = input.budget.reserve(ownerId, input.clock.now());
+      const reservation = await input.budget.reserve(ownerId, input.clock.now());
       if (!reservation.allowed) return null;
 
       try {
@@ -47,7 +47,7 @@ export function createDesignAssistant(input: {
           signal: AbortSignal.timeout(input.timeoutMs ?? 20_000),
           maxOutputTokens: 320,
         });
-        input.budget.consume(ownerId, completion.usage ?? {}, input.clock.now());
+        await input.budget.consume(ownerId, completion.usage ?? {}, input.clock.now());
         const parsed = JSON.parse(completion.text.trim()) as {
           logline?: unknown;
           pillars?: unknown;
