@@ -2165,6 +2165,7 @@
                             "enum": [
                               "GET",
                               "POST",
+                              "PATCH",
                               "DELETE"
                             ]
                           },
@@ -2951,6 +2952,199 @@
             }
           }
         ]
+      },
+      "patch": {
+        "operationId": "updateSchedule",
+        "summary": "Edit a schedule that has not run yet, including its next due time.",
+        "tags": [
+          "schedules"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "scheduleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "objective": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200000
+                    },
+                    "agent": {
+                      "type": "string",
+                      "enum": [
+                        "coderax",
+                        "opencode",
+                        "freebuff"
+                      ]
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "cloud"
+                      ]
+                    },
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "providerId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "modelId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 160
+                        }
+                      },
+                      "required": [
+                        "providerId",
+                        "modelId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "requireApproval": {
+                      "type": "boolean"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "scheduled",
+                        "submitted",
+                        "cancelled",
+                        "failed"
+                      ]
+                    },
+                    "runAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "intervalMs": {
+                      "type": "integer",
+                      "minimum": 1000
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "nextRunAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "lastTaskId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "lastError": {
+                      "type": "string",
+                      "maxLength": 500
+                    }
+                  },
+                  "required": [
+                    "scheduleId",
+                    "objective",
+                    "agent",
+                    "mode",
+                    "requireApproval",
+                    "state",
+                    "runAt",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "scheduleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "objective": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200000
+                  },
+                  "runAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "intervalMs": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "maximum": 31536000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "requireApproval": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/work/{taskId}": {

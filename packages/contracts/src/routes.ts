@@ -1,6 +1,12 @@
 import type { z } from 'zod';
 import { z as zod } from 'zod';
-import { ArtifactContent, ArtifactList, ArtifactRecord, ArtifactUploadRequest } from './artifacts.js';
+import {
+  ARTIFACT_UPLOAD_BODY_BYTES,
+  ArtifactContent,
+  ArtifactList,
+  ArtifactRecord,
+  ArtifactUploadRequest,
+} from './artifacts.js';
 import { AgentList } from './capabilities.js';
 import { ChatStreamFrame } from './chat.js';
 import { Problem } from './errors.js';
@@ -19,7 +25,13 @@ import {
 } from './permissions.js';
 import { ReceiptList, ReceiptListQuery } from './receipts.js';
 import { ArtifactId, ConversationId, ScheduleId, TaskId } from './primitives.js';
-import { Schedule, ScheduleControlResult, ScheduleCreateRequest, ScheduleList } from './schedules.js';
+import {
+  Schedule,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleList,
+  ScheduleUpdateRequest,
+} from './schedules.js';
 import {
   CancelRequest,
   ChatReply,
@@ -58,7 +70,16 @@ import {
  * answer.
  */
 
-export type RouteMethod = 'GET' | 'POST' | 'DELETE';
+export type RouteMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+
+/**
+ * The body bound for an operation that does not declare its own.
+ *
+ * Ordinary requests stay small; a route that legitimately carries more (an
+ * artifact upload) declares it here, so the transport has one catalogue to read
+ * and cannot drift from the contract.
+ */
+export const DEFAULT_BODY_LIMIT_BYTES = 1_048_576;
 
 export type RouteAuth = 'owner' | 'public';
 
@@ -83,6 +104,12 @@ export type RouteSpec = {
    * `Accept: text/event-stream`. Shape reserved by `feat/intelligence-core`.
    */
   negotiated?: boolean;
+  /**
+   * Bytes this operation may carry in a request body. Omitted means
+   * `DEFAULT_BODY_LIMIT_BYTES`; a larger declared bound never weakens any other
+   * route, because the limit is resolved per operation before the body is read.
+   */
+  bodyLimit?: number;
 };
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
@@ -368,6 +395,17 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Schedule', schema: Schedule },
   },
   {
+    operationId: 'updateSchedule',
+    method: 'PATCH',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'Edit a schedule that has not run yet, including its next due time.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleUpdateRequest,
+    response: { status: 200, description: 'Updated schedule', schema: Schedule },
+  },
+  {
     operationId: 'cancelSchedule',
     method: 'POST',
     path: '/v1/schedules/{scheduleId}/cancel',
@@ -396,6 +434,7 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     auth: 'owner',
     params: TaskParams,
     body: ArtifactUploadRequest,
+    bodyLimit: ARTIFACT_UPLOAD_BODY_BYTES,
     response: { status: 201, description: 'Stored artifact', schema: ArtifactRecord },
   },
   {

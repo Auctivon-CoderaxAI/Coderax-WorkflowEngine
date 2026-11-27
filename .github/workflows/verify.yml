@@ -9,7 +9,7 @@ on:
   push:
     # The consolidation branch publishes hosted evidence before a pull request
     # exists. Remove this branch once the pull request supplies its own runs.
-    branches: [main, integration/authoritative-runtime]
+    branches: [main, consolidation/authoritative-v1]
 
 permissions:
   contents: read
@@ -95,8 +95,13 @@ jobs:
       - name: Build (TypeScript project references)
         run: npm run build
 
-      - name: SDK distribution artifacts (deterministic)
-        run: node dist/scripts/pack-sdk.js
+      # Runs before any artifact is regenerated, so a committed tarball that no
+      # longer matches its source is a failure rather than silently refreshed.
+      - name: Architecture and release gate
+        run: node dist/scripts/gate.js
+
+      - name: Dependency advisories (fails closed)
+        run: node dist/scripts/gate.js --audit
 
       - name: Tests (unit, contract, integration, security, e2e)
         run: node --test "dist/tests/**/*.test.js"

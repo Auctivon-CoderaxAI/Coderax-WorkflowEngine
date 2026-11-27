@@ -31,6 +31,25 @@ export const ScheduleCreateRequest = z
   .strict();
 export type ScheduleCreateRequest = z.infer<typeof ScheduleCreateRequest>;
 
+/**
+ * Editing an existing schedule.
+ *
+ * Only the fields that change when the schedule runs are editable. `agent` and
+ * `model` are fixed at creation because they are the authorization the owner
+ * granted; changing them would silently redefine what the stored schedule is
+ * allowed to do. `intervalMs: null` turns a repeating schedule into a one-shot.
+ */
+export const ScheduleUpdateRequest = z
+  .object({
+    objective: z.string().min(1).max(200_000).optional(),
+    runAt: IsoDateTime.optional(),
+    intervalMs: z.number().int().min(1_000).max(31_536_000_000).nullable().optional(),
+    requireApproval: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, 'at least one field must be supplied');
+export type ScheduleUpdateRequest = z.infer<typeof ScheduleUpdateRequest>;
+
 export const Schedule = z
   .object({
     scheduleId: ScheduleId,

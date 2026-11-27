@@ -102,9 +102,10 @@ differs from the catalogue.
 | `listSchedules` | `GET /v1/schedules` | 200 `ScheduleList` | owner |
 | `createSchedule` | `POST /v1/schedules` | 201 `Schedule` | owner |
 | `getSchedule` | `GET /v1/schedules/{scheduleId}` | 200 `Schedule` | owner |
+| `updateSchedule` | `PATCH /v1/schedules/{scheduleId}` | 200 `Schedule` | owner; only before it runs |
 | `cancelSchedule` | `POST /v1/schedules/{scheduleId}/cancel` | 200 `ScheduleControlResult` | owner |
 | `listTaskArtifacts` | `GET /v1/work/{taskId}/artifacts` | 200 `ArtifactList` | owner |
-| `uploadTaskArtifact` | `POST /v1/work/{taskId}/artifacts` | 201 `ArtifactRecord` | owner; base64, max 8 MiB decoded |
+| `uploadTaskArtifact` | `POST /v1/work/{taskId}/artifacts` | 201 `ArtifactRecord` | owner; base64, max 9,000,000 bytes decoded |
 | `getArtifact` | `GET /v1/artifacts/{artifactId}` | 200 `ArtifactRecord` | owner |
 | `getArtifactContent` | `GET /v1/artifacts/{artifactId}/content` | 200 `ArtifactContent` | owner; sha256 verified |
 | `deleteConversation` | `DELETE /v1/conversations/{conversationId}` | 200 `ConversationDeletion` | owner; refuses while a task is live |
@@ -187,6 +188,25 @@ These were process-local or absent on `main` and are reconstructed here:
   `<workspace-root>/.coderax-artifacts/<artifactId>.bin` at mode 0600, never at a
   caller-chosen path. The engine computes and re-verifies `sha256:<hex>`; `path`
   is a label only and traversal is rejected by the request schema.
+- Schedule editing is a `PATCH` on the schedule itself and is refused once the
+  schedule has run or been cancelled, so an edit can never rewrite what the owner
+  already authorized. `agent` and `model` are fixed at creation.
+
+## Request body limits
+
+The bound is declared per operation in the catalogue, not applied globally, so
+an operation that legitimately carries more is not refused before its schema is
+validated:
+
+| Operation class | Body bound |
+| --- | --- |
+| Ordinary JSON request | 1,048,576 bytes |
+| `uploadTaskArtifact` | 12,032,768 bytes (the 12,000,000-character base64 bound plus envelope) |
+
+A body past its operation's bound is answered `413` with the shared `Problem`
+body and `code: "validation_failed"`. The remaining bytes are drained rather
+than the socket being destroyed, so the client reads the status instead of a
+connection reset.
 
 ## Unavailable capabilities (deliberately not published)
 

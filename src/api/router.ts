@@ -1,5 +1,5 @@
 import type { RouteSpec } from '@coderax/contracts';
-import { ROUTE_INDEX } from '@coderax/contracts';
+import { DEFAULT_BODY_LIMIT_BYTES, ROUTE_INDEX } from '@coderax/contracts';
 import { buildOpenApiDocument, type OpenApiDocument } from '@coderax/contracts';
 import type { ProblemCode } from '@coderax/contracts';
 import type { AuthService, Principal } from '../security/auth.js';
@@ -166,6 +166,11 @@ export const problemResult = problem;
 export type Router = {
   handle: (request: RawRequest) => Promise<RouterResult>;
   registry: RouteRegistry;
+  /**
+   * The declared body bound for a method and path, resolved before the body is
+   * read. An unknown route gets the default bound rather than an unbounded read.
+   */
+  bodyLimitFor: (method: string, path: string) => number;
 };
 
 function toFrame(value: unknown): SseFrame {
@@ -218,6 +223,16 @@ export function createRouter(input: {
 
   return {
     registry: input.registry,
+    bodyLimitFor: (method, path) => {
+      const [pathname = ''] = path.split('?');
+      const upper = method.toUpperCase();
+      for (const route of routes) {
+        if (route.spec.method !== upper) continue;
+        if (!route.matcher.test(pathname)) continue;
+        return route.spec.bodyLimit ?? DEFAULT_BODY_LIMIT_BYTES;
+      }
+      return DEFAULT_BODY_LIMIT_BYTES;
+    },
     handle: async (raw) => {
       const requestId = raw.requestId ?? input.requestId();
       const [pathname, search = ''] = raw.path.split('?');

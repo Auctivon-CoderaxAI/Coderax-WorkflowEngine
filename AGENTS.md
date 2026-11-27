@@ -42,9 +42,19 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
 `npm run verify` is the acceptance gate. It runs:
 
 1. `npm run build` — TypeScript project references across contracts, SDK and engine.
-2. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security
+2. `npm run gate` — the permanent architectural and release gate: contract/SDK
+   parity, one implementation per authority, zero-cost and isolation rules,
+   unconditional skips, reproducible dependencies, credential patterns, and the
+   committed release artifacts against their recorded checksums.
+3. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security
    and end-to-end suites.
-3. `npm run openapi:check` — fails if `openapi.json` differs from the contracts.
+4. `npm run openapi:check` — fails if `openapi.json` differs from the contracts.
+
+`npm run verify` never writes `dist-artifacts`. Regenerating the tarballs is a
+release step (`npm run sdk:pack`) that must be committed with the source change
+that caused it, so a stale artifact is detectable. `npm run gate:audit` adds the
+network-bound dependency advisory check, which fails closed when metadata is
+unavailable; CI runs it as a separate required step.
 
 Paste the command and its actual result into the pull request's Testing section. A
 component passing its own unit tests is not sufficient: the UI-to-API-to-engine

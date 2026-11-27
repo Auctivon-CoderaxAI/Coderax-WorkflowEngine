@@ -359,6 +359,16 @@ async function* chatFrames(reply: { text: string }): AsyncIterable<SseFrame> {
     return { kind: 'json', status: 201, body: result.value };
   });
 
+  registry.register('updateSchedule', async (context) => {
+    const result = await service.updateSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('getSchedule', async (context) => {
     const result = await service.schedule(
       context.principal,

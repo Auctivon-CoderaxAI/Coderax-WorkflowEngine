@@ -28,6 +28,7 @@ import {
   ScheduleControlResult,
   ScheduleCreateRequest,
   ScheduleList,
+  ScheduleUpdateRequest,
   TaskAccepted,
   TaskControlResult,
   TaskList,
@@ -91,7 +92,7 @@ export type CoderaxClientOptions = {
 };
 
 type RequestInput = {
-  method: 'GET' | 'POST' | 'DELETE';
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
@@ -471,6 +472,14 @@ export class CoderaxClient {
     return this.request<Schedule>(Schedule, {
       method: 'POST',
       path: '/v1/schedules',
+      body: request,
+    });
+  }
+
+  updateSchedule(scheduleId: string, request: ScheduleUpdateRequest): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'PATCH',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
       body: request,
     });
   }

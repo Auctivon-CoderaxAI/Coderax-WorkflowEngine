@@ -6,13 +6,13 @@
   "files": [
     {
       "name": "coderax-contracts-1.1.0.tgz",
-      "sha256": "6704df113bd1b7479ea135f7800e2bf6e16bcd12f9e9e3fda4ad80b88e87c33e",
-      "bytes": 27361
+      "sha256": "39cb1a7a24c5e11f2ece7e98d6b9a11b325109fda8f810abb431b536dbf38aa5",
+      "bytes": 28340
     },
     {
       "name": "coderax-sdk-1.1.0.tgz",
-      "sha256": "d341314f2aac30a35bf2c32cb3195d6d309aba7f39ca0b3878104b6c2bdd06d0",
-      "bytes": 7859
+      "sha256": "9caaf9ad3d9601cddf37f1bcdca43391521851c3966358f71eb04520e649451d",
+      "bytes": 7915
     }
   ]
 }

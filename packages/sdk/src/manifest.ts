@@ -36,6 +36,7 @@ export const SDK_COVERAGE: Readonly<Record<string, string>> = Object.freeze({
   listSchedules: 'schedules',
   createSchedule: 'createSchedule',
   getSchedule: 'schedule',
+  updateSchedule: 'updateSchedule',
   cancelSchedule: 'cancelSchedule',
   listTaskArtifacts: 'artifacts',
   uploadTaskArtifact: 'uploadArtifact',

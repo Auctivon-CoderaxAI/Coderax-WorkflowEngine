@@ -3,22 +3,57 @@ import type { Router } from './router.js';
 import type { Logger } from '../observability/logger.js';
 import type { MetricsRegistry } from '../observability/metrics.js';
 
-const MAX_BODY_BYTES = 1_048_576;
+/**
+ * An absolute ceiling for discarding an oversized body.
+ *
+ * The declared per-route bound is the real limit. This cap only stops a client
+ * from streaming forever after it has already exceeded that bound.
+ */
+const HARD_DRAIN_LIMIT_BYTES = 33_554_432;
 
-function readBody(request: IncomingMessage): Promise<string> {
+class BodyTooLargeError extends Error {
+  constructor() {
+    super('request body exceeds the limit for this operation');
+    this.name = 'BodyTooLargeError';
+  }
+}
+
+/**
+ * Read a request body up to `limit`.
+ *
+ * Over-limit input is answered with a structured 413, so the remaining bytes are
+ * drained rather than the socket being destroyed: a reset would reach the client
+ * as ECONNRESET and hide the status the contract promises. Nothing past the limit
+ * is retained.
+ */
+function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    const declared = Number(request.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) {
+      request.resume();
+      reject(new BodyTooLargeError());
+      return;
+    }
     const chunks: Buffer[] = [];
     let size = 0;
+    let tooLarge = false;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error('request body is too large'));
-        request.destroy();
+      if (size > limit) {
+        tooLarge = true;
+        chunks.length = 0;
+        if (size > HARD_DRAIN_LIMIT_BYTES) {
+          request.destroy();
+          reject(new BodyTooLargeError());
+        }
         return;
       }
       chunks.push(chunk);
     });
-    request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    request.on('end', () => {
+      if (tooLarge) reject(new BodyTooLargeError());
+      else resolve(Buffer.concat(chunks).toString('utf8'));
+    });
     request.on('error', reject);
   });
 }
@@ -72,10 +107,14 @@ export function createHttpServer(input: {
       let bodyText = '';
       try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          bodyText = await readBody(request);
+          bodyText = await readBody(
+            request,
+            input.router.bodyLimitFor(request.method ?? 'GET', request.url ?? '/'),
+          );
         }
       } catch {
         status = 413;
+        response.setHeader('connection', 'close');
         sendJson(
           response,
           413,

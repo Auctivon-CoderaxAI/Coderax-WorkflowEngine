@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
+import { ARTIFACT_MAX_BYTES, CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -160,8 +160,12 @@ export const ScheduleConfig = z
 
 export const ArtifactConfig = z
   .object({
-    /** Decoded bytes accepted for one artifact; the API also bounds base64. */
-    maxBytes: z.number().int().min(1).max(16_000_000).default(8_388_608),
+    /**
+     * Decoded bytes accepted for one artifact. The ceiling is the contract's own
+     * base64 bound, so a configuration cannot promise more than the wire format
+     * can carry.
+     */
+    maxBytes: z.number().int().min(1).max(ARTIFACT_MAX_BYTES).default(ARTIFACT_MAX_BYTES),
   })
   .strict();
 

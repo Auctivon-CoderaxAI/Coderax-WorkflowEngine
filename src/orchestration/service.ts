@@ -31,6 +31,7 @@ import type {
   ScheduleControlResult,
   ScheduleCreateRequest,
   ScheduleList,
+  ScheduleUpdateRequest,
   TaskAccepted,
   TaskControlResult,
   TaskList,
@@ -234,6 +235,11 @@ export type ApplicationService = {
   createSchedule: (
     principal: Principal,
     request: ScheduleCreateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  updateSchedule: (
+    principal: Principal,
+    scheduleId: string,
+    request: ScheduleUpdateRequest,
   ) => Promise<ServiceResult<Schedule>>;
   schedule: (principal: Principal, scheduleId: string) => Promise<ServiceResult<Schedule>>;
   cancelSchedule: (
@@ -2062,6 +2068,39 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return fail('conflict', 'The maximum number of active schedules is reached.');
       }
       return ok(toSchedule(record));
+    },
+
+    updateSchedule: async (principal, scheduleId, request) => {
+      const record = await deps.schedules.get(principal.ownerId, scheduleId);
+      if (!record) return fail('not_found', 'That schedule does not exist for this owner.');
+      // A schedule that already dispatched or was cancelled has an immutable
+      // history: editing it would rewrite what the owner authorized in the past.
+      if (record.state !== 'scheduled') {
+        return fail(
+          'conflict',
+          'Only a schedule that has not run and was not cancelled can be edited.',
+        );
+      }
+      const runAt =
+        request.runAt === undefined
+          ? record.runAt
+          : new Date(request.runAt).toISOString();
+      const nextRunAt = request.runAt === undefined ? record.nextRunAt : runAt;
+      const updated: ScheduleRecord = {
+        ...record,
+        objective: request.objective ?? record.objective,
+        requireApproval: request.requireApproval ?? record.requireApproval,
+        runAt,
+        intervalMs:
+          request.intervalMs === undefined ? record.intervalMs : request.intervalMs,
+        nextRunAt,
+        updatedAt: deps.clock.iso(),
+      };
+      const applied = await deps.schedules.update(updated);
+      if (!applied) {
+        return fail('conflict', 'That schedule changed before it could be updated.');
+      }
+      return ok(toSchedule(updated));
     },
 
     schedule: async (principal, scheduleId) => {

@@ -57,7 +57,7 @@ export type HandshakeCapabilities = z.infer<typeof HandshakeCapabilities>;
 export const OperationDescriptor = z
   .object({
     operationId: z.string().min(1).max(80),
-    method: z.enum(['GET', 'POST', 'DELETE']),
+    method: z.enum(['GET', 'POST', 'PATCH', 'DELETE']),
     path: z.string().min(1).max(300),
     tags: z.array(z.string().min(1).max(40)),
     auth: z.enum(['owner', 'public']),

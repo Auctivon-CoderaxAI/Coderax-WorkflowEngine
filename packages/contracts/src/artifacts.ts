@@ -31,12 +31,24 @@ export const ArtifactPath = z
     'path may not traverse outside the artifact root',
   );
 
+/**
+ * Transfer bounds, declared once.
+ *
+ * base64 expands by 4/3, so the largest artifact the contract can carry is
+ * `ARTIFACT_MAX_BYTES`. The HTTP transport reads `ARTIFACT_UPLOAD_BODY_BYTES`
+ * from the route specification rather than applying one global limit, so a
+ * contract-valid maximum upload is not refused before the contract sees it.
+ */
+export const ARTIFACT_MAX_BASE64_CHARS = 12_000_000;
+export const ARTIFACT_MAX_BYTES = Math.floor(ARTIFACT_MAX_BASE64_CHARS / 4) * 3;
+export const ARTIFACT_UPLOAD_BODY_BYTES = ARTIFACT_MAX_BASE64_CHARS + 32_768;
+
 export const ArtifactUploadRequest = z
   .object({
     path: ArtifactPath,
     mediaType: ArtifactMediaType,
-    /** Base64, at most 12M characters; the engine enforces the decoded bound. */
-    contentBase64: z.string().min(1).max(12_000_000),
+    /** Base64, at most `ARTIFACT_MAX_BASE64_CHARS`; the decoded bound is enforced too. */
+    contentBase64: z.string().min(1).max(ARTIFACT_MAX_BASE64_CHARS),
   })
   .strict();
 export type ArtifactUploadRequest = z.infer<typeof ArtifactUploadRequest>;
