@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -9,18 +10,27 @@ import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
+import { createBrowserService } from '../orchestration/browser.js';
+import { createBrowserStore } from '../browser/store.js';
+import type { BrowserProvider } from '../browser/types.js';
+import { buildBrowserProvider } from './browser.js';
+import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionStore } from '../permissions/store.js';
+import { createPermissionGate } from '../permissions/gate.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { createRunSupervisor } from '../execution/supervisor.js';
+import { validateRemoteEndpoint } from '../configuration/endpoint.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import { createArtifactService } from '../artifacts/service.js';
+import { createArtifactGenerator } from '../artifacts/generate.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
@@ -35,6 +45,11 @@ import {
 } from './container.js';
 import { buildPersistence } from './persistence.js';
 import { StartupError } from './startup-error.js';
+import { createArtifactStore } from '../artifacts/store.js';
+import { createGameStore } from '../games/store.js';
+import { createGameStudio } from '../games/studio.js';
+import { createDesignAssistant } from '../games/assistant.js';
+import { createGameSessions } from '../games/session.js';
 
 export { StartupError } from './startup-error.js';
 
@@ -56,6 +71,8 @@ export type ComposeInput = {
   /** Test and future-adapter injection; nothing here changes production defaults. */
   gateway?: ModelGateway | null;
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
+  /** Test and future-provider injection; the default is configuration-driven. */
+  browserProvider?: BrowserProvider;
   fetchImpl?: typeof fetch;
   /**
    * Persistence injection for tests and for a host that owns its own driver. A
@@ -90,6 +107,14 @@ function buildGateway(input: ComposeInput): ModelGateway | null {
   const baseURL = env.CODERAX_INFERENCE_BASE_URL;
   const apiKey = env.CODERAX_INFERENCE_KEY;
   if (!baseURL || !apiKey) return null;
+  // A key may only cross the network inside TLS. This is a startup gate: a
+  // deployment that would send its credential in plaintext does not start.
+  const endpoint = validateRemoteEndpoint({
+    url: baseURL,
+    name: 'CODERAX_INFERENCE_BASE_URL',
+    carriesCredential: true,
+  });
+  if (!endpoint.ok) throw new StartupError([endpoint.detail]);
   return createOpenAiCompatibleGateway({
     baseURL,
     apiKey,
@@ -129,6 +154,12 @@ function modelDescriptors(input: {
 export async function composeApplication(input: ComposeInput): Promise<Application> {
   const env = input.env ?? process.env;
   const { config } = input;
+  // `loadConfig` validates this for the normal entry point. Programmatic
+  // callers must not be able to bypass the same fail-closed invariants.
+  const invariantIssues = validateInvariants(config);
+  if (invariantIssues.length > 0) {
+    throw new StartupError(invariantIssues);
+  }
   const clock = createClock();
   const ids = createIdGenerator();
 
@@ -143,7 +174,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
 
   const gateway = buildGateway(input);
-  const native = createNativeAgent({ enabled: config.engines.native.enabled, gateway });
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
@@ -167,16 +197,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
-  const adapters: AgentAdapter[] = [native, opencode, freebuff];
-  const agents = createAgentRegistry({
-    adapters,
-    defaultAgent: config.engines.default === 'opencode'
-      ? 'opencode'
-      : config.engines.default === 'freebuff'
-        ? 'freebuff'
-        : 'coderax',
-  });
-
   const models = createModelCatalog({
     descriptors: modelDescriptors({ config, gateway }),
     route: config.models.route,
@@ -188,19 +208,90 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     maxTokensPerDay: config.models.dailyTokenBudget,
   });
 
+  const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
+  const assistant = createDesignAssistant({ models, gateway, budget, clock });
+  const studio = createGameStudio({
+    store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
+    artifacts,
+    clock,
+    ids,
+    assistant,
+    maxProjects: config.games.maxProjectsPerOwner,
+  });
+  const gaming = createGameSessions({
+    artifacts,
+    clock,
+    ids,
+    maxPauseMs: config.games.maxPauseMs,
+  });
+
   const persistence = await buildPersistence({
     config,
     env,
     clock,
+    ids,
     ...(input.persistence ?? {}),
   });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = persistence.permissions;
+  const permissionsGate = createPermissionGate({ permissions, clock });
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway,
+    authorizer: permissionsGate,
+    limits: {
+      maxSteps: config.engines.native.maxSteps,
+      maxParallelSteps: config.engines.native.maxParallelSteps,
+      maxReplans: config.engines.native.maxReplans,
+      maxStepAttempts: config.engines.native.maxStepAttempts,
+      maxIterations: config.engines.native.maxIterations,
+    },
+  });
+  const adapters: AgentAdapter[] = [native, opencode, freebuff];
+  const agents = createAgentRegistry({
+    adapters,
+    defaultAgent: config.engines.default === 'opencode'
+      ? 'opencode'
+      : config.engines.default === 'freebuff'
+        ? 'freebuff'
+        : 'coderax',
+  });
   const notifications = persistence.notifications;
+  const schedules = persistence.schedules;
+  const scheduleNotices = persistence.scheduleNotices;
   const audit = createAuditLog({ clock, ids });
+  const browserProvider =
+    input.browserProvider ??
+    buildBrowserProvider({
+      config,
+      env,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    });
+  const browser = createBrowserService({
+    config,
+    clock,
+    ids,
+    permissions,
+    audit,
+    provider: browserProvider,
+    store: createBrowserStore(),
+  });
+  const artifactService = createArtifactService({
+    artifacts: persistence.artifacts,
+    blobs: persistence.blobs,
+    capacity: persistence.capacity,
+    ownerId: config.auth.ownerId,
+    conversations,
+    tasks,
+    audit,
+    clock,
+    ids,
+    settings: config.artifacts,
+  });
+  const artifactGenerator = createArtifactGenerator({ artifacts: artifactService });
   const events = createEventBus({
     store: persistence.events,
     // The task row is the fenced sequence authority; the bus never numbers an
@@ -210,12 +301,22 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     eventId: ids.eventId,
     iso: clock.iso,
   });
+  const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({
     lease,
     clock,
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
+    // The composition root is where supervision exists in production. An
+    // adapter that ignored its abort may still be running; its capability and
+    // workspace are revoked here even if the service already moved on.
+    onAbandoned: async ({ token }) => {
+      await supervisor.abandon({
+        token,
+        reason: 'A cancelled adapter did not stop within the grace period.',
+      });
+    },
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -263,6 +364,37 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         }),
       },
       {
+        // Required only when the deployment selected durable persistence. A
+        // memory deployment still starts, but reports honestly that artifact
+        // writes are refused rather than pretending they would survive.
+        name: 'artifacts',
+        required: persistence.driver === 'mongo',
+        check: async () => {
+          if (!persistence.blobs.durable) {
+            // Consistent with the persistence probe: a memory deployment is a
+            // known non-durable configuration, reported as ok-with-limitation
+            // rather than as a fault. What matters is that it is never silent.
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
+            };
+          }
+          try {
+            await persistence.blobs.check();
+            return {
+              status: 'ok' as const,
+              detail: 'Artifact metadata and content are stored durably in MongoDB.',
+            };
+          } catch {
+            return {
+              status: 'failed' as const,
+              detail: 'Artifact storage could not be read.',
+            };
+          }
+        },
+      },
+      {
         name: 'engine',
         required: true,
         check: async () => {
@@ -288,6 +420,26 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
+      ...(config.browsers.enabled
+        ? [
+            {
+              // Optional: no verified browser provider is required to run Work.
+              // It is reported truthfully, and an unavailable one degrades rather
+              // than blocks the engine.
+              name: 'browser',
+              required: false,
+              check: async () => {
+                const capabilities = await browser.capabilities();
+                return capabilities.operational
+                  ? {
+                      status: 'ok' as const,
+                      detail: `Browser provider ${capabilities.provider} is operational.`,
+                    }
+                  : { status: 'degraded' as const, detail: capabilities.detail };
+              },
+            },
+          ]
+        : []),
     ],
   });
 
@@ -305,11 +457,20 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    schedules,
+    scheduleNotices,
+    artifactService,
+    artifactGenerator,
     audit,
     events,
     runner,
     scheduler,
     health,
+    studio,
+    sessions: gaming.sessions,
+    gaming: gaming.agent,
+    browser,
+    supervisor,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -372,10 +533,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     server,
     persistence: { driver: persistence.driver },
     start: async () => {
+      // Rebuild quota availability from committed rows before the socket is
+      // open, so an early request cannot be admitted against stale capacity.
+      // The reconcile refuses to run while another replica's reservation is live.
+      await service.artifacts.reconcile();
       const { url } = await server.listen();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // The schedule loop belongs to the engine process, not to a request. Both
+      // Coderax and CoderaxCLI can disconnect and a due occurrence still runs.
+      service.startSchedules();
+      // Retention and abandoned reservations are enforced at startup too.
+      await service.artifacts.sweepExpiredArtifacts();
       return { url };
     },
     stop: async () => {

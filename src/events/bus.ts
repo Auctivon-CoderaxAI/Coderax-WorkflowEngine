@@ -4,6 +4,7 @@ import type {
   ExecutionEventType,
 } from '@coderax/contracts';
 import { EVENT_SCHEMA_VERSION } from '@coderax/contracts';
+import { redactValue } from '../observability/redact.js';
 import type { EventStore, Replay } from './store.js';
 
 export type { Replay } from './store.js';
@@ -83,7 +84,9 @@ export function createEventBus(input: {
         agent: draft.agent,
         generation: draft.generation,
         type: draft.type,
-        ...(draft.payload === undefined ? {} : { payload: draft.payload }),
+        // Redaction is enforced here, not by each producer: every event that is
+        // streamed or persisted has already crossed this line.
+        ...(draft.payload === undefined ? {} : { payload: redactValue(draft.payload) }),
       } as ExecutionEvent;
       // A duplicate here means the allocated sequence was already stored, which
       // only happens if the head lagged the log. Reporting it as unpublished is
@@ -98,13 +101,19 @@ export function createEventBus(input: {
       if (event.seq <= (await input.store.lastSeq(event.taskId))) {
         return { accepted: false, reason: 'out_of_order' };
       }
-      if ((await input.store.append(event)) === 'duplicate') {
+      // An adopted event crosses the same redaction boundary a published one
+      // does: it is about to be stored and streamed like any other.
+      const payload = (event as { payload?: unknown }).payload;
+      const safe = (
+        payload === undefined ? event : { ...event, payload: redactValue(payload) }
+      ) as ExecutionEvent;
+      if ((await input.store.append(safe)) === 'duplicate') {
         return { accepted: false, reason: 'duplicate' };
       }
       // Adoption raises the head so the next allocation continues above it; a
       // head that stayed behind would hand out a sequence the log already holds.
       await input.seq.adoptSeq({ taskId: event.taskId, seq: event.seq });
-      return { accepted: true, event };
+      return { accepted: true, event: safe };
     },
 
     replay: (taskId, after) => input.store.replay(taskId, after),

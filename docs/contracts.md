@@ -29,9 +29,12 @@ the successful response; failures use the shared `Problem` body.
 
 | Surface | Version | Where |
 | --- | --- | --- |
-| HTTP contracts | `CONTRACT_VERSION = '1.0.0'`, served at `/v1` | `primitives.ts` |
+| HTTP contracts | `CONTRACT_VERSION = '1.1.0'`, served at `/v1` | `primitives.ts` |
 | Execution events | `EVENT_SCHEMA_VERSION = 1` | `events.ts` |
 | SDK | matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
+
+The version literal in the `/v1/health` response remains `1.0.0` so clients
+using the original v1 schema can still parse it.
 
 Rules:
 
@@ -74,6 +77,49 @@ Every event is an envelope plus a payload:
   deployed SDK keeps working; a client that reads it can tell that its cursor is
   older than retention (or ahead of the log) and must re-read task state instead
   of assuming it missed nothing.
+
+## Browser operations
+
+`/v1/browser/*` is declared in the same catalogue and follows the same rules:
+
+- `browserCapabilities` reports truthful availability; a provider is operational
+  only after a versioned handshake with every feature and a free cost class.
+- Session creation takes an exact origin allowlist and always runs in cloud
+  infrastructure.
+- `browserAction` performs one navigation, inspection, screenshot, accessible
+  discovery, form, keyboard, mouse, tab, upload or download action.
+- Sensitive categories use the permission store with `browser.control` or
+  `browser.transfer`; a grant is single-use and bound to
+  `browser:<sessionId>:<category>`.
+- Screenshots, uploads and downloads are returned as artifacts whose SHA-256 is
+  computed by the engine; page observations carry `trust: "untrusted"`.
+- Receipts are a separate, bounded append-only window of what was attempted,
+  refused or performed. Retention is per session; they are not execution events
+  and do not enter a Work task stream.
+
+`docs/browser.md` documents the provider protocol, the safety model and the
+verification evidence required before the capability may be called operational.
+
+## Schedule occurrences
+
+A schedule is a durable authorization to submit Work, so its identity is part of
+the contract, not an implementation detail. Every occurrence carries an
+`occurrenceKey`; the engine stores one receipt per occurrence in the schedule
+store, and the receipt's task id is derived from the schedule, the occurrence and
+the attempt. Re-sending a manual trigger or an event with the same
+`idempotencyKey` returns the existing receipt (`duplicate: true`) instead of
+starting a second run. A `trigger` or `scheduleEvent` response therefore reports
+the authoritative execution state, including `refused` or `skipped`, rather than
+pretending every request was accepted for execution.
+
+`PATCH /v1/schedules/{scheduleId}` deliberately omits `agent`, `mode`, `model`
+and `objective`. Those fields are the execution identity the owner authorized;
+scheduling them is safe, redirecting them is not. A client that needs a different
+identity creates a new schedule, which produces a new owner decision.
+
+Schedule notices (completion, failure, missed run, refusal) are returned in the
+same `NotificationList` as Work completions, under `schedules`, and the one
+`POST /v1/notifications/read` marks both kinds. The unread count covers both.
 
 ## SDK rules
 

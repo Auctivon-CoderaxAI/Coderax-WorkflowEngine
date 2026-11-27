@@ -4,6 +4,10 @@ import type { ConversationRecord, NotificationRecord, StoredMessage } from '../.
 import { createMongoConversationRepository } from '../../src/persistence/mongo-tables.js';
 import { createMongoMemoryStore } from '../../src/persistence/mongo-tables.js';
 import { createMongoNotificationStore } from '../../src/persistence/mongo-tables.js';
+import {
+  createMongoPermissionStore,
+  ensurePermissionIndexes,
+} from '../../src/persistence/mongo-permissions.js';
 import { createMongoTaskRepository } from '../../src/persistence/mongo-tables.js';
 import {
   ensureConversationIndexes,
@@ -117,6 +121,26 @@ test('a fenced write is refused for a superseded generation and after a terminal
   );
 });
 
+test('Mongo guards the cancellation and suspension writes against each other', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'flagged', runToken: 'run-1', state: 'running',
+    cancelRequested: true }));
+  await tasks.create(taskRecord({ taskId: 'suspended', conversationId: 'conv_2',
+    runToken: 'run-2', state: 'awaiting_approval' }));
+
+  assert.deepEqual(await tasks.updateFenced({
+    taskId: 'flagged', token: 'run-1', guard: 'not_cancel_requested',
+    patch: { state: 'awaiting_approval' },
+  }), { applied: false, reason: 'guard_rejected' });
+  assert.equal((await tasks.get('flagged'))?.state, 'running');
+
+  assert.deepEqual(await tasks.updateFenced({
+    taskId: 'suspended', token: 'run-2', guard: 'not_awaiting_approval',
+    patch: { cancelRequested: true },
+  }), { applied: false, reason: 'guard_rejected' });
+  assert.equal((await tasks.get('suspended'))?.cancelRequested, false);
+});
+
 test('a task is never settled through the unclaimed path', async () => {
   const tasks = createMongoTaskRepository(createFakeCollection());
   await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1' }));
@@ -138,22 +162,34 @@ test('a task is never settled through the unclaimed path', async () => {
 test('reissue claims a new generation and refuses a live task', async () => {
   const tasks = createMongoTaskRepository(createFakeCollection());
   await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1', state: 'failed',
-    checkpoint: { text: 'previous', completedSteps: ['first'] } }));
+    checkpoint: { text: 'previous', completedSteps: ['first'], plan: null, evidence: [] } }));
 
   const issued = await tasks.reissue({
     taskId: 'task_1',
     token: 'run-2',
     now: NOW,
     leaseExpiresAt: NOW,
+    from: ['failed'],
   });
   assert.equal(issued.applied, true);
-  assert.deepEqual(issued.applied && issued.task.checkpoint, { text: '', completedSteps: ['first'] });
+  assert.deepEqual(issued.applied && issued.task.checkpoint, {
+    text: '',
+    completedSteps: ['first'],
+    plan: null,
+    evidence: [],
+  });
   assert.equal(issued.applied && issued.task.generation, 2);
   assert.equal(issued.applied && issued.task.state, 'queued');
   assert.equal(issued.applied && issued.task.runToken, 'run-2');
 
   assert.deepEqual(
-    await tasks.reissue({ taskId: 'task_1', token: 'run-3', now: NOW, leaseExpiresAt: NOW }),
+    await tasks.reissue({
+      taskId: 'task_1',
+      token: 'run-3',
+      now: NOW,
+      leaseExpiresAt: NOW,
+      from: ['failed'],
+    }),
     { applied: false, reason: 'superseded' },
   );
 });
@@ -192,6 +228,7 @@ test('a reissued generation allocates above the log the previous one wrote', asy
     token: 'run-2',
     now: NOW,
     leaseExpiresAt: NOW,
+    from: ['failed'],
   });
   assert.equal(issued.applied, true);
   // The head survives reissue, so a client cursor from generation 1 still means
@@ -231,14 +268,16 @@ test('conversations are created once, listed and never shared across owners', as
   const conversations = createMongoConversationRepository(input);
 
   const first = await conversations.ensure(conversation());
-  assert.equal(first.conversationId, 'conv_1');
+  assert.equal(first.ok && first.record.conversationId, 'conv_1');
   const again = await conversations.ensure(conversation({ title: 'Different title' }));
-  assert.equal(again.title, 'Persisted');
+  assert.equal(again.ok && again.record.title, 'Persisted');
 
-  await assert.rejects(
-    () => conversations.ensure(conversation({ ownerId: 'someone-else' })),
-    /identity collision/,
-  );
+  const foreign = await conversations.ensure(conversation({ ownerId: 'someone-else' }));
+  assert.deepEqual(foreign, { ok: false, reason: 'owner' });
+  const foreignMode = await conversations.ensure(conversation({ mode: 'private' }));
+  assert.deepEqual(foreignMode, { ok: false, reason: 'mode' });
+  const foreignSurface = await conversations.ensure(conversation({ isWork: false }));
+  assert.deepEqual(foreignSurface, { ok: false, reason: 'surface' });
 
   assert.equal(await conversations.get('owner-test', 'conv_1').then(Boolean), true);
   assert.equal(await conversations.get('someone-else', 'conv_1').then(Boolean), false);
@@ -264,8 +303,22 @@ test('messages are appended once, ordered, and reflected in the conversation', a
   );
 
   assert.deepEqual(
-    (await conversations.messages('conv_1')).map((entry) => entry.messageId),
+    (
+      await conversations.messages({
+        ownerId: 'owner-test',
+        conversationId: 'conv_1',
+        mode: 'cloud',
+      })
+    )?.map((entry) => entry.messageId),
     ['msg_1', 'msg_2'],
+  );
+  assert.equal(
+    await conversations.messages({
+      ownerId: 'owner-test',
+      conversationId: 'conv_1',
+      mode: 'private',
+    }),
+    null,
   );
   const record = await conversations.get('owner-test', 'conv_1');
   assert.ok(record);
@@ -315,6 +368,57 @@ test('memory is partitioned by mode and replaced on write', async () => {
     () => memory.put({ ownerId: 'owner-test', tenantId: null, mode: 'private', key: 'big', value: 'x'.repeat(11) }),
     /bound/,
   );
+});
+
+test('permission grants survive a store recreation and remain scoped', async () => {
+  const collection = createFakeCollection();
+  await ensurePermissionIndexes(collection);
+  const clock = {
+    now: () => new Date(NOW),
+    iso: () => NOW,
+  };
+  const ids = { requestId: () => 'req_1' };
+  const first = createMongoPermissionStore({
+    collection,
+    clock: clock as never,
+    ids: ids as never,
+  });
+
+  const request = await first.request({
+    ownerId: 'owner-test',
+    taskId: 'task_1',
+    agent: 'coderax',
+    scope: 'workspace.read',
+    description: 'Read notes.txt',
+    resource: 'notes.txt',
+  });
+  assert.equal(request.decision, 'pending');
+
+  // A restart or another replica reads the same durable request.
+  const second = createMongoPermissionStore({
+    collection,
+    clock: clock as never,
+    ids: ids as never,
+  });
+  const listed = await second.list('owner-test', 'task_1');
+  assert.deepEqual(listed.requests.map((entry) => entry.requestId), ['req_1']);
+  assert.equal((await second.list('someone-else', 'task_1')).requests.length, 0);
+
+  const decided = await second.decide({
+    ownerId: 'owner-test',
+    taskId: 'task_1',
+    requestId: 'req_1',
+    decision: 'approved',
+  });
+  assert.equal(decided.ok, true);
+
+  const third = createMongoPermissionStore({
+    collection,
+    clock: clock as never,
+    ids: ids as never,
+  });
+  assert.equal(await third.isApproved('task_1', 'workspace.read', 'notes.txt'), true);
+  assert.equal(await third.isApproved('task_1', 'workspace.read', 'other.txt'), false);
 });
 
 test('notifications are written once per task and marked read per owner', async () => {

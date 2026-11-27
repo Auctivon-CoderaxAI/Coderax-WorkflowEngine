@@ -66,7 +66,15 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
   const paths: Record<string, Record<string, OpenApiOperation>> = {};
   const schemas: Record<string, unknown> = { Problem: toJsonSchema(Problem) };
 
-  for (const route of routes) {
+  // The document is a function of the catalogue, not of registration order. The
+  // registry can register a valid subset in any order; the served document must
+  // still equal the published one byte for byte.
+  const ordered = [...routes].sort(
+    (left, right) =>
+      left.path.localeCompare(right.path) || left.method.localeCompare(right.method),
+  );
+
+  for (const route of ordered) {
     const operation: OpenApiOperation = {
       operationId: route.operationId,
       summary: route.summary,
@@ -81,7 +89,9 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
           : {
               description: route.response.description,
               content: {
-                'application/json': { schema: toJsonSchema(route.response.schema) },
+                [route.response.contentType ?? 'application/json']: {
+                  schema: toJsonSchema(route.response.schema),
+                },
               },
             },
         '4XX': ERROR_RESPONSE,

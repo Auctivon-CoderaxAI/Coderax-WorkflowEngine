@@ -19,6 +19,23 @@ import type { WorkRunRow, WorkRunTable } from './work-runs.js';
 
 export type MongoFilter = Record<string, unknown>;
 
+/**
+ * The update operators these tables rely on. `$inc` is how a capacity counter is
+ * admitted atomically and how an event sequence is allocated: the filter and the
+ * increment are one server-side operation, so two replicas cannot both spend the
+ * last byte or hand out the same sequence. `$max` lets an adopted sequence raise
+ * a head without ever lowering it.
+ */
+export type MongoUpdate = {
+  $set?: Record<string, unknown>;
+  $setOnInsert?: Record<string, unknown>;
+  $inc?: Record<string, number>;
+  /** Used by the blob read leases: the array and its count change together. */
+  $push?: Record<string, unknown>;
+  $pull?: Record<string, unknown>;
+  $max?: Record<string, number>;
+};
+
 /** A lazily executed query; the subset of the driver cursor these stores use. */
 export type MongoCursor = {
   sort: (spec: Record<string, 1 | -1>) => MongoCursor;
@@ -26,23 +43,16 @@ export type MongoCursor = {
   toArray: () => Promise<Record<string, unknown>[]>;
 };
 
-/**
- * The update operators these tables use. `$inc` is what makes the event sequence
- * allocation atomic, and `$max` is what lets an adopted external sequence raise a
- * head without ever lowering it.
- */
-export type MongoUpdate = {
-  $set?: Record<string, unknown>;
-  $setOnInsert?: Record<string, unknown>;
-  $inc?: Record<string, number>;
-  $max?: Record<string, number>;
-};
-
 /** The subset of the MongoDB collection API these tables need. */
 export type MongoCollectionLike = {
   createIndex: (
     keys: Record<string, 1 | -1>,
-    options?: { unique?: boolean; name?: string; expireAfterSeconds?: number },
+    options?: {
+      unique?: boolean;
+      name?: string;
+      partialFilterExpression?: MongoFilter;
+      expireAfterSeconds?: number;
+    },
   ) => Promise<unknown>;
   insertOne: (document: Record<string, unknown>) => Promise<unknown>;
   findOne: (filter: MongoFilter) => Promise<Record<string, unknown> | null>;

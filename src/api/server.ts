@@ -3,13 +3,13 @@ import type { Router } from './router.js';
 
 const MAX_BODY_BYTES = 1_048_576;
 
-function readBody(request: IncomingMessage): Promise<string> {
+function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         reject(new Error('request body is too large'));
         request.destroy();
         return;
@@ -46,14 +46,19 @@ export function createHttpServer(input: {
       let bodyText = '';
       try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          bodyText = await readBody(request);
+          const limit =
+            input.router.bodyLimit(
+              request.method ?? 'GET',
+              request.url ?? '/',
+            ) ?? MAX_BODY_BYTES;
+          bodyText = await readBody(request, limit);
         }
       } catch {
         sendJson(response, 413, {
-          type: 'https://coderax.dev/problems/validation_failed',
-          title: 'validation failed',
+          type: 'https://coderax.dev/problems/payload_too_large',
+          title: 'payload too large',
           status: 413,
-          code: 'validation_failed',
+          code: 'payload_too_large',
           detail: 'The request body is too large.',
           retryable: false,
         });
@@ -70,6 +75,20 @@ export function createHttpServer(input: {
 
         if (result.kind === 'json') {
           sendJson(response, result.status, result.body);
+          return;
+        }
+
+        if (result.kind === 'text') {
+          response.writeHead(result.status, {
+            'content-type': result.contentType,
+            'cache-control': 'no-store',
+            // The preview is a self-contained document with no external loads.
+            'content-security-policy':
+              "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'",
+            'x-content-type-options': 'nosniff',
+            'content-length': Buffer.byteLength(result.body),
+          });
+          response.end(result.body);
           return;
         }
 

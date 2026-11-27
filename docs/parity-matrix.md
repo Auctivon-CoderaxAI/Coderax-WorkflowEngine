@@ -2,7 +2,7 @@
 
 Baseline: `Coderax@a5d237b0`, `packages/api/src/engines` and
 `packages/data-schemas/src/methods/workRun.ts`.
-Candidate: this repository at the head of `feat/workflow-engine-foundation`.
+Candidate: this repository at the head of `feat/native-game-studio-gaming-agent`.
 
 Status vocabulary:
 
@@ -46,7 +46,7 @@ Status vocabulary:
 | 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | none | Missing |
 | 31 | FreeBuff SDK loading, loopback restriction, context floor | `freebuff/adapter.ts` | injected transport only | Missing (review F3) |
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
-| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | new deterministic planner + gateway (`src/agents/native`) | Changed — not the same agent; see #34 |
+| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | independent reasoning loop: model-assisted decomposition, dependency-aware parallel scheduling, bounded replanning, evidence verification and approval suspension (`src/agents/native`) | Changed — not the same agent; see #34 |
 | 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | absent; `tools: false` | Missing |
 | 35 | Secret redaction of provider text | `cloud/redact.ts` | `src/observability/redact.ts` | Preserved |
 | 36 | Private/cloud mode denial for providers | `cloud/mode.ts` | workspace + memory partitioning only | Simplified |
@@ -57,24 +57,31 @@ Status vocabulary:
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
-| 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
-| 45 | Cloud browser orchestration | none | none | Not started (both) |
+| 44 | Schedules (cron) | `croner` + Mongo, in-process | `src/scheduling` (once, interval, hourly, calendar in an IANA zone, monthly, named events) + durable receipts and Mongo store | Strengthened — cross-replica idempotency, missed-run policy, pause/resume/cancel, edit with an immutable execution identity, upcoming preview, priorities, run and inference budgets, notices merged into `/v1/notifications` |
+| 45 | Cloud browser orchestration | none | contract v1, fail-closed adapter, approvals, receipts, takeover; no verified provider | Contract only |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
 | 47 | Tool/plugin execution | Coderax tools | none | Missing |
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
 | 49 | Shared typed SDK for both clients | none (hand-written helpers) | `packages/sdk` | Strengthened |
 | 50 | Startup dependency validation | none (config read at request time) | `src/bootstrap/compose.ts` refuses to start | Strengthened |
+| 51 | Native Game Studio | project lifecycle + design brief only; every build capability hard-coded false (CX-32 Partial) | `src/games/studio.ts`: deterministic spec, plan, original source/assets/levels, 8 genres, procedural audio, self-contained preview, browser-boot and measured playability, export, iterations, persistence | Changed (deliberate) — lifecycle pattern migrated, executor newly built |
+| 52 | Native Gaming Agent | no session runtime (CX-33 Blocked) | `src/games/session.ts`: durable sessions over verified, version-pinned builds, observation, bounded controls, pause/resume, takeover, cancel, memory, logs, measured completion | Changed (deliberate) |
+| 53 | Gaming Agent — external game environments | none (blocked in the registry) | none; reported `blocked` with the exact prerequisite | Not started (both) |
+| 54 | Build version history and restore | `revision`/`specRevision` only; no historical build bytes | `GET /v1/games/{gameId}/builds` plus exact-spec restore; traversal- and owner-checked | Changed (deliberate) |
+| 55 | Real-browser acceptance of generated builds | none | platformer and puzzle rendered, controlled and completed in cloud Chromium; owner-only origin returned 403 anonymous / 200 owner | Changed (new evidence) — two reference builds, Chromium only |
+| 56 | Autonomous cloud-browser gameplay | none | none; `native.gaming-agent.browser` reported blocked | Not started (both) |
 
 ## Summary
 
 | Status | Count |
 | --- | --- |
-| Preserved | 23 |
+| Preserved | 24 |
 | Strengthened | 10 |
 | Simplified | 5 |
-| Missing | 9 |
-| Changed (deliberate) | 2 |
-| Not started (both) | 1 |
+| Missing | 8 |
+| Changed (deliberate) | 6 |
+| Contract only (no verified provider) | 1 |
+| Not started (both) | 2 |
 
 ## What this means
 
@@ -83,8 +90,11 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 44, 46 and 47 are
+capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 46 and 47 are
 closed, migrating a client would remove functionality, which the brief forbids.
+Scheduling (row 44) is implemented here and no longer blocks a client cut-over,
+and persistent events with replay across restart (row 22) are durable as of the
+event-log branch.
 
 Dependency order for closing them:
 
@@ -96,12 +106,15 @@ Dependency order for closing them:
    agent stack.
 4. Approvals bound to a resource (40), provider mode denial (36), caller-supplied
    workspace confinement (13).
-5. Schedules (44) and DeploymentPlatformAI (46).
+5. DeploymentPlatformAI (46) and a verified zero-cost browser
+   provider for the contract in `docs/browser.md` (45).
 6. Only then Phase 5/6 client migration, Phase 8 deployment, Phase 9 removal.
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 129/129 tests, OpenAPI drift clean.
+- `npm run verify` at this merge head: 391 tests, 377 passing, 0 failing, 14
+  skipped, OpenAPI drift clean. The skipped tests are the real-MongoDB artifact
+  suites, which need `CODERAX_TEST_MONGODB_URI`; nothing else is skipped.
 - Durable execution events are covered by store-contract, fenced-allocation,
   replay-across-restart and SSE-metadata tests. TTL expiry, a concurrent append
   race on two replicas and a live MongoDB are not exercised.
@@ -111,3 +124,10 @@ Dependency order for closing them:
   real server has stored a row.
 - No hosted CI run exists: the GitHub Actions job is blocked by account billing.
   The local run above is the only executed evidence.
+- The Game Studio branch reports 132/132 passing tests and a clean OpenAPI drift check before integration.
+- The branch reports separate MongoDB 8.0.4 durability and concurrency verification. See `docs/evidence/mongo/`.
+- Game project and build bytes remain file-backed. Cross-replica game artifact concurrency is not claimed.
+- Real Chromium acceptance was reported for the platformer and puzzle, including rendering, controls, scoring, collision, restart, audio and owner-only access.
+- See `docs/evidence/browser/` for the acceptance reports.
+- Safari, Firefox and physical mobile devices remain unverified.
+- Autonomous cloud-browser gameplay remains blocked pending a verified zero-cost provider.

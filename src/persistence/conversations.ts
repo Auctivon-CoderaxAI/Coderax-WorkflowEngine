@@ -1,13 +1,29 @@
 import type { ConversationRecord, StoredMessage } from '../domain.js';
 import type { Conversation, ConversationList, Message } from '@coderax/contracts';
 import type { AgentId, DataMode } from '@coderax/contracts';
+import { redactContent } from '../observability/redact.js';
+
+export type ConversationBinding =
+  | { ok: true; record: ConversationRecord }
+  | { ok: false; reason: 'owner' | 'mode' | 'surface' };
 
 export type ConversationRepository = {
-  ensure: (record: ConversationRecord) => Promise<ConversationRecord>;
+  /**
+   * Returns the stored conversation only when owner, data mode and surface all
+   * match. A mismatch is refused instead of silently returning a record bound to
+   * another mode: that record's messages are the history a cloud run must never
+   * receive.
+   */
+  ensure: (record: ConversationRecord) => Promise<ConversationBinding>;
   get: (ownerId: string, conversationId: string) => Promise<ConversationRecord | null>;
   list: (ownerId: string) => Promise<ConversationList>;
   appendMessage: (message: StoredMessage) => Promise<boolean>;
-  messages: (conversationId: string) => Promise<StoredMessage[]>;
+  /** Owner- and mode-scoped. Null means the conversation is not readable here. */
+  messages: (input: {
+    ownerId: string;
+    conversationId: string;
+    mode: DataMode;
+  }) => Promise<StoredMessage[] | null>;
   /** Projected into the wire contract; the only place a message shape is chosen. */
   toContract: (record: ConversationRecord) => Promise<Conversation>;
   updateAgent: (conversationId: string, agent: AgentId) => Promise<void>;
@@ -33,14 +49,14 @@ export function createConversationRepository(): ConversationRepository {
     ensure: async (record) => {
       const existing = conversations.get(record.conversationId);
       if (existing) {
-        if (existing.ownerId !== record.ownerId) {
-          throw new Error('conversation identity collision across owners');
-        }
-        return existing;
+        if (existing.ownerId !== record.ownerId) return { ok: false, reason: 'owner' };
+        if (existing.mode !== record.mode) return { ok: false, reason: 'mode' };
+        if (existing.isWork !== record.isWork) return { ok: false, reason: 'surface' };
+        return { ok: true, record: existing };
       }
       conversations.set(record.conversationId, { ...record });
       messages.set(record.conversationId, []);
-      return { ...record };
+      return { ok: true, record: { ...record } };
     },
     get: async (ownerId, conversationId) => {
       const record = conversations.get(conversationId);
@@ -66,12 +82,18 @@ export function createConversationRepository(): ConversationRepository {
       if (list.some((entry) => entry.messageId === message.messageId)) {
         return false;
       }
-      list.push({ ...message });
+      // A transcript is a persistence sink like any other: a pasted credential
+      // is removed before it is stored, so it cannot be replayed to a model.
+      list.push({ ...message, text: redactContent(message.text) });
       messages.set(message.conversationId, list);
       existing.updatedAt = message.createdAt;
       return true;
     },
-    messages: async (conversationId) => [...(messages.get(conversationId) ?? [])],
+    messages: async ({ ownerId, conversationId, mode }) => {
+      const record = conversations.get(conversationId);
+      if (!record || record.ownerId !== ownerId || record.mode !== mode) return null;
+      return [...(messages.get(conversationId) ?? [])];
+    },
     toContract: async (record) => ({
       conversationId: record.conversationId,
       ...(record.title ? { title: record.title } : {}),

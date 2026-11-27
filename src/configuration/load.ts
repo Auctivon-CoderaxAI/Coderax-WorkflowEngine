@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { validateRemoteEndpoint } from './endpoint.js';
 import { EngineConfigSchema, type EngineConfig } from './schema.js';
 
 export class ConfigurationError extends Error {
@@ -77,13 +78,32 @@ function fromEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
  * names the field to fix; none of them is a warning that lets a broken
  * deployment start.
  */
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '[::1]' ||
+    hostname === '::1'
+  );
+}
+
 export function validateInvariants(config: EngineConfig): string[] {
   const issues: string[] = [];
-  const { engines, execution, models, workspaces } = config;
+  const { engines, execution, models, schedules, workspaces, browsers } = config;
 
   if (execution.heartbeatIntervalMs * 3 > execution.leaseTtlMs) {
     issues.push(
       `execution.heartbeatIntervalMs (${execution.heartbeatIntervalMs}) must be at most one third of execution.leaseTtlMs (${execution.leaseTtlMs})`,
+    );
+  }
+  if (schedules.missedGraceMs < schedules.tickMs) {
+    issues.push(
+      `schedules.missedGraceMs (${schedules.missedGraceMs}) must be at least schedules.tickMs (${schedules.tickMs}); otherwise a healthy occurrence can be classified missed`,
+    );
+  }
+  if (schedules.dispatchTimeoutMs < schedules.tickMs * 2) {
+    issues.push(
+      `schedules.dispatchTimeoutMs (${schedules.dispatchTimeoutMs}) must be at least twice schedules.tickMs (${schedules.tickMs}); otherwise recovery can preempt a live dispatch`,
     );
   }
   if (workspaces.privateRoot === workspaces.cloudRoot) {
@@ -104,11 +124,56 @@ export function validateInvariants(config: EngineConfig): string[] {
     if (!engines.opencode.passwordEnv) {
       issues.push('engines.opencode.passwordEnv is required when enabled');
     }
+    if (engines.opencode.baseURL) {
+      const endpoint = validateRemoteEndpoint({
+        url: engines.opencode.baseURL,
+        name: 'engines.opencode.baseURL',
+        carriesCredential: Boolean(engines.opencode.passwordEnv),
+      });
+      if (!endpoint.ok) issues.push(endpoint.detail);
+    }
   }
   if (engines.freebuff.enabled) {
     if (!engines.freebuff.baseURL) issues.push('engines.freebuff.baseURL is required when enabled');
     if (!engines.freebuff.sdkPath) issues.push('engines.freebuff.sdkPath is required when enabled');
     if (!engines.freebuff.model) issues.push('engines.freebuff.model is required when enabled');
+    if (engines.freebuff.baseURL) {
+      const endpoint = validateRemoteEndpoint({
+        url: engines.freebuff.baseURL,
+        name: 'engines.freebuff.baseURL',
+        carriesCredential: false,
+      });
+      if (!endpoint.ok) issues.push(endpoint.detail);
+    }
+  }
+
+  if (browsers.enabled && browsers.provider === 'http') {
+    if (!browsers.remote.baseURL) {
+      issues.push('browsers.remote.baseURL is required when browsers.provider is http');
+    } else {
+      const url = new URL(browsers.remote.baseURL);
+      if (url.protocol !== 'https:' && !isLoopbackHost(url.hostname)) {
+        issues.push(
+          'browsers.remote.baseURL must use https unless it names a loopback host',
+        );
+      }
+      if (url.username || url.password || url.search || url.hash) {
+        issues.push(
+          'browsers.remote.baseURL must not contain credentials, a query or a fragment',
+        );
+      }
+    }
+    if (!browsers.remote.zeroCostAttested) {
+      issues.push(
+        'browsers.remote.zeroCostAttested must be true before a browser provider can be enabled',
+      );
+    }
+    if (!browsers.remote.tokenEnv) {
+      issues.push('browsers.remote.tokenEnv is required when browsers.provider is http');
+    }
+  }
+  if (browsers.allowPaid !== false) {
+    issues.push('browsers.allowPaid must remain false: Coderax does not use paid browser infrastructure');
   }
 
   const seen = new Set<string>();

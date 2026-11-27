@@ -51,6 +51,7 @@ test('a superseded generation publishes nothing at all', async () => {
     token: 'run-2',
     now: new Date().toISOString(),
     leaseExpiresAt: new Date().toISOString(),
+    from: ['failed'],
   });
   assert.equal(issued.applied, true);
 
