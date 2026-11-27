@@ -1,4 +1,4 @@
-import net from 'node:net';
+import { isIPv4 } from 'node:net';
 
 /**
  * Inference endpoints are the one place a credential is sent on purpose.
@@ -27,7 +27,7 @@ export function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
   if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
-  if (net.isIPv4(host)) return host.startsWith('127.');
+  if (isIPv4(host)) return host.startsWith('127.');
   return false;
 }
 

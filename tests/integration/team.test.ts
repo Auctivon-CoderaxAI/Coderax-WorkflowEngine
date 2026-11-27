@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { ModelCompletionRequest, ModelGateway } from '../../src/agents/native/types.js';
+import type { ModelCompletionRequest, BasicModelGateway as ModelGateway } from '../../src/agents/native/types.js';
 import type { ExternalAgentTransport } from '../../src/agents/adapters/external.js';
 import { composeApplication, type Application } from '../../src/bootstrap/compose.js';
 import { EngineConfigSchema } from '../../src/configuration/schema.js';
@@ -132,7 +132,7 @@ test('a team runs dependency waves and completes only on verified artifacts and 
       'a dependent member receives the result produced earlier in the same run',
     );
 
-    const events = started.app.dependencies.events.replay(submitted.value.teamId, 0);
+    const events = await started.app.dependencies.events.replay(submitted.value.teamId, 0);
     const types = events.events.map((event) => event.type);
     assert.ok(types.includes('task.started') || types.includes('task.queued'));
     assert.ok(types.includes('task.completed'));

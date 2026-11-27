@@ -12,6 +12,7 @@ export * from './deliverables.js';
 export * from './schedules.js';
 export * from './events.js';
 export * from './permissions.js';
+export * from './intelligence.js';
 export * from './games.js';
 export * from './browser.js';
 export * from './routes.js';
@@ -19,6 +20,4 @@ export * from './ownership.js';
 export * from './json-schema.js';
 export * from './openapi.js';
 
-export * from './intelligence.js';
 export * from './team.js';
-export * from './media.js';

@@ -563,19 +563,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     guard?: ToolExecutionGuard;
   }): ApprovalGate {
     return {
-      ensure: async ({ scope, resource, description, tool, binding, consume }) => {
+      ensure: async ({ scope, resource, description, tool, binding, consume, callId, policy, requestId }) => {
         if (input.guard && !input.guard.live()) return { decision: 'denied' as const };
         if (input.taskId === null) return { decision: 'denied' as const };
         if (!input.requireApproval) return { decision: 'denied' };
         const prior = await deps.permissions.lookup({
-          ownerId: input.ownerId, taskId: input.taskId, scope, resource, binding, consume,
+          ownerId: input.ownerId, taskId: input.taskId, scope, resource, binding, consume, callId, ...(requestId ? { requestId } : {}),
         });
         if (prior) return prior;
         const created = await deps.permissions.request({
           ownerId: input.ownerId,
           taskId: input.taskId,
           agent: 'coderax',
-          binding,
+          binding, callId, policy,
           scope,
           resource,
           description: `${tool}: ${description}`.slice(0, 2000),
@@ -2371,7 +2371,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         }
         await publish(applied.task, 'task.cancelled', {});
         await notifyTerminal(applied.task, 'cancelled');
-        deps.permissions.clear(applied.task.taskId);
+        await deps.permissions.cancelTask(applied.task.ownerId, applied.task.taskId);
         return ok({
           taskId: task.taskId,
           state: 'cancelled',

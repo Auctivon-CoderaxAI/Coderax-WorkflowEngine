@@ -27,8 +27,11 @@ import {
  */
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const TOOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
 const MAX_TITLE = 200;
 const MAX_ACCEPTANCE = 300;
+const MAX_TOOL_INPUT_BYTES = 20_000;
+const MAX_TOOL_INPUT_KEYS = 24;
 
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -150,7 +153,7 @@ export function validatePlan(input: {
     if (step.acceptance !== undefined && step.acceptance.length > MAX_ACCEPTANCE) {
       return { ok: false, reason: `step "${step.id}" has an oversized acceptance criterion` };
     }
-    if (step.kind !== 'reason' && step.kind !== 'read') {
+    if (step.kind !== 'reason' && step.kind !== 'read' && step.kind !== 'tool') {
       return { ok: false, reason: `step "${step.id}" has an unsupported action` };
     }
     if (step.kind === 'read') {
@@ -161,8 +164,32 @@ export function validatePlan(input: {
         return { ok: false, reason: `read resource "${step.resource}" is planned more than once` };
       }
       readResources.add(step.resource);
-    } else if (step.resource !== undefined) {
-      return { ok: false, reason: `reason step "${step.id}" must not name a resource` };
+    } else if (step.kind === 'tool') {
+      if (!step.resource || !TOOL_NAME_PATTERN.test(step.resource)) {
+        return { ok: false, reason: `tool step "${step.id}" has an invalid tool name` };
+      }
+      if (step.input !== undefined) {
+        const keys = Object.keys(step.input);
+        if (keys.length > MAX_TOOL_INPUT_KEYS) {
+          return { ok: false, reason: `tool step "${step.id}" has too many arguments` };
+        }
+        let serialized: string;
+        try {
+          serialized = JSON.stringify(step.input);
+        } catch {
+          return { ok: false, reason: `tool step "${step.id}" has unserializable arguments` };
+        }
+        if (serialized.length > MAX_TOOL_INPUT_BYTES) {
+          return { ok: false, reason: `tool step "${step.id}" has oversized arguments` };
+        }
+      }
+    } else {
+      if (step.resource !== undefined) {
+        return { ok: false, reason: `reason step "${step.id}" must not name a resource` };
+      }
+      if (step.input !== undefined) {
+        return { ok: false, reason: `reason step "${step.id}" must not carry tool arguments` };
+      }
     }
   }
   // Dependencies may appear in any array order; only the graph must be acyclic.
@@ -242,7 +269,14 @@ export function parseModelPlan(input: {
     const id = readString(entry.id, 80) ?? `step-${index + 1}`;
     const title = readString(entry.title, MAX_TITLE);
     if (!title) return { ok: false, reason: `step ${id} had no bounded title` };
-    const kind = entry.kind === 'read' ? 'read' : entry.kind === 'reason' ? 'reason' : null;
+    const kind =
+      entry.kind === 'read'
+        ? 'read'
+        : entry.kind === 'reason'
+          ? 'reason'
+          : entry.kind === 'tool'
+            ? 'tool'
+            : null;
     if (!kind) return { ok: false, reason: `step ${id} had an unsupported kind` };
     if (entry.dependsOn !== undefined && !Array.isArray(entry.dependsOn)) {
       return { ok: false, reason: `step ${id} had a malformed dependency list` };
@@ -255,12 +289,21 @@ export function parseModelPlan(input: {
     }
     const acceptance = readString(entry.acceptance, MAX_ACCEPTANCE);
     const resource = readString(entry.resource, 512);
+    let toolInput: Record<string, unknown> | undefined;
+    if (kind === 'tool' && entry.input !== undefined) {
+      if (typeof entry.input !== 'object' || entry.input === null || Array.isArray(entry.input)) {
+        return { ok: false, reason: `step ${id} had malformed tool arguments` };
+      }
+      toolInput = entry.input as Record<string, unknown>;
+    }
     steps.push({
       id,
       title,
       dependsOn,
       kind,
       ...(kind === 'read' && resource ? { resource } : {}),
+      ...(kind === 'tool' && resource ? { resource } : {}),
+      ...(kind === 'tool' && toolInput ? { input: toolInput } : {}),
       ...(acceptance ? { acceptance } : {}),
     });
   }
@@ -359,6 +402,8 @@ async function modelPlan(input: {
 export function createNativePlanner(input: {
   gateway: BasicModelGateway;
   maxSteps: number;
+  /** A rendered tool catalogue; absent means Native has no tools to plan. */
+  tools?: string;
 }): ReasoningPlanner {
   return {
     plan: async (planInput): Promise<PlanOutcome> => {
@@ -374,6 +419,7 @@ export function createNativePlanner(input: {
           objective: planInput.objective,
           history: planInput.history,
           maxSteps,
+          ...(input.tools ? { tools: input.tools } : {}),
         }),
       });
       return {
@@ -408,6 +454,7 @@ export function createNativePlanner(input: {
               evidence: replanInput.evidence,
               failure: replanInput.failure,
               maxSteps,
+              ...(input.tools ? { tools: input.tools } : {}),
             }),
             ...(replanInput.maxOutputTokens
               ? { maxOutputTokens: replanInput.maxOutputTokens }

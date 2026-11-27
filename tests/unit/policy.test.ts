@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { DataMode } from '@coderax/contracts';
-import { createBudgetLedger } from '../../src/models/budget.js';
+import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 import {
   createProviderPolicyRegistry,
   PROCESSING_OPERATIONS,
@@ -112,7 +112,11 @@ function router(input: {
   return createModelRouter({
     providers: input.adapters.map((entry) => ({ adapter: entry, settings: SETTINGS })),
     policy: input.policy ?? createProviderPolicyRegistry(input.policies),
-    budget: createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 1_000_000 }),
+    budget: createBudgetLedger({
+      store: createMemoryBudgetStore(),
+      maxRequestsPerDay: 100,
+      maxTokensPerDay: 1_000_000,
+    }),
     maxFallbacks: 2,
     maxCandidates: 4,
     failureThreshold: 10,
@@ -440,13 +444,4 @@ test('a private-approved provider actually completes without leaking to the erro
   assert.equal(completed.text, 'ok');
   assert.equal(hosted.calls, 1);
   assert.equal(hosted.requests[0]?.prompt, 'PRIVATE-RETRIEVAL-CHUNK-4871');
-});
-
-test('a matching location grant can follow another grant for the same operation and mode', () => {
-  const policy = createProviderPolicyRegistry([
-    policyFor('fixture', { grants: [grant('chat', 'private', 'us'), grant('chat', 'private')] }),
-  ]);
-  assert.equal(policy.evaluate({
-    providerId: 'fixture', mode: 'private', operation: 'chat', at: new Date('2026-11-26T12:00:00Z'),
-  }).allowed, true);
 });

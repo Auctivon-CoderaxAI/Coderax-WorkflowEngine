@@ -288,7 +288,7 @@ export async function startTestApp(options: {
   /** Defaults to a local endpoint; a test may declare a hosted one. */
   providerSettings?: Partial<ProviderSettings>;
   /** A transport fixture for the agent loop; not a routing authority. */
-  gateway?: ModelGateway | null;
+  gateway?: Parameters<typeof composeApplication>[0]['gateway'];
   config?: Record<string, unknown>;
   externals?: Parameters<typeof composeApplication>[0]['externals'];
   persistence?: Parameters<typeof composeApplication>[0]['persistence'];

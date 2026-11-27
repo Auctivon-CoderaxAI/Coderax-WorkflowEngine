@@ -36,9 +36,7 @@ import type { CapacityStore } from '../persistence/capacity.js';
 import { createMongoArtifactRepository, createMongoBlobStore, ensureArtifactIndexes } from '../persistence/mongo-artifacts.js';
 import { createPermissionStore } from '../permissions/store.js';
 import { createScheduleNoticeStore, createScheduleRepository } from '../persistence/schedules.js';
-import {
-  ensurePermissionIndexes,
-} from '../persistence/mongo-records.js';
+import { createMongoPermissionStore, ensurePermissionIndexes } from '../persistence/mongo-permissions.js';
 import {
   createMongoConversationRepository,
   createMongoMemoryStore,
@@ -224,7 +222,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     artifacts: createMongoArtifactRepository({ artifacts, versions: artifactVersions, blobs: artifactBlobs, chunks: artifactChunks }),
     blobs: createMongoBlobStore({ collections: { blobs: artifactBlobs, chunks: artifactChunks }, clock, chunkBytes: config.artifacts.chunkBytes }),
     capacity: createMongoCapacityStore({ capacity: artifactCapacity, reservations: artifactReservations }),
-    permissions: createPermissionStore({
+    permissions: createMongoPermissionStore({
       clock,
       ids,
       collection: permissions,

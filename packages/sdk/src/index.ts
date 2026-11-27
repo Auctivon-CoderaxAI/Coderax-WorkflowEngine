@@ -1,3 +1,4 @@
+import { ChatFrame, RoutingReport, type RoutingMode } from '@coderax/contracts';
 import { CreativeValidation, MediaCapabilities, MediaDownload, MediaUploadResult, TeamAccepted, TeamControlResult, TeamStatus,
   type CreativeValidationRequest, type MediaUploadRequest, type TeamSubmitRequest
 } from '@coderax/contracts';
@@ -41,7 +42,12 @@ import {
   HealthReport,
   MediaIntakeResult,
   MemoryList,
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
   ModelList,
+  ToolList,
   NotificationList,
   PermissionList,
   PermissionRequest,
@@ -148,7 +154,23 @@ export const SDK_OPERATIONS = Object.freeze({
   getReadiness: 'readiness',
   listAgents: 'agents',
   listModels: 'models',
+  getRouting: 'routing',
+  getMediaCapabilities: 'mediaCapabilities',
+  uploadMedia: 'uploadMedia',
+  getMedia: 'media',
+  validateCreative: 'validateCreative',
+  submitTeam: 'submitTeam',
+  getTeam: 'team',
+  cancelTeam: 'cancelTeam',
+  resumeTeam: 'resumeTeam',
+  listTeamPermissions: 'teamPermissions',
+  decideTeamPermission: 'decideTeamPermission',
+  listTools: 'tools',
+  ingestKnowledge: 'ingestKnowledge',
+  listKnowledge: 'knowledge',
+  searchKnowledge: 'searchKnowledge',
   submitChat: 'chat',
+  intakeMedia: 'intakeMedia',
   submitWork: 'submitWork',
   getTask: 'task',
   cancelTask: 'cancel',
@@ -226,6 +248,7 @@ type RequestInput = {
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
+  accept?: string;
   signal?: AbortSignal;
 };
 
@@ -299,7 +322,7 @@ export class CoderaxClient {
       {
         method: input.method,
         headers: {
-          ...this.headers(),
+          ...this.headers(input.accept),
           ...(input.body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
@@ -376,6 +399,42 @@ export class CoderaxClient {
 
   models(): Promise<ModelList> {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
+  }
+
+  /** Registered tools with the scopes and approval policy each one requires. */
+  routing(mode: RoutingMode = 'auto'): Promise<RoutingReport> {
+    return this.request<RoutingReport>(RoutingReport, { method: 'GET', path: '/v1/routing', query: { mode } });
+  }
+
+  tools(): Promise<ToolList> {
+    return this.request<ToolList>(ToolList, { method: 'GET', path: '/v1/tools' });
+  }
+
+  ingestKnowledge(request: KnowledgeIngestRequest): Promise<KnowledgeIngestResult> {
+    return this.request<KnowledgeIngestResult>(KnowledgeIngestResult, {
+      method: 'POST',
+      path: '/v1/knowledge',
+      body: request,
+    });
+  }
+
+  knowledge(mode: DataMode = 'private'): Promise<KnowledgeList> {
+    return this.request<KnowledgeList>(KnowledgeList, {
+      method: 'GET',
+      path: '/v1/knowledge',
+      query: { mode },
+    });
+  }
+
+  searchKnowledge(
+    query: string,
+    options: { k?: number; mode?: DataMode } = {},
+  ): Promise<KnowledgeSearchResult> {
+    return this.request<KnowledgeSearchResult>(KnowledgeSearchResult, {
+      method: 'GET',
+      path: '/v1/knowledge/search',
+      query: { q: query, k: options.k, mode: options.mode },
+    });
   }
 
   browserCapabilities(): Promise<BrowserCapabilities> {
@@ -493,6 +552,23 @@ export class CoderaxClient {
       path: '/v1/chat',
       body: request,
     });
+  }
+
+  async *chatStream(request: ChatRequest, options: { signal?: AbortSignal } = {}): AsyncGenerator<ChatFrame> {
+    const path = '/v1/chat';
+    const response = await this.send({
+      method: 'POST', path, accept: 'text/event-stream', body: request,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (!response.ok || !response.body) {
+      await this.parse(ChatReply, response, path);
+      throw new CoderaxContractError('the chat stream had no body');
+    }
+    for await (const frame of parseSse(response.body)) {
+      const parsed = ChatFrame.safeParse(frame);
+      if (!parsed.success) throw new CoderaxContractError('a chat frame did not match the published schema');
+      yield parsed.data;
+    }
   }
 
   /** Validates image attachments and returns metadata for a chat turn. */

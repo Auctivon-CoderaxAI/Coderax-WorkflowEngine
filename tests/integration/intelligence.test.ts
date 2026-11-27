@@ -141,7 +141,7 @@ test('a tool action suspends for approval, resumes and writes a real file', asyn
     );
     assert.equal(content, 'verified by the engine');
 
-    const events = started.app.dependencies.events.replay(submitted.value.taskId, 0);
+    const events = await started.app.dependencies.events.replay(submitted.value.taskId, 0);
     const types = events.events.map((event) => event.type);
     assert.ok(types.includes('approval.required'));
     assert.ok(types.includes('tool.call'));

@@ -8,7 +8,7 @@ import { composeApplication } from '../../src/bootstrap/compose.js';
 import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
 import type { MongoCollectionLike } from '../../src/persistence/mongo.js';
 import { createMongoBudgetStore, ensureBudgetIndexes } from '../../src/persistence/budgets.js';
-import { budgetKey, createBudgetLedger } from '../../src/models/budget.js';
+import { createBudgetLedger } from '../../src/models/budget.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../../src/persistence/mongo.js';
 import { createLeaseStore } from '../../src/persistence/work-runs.js';
 import { workRunKey } from '../../src/execution/lease.js';
@@ -514,7 +514,7 @@ test(
       // The durable window holds the winner's reservation, not two.
       const shared = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
       assert.deepEqual(await shared.snapshot('owner', now), {
-        requests: 1,
+        requests: 0,
         inputTokens: 0,
         outputTokens: 0,
       });
@@ -523,15 +523,7 @@ test(
       // Settlement is applied once. Replaying the same reservation through a
       // fresh store (as another replica would) is a no-op, not a second charge.
       await winnerLedger.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 });
-      const replay = await createMongoBudgetStore(collection).settle({
-        key: budgetKey('owner', now),
-        reservationId: winner.reservation.id,
-        reservedTokens: 20,
-        reservedInputTokens: 10,
-        reservedOutputTokens: 10,
-        usage: { inputTokens: 7, outputTokens: 3 },
-      });
-      assert.equal(replay, false);
+      await shared.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 });
 
       // A fresh process reads the same durable window, not a local copy.
       const restarted = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });

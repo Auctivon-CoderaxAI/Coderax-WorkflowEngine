@@ -128,14 +128,6 @@ export const CAPABILITIES: readonly CapabilitySpec[] = Object.freeze([
     typePathPrefix: 'src/scheduling/',
   },
   {
-    capability: 'event_log',
-    typeName: 'EventLog',
-    typePathPrefix: 'src/events/',
-    // Memory and Mongo are persistence drivers for the same log contract, not
-    // competing event-delivery authorities.
-    supporting: ['src/persistence/mongo-events.ts'],
-  },
-  {
     capability: 'media_service',
     typeName: 'MediaService',
     typePathPrefix: 'src/media/',

@@ -101,17 +101,12 @@ Run the engine (it refuses to start until every startup check passes):
 ```bash
 export CODERAX_OWNER_ID=owner
 export CODERAX_OWNER_TOKEN="$(openssl rand -hex 32)"
-# One or more provider keys. A key authenticates; it does not make a model free.
-export OPENROUTER_API_KEY=...
-export GEMINI_API_KEY=...
+export CODERAX_INFERENCE_BASE_URL=https://your-zero-cost-endpoint/v1
+export CODERAX_INFERENCE_KEY=...
 # workspace roots must exist, be absolute and must not overlap
 node -e "require('fs').mkdirSync('/srv/coderax/private',{recursive:true});require('fs').mkdirSync('/srv/coderax/cloud',{recursive:true})"
 CODERAX_ENGINE_CONFIG=./engine.json npm start
 ```
-
-<!-- coderabbit-ai-generated:v1 -->
-
-<!-- coderabbit-ai-generated-section:v1:78e5dcd56f46b77f525d39cca554d8d596eb4a8cf8e8537f1990fb5bfa9dae29 -->
 
 `engine.json` carries the non-secret settings; environment variables win over it:
 
@@ -201,14 +196,9 @@ Native separates planning, authorization and execution:
 
 ## Non-negotiables enforced in code
 
-- **$0**: no paid model is representable (`allowPaid` is a literal `false`); free
-  cost is proven from provider pricing or an unexpired exact-model attestation;
-  unknown cost is refused; and a reserved request/token budget fails closed.
+- **$0**: no paid model is representable (`allowPaid` is a literal `false`), and a
+  daily request/token budget refuses rather than overruns.
 - **Cloud-only execution**: the engine runs on its host; clients execute nothing.
-- **Data-processing policy**: cost, capability, retention, training, location,
-  authorization, credential, quota and execution mode are separate eligibility
-  dimensions. Private mode never leaves the process without an exact, owner-approved
-  private grant, and fallback cannot widen that grant.
 - **Owner-only**: one principal, constant-time token comparison, no memberships.
 - **No silent substitution**: an unavailable agent is refused, never swapped.
 - **No private/cloud bleed**: memory and workspaces are partitioned by data mode.

@@ -31,6 +31,7 @@ export function createNativeAgent(input: {
   authorizer?: ActionAuthorizer;
   executor?: ActionExecutor;
   limits?: Partial<NativeLimits>;
+  tools?: import('../../tools/types.js').ToolRuntime;
   unavailableDetail?: string;
   /** Live route admission; a gateway may exist while every endpoint is excluded. */
   modelsAvailable?: () => boolean;
@@ -39,7 +40,7 @@ export function createNativeAgent(input: {
 
   const capabilities: EngineCapabilities = {
     streaming: true,
-    tools: false,
+    tools: input.tools !== undefined,
     cancellation: true,
     resume: true,
     modelSelection: true,
@@ -73,7 +74,7 @@ export function createNativeAgent(input: {
   return {
     agent: 'coderax',
     engine: 'native',
-    sideEffects: 'none',
+    sideEffects: input.tools ? 'gated' : 'none',
     capabilities,
     isolation: {
       workspace: 'isolated',
@@ -118,14 +119,18 @@ export function createNativeAgent(input: {
             if (!scope) return { decision: 'allowed' };
             const gate = request.context?.tools?.gate;
             if (!gate) return { decision: 'denied' };
-            const result = await gate.ensure({ scope, resource, description, tool: 'native.read', binding: resource, consume: false });
+            const result = await gate.ensure({ scope, resource, description, tool: 'native.read', binding: resource, callId: `native.read:${resource}`, policy: 'once', consume: false });
             return result.decision === 'granted' ? { decision: 'approved' }
               : result.requestId && result.decision === 'pending' ? { decision: 'pending', requestId: result.requestId }
               : { decision: 'denied' };
           },
         };
+        const toolContext = request.context?.tools;
         return createReasoningNativeAgent({
           enabled: true, gateway, authorizer,
+          ...(input.tools && toolContext
+            ? { tools: input.tools, approvals: () => toolContext.gate }
+            : {}),
           ...(input.planner && 'replan' in input.planner ? { planner: input.planner } : {}),
           ...(input.executor ? { executor: input.executor } : {}),
           ...(input.limits ? { limits: input.limits } : {}),
@@ -183,7 +188,7 @@ export function createNativeAgent(input: {
           : undefined;
 
         report({ type: 'step.started', stepId: step.id, title: step.title });
-        const images = request.images ?? [];
+        const images = request.images ?? request.media?.map((entry) => entry.dataUrl) ?? [];
         try {
           let stepText = '';
           if (gateway.stream) {

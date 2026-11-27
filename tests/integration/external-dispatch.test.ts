@@ -138,11 +138,11 @@ test('a Chat mode conflict cannot append content or replay the existing conversa
     const first = await app.service.chat(principal, { agent: 'coderax', mode: 'private', message: 'private content' });
     assert.ok(first.ok);
     const conversationId = first.value.conversationId;
-    const before = await app.dependencies.conversations.messages(conversationId);
+    const before = await app.dependencies.conversations.messages({ ownerId: OWNER_ID, conversationId, mode: 'private' });
     const result = await app.service.chat(principal, { agent: 'coderax', mode: 'cloud', conversationId, message: 'different mode' });
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.code, 'conflict');
-    assert.deepEqual(await app.dependencies.conversations.messages(conversationId), before);
+    assert.deepEqual(await app.dependencies.conversations.messages({ ownerId: OWNER_ID, conversationId, mode: 'private' }), before);
   } finally {
     await close();
   }

@@ -150,13 +150,13 @@ const CONSTRUCTIONS: ReadonlyArray<{
   minimum?: number;
   singleton?: boolean;
 }> = [
-  { rule: 'single_workflow_engine', token: 'createApplicationService({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_task_runner', token: 'createTaskRunner({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_model_router', token: 'createModelRouter({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_event_bus', token: 'createEventBus({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_route_registry', token: 'createRouteRegistry();', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_http_server', token: 'createHttpServer({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_scheduler', token: 'createTaskScheduler({', allowed: ['src/bootstrap/compose.ts'] },
+  { rule: 'single_workflow_engine', token: 'createApplicationService', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_task_runner', token: 'createTaskRunner', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_model_router', token: 'createModelCatalog', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_event_bus', token: 'createEventBus', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_route_registry', token: 'createRouteRegistry', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_http_server', token: 'createHttpServer', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_scheduler', token: 'createTaskScheduler', allowed: ['src/bootstrap/compose.ts'], singleton: true },
   { rule: 'single_run_dispatch', token: 'scheduler.enqueue(', allowed: ['src/orchestration/service.ts'] },
   { rule: 'single_run_ownership', token: 'runner.run(', allowed: ['src/orchestration/service.ts'] },
   { rule: 'single_lease_claim', token: 'lease.claim(', allowed: ['src/orchestration/service.ts'] },
@@ -177,6 +177,8 @@ const CONSTRUCTIONS: ReadonlyArray<{
 
 /** The runtime network seams: inference, explicit tools and MCP transports. */
 const EGRESS_ALLOWED = [
+  'src/security/network.ts',
+  'src/agents/native/gateway.ts',
   'src/models/providers/',
   'src/mcp/',
   'src/tools/',
@@ -273,6 +275,14 @@ const UNIQUE_DECLARATIONS: ReadonlyArray<{
 }> = [
   { rule: 'duplicate_workflow_engine', token: 'export function createApplicationService(' },
   { rule: 'duplicate_task_runner', token: 'export function createTaskRunner(' },
+  // PR #4 replaces the legacy catalogue with its router. Zero is valid during
+  // that transition; two catalogue implementations are not.
+  {
+    rule: 'duplicate_model_catalog',
+    token: 'export function createModelCatalog(',
+    minimum: 0,
+    maximum: 1,
+  },
   { rule: 'duplicate_event_bus', token: 'export function createEventBus(' },
   { rule: 'duplicate_route_catalogue', token: 'export const ROUTES' },
 ];

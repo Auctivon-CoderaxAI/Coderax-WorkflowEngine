@@ -57,7 +57,7 @@ export type ReasoningMode = 'fast' | 'complex';
  * side-effecting-adjacent action it plans, and it always passes the permission
  * layer before it executes.
  */
-export type PlanStepKind = 'reason' | 'read';
+export type PlanStepKind = 'reason' | 'read' | 'tool';
 
 export type TaskPlanStep = {
   id: string;
@@ -69,6 +69,7 @@ export type TaskPlanStep = {
   resource?: string;
   /** What the step must prove to count as complete. */
   acceptance?: string;
+  input?: Record<string, unknown>;
 };
 
 /**

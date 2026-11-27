@@ -39,8 +39,10 @@ function matches(document: Document, filter: MongoFilter): boolean {
   if (Array.isArray(anyOf)) {
     if (!anyOf.some((option) => matches(document, option as MongoFilter))) return false;
   }
+  const allOf = (filter as Record<string, unknown>).$and;
+  if (Array.isArray(allOf) && !allOf.every((option) => matches(document, option as MongoFilter))) return false;
   return Object.entries(filter)
-    .filter(([field]) => field !== '$or')
+    .filter(([field]) => field !== '$or' && field !== '$and')
     .every(([field, condition]) => {
     const value = atPath(document, field);
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
@@ -221,8 +223,21 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = applyUpdate(documents[index] ?? {}, update);
-      return { ...documents[index] };
+      const next = applyUpdate(documents[index] ?? {}, update);
+      assertUnique(next, index);
+      documents[index] = next;
+      return { ...next };
+    },
+    updateMany: async (filter, update) => {
+      let matched = 0;
+      for (let index = 0; index < documents.length; index += 1) {
+        if (!matches(documents[index] as Document, filter)) continue;
+        const next = applyUpdate(documents[index] as Document, update);
+        assertUnique(next, index);
+        documents[index] = next;
+        matched += 1;
+      }
+      return { matchedCount: matched };
     },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);

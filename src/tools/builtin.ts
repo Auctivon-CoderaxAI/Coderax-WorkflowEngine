@@ -1,26 +1,23 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { mkdir, open, readdir, stat, writeFile } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import type { DataMode, KnowledgeSearchResult, MemoryList } from '@coderax/contracts';
 import type { Tool, ToolResult } from './types.js';
 import { bounded, failure, success } from './types.js';
-import { confinePath } from './paths.js';
-import { scopedChildEnvironment } from '../security/environment.js';
-import { authorizeUrl, pinnedRequest } from '../security/network.js';
-import type {
-  DestinationPolicy,
-  NetworkResponse,
-  ParsedTarget,
-} from '../security/network.js';
+import { confinePath, isInside } from './paths.js';
 import { validateCommand } from '../security/shell.js';
+import { authorizeUrl, pinnedRequest } from '../security/network.js';
 
 /**
  * Built-in tools are the capabilities Coderax Native owns directly. File access
- * is confined to the run's workspace, shell and network are disabled by default
- * and always ask the owner, and every output is bounded. Nothing here can reach a
- * private workspace from a cloud run: the context's root is already the mode root.
+ * is confined to the run's workspace and resolved through symlinks, shell and
+ * network are disabled by default and always ask the owner, and every output is
+ * bounded before it is allocated. Nothing here can reach a private workspace from
+ * a cloud run: the context's root is already the mode root.
  */
 
 export type ToolMemory = {
@@ -43,29 +40,13 @@ export type ToolKnowledge = {
   }) => Promise<KnowledgeSearchResult>;
 };
 
-/**
- * The pinned transport `http.fetch` dispatches through. The default is
- * `pinnedRequest`; it is injectable only so a test can prove the approved path
- * dispatches through this client, because the policy above it forbids reaching
- * a server on this machine.
- */
-export type NetworkDispatch = (
-  input: {
-    target: ParsedTarget;
-    method: string;
-    headers?: Record<string, string>;
-    body?: string;
-    signal?: AbortSignal;
-  },
-  policy: DestinationPolicy,
-) => Promise<NetworkResponse>;
-
 export type BuiltinToolOptions = {
   shellEnabled: boolean;
   allowedCommands: string[];
   networkEnabled: boolean;
   allowedHosts: string[];
-  networkFetch?: NetworkDispatch;
+  /** Loopback plaintext is for local development only; it is off by default. */
+  allowInsecureLoopback?: boolean;
   maxOutputBytes: number;
   commandTimeoutMs: number;
   maxSearchFiles: number;
@@ -89,8 +70,11 @@ async function directoryEntries(root: string, relative: string, depth: number): 
       if (entry.isDirectory() && SKIP_DIRECTORIES.has(entry.name)) continue;
       const full = path.join(current, entry.name);
       const rel = path.relative(root, full).split(path.sep).join('/');
-      lines.push(`${entry.isDirectory() ? 'dir ' : 'file'} ${rel}`);
-      if (entry.isDirectory() && remaining > 0) await walk(full, remaining - 1);
+      // A symlink is shown as a link but never followed by a listing or a read.
+      lines.push(
+        `${entry.isSymbolicLink() ? 'link' : entry.isDirectory() ? 'dir ' : 'file'} ${rel}`,
+      );
+      if (entry.isDirectory() && !entry.isSymbolicLink() && remaining > 0) await walk(full, remaining - 1);
       if (lines.length > 400) return;
     }
   }
@@ -98,9 +82,21 @@ async function directoryEntries(root: string, relative: string, depth: number): 
   return lines.length > 0 ? lines : ['(empty)'];
 }
 
+/** Reads at most `bytes` from a file without allocating the whole file. */
+async function readBounded(file: string, bytes: number): Promise<string | null> {
+  const handle = await open(file, 'r').catch(() => null);
+  if (!handle) return null;
+  try {
+    const buffer = Buffer.alloc(Math.max(1, bytes));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
   const limit = options.maxOutputBytes;
-  const dispatch = options.networkFetch ?? pinnedRequest;
   const tools: Tool[] = [
     {
       name: 'fs.read',
@@ -108,7 +104,7 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
       source: 'builtin',
       scopes: ['workspace.read'],
       approval: 'never',
-      parameters: { path: 'string' },
+      parameters: { path: 'string', maxBytes: 'number?' },
       schema: z
         .object({ path: z.string().min(1).max(1024), maxBytes: z.number().int().min(1).max(200_000).optional() })
         .strict(),
@@ -119,10 +115,10 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
         if (!confined.ok) return failure('permission_required', confined.detail);
         const info = await stat(confined.path).catch(() => null);
         if (!info || !info.isFile()) return failure('not_found', 'That file does not exist.');
-        const bytes = maxBytes ?? limit;
-        const text = await readFile(confined.path, 'utf8').catch(() => null);
+        const bytes = Math.min(maxBytes ?? limit, 200_000);
+        const text = await readBounded(confined.path, bytes);
         if (text === null) return failure('tool_failed', 'That file could not be read as UTF-8.');
-        return output(text.slice(0, bytes), bytes);
+        return output(text, bytes);
       },
     },
     {
@@ -156,24 +152,34 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
         const { query } = input as { query: string };
         const needle = query.toLowerCase();
         const matches: string[] = [];
+        const rootReal = await realpath(context.workspaceRoot).catch(() => null);
+        if (rootReal === null) return failure('tool_failed', 'The workspace is unavailable.');
+        // A stable local binding keeps the narrowed type inside the closure.
+        const root: string = rootReal;
         let scanned = 0;
         async function walk(directory: string): Promise<void> {
           if (matches.length >= 50 || scanned >= options.maxSearchFiles) return;
           const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
           for (const entry of entries) {
             if (matches.length >= 50 || scanned >= options.maxSearchFiles) return;
+            // A symlink is never followed: it is the classic escape from a cloud
+            // workspace into a private one. Directories are walked only when they
+            // are real directories.
+            if (entry.isSymbolicLink()) continue;
             if (entry.name.startsWith('.') || (!entry.isDirectory() && !entry.isFile())) continue;
             if (entry.isDirectory()) {
               if (!SKIP_DIRECTORIES.has(entry.name)) await walk(path.join(directory, entry.name));
               continue;
             }
             const full = path.join(directory, entry.name);
-            const info = await stat(full).catch(() => null);
-            if (!info || info.size > 1_000_000) continue;
+            const resolved = await realpath(full).catch(() => null);
+            if (resolved === null || !isInside(resolved, root)) continue;
+            const info = await stat(resolved).catch(() => null);
+            if (!info || !info.isFile() || info.size > 1_000_000) continue;
             scanned += 1;
-            const text = await readFile(full, 'utf8').catch(() => null);
+            const text = await readBounded(resolved, Math.min(info.size, 1_000_000));
             if (!text) continue;
-            const rel = path.relative(context.workspaceRoot, full).split(path.sep).join('/');
+            const rel = path.relative(root, resolved).split(path.sep).join('/');
             text.split(/\r?\n/).forEach((line, index) => {
               if (matches.length < 50 && line.toLowerCase().includes(needle)) {
                 matches.push(`${rel}:${index + 1}: ${bounded(line.trim(), 240)}`);
@@ -181,7 +187,7 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
             });
           }
         }
-        await walk(context.workspaceRoot);
+        await walk(root);
         return output(matches.length > 0 ? matches.join('\n') : `No matches for ${query}.`, limit);
       },
     },
@@ -201,7 +207,16 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
         const confined = await confinePath(context.workspaceRoot, requested);
         if (!confined.ok) return failure('permission_required', confined.detail);
         await mkdir(path.dirname(confined.path), { recursive: true });
-        await writeFile(confined.path, content, 'utf8');
+        // O_NOFOLLOW closes the race where a symlink is swapped in after the
+        // confinement check. It is unavailable on Windows, where the resolved
+        // parent check above remains the guard.
+        const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW;
+        const written = await writeFile(confined.path, content, {
+          encoding: 'utf8',
+          mode: 0o600,
+          flag: fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollow,
+        }).catch(() => null);
+        if (written === null) return failure('tool_failed', 'That file could not be written safely.');
         const digest = createHash('sha256').update(content).digest('hex');
         return output(`Wrote ${confined.relative} (${Buffer.byteLength(content)} bytes, sha256 ${digest}).`, 400);
       },
@@ -215,10 +230,6 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
       source: 'builtin',
       scopes: ['command.execute'],
       approval: 'always',
-      // The engine cannot reap a descendant that leaves the process group, so a
-      // run that uses this tool is never reported as verified-terminated by
-      // inference alone.
-      spawnsProcesses: true,
       parameters: { command: 'string', args: 'string[]' },
       schema: z
         .object({
@@ -239,21 +250,31 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
           allowedCommands: options.allowedCommands,
         });
         if (!validated.ok) return failure('permission_required', validated.detail);
+
+        const home = path.join(context.workspaceRoot, '.home');
+        const tmp = path.join(context.workspaceRoot, '.tmp');
+        await mkdir(home, { recursive: true }).catch(() => undefined);
+        await mkdir(tmp, { recursive: true }).catch(() => undefined);
         const timeoutMs = typed.timeoutMs ?? options.commandTimeoutMs;
+
         return new Promise<ToolResult>((resolve) => {
           let settled = false;
           let collected = '';
+          const detached = process.platform !== 'win32';
           const child = spawn(validated.executable, validated.args, {
             cwd: context.workspaceRoot,
             shell: false,
             windowsHide: true,
-            // A child gets an allow-listed environment, never the engine's own:
-            // an inference key or database URI must not be readable via `env`.
-            env: scopedChildEnvironment(),
-            // Its own process group, so a cancel can signal descendants that the
-            // command started rather than only the direct child.
-            detached: process.platform !== 'win32',
+            // HOME and TMPDIR point inside the workspace so an allow-listed tool
+            // cannot quietly write into the engine account's home directory.
+            env: {
+              PATH: process.env.PATH ?? '',
+              HOME: home,
+              TMPDIR: tmp,
+              LANG: 'C.UTF-8',
+            },
             stdio: ['ignore', 'pipe', 'pipe'],
+            detached,
           });
           let timer: NodeJS.Timeout | null = null;
           const finish = (result: ToolResult): void => {
@@ -263,34 +284,35 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
             context.signal.removeEventListener('abort', onAbort);
             resolve(result);
           };
-          const kill = (): void => {
-            if (child.pid !== undefined && process.platform !== 'win32') {
-              try {
-                process.kill(-child.pid, 'SIGKILL');
-                return;
-              } catch {
-                // The group may already be gone; fall through to the direct child.
-              }
+          const killTree = (): void => {
+            if (child.pid === undefined) return;
+            try {
+              if (detached) process.kill(-child.pid, 'SIGKILL');
+              else child.kill('SIGKILL');
+            } catch {
+              child.kill('SIGKILL');
             }
-            child.kill('SIGKILL');
           };
           const onAbort = (): void => {
-            kill();
+            killTree();
             finish(failure('cancelled', 'The run was cancelled.'));
           };
           timer = setTimeout(() => {
-            kill();
+            killTree();
             finish(failure('tool_failed', `The command exceeded ${timeoutMs} ms.`));
           }, timeoutMs);
           timer.unref();
           if (context.signal.aborted) onAbort();
           else context.signal.addEventListener('abort', onAbort, { once: true });
-          child.stdout.on('data', (chunk: Buffer) => {
-            if (collected.length < limit) collected += chunk.toString('utf8');
-          });
-          child.stderr.on('data', (chunk: Buffer) => {
-            if (collected.length < limit) collected += chunk.toString('utf8');
-          });
+          const collect = (chunk: Buffer): void => {
+            if (Buffer.byteLength(collected) >= limit) return;
+            collected += chunk.toString('utf8');
+            if (Buffer.byteLength(collected) > limit) {
+              collected = bounded(collected, limit);
+            }
+          };
+          child.stdout.on('data', collect);
+          child.stderr.on('data', collect);
           child.on('error', () => finish(failure('tool_failed', 'The command could not start.')));
           child.on('close', (code) => {
             finish(
@@ -310,54 +332,97 @@ export function createBuiltinTools(options: BuiltinToolOptions): Tool[] {
   if (options.networkEnabled) {
     tools.push({
       name: 'http.fetch',
-      description: 'Fetch an allow-listed HTTPS URL. The owner approves each host.',
+      description: 'Fetch an allow-listed HTTPS URL. The owner approves each destination.',
       source: 'builtin',
       scopes: ['network.access'],
       approval: 'once',
       parameters: { url: 'string', method: 'GET|POST' },
       schema: z
         .object({
-          url: z.string().url().max(2000).refine(
-            (url) => URL.canParse(url) && new URL(url).protocol === 'https:',
-            'The URL must use HTTPS.',
-          ),
+          url: z.string().url().max(2000),
           method: z.enum(['GET', 'POST']).default('GET'),
           body: z.string().max(20_000).optional(),
         })
-        .strict(),
+        .strict()
+        .superRefine((value, context) => {
+          // Destination policy is checked before the owner is asked to approve:
+          // an unapprovable URL must never become a durable permission request.
+          let target: URL;
+          try {
+            target = new URL(value.url);
+          } catch {
+            context.addIssue({ code: z.ZodIssueCode.custom, path: ['url'], message: 'The URL is invalid.' });
+            return;
+          }
+          const loopback = target.hostname === '127.0.0.1' || target.hostname === 'localhost' || target.hostname === '::1';
+          if (target.protocol !== 'https:' && !(options.allowInsecureLoopback && target.protocol === 'http:' && loopback)) {
+            context.addIssue({ code: z.ZodIssueCode.custom, path: ['url'], message: 'Only HTTPS destinations are allowed.' });
+          }
+          if (target.username.length > 0 || target.password.length > 0) {
+            context.addIssue({ code: z.ZodIssueCode.custom, path: ['url'], message: 'The URL may not carry credentials.' });
+          }
+          if (options.allowedHosts.length > 0 && !options.allowedHosts.includes(target.hostname)) {
+            context.addIssue({ code: z.ZodIssueCode.custom, path: ['url'], message: 'The host is not allow-listed.' });
+          }
+        }),
       resource: (input) => (input as { url: string }).url,
       run: async (input, context) => {
+        if (context.signal.aborted) return failure('cancelled', 'The run was cancelled.');
         const typed = input as { url: string; method: 'GET' | 'POST'; body?: string };
         const policy = {
           allowedHosts: options.allowedHosts,
+          ...(options.allowInsecureLoopback ? { allowInsecureLoopback: true } : {}),
           maxBytes: limit,
           timeoutMs: 15_000,
         };
-        // The policy refuses a private destination and pins the validated DNS
-        // answer; `fetch` cannot express either guarantee.
-        const authorized = await authorizeUrl(typed.url, policy);
-        if (!authorized.ok) {
-          const code = authorized.detail === 'That URL is not valid.' ? 'validation_failed' : 'permission_required';
-          return failure(code, authorized.detail);
-        }
-        try {
-          const response = await dispatch(
-            {
-              target: authorized.target,
-              method: typed.method,
-              headers: { accept: 'text/plain, application/json;q=0.9' },
-              signal: context.signal,
-              ...(typed.body === undefined ? {} : { body: typed.body }),
-            },
-            policy,
-          );
+        let current = typed.url;
+        let method: string = typed.method;
+        let body: string | undefined = typed.body;
+
+        for (let hop = 0; hop <= 2; hop += 1) {
+          const authorized = await authorizeUrl(current, policy);
+          if (!authorized.ok) {
+            return failure('permission_required', authorized.detail);
+          }
+          let response;
+          try {
+            response = await pinnedRequest(
+              {
+                target: authorized.target,
+                method,
+                headers: {
+                  accept: 'text/plain, application/json;q=0.9',
+                  ...(body !== undefined ? { 'content-type': 'text/plain; charset=utf-8' } : {}),
+                },
+                ...(body !== undefined ? { body } : {}),
+              },
+              policy,
+            );
+          } catch {
+            return failure('tool_failed', 'The request failed.');
+          }
+          const location = response.headers.location;
+          if (
+            response.status >= 300 &&
+            response.status < 400 &&
+            typeof location === 'string' &&
+            hop < 2
+          ) {
+            // Each redirect is authorized and pinned again; an unapproved hop is
+            // refused rather than followed by the TLS client.
+            current = new URL(location, current).toString();
+            if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
+              method = 'GET';
+              body = undefined;
+            }
+            continue;
+          }
           return output(
-            `HTTP ${response.status}${response.truncated ? ' (truncated)' : ''}\n${bounded(response.text, limit)}`,
+            `HTTP ${response.status}${response.truncated ? ' (truncated)' : ''}\n${response.text}`,
             limit,
           );
-        } catch {
-          return failure('tool_failed', 'The request failed.');
         }
+        return failure('tool_failed', 'The request exceeded the redirect bound.');
       },
     });
   }

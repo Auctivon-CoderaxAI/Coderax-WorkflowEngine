@@ -53,14 +53,14 @@ Status vocabulary:
 | 37 | Durable cancellation | lease flag | lease flag + service cancel | Preserved |
 | 38 | Resume / retry of an interrupted task | partial (retry of start failures) | `resume` and `retry` on the service, with checkpoints | Strengthened |
 | 39 | Checkpoints | none | `checkpoint.completedSteps` + accumulated text | Strengthened |
-| 40 | Approval records bound to an exact resource | approvals store | permission store + durable `awaiting_approval` suspend/resume | Strengthened |
+| 40 | Approval records bound to an exact resource | approvals store | permission store; adapter does not create the record | Simplified (review F5) |
 | 41 | SSE streaming to a client | `workChat/handler.ts` | `src/api/server.ts` (SSE with `seq`/`eventId`) | Preserved |
 | 42 | Health / readiness endpoints | `/health`, `/livez`, `/readyz` | `src/observability/health.ts` + routes | Preserved |
 | 43 | Audit trail of execution receipts | none | `src/observability/audit.ts` | Strengthened |
 | 44 | Schedules (cron) | `croner` + Mongo | none | Missing (Phase 7) |
 | 45 | Cloud browser orchestration | none | attachable through a configured browser/computer-use MCP server with `browser.use`; no live server verified | Simplified |
 | 46 | DeploymentPlatformAI integration | partial | none | Missing |
-| 47 | Tool/plugin execution | Coderax tools | built-in and MCP tools implemented; plugin manifest loader absent | Simplified |
+| 47 | Tool/plugin execution | Coderax tools | none | Missing |
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
 | 49 | Shared typed SDK for both clients | none (hand-written helpers) | `packages/sdk` | Strengthened |
 | 50 | Startup dependency validation | none (config read at request time) | `src/bootstrap/compose.ts` refuses to start | Strengthened |

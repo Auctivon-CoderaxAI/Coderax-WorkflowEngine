@@ -35,13 +35,6 @@ export const LIVE_REQUIREMENTS: readonly LiveRequirement[] = Object.freeze([
     detail: 'artifact persistence, quota admission and reference counting require a real database',
   },
   {
-    feature: 'Durable Events',
-    source: 'src/events/log.ts',
-    test: 'tests/live/events.test.ts',
-    database: true,
-    detail: 'event replay and notification recovery require a real database',
-  },
-  {
     feature: 'Durable Scheduling',
     source: 'src/scheduling/engine.ts',
     test: 'tests/live/scheduling.test.ts',

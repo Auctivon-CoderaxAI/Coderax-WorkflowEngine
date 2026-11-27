@@ -1,4 +1,3 @@
-import { credentialEndpoint } from '../security/endpoint.js';
 import type {
   DataMode,
   KnowledgeIngestResult,
@@ -20,6 +19,11 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 
 export type EmbeddingProvider = {
   id: string;
+  /**
+   * A hosted model transmits text off-process, so it can never index a private
+   * document. The flag is a capability, declared once by the provider, and the
+   * store refuses private text before calling rather than letting the batch fail.
+   */
   cloudOnly?: boolean;
   embed: (texts: string[]) => Promise<number[][]>;
 };
@@ -235,56 +239,5 @@ export function createKnowledgeStore(input: {
         createdAt: document.createdAt,
       })),
     }),
-  };
-}
-
-/**
- * An OpenAI-compatible embeddings endpoint. The key is supplied by name from the
- * caller and never logged or embedded in a URL.
- */
-export function createOpenAiEmbeddingProvider(input: {
-  baseURL: string;
-  apiKey: string;
-  model: string;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}): EmbeddingProvider {
-  const endpoint = credentialEndpoint(input.baseURL);
-  endpoint.pathname = endpoint.pathname.replace(/\/+$/, '') + '/embeddings';
-  const fetchImpl = input.fetchImpl ?? fetch;
-  const timeoutMs = input.timeoutMs ?? 20_000;
-  return {
-    id: 'openai-compatible',
-    cloudOnly: true,
-    embed: async (texts) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchImpl(endpoint.href, {
-          method: 'POST',
-          redirect: 'error',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${input.apiKey}`,
-          },
-          body: JSON.stringify({ model: input.model, input: texts }),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(`embeddings responded with HTTP ${response.status}`);
-        const body = (await response.json()) as {
-          data?: Array<{ embedding?: unknown }>;
-        };
-        const rows = body.data ?? [];
-        if (rows.length !== texts.length) throw new Error('embeddings response was incomplete');
-        return rows.map((row) => {
-          if (!Array.isArray(row.embedding) || row.embedding.some((value) => typeof value !== 'number')) {
-            throw new Error('embeddings response was not numeric');
-          }
-          return row.embedding as number[];
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-    },
   };
 }

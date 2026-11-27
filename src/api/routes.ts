@@ -1,4 +1,4 @@
-import { ExecutionEvent } from '@coderax/contracts';
+import { ExecutionEvent, type ChatFrame, type ChatReply } from '@coderax/contracts';
 import type {
   ArtifactKind,
   ArtifactModeRequest,
@@ -106,6 +106,14 @@ async function* toEventStream(stream: EventStream, signal?: AbortSignal): AsyncI
     unsubscribe();
   }
 }
+/** Chat keeps the JSON reply shape inside the published completion frame. */
+async function* chatFrames(reply: ChatReply): AsyncIterable<SseFrame> {
+  const delta: ChatFrame = { type: 'chat.delta', text: reply.text };
+  const complete: ChatFrame = { type: 'chat.completed', reply };
+  yield { kind: 'event', event: delta };
+  yield { kind: 'event', event: complete };
+}
+
 export function registerRoutes(
   registry: RouteRegistry,
   service: ApplicationService,
@@ -135,12 +143,6 @@ export function registerRoutes(
     body: service.models(),
   }));
 
-  registry.register('listTools', async () => ({
-    kind: 'json',
-    status: 200,
-    body: service.tools(),
-  }));
-
   registry.register('getRouting', async (context) => {
     const mode =
       context.query.mode === 'fast' || context.query.mode === 'complex'
@@ -148,6 +150,12 @@ export function registerRoutes(
         : 'auto';
     return { kind: 'json', status: 200, body: service.routing(mode) };
   });
+
+  registry.register('listTools', async () => ({
+    kind: 'json',
+    status: 200,
+    body: service.tools(),
+  }));
 
   registry.register('ingestKnowledge', async (context) => {
     const result = await service.ingestKnowledge(context.principal, context.body as never);
@@ -183,6 +191,9 @@ export function registerRoutes(
   registry.register('submitChat', async (context) => {
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
+    if (context.accept.toLowerCase().includes('text/event-stream')) {
+      return { kind: 'sse', status: 200, events: chatFrames(result.value) };
+    }
     return { kind: 'json', status: 200, body: result.value };
   });
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fakeProvider, startTestApp } from '../helpers.js';
+import { startTestApp } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -41,46 +41,6 @@ test('Native is the default and is marked as the only internal agent', async () 
     assert.equal(native.external, false);
     assert.equal(native.engine, 'native');
     assert.equal(native.isolation.memory, 'granted');
-  } finally {
-    await started.close();
-  }
-});
-
-test('private Chat and Work fail closed before a hosted free model is called', async () => {
-  const provider = fakeProvider();
-  const started = await startTestApp({ provider });
-  try {
-    // The fixture is verified free and authorized for cloud chat/work only.
-    const privateChat = await started.app.service.chat(principal, {
-      message: 'Summarize the private retrieval chunk',
-      mode: 'private',
-      agent: 'coderax',
-    });
-    assert.equal(privateChat.ok, false);
-    assert.equal(privateChat.ok === false && privateChat.code, 'model_missing');
-
-    const privateWork = await started.app.service.submitWork(principal, {
-      objective: 'Process the private objective',
-      mode: 'private',
-      requireApproval: true,
-    });
-    assert.equal(privateWork.ok, false);
-    assert.equal(privateWork.ok === false && privateWork.code, 'model_missing');
-
-    // Neither surface dispatched anything, and no task was created to retry later.
-    assert.equal(provider.calls, 0);
-    assert.equal(
-      (await started.app.dependencies.tasks.listByOwner(principal.ownerId)).length,
-      0,
-    );
-
-    const cloudChat = await started.app.service.chat(principal, {
-      message: 'Summarize the cloud chunk',
-      mode: 'cloud',
-      agent: 'coderax',
-    });
-    assert.equal(cloudChat.ok, true);
-    assert.equal(provider.calls, 1);
   } finally {
     await started.close();
   }

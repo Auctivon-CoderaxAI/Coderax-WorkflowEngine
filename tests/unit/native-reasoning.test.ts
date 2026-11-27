@@ -6,9 +6,9 @@ import { verifyObjective } from '../../src/agents/native/verify.js';
 import type {
   ActionExecutor,
   ModelCompletionRequest,
-  ModelGateway,
+  BasicModelGateway as ModelGateway,
   NativeLimits,
-  Planner,
+  ReasoningPlanner as Planner,
   ReplanInput,
 } from '../../src/agents/native/types.js';
 import type { TaskPlan, TaskPlanStep } from '../../src/domain.js';
@@ -40,6 +40,7 @@ function runRequest(overrides: Partial<AgentRunRequest> = {}): AgentRunRequest {
     taskId: 'task-1',
     workload: 'work',
     game: null,
+    operation: 'work', routing: 'auto', allowFallback: false,
     objective: 'Produce the result',
     model: { providerId: 'free', modelId: 'coderax-small' },
     mode: 'cloud',
@@ -488,8 +489,19 @@ test('a scoped action without approval escalates and never executes', async () =
   assert.equal(gateway.calls, 0);
 });
 
+function reasoningFixture() {
+  const fixture = fakeGateway();
+  return {
+    id: fixture.id,
+    get calls() { return fixture.calls; },
+    complete: (request: ModelCompletionRequest) => fixture.complete({
+      ...request, ownerId: 'owner', mode: 'cloud', operation: 'work',
+    }),
+  };
+}
+
 test('fast reasoning answers directly; complex reasoning plans, executes and verifies', async () => {
-  const fastGateway = fakeGateway();
+  const fastGateway = reasoningFixture();
   const fastAgent = agentWith(fastGateway);
   const fast = await fastAgent.run(
     runRequest({ objective: 'Summarize the repository', reasoning: 'fast', plan: null }),
@@ -500,7 +512,7 @@ test('fast reasoning answers directly; complex reasoning plans, executes and ver
   assert.equal(fast.verification?.passed, true);
   assert.equal(fastGateway.calls, 2);
 
-  const complexGateway = fakeGateway();
+  const complexGateway = reasoningFixture();
   const complexAgent = agentWith(complexGateway);
   const events: AgentReportEvent[] = [];
   const complex = await complexAgent.run(

@@ -6,10 +6,13 @@ Cost verification, capability classification, ranking, budgets, rate limits,
 circuits, fallback, streaming normalization and health all live above that
 boundary.
 
-There is no second selector. `src/models/catalog.ts` is a type alias for the
-routing port in `src/models/router.ts`; `src/agents/native/gateway.ts` and the
-old static catalogue were removed. An agent receives a resolved `ModelRef` and
-calls the router through the gateway port; it never sees a provider URL or key.
+There is no second selector. `src/models/catalog.ts` is a read-only projection
+over the one router (`list`, `resolve`, `report`), not a second implementation;
+the competing `eligibility.ts`, `routed.ts`, `tokens.ts` and
+`src/agents/native/gateway.ts` were removed in the consolidation. An agent
+receives a resolved `ModelRef` and calls the router through the gateway port; it
+never sees a provider URL or key. `src/models/budget.ts` is the only ledger and
+`src/models/verify.ts` the only cost verifier.
 
 ## Invariants
 
@@ -54,16 +57,30 @@ An attestation is a time-bounded operator statement about **one exact model**:
 {
   "providerId": "gemini",
   "modelId": "gemini-2.5-flash",
+  "accountRef": "billing-account-1234",
   "evidenceUrl": "https://ai.google.dev/gemini-api/docs/pricing",
+  "currency": "USD",
+  "billing": "prepaid",
+  "spendCapUsd": 0,
+  "quota": { "requestsPerDay": 1500, "tokensPerDay": 1000000 },
   "verifiedAt": "2026-11-26T00:00:00.000Z",
   "expiresAt": "2026-12-26T00:00:00.000Z"
 }
 ```
 
+`accountRef` names the exact account the claim was checked against, `billing`
+names the boundary it sits behind, and `spendCapUsd` must be exactly `0`. A
+positive cap, an unbounded account, a missing account reference, a currency other
+than USD or an allowance that is not published is not a free tier and the model is
+treated as paid. A free *allowance* over a billing account that can charge overage
+is not free.
+
 The URL must be `https`. Expired, future-dated or invalid attestations are not
-evidence. Expiry is checked on every route, not only on refresh, so a stale claim
-stops routing immediately. Config refuses an attestation whose `expiresAt` is not
-after `verifiedAt`.
+evidence, and the validity window may not exceed 90 days: a claim that lasts a year
+cannot be re-verified. Expiry is checked on every route, not only on refresh, so a
+stale claim stops routing immediately. Config refuses an attestation whose
+`expiresAt` is not after `verifiedAt` or whose window exceeds 90 days, and startup
+refuses to become ready when nothing verified-free remains.
 
 ### No-longer-free endpoints
 
@@ -205,13 +222,39 @@ authorized for Chat or Work, as appropriate.
 
 The daily ledger reserves before the call:
 
-- one request slot;
+- one request slot in a per-owner window keyed by UTC day;
+- one request slot in a per-task window, so a scheduled or multi-agent task cannot
+  spend the owner's whole day;
 - estimated input tokens plus the output ceiling.
 
-The reservation counts against the day until it is settled with actual usage or
-released because no provider was called. Concurrent requests cannot each see the
-same remaining allowance. Exhaustion raises `budget_exhausted`; the request is not
-sent and there is no paid path to fall through to.
+Exhaustion raises `budget_exhausted`; the request is not sent and there is no paid
+path to fall through to.
+
+The ledger is one implementation over a `BudgetStore` port. The memory store is
+used for a single process; `src/persistence/budgets.ts` is the durable store, with
+one document per window and one per reservation, and it is selected whenever
+`persistence.driver=mongo`.
+
+| Situation | Behaviour |
+| --- | --- |
+| Concurrent reservations across replicas | `findOneAndUpdate` with `requests < max` and `committed + reserved + tokens <= max`; the updated document is the only proof of admission, so exactly one replica can take the last slot |
+| Crash after reservation | the reservation carries an expiry; the next admission on that window sweeps it and refunds the unused part exactly once |
+| Provider timeout, ambiguous consumption | `release(id, { dispatched: true })` charges the **reserved** amount: a possibly-consumed call is never refunded |
+| Partial stream failure | the same dispatched rule applies; the reservation is not returned just because the stream broke |
+| Missing usage report | settlement with no usage charges the reservation |
+| Usage above the estimate | the reservation is settled at the higher actual amount, and the window may go over its ceiling; further requests are refused until the window rolls over |
+| Duplicate settlement | settlement and release are idempotent on the reservation document: the first transition wins, later ones are no-ops |
+| Quota-window transition | windows are keyed by UTC day, so a new day is a new document; yesterday's reservations cannot refund into today |
+
+The token counts are provider-agnostic estimates, not provider billing units. A
+provider that bills something other than tokens (per request, per image, per
+minute) is only safe to route when its price is zero; that is why an unpriced
+provider needs an attestation with `spendCapUsd: 0` rather than a token estimate.
+
+These guarantees are exercised against a driver fake and, for the memory store,
+across concurrent reservations. They are **not** verified against a live MongoDB
+replica set: the conditional updates are written for atomic single-document
+semantics, but no test in this repository proves them on real hardware.
 
 Per-provider local ceilings are configured as `requestsPerMinute`,
 `tokensPerMinute` and `maxConcurrency`. They are local safety limits, not claims

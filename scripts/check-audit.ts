@@ -151,9 +151,13 @@ export function auditFromResult(result: AuditRun): AuditReport {
 }
 
 export function checkAudit(): AuditReport {
-  const result = spawnSync('npm', ['audit', '--json'], {
+  // Windows only exposes `npm.cmd`, and Node refuses to spawn a `.cmd` shim
+  // without a shell; the arguments are constants, never caller input.
+  const windows = process.platform === 'win32';
+  const result = spawnSync(windows ? 'npm.cmd' : 'npm', ['audit', '--json'], {
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
+    ...(windows ? { shell: true } : {}),
   });
   return auditFromResult(result as AuditRun);
 }

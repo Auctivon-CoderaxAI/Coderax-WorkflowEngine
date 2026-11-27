@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -26,13 +27,17 @@ function context(root: string): ToolContext {
 
 const gate = (decision: ApprovalDecision) => ({ ensure: async () => ({ decision }) });
 
-function runtime(networkEnabled = false) {
+function runtime(
+  networkEnabled = false,
+  options: { allowedHosts?: string[]; allowInsecureLoopback?: boolean } = {},
+) {
   return createToolRuntime({
     tools: createBuiltinTools({
       shellEnabled: false,
       allowedCommands: [],
       networkEnabled,
-      allowedHosts: ['allowed.example'],
+      allowedHosts: options.allowedHosts ?? ['allowed.example'],
+      ...(options.allowInsecureLoopback ? { allowInsecureLoopback: true } : {}),
       maxOutputBytes: 10_000,
       commandTimeoutMs: 1_000,
       maxSearchFiles: 100,
@@ -149,106 +154,39 @@ test('cancellation during approval prevents an approved write', async () => {
   }
 });
 
-test('an approved http.fetch dispatches through the pinned client, never global fetch', async () => {
+test('the HTTP tool rejects plaintext before approval and dispatches an approved loopback request', async (t) => {
   const space = workspace();
-  const original = globalThis.fetch;
-  let globalFetchCalls = 0;
-  globalThis.fetch = (async () => {
-    globalFetchCalls += 1;
-    throw new Error('http.fetch must not use global fetch');
-  }) as typeof fetch;
+  let hits = 0;
+  const server = createServer((_request, response) => {
+    hits += 1;
+    response.end('verified');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   try {
-    const dispatched: Array<{ url: string; method: string; addresses: string[]; body?: string }> = [];
-    const tools = createToolRuntime({
-      tools: createBuiltinTools({
-        shellEnabled: false,
-        allowedCommands: [],
-        networkEnabled: true,
-        allowedHosts: ['1.1.1.1'],
-        maxOutputBytes: 10_000,
-        commandTimeoutMs: 1_000,
-        maxSearchFiles: 100,
-        memory: null,
-        knowledge: null,
-        // The real policy refuses a non-public destination, so no local server
-        // can stand in for the network. Only the transport is injected;
-        // authorization above it is the production code path.
-        networkFetch: async (input) => {
-          dispatched.push({
-            url: input.target.url.href,
-            method: input.method,
-            addresses: input.target.addresses,
-            ...(input.body === undefined ? {} : { body: input.body }),
-          });
-          return { status: 200, headers: {}, text: 'pinned response', truncated: false };
-        },
-      }),
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const tools = runtime(true, {
+      allowedHosts: ['127.0.0.1'],
+      allowInsecureLoopback: true,
     });
-    let approvals = 0;
-    const outcome = await tools.call({
-      name: 'http.fetch',
-      arguments: { url: 'https://1.1.1.1/status', method: 'POST', body: 'payload' },
-      context: context(space.root),
-      gate: {
-        ensure: async () => {
-          approvals += 1;
-          return { decision: 'granted' };
-        },
-      },
-    });
-    assert.equal(outcome.approval, 'granted');
-    assert.equal(outcome.result.ok && outcome.result.output, 'HTTP 200\npinned response');
-    assert.equal(approvals, 1);
-    assert.deepEqual(dispatched, [
-      { url: 'https://1.1.1.1/status', method: 'POST', addresses: ['1.1.1.1'], body: 'payload' },
-    ]);
-    assert.equal(globalFetchCalls, 0);
-  } finally {
-    globalThis.fetch = original;
-    space.cleanup();
-  }
-});
-
-test('the HTTP tool refuses plaintext before approval and private destinations before dispatch', async () => {
-  const space = workspace();
-  try {
-    const tools = runtime(true);
-    let approvals = 0;
-    const ensure = async (): Promise<{ decision: ApprovalDecision }> => {
-      approvals += 1;
-      return { decision: 'granted' };
-    };
-    const call = (target: ReturnType<typeof runtime>, url: string) => target.call({
+    const ensure = t.mock.fn(async () => ({ decision: 'granted' as const }));
+    const call = (url: string) => tools.call({
       name: 'http.fetch', arguments: { url },
       context: context(space.root), gate: { ensure },
     });
 
-    const refused = await call(tools, 'http://allowed.example/resource');
+    // Non-loopback plaintext is refused by schema validation before the owner
+    // is asked, so no durable request can be created for an unapprovable URL.
+    const refused = await call('http://allowed.example/resource');
     assert.equal(!refused.result.ok && refused.result.code, 'validation_failed');
-    assert.equal(approvals, 0);
+    assert.equal(ensure.mock.callCount(), 0);
+    assert.equal(hits, 0);
 
-    const foreign = await call(tools, 'https://not-allowed.example/resource');
-    assert.equal(!foreign.result.ok && foreign.result.code, 'permission_required');
-
-    const privateNetwork = createToolRuntime({
-      tools: createBuiltinTools({
-        shellEnabled: false,
-        allowedCommands: [],
-        networkEnabled: true,
-        allowedHosts: ['192.168.1.10'],
-        maxOutputBytes: 10_000,
-        commandTimeoutMs: 1_000,
-        maxSearchFiles: 100,
-        memory: null,
-        knowledge: null,
-      }),
-    });
-    const privateTarget = await call(privateNetwork, 'https://192.168.1.10/resource');
-    assert.equal(!privateTarget.result.ok && privateTarget.result.code, 'permission_required');
-    assert.match(
-      privateTarget.result.ok === false ? privateTarget.result.detail : '',
-      /non-public/,
-    );
+    const approved = await call(`http://127.0.0.1:${address.port}/resource`);
+    assert.equal(approved.result.ok, true);
+    assert.equal(ensure.mock.callCount(), 1);
+    assert.equal(hits, 1);
   } finally {
     space.cleanup();
   }

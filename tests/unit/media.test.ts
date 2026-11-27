@@ -1,190 +1,173 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { decodeBase64 } from '../../src/media/decode.js';
-import { sniffImage } from '../../src/media/sniff.js';
-import { createMediaService } from '../../src/media/service.js';
-import { artifactHarness } from '../fixtures/artifacts.js';
-import { gifBytes, jpegBytes, pngBytes, webpBytes } from '../helpers.js';
+import { createNativeAgent } from '../../src/agents/native/agent.js';
+import { intakeMedia } from '../../src/media/intake.js';
+import { chunk, jpeg, png, webp } from '../fixtures/media.js';
 
-const LIMITS = { maxPixels: 40_000_000 };
+function attachment(
+  bytes: Buffer,
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp',
+  name?: string,
+) {
+  return {
+    kind: 'image' as const,
+    mediaType,
+    dataBase64: bytes.toString('base64'),
+    ...(name ? { name } : {}),
+  };
+}
 
-test('PNG, JPEG, WebP and single-frame GIF are identified from their headers', () => {
-  const png = sniffImage(pngBytes(320, 200), LIMITS);
-  assert.deepEqual(png, { ok: true, mediaType: 'image/png', width: 320, height: 200 });
-
-  const jpeg = sniffImage(jpegBytes(640, 480), LIMITS);
-  assert.deepEqual(jpeg, { ok: true, mediaType: 'image/jpeg', width: 640, height: 480 });
-
-  const webp = sniffImage(webpBytes(800, 600), LIMITS);
-  assert.deepEqual(webp, { ok: true, mediaType: 'image/webp', width: 800, height: 600 });
-
-  const gif = sniffImage(gifBytes(64, 32), LIMITS);
-  assert.deepEqual(gif, { ok: true, mediaType: 'image/gif', width: 64, height: 32 });
+test('a well-formed PNG is accepted with its real dimensions and digest', () => {
+  const result = intakeMedia([attachment(png(7, 9), 'image/png', '../report.png')]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const [media] = result.value;
+  assert.ok(media);
+  assert.equal(media.reference.mediaType, 'image/png');
+  assert.equal(media.reference.width, 7);
+  assert.equal(media.reference.height, 9);
+  assert.equal(media.reference.bytes, png(7, 9).length);
+  assert.equal(media.reference.sha256.length, 64);
+  assert.ok(media.reference.mediaId.startsWith('media_'));
+  // A display name is never treated as a path.
+  assert.equal(media.reference.name?.includes('/'), false);
+  assert.equal(media.reference.name?.includes('\\'), false);
 });
 
-test('a pixel ceiling is enforced from the header without decompression', () => {
-  const result = sniffImage(pngBytes(10_000, 10_000), { maxPixels: 1_000_000 });
-  assert.equal(result.ok, false);
-  assert.equal(result.ok === false && result.code, 'media_invalid');
-  assert.match(result.ok === false ? result.detail : '', /pixel limit/);
+test('JPEG and WebP are identified from their own headers', () => {
+  const jpegResult = intakeMedia([attachment(jpeg(11, 13), 'image/jpeg')]);
+  assert.equal(jpegResult.ok, true);
+  if (jpegResult.ok) {
+    assert.equal(jpegResult.value[0]?.reference.width, 11);
+    assert.equal(jpegResult.value[0]?.reference.height, 13);
+  }
+
+  const webpResult = intakeMedia([attachment(webp(16, 10), 'image/webp')]);
+  assert.equal(webpResult.ok, true);
+  if (webpResult.ok) {
+    assert.equal(webpResult.value[0]?.reference.width, 16);
+    assert.equal(webpResult.value[0]?.reference.height, 10);
+  }
 });
 
-test('animated images are refused rather than sampled silently', () => {
-  const gif = sniffImage(gifBytes(8, 8, 2), LIMITS);
-  assert.equal(gif.ok, false);
-  assert.equal(gif.ok === false && gif.code, 'media_unsupported');
+test('the declared type must match the magic bytes', () => {
+  const disguised = intakeMedia([attachment(png(), 'image/jpeg')]);
+  assert.equal(disguised.ok, false);
+  assert.match(disguised.ok === false ? disguised.detail : '', /well-formed/);
+});
 
-  const animated = webpBytes(8, 8);
-  animated[20] = 0x02;
-  const webp = sniffImage(animated, LIMITS);
-  assert.equal(webp.ok, false);
-  assert.equal(webp.ok === false && webp.code, 'media_unsupported');
+test('SVG, GIF and archive bytes are refused even when declared as a raster type', () => {
+  for (const bytes of [
+    Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
+    Buffer.from('GIF89a\x01\x00\x01\x00', 'binary'),
+    Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]),
+  ]) {
+    const result = intakeMedia([attachment(bytes, 'image/png')]);
+    assert.equal(result.ok, false);
+  }
+});
 
-  const png = pngBytes(8, 8);
-  const actl = Buffer.alloc(20);
-  actl.writeUInt32BE(8, 0);
-  actl.write('acTL', 4, 'latin1');
-  actl.writeUInt32BE(2, 8);
-  actl.writeUInt32BE(0, 12);
-  const apng = Buffer.concat([png.subarray(0, 33), actl, png.subarray(33)]);
-  const animatedPng = sniffImage(apng, LIMITS);
+test('animated PNG and WebP are refused', () => {
+  const actl = chunk('acTL', Buffer.alloc(8));
+  const animatedPng = intakeMedia([attachment(png(2, 2, [actl]), 'image/png')]);
   assert.equal(animatedPng.ok, false);
-  assert.equal(animatedPng.ok === false && animatedPng.code, 'media_unsupported');
+  assert.match(animatedPng.ok === false ? animatedPng.detail : '', /Animated/);
+
+  const animatedWebp = intakeMedia([attachment(webp(4, 4, true), 'image/webp')]);
+  assert.equal(animatedWebp.ok, false);
+  assert.match(animatedWebp.ok === false ? animatedWebp.detail : '', /Animated/);
 });
 
-test('active and unsupported formats never become image input', () => {
-  for (const content of [
-    '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
-    '<?xml version="1.0"?><svg/>',
-    '<!doctype html><html><body>hi</body></html>',
-    '%PDF-1.7 leading bytes',
-  ]) {
-    const result = sniffImage(Buffer.from(content, 'utf8'), LIMITS);
-    assert.equal(result.ok, false);
-    assert.equal(result.ok === false && result.code, 'media_unsupported');
-  }
+test('pixel-bomb dimensions are refused from the header alone', () => {
+  const huge = intakeMedia([attachment(png(9000, 20), 'image/png')]);
+  assert.equal(huge.ok, false);
+  assert.match(huge.ok === false ? huge.detail : '', /8192|pixels/);
 });
 
-test('a truncated or inconsistent header is invalid, not guessed', () => {
-  const png = pngBytes(4, 4).subarray(0, 20);
-  assert.equal(sniffImage(png, LIMITS).ok, false);
-  const unterminated = pngBytes(4, 4).subarray(0, 40);
-  assert.equal(sniffImage(unterminated, LIMITS).ok, false);
+test('per-item, total and count limits are enforced', () => {
+  const oversized = Buffer.concat([png(), Buffer.alloc(2 * 1024 * 1024)]);
+  const item = intakeMedia([attachment(oversized, 'image/png')]);
+  assert.equal(item.ok, false);
+  assert.match(item.ok === false ? item.detail : '', /at most/);
 
-  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x40, 0x08]);
-  assert.equal(sniffImage(jpeg, LIMITS).ok, false);
-  const unterminatedJpeg = jpegBytes(4, 4).subarray(0, jpegBytes(4, 4).length - 2);
-  assert.equal(sniffImage(unterminatedJpeg, LIMITS).ok, false);
+  const padded = (size: number): Buffer => png(2, 2, [chunk('tEXt', Buffer.alloc(size, 0x41))]);
+  const total = intakeMedia([
+    attachment(padded(1_500_000), 'image/png'),
+    attachment(padded(1_500_000), 'image/png'),
+    attachment(padded(1_500_000), 'image/png'),
+  ]);
+  assert.equal(total.ok, false);
+  assert.match(total.ok === false ? total.detail : '', /total at most/);
 
-  const unknown = Buffer.from('not an image at all');
-  const result = sniffImage(unknown, LIMITS);
+  const tooMany = intakeMedia(Array.from({ length: 5 }, () => attachment(png(), 'image/png')));
+  assert.equal(tooMany.ok, false);
+  assert.match(tooMany.ok === false ? tooMany.detail : '', /At most 4/);
+});
+
+test('non-canonical base64 and a missing image body are refused', () => {
+  const padded = intakeMedia([{ kind: 'image', mediaType: 'image/png', dataBase64: 'AAAA' }]);
+  assert.equal(padded.ok, false);
+  const nonCanonical = intakeMedia([
+    { kind: 'image', mediaType: 'image/png', dataBase64: 'iVBORw0KGgo=' },
+  ]);
+  assert.equal(nonCanonical.ok, false);
+});
+
+test('a truncated JPEG without a frame header is refused', () => {
+  const truncated = Buffer.concat([
+    Buffer.from([0xff, 0xd8]),
+    Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, 0x00]),
+  ]);
+  const result = intakeMedia([attachment(truncated, 'image/jpeg')]);
   assert.equal(result.ok, false);
-  assert.equal(result.ok === false && result.code, 'media_unsupported');
 });
 
-test('base64 decoding is canonical and bounded before allocation', () => {
-  const bytes = pngBytes(2, 2);
-  const canonical = bytes.toString('base64');
-  assert.deepEqual(decodeBase64(canonical, 1_000), { ok: true, bytes });
-
-  for (const bad of [
-    `${canonical}\n`,
-    canonical.slice(0, -1),
-    `${canonical.slice(0, -2)}-_`,
-    'A',
-    Buffer.from([1, 2]).toString('base64').replace(/=$/, ''),
-  ]) {
-    const result = decodeBase64(bad, 1_000);
-    assert.equal(result.ok, false);
-    assert.equal(result.ok === false && result.code, 'media_invalid');
-  }
-
-  const huge = Buffer.alloc(2_000, 1).toString('base64');
-  const oversized = decodeBase64(huge, 1_024);
-  assert.equal(oversized.ok, false);
-  assert.equal(oversized.ok === false && oversized.code, 'media_too_large');
-});
-
-test('an upload is owner-scoped, header-typed and mode-bound', async () => {
-  const harness = artifactHarness({ settings: { allowEphemeral: true } });
-  const media = createMediaService({
-    artifacts: harness.service,
-    clock: harness.clock,
-    limits: {
-      enabled: true,
-      maxBytes: 5_000_000,
-      maxPixels: 40_000_000,
-      maxAttachments: 4,
-      creativeMaxBytes: 262_144,
-      allowPrivateModeAttachments: false,
+test('Native sends a validated image as content parts on the chat model call', async () => {
+  const model = { providerId: 'fixture', modelId: 'fixture' };
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+  let capturedImages: string[] | undefined;
+  const native = createNativeAgent({
+    enabled: true,
+    gateway: {
+      id: 'fixture',
+      complete: async (request: import('../../src/agents/native/types.js').ModelCompletionRequest) => {
+        capturedImages = request.images;
+        return { text: 'seen', usage: {} };
+      },
     },
   });
-  const data = pngBytes(10, 10).toString('base64');
-
-  const uploaded = await media.upload(harness.owner.ownerId, {
-    mode: 'cloud',
-    data,
-    declaredType: 'image/png',
-  });
-  assert.equal(uploaded.ok, true);
-  if (!uploaded.ok) return;
-  assert.equal(uploaded.value.media.mediaType, 'image/png');
-
-  const mismatch = await media.upload(harness.owner.ownerId, {
-    mode: 'cloud',
-    data,
-    declaredType: 'image/jpeg',
-  });
-  assert.equal(mismatch.ok, false);
-  assert.equal(mismatch.ok === false && mismatch.code, 'media_invalid');
-
-  const foreign = await media.get(harness.other.ownerId, uploaded.value.media.mediaId);
-  assert.equal(foreign.ok, false);
-  assert.equal(foreign.ok === false && foreign.code, 'not_found');
-
-  const wrongMode = await media.resolve({
-    ownerId: harness.owner.ownerId,
-    mode: 'private',
-    mediaIds: [uploaded.value.media.mediaId],
-  });
-  assert.equal(wrongMode.ok, false);
-  assert.equal(wrongMode.ok === false && wrongMode.code, 'forbidden');
-
-  const resolved = await media.resolve({
-    ownerId: harness.owner.ownerId,
-    mode: 'cloud',
-    mediaIds: [uploaded.value.media.mediaId],
-  });
-  assert.equal(resolved.ok, true);
-  if (resolved.ok) {
-    assert.match(resolved.value[0]?.dataUrl ?? '', /^data:image\/png;base64,/);
-  }
-});
-
-test('the capability report keeps unimplemented modalities unavailable', () => {
-  const harness = artifactHarness({ settings: { allowEphemeral: true } });
-  const media = createMediaService({
-    artifacts: harness.service,
-    clock: harness.clock,
-    limits: {
-      enabled: true,
-      maxBytes: 4_194_304,
-      maxPixels: 40_000_000,
-      maxAttachments: 4,
-      creativeMaxBytes: 262_144,
-      allowPrivateModeAttachments: false,
+  const outcome = await native.run(
+    {
+      ownerId: 'owner',
+      tenantId: null,
+      conversationId: 'conv',
+      workload: 'work',
+      game: null,
+      objective: 'describe the attached image',
+      operation: 'multimodal', routing: 'auto', allowFallback: false, reasoning: 'fast',
+      model,
+      mode: 'cloud',
+      workspaceRoot: '/fixture',
+      maxSteps: 1,
+      budget: null,
+      signal: new AbortController().signal,
+      media: [
+        {
+          reference: {
+            mediaId: 'media_1',
+            kind: 'image',
+            mediaType: 'image/png',
+            bytes: 8,
+            width: 1,
+            height: 1,
+            sha256: '0'.repeat(64),
+          },
+          dataUrl,
+        },
+      ],
     },
-  });
-  const unavailable = media.capabilities({ available: false, detail: 'No vision route.' });
-  assert.equal(unavailable.inputs.find((entry) => entry.kind === 'image')?.available, false);
-  for (const kind of ['audio', 'video', 'document'] as const) {
-    const entry = unavailable.inputs.find((item) => item.kind === kind);
-    assert.equal(entry?.available, false);
-    assert.match(entry?.reason.detail ?? '', /not implemented/);
-  }
-  assert.deepEqual(unavailable.creative.formats, ['svg', 'html']);
-  assert.equal(unavailable.creative.scripts, false);
-  assert.equal(unavailable.creative.externalResources, false);
-  assert.equal(unavailable.creative.sandbox, 'required');
-  assert.equal(unavailable.privateModeAttachments.available, false);
+    () => undefined,
+  );
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(capturedImages, [dataUrl]);
 });

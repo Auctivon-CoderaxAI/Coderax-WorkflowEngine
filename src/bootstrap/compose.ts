@@ -20,8 +20,8 @@ import { probeAgents } from '../agents/probe.js';
 import { createRouterCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import { createModelRouter, type ModelRouter } from '../models/router.js';
-import type { ProviderAdapter, ProviderSettings, RegisteredProvider, FreeTierAttestation, BenchmarkScore } from '../models/types.js';
-import type { ModelGateway } from '../agents/native/types.js';
+import type { ProviderAdapter, ProviderSettings, RegisteredProvider, FreeTierAttestation, BenchmarkScore, GatewayCompletion } from '../models/types.js';
+import type { BasicModelGateway, ModelGateway } from '../agents/native/types.js';
 import { createProviderPolicyRegistry, type ProviderPolicy, type ProviderPolicyRegistry } from '../models/policy.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
 import { createGeminiProvider } from '../models/providers/gemini.js';
@@ -32,7 +32,8 @@ import { createArtifactToolkit } from '../artifacts/toolkit.js';
 import { createArtifactStore } from '../artifacts/store.js';
 import { createBuiltinTools } from '../tools/builtin.js';
 import { createToolRuntime } from '../tools/runtime.js';
-import { attachMcpServers } from '../mcp/client.js';
+import { attachMcpServers } from '../tools/mcp.js';
+import { loadPlugins } from '../plugins/manifest.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createMediaService } from '../media/service.js';
 import { createCreativeService } from '../creative/service.js';
@@ -109,7 +110,7 @@ export type ComposeInput = {
    * transport. It is an injection point, not an authority: production always
    * builds the router below, and a deployment never sets this.
    */
-  gateway?: ModelGateway | null;
+  gateway?: ModelGateway | BasicModelGateway | null;
   /** Benchmark scores for tests; production loads them from the configured file. */
   benchmarks?: BenchmarkScore[];
   /** Provider policy records for fixtures; production reads `models.policy`. */
@@ -418,17 +419,54 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   // Production reaches inference only through the router above. A gateway
   // fixture is a test seam and never becomes a second production authority.
+  const fixture = input.gateway;
   const gateway: ModelGateway | null =
-    input.gateway !== undefined
-      ? input.gateway
+    fixture !== undefined
+      ? fixture && {
+          id: fixture.id,
+          complete: async (request) => {
+            const images = request.messages?.flatMap((message) => message.images ?? []);
+            const configured = { ...request, ...(images?.length ? { images } : {}) };
+            const result = await fixture.complete(configured);
+            const normalized: Partial<GatewayCompletion> = result;
+            return {
+              ...result,
+              model: normalized.model ?? request.model,
+              attempts: normalized.attempts ?? [request.model],
+              toolCalls: normalized.toolCalls ?? [],
+              latencyMs: normalized.latencyMs ?? 0,
+            };
+          },
+          ...('stream' in fixture && typeof fixture.stream === 'function' ? { stream: fixture.stream } : {}),
+        }
       : providerBuild.registrations.length > 0
         ? modelRouter
         : null;
+
+  const plugins = await loadPlugins(config.tools.pluginDirectory);
+  const mcp = await attachMcpServers(config.tools.enabled ? [...config.tools.mcp, ...config.mcp.servers, ...plugins.servers] : []);
+  const knowledge = createKnowledgeStore({ clock, ids, embeddings: null, maxDocuments: config.knowledge.maxDocuments });
+  const builtinTools = config.tools.enabled
+    ? createBuiltinTools({
+        allowInsecureLoopback: config.tools.allowInsecureLoopback,
+        shellEnabled: config.tools.shellEnabled,
+        allowedCommands: config.tools.allowedCommands,
+        networkEnabled: config.tools.networkEnabled,
+        allowedHosts: config.tools.allowedHosts,
+        maxOutputBytes: config.tools.maxOutputBytes,
+        commandTimeoutMs: config.tools.commandTimeoutMs,
+        maxSearchFiles: config.tools.maxSearchFiles,
+        memory: persistence.memory,
+        knowledge: config.knowledge.enabled ? knowledge : null,
+      })
+    : [];
+  const tools = createToolRuntime({ tools: [...builtinTools, ...mcp.tools], catalogueMaxChars: config.tools.catalogueMaxChars });
 
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
     gateway,
     planner: createDeterministicPlanner(),
+    ...(config.tools.enabled ? { tools } : {}),
     // An injected transport is a test seam. A real provider registration only
     // counts once the router has verified a zero-cost route; a key alone never
     // makes a model free.
@@ -511,23 +549,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const { lease, tasks, conversations, memory, permissions, scheduleNotices } = persistence;
   const notifications = persistence.notifications;
   const schedules = persistence.schedules;
-  const mcp = await attachMcpServers(config.mcp.servers);
-  const knowledge = createKnowledgeStore({ clock, ids, embeddings: null, maxDocuments: config.knowledge.maxDocuments });
-  const builtinTools = config.tools.enabled
-    ? createBuiltinTools({
-        shellEnabled: config.tools.shellEnabled,
-        allowedCommands: config.tools.allowedCommands,
-        networkEnabled: config.tools.networkEnabled,
-        allowedHosts: config.tools.allowedHosts,
-        maxOutputBytes: config.tools.maxOutputBytes,
-        commandTimeoutMs: config.tools.commandTimeoutMs,
-        maxSearchFiles: config.tools.maxSearchFiles,
-        memory,
-        knowledge: config.knowledge.enabled ? knowledge : null,
-      })
-    : [];
-  const tools = createToolRuntime({ tools: [...builtinTools, ...mcp.tools] });
-
   const audit = createAuditLog({ clock, ids });
   const artifactService = createArtifactService({
     artifacts: persistence.artifacts,

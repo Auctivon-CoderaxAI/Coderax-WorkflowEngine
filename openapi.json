@@ -6524,11 +6524,167 @@
         ],
         "responses": {
           "200": {
-            "description": "Chat reply",
+            "description": "Chat reply or SSE frames",
             "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conversationId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "messageId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "agent": {
+                      "type": "string",
+                      "enum": [
+                        "coderax",
+                        "opencode",
+                        "freebuff"
+                      ]
+                    },
+                    "model": {
+                      "type": "object",
+                      "properties": {
+                        "providerId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "modelId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 160
+                        }
+                      },
+                      "required": [
+                        "providerId",
+                        "modelId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "usage": {
+                      "type": "object",
+                      "properties": {
+                        "inputTokens": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "outputTokens": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "creative": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "artifactId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "format": {
+                            "type": "string",
+                            "enum": [
+                              "svg",
+                              "html"
+                            ]
+                          },
+                          "safe": {
+                            "type": "boolean"
+                          },
+                          "content": {
+                            "type": "string",
+                            "maxLength": 262144
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "bytes": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 262144
+                          },
+                          "findings": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "code": {
+                                  "type": "string",
+                                  "enum": [
+                                    "script",
+                                    "event_handler",
+                                    "external_reference",
+                                    "embedded_object",
+                                    "entity",
+                                    "style",
+                                    "unsupported_element",
+                                    "unsupported_attribute",
+                                    "oversize",
+                                    "malformed",
+                                    "control_character"
+                                  ]
+                                },
+                                "detail": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 300
+                                }
+                              },
+                              "required": [
+                                "code",
+                                "detail"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "maxItems": 20
+                          }
+                        },
+                        "required": [
+                          "artifactId",
+                          "format",
+                          "safe",
+                          "sha256",
+                          "bytes",
+                          "findings"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "conversationId",
+                    "messageId",
+                    "text",
+                    "agent",
+                    "model",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              },
               "text/event-stream": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Server-sent event frames."
                 }
               }
             }
@@ -26317,7 +26473,8 @@
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Server-sent event frames."
                 }
               }
             }

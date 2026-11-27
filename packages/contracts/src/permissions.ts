@@ -26,6 +26,7 @@ export const PermissionScope = z.enum([
   'memory.read',
   'conversation.read',
   'credential.use',
+  'browser.use',
   'browser.control',
   'browser.transfer',
 ]);

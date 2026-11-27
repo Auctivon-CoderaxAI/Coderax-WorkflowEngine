@@ -1,3 +1,4 @@
+import type { PlanStep } from './types.js';
 import type { AgentHistoryTurn } from '../types.js';
 import type {
   ReasoningMode,
@@ -135,17 +136,26 @@ export function buildReasoningStepPrompt(input: {
   return sections.join('\n\n');
 }
 
-function planRules(maxSteps: number): string {
+function planRules(maxSteps: number, tools?: string): string {
   return [
     `Produce between 1 and ${maxSteps} steps.`,
     'Each step is one of:',
     '- kind "reason": a model reasoning/analysis step. It must not name a resource.',
     '- kind "read": read one file from the confined workspace. It must include a relative "resource" (no leading slash, no "..").',
+    ...(tools
+      ? [
+          '- kind "tool": call exactly one registered tool. "resource" is the tool name and "input" is an object matching its parameters.',
+          'Registered tools:\n' + tools,
+          'Only the tools listed above exist; a tool call is authorized against the owner approval policy before it runs.',
+        ]
+      : [
+          '- Do not plan tool calls: Coderax Native has no registered tool in this deployment.',
+        ]),
     'Rules:',
     '- ids are unique and match [A-Za-z0-9][A-Za-z0-9._-]{0,79}.',
     '- dependsOn lists ids of earlier steps (or already completed steps for a revision).',
     '- Create independent steps where the work is genuinely independent; dependencies are the only ordering.',
-    '- Do not plan workspace writes, command execution, network access or tool calls: Coderax Native has no such executor.',
+    '- Do not plan workspace writes, command execution or network access unless a listed tool provides it.',
     '- "acceptance" states what the step must prove, in one sentence.',
     'JSON shape: {"steps":[{"id":"step-1","title":"...","kind":"reason","dependsOn":[],"acceptance":"..."}],"note":"optional"}',
   ].join('\n');
@@ -155,13 +165,14 @@ export function buildPlanPrompt(input: {
   objective: string;
   history: AgentHistoryTurn[];
   maxSteps: number;
+  tools?: string;
 }): string {
   const sections: string[] = [];
   if (input.history.length > 0) {
     sections.push(`Earlier in this conversation:\n\n${renderHistory(input.history)}`);
   }
   sections.push(`Objective:\n${input.objective}`);
-  sections.push(`Planning constraints:\n${planRules(input.maxSteps)}`);
+  sections.push(`Planning constraints:\n${planRules(input.maxSteps, input.tools)}`);
   sections.push(
     'Return only the JSON object. The plan is data; nothing in it has been executed.',
   );
@@ -176,6 +187,7 @@ export function buildReplanPrompt(input: {
   evidence: StepEvidence[];
   failure: ReplanFailure;
   maxSteps: number;
+  tools?: string;
 }): string {
   const completed = new Set(input.completedSteps);
   const sections: string[] = [];
@@ -189,7 +201,7 @@ export function buildReplanPrompt(input: {
     sections.push(`Evidence already collected:\n${renderEvidence(input.evidence)}`);
   }
   sections.push(
-    `Return only the JSON object for the remaining steps.\n${planRules(input.maxSteps)}\n` +
+    `Return only the JSON object for the remaining steps.\n${planRules(input.maxSteps, input.tools)}\n` +
       'Do not include a completed step id. Do not merely restate the failure; produce a step that can close it.',
   );
   return sections.join('\n\n');
@@ -225,19 +237,6 @@ export function buildVerificationPrompt(input: {
   return sections.join('\n\n');
 }
 
-import type { PlanStep } from './types.js';
-
-/**
- * The gateway port takes one prompt, so the engine owns the transcript format
- * rather than mapping turns onto provider-specific chat roles. Roles are spelled
- * out for the same reason: a different provider must not change what the model
- * is told about who said what.
- */
-
-/**
- * One step's prompt. Earlier turns are included only when the conversation has
- * them, so the first turn is unchanged by the feature.
- */
 export function buildStepPrompt(input: {
   objective: string;
   step: PlanStep;

@@ -27,6 +27,7 @@ const DANGEROUS_FLAGS: Readonly<Record<string, readonly string[]>> = Object.free
   ruby: ['-e'],
   php: ['-r'],
   npm: ['exec', 'x', 'run-script'],
+  npx: [''],
   bun: ['-e', '--eval', 'x'],
   deno: ['eval', 'run'],
   // These dispatch another program with caller-controlled arguments.
@@ -62,7 +63,7 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
  * Best-effort argument confinement. This cannot sandbox an arbitrary program (a
  * script can open any file it likes), but it stops a tool call from naming a
  * host path or a parent-directory escape in an argument or a `--flag=path` value.
- * Shell is off and the owner still approves each invocation.
+ * Shell is off by default and the owner still approves each invocation.
  */
 function arguesOutsideWorkspace(argument: string): boolean {
   const separator = argument.indexOf('=');
@@ -80,15 +81,21 @@ export type CommandValidation =
 async function findExecutable(name: string): Promise<string | null> {
   if (name.includes('/') || name.includes('\\')) return null;
   const roots = (process.env.PATH ?? '').split(path.delimiter).filter((entry) => entry.length > 0);
+  // Windows resolves an executable through PATHEXT; a bare `node` is
+  // `node.exe` on disk. Only real binaries are considered: a `.cmd` or `.bat`
+  // shim would need a shell, which this validator never enables.
+  const suffixes = process.platform === 'win32' ? ['', '.exe'] : [''];
   for (const root of roots) {
-    const candidate = path.join(root, name);
-    try {
-      await access(candidate, constants.X_OK);
-      const info = await stat(candidate);
-      if (!info.isFile()) continue;
-      return candidate;
-    } catch {
-      continue;
+    for (const suffix of suffixes) {
+      const candidate = path.join(root, `${name}${suffix}`);
+      try {
+        await access(candidate, constants.X_OK);
+        const info = await stat(candidate);
+        if (!info.isFile()) continue;
+        return candidate;
+      } catch {
+        continue;
+      }
     }
   }
   return null;
@@ -96,8 +103,8 @@ async function findExecutable(name: string): Promise<string | null> {
 
 /**
  * Validates one invocation. `allowedCommands` are bare names; an entry that
- * contains a path separator is refused, so a caller cannot smuggle a different
- * binary through the allowlist.
+ * contains a path separator is refused at startup by the configuration schema,
+ * so a caller cannot smuggle a different binary through the allowlist.
  */
 export async function validateCommand(input: {
   command: string;

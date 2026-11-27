@@ -45,27 +45,27 @@ test('each domain has one recorded owner and no orphan domain', () => {
 
 test('a reserved id is never published and a superseded id names its canonical operation', () => {
   const ids = new Set(published);
-  const reservedIds = RESERVED_OPERATIONS.map((operation) => operation.operationId);
+  const reservedIds = RESERVED_OPERATIONS.map((operation) => operation.id);
   assert.equal(new Set(reservedIds).size, reservedIds.length, 'a reserved operation cannot be listed twice');
 
   for (const reserved of RESERVED_OPERATIONS) {
     assert.equal(
-      ids.has(reserved.operationId),
+      ids.has(reserved.id),
       false,
-      `${reserved.operationId} is reserved by ${reserved.branch} and must not be published on this base`,
+      `${reserved.id} is reserved by ${reserved.branch} and must not be published on this base`,
     );
-    assert.match(reserved.head, /^[0-9a-f]{40}$/, `${reserved.operationId} records an exact branch head`);
-    assert.ok(reserved.reason.trim().length > 0, `${reserved.operationId} states why it is withheld`);
+    assert.match(reserved.head, /^[0-9a-f]{40}$/, `${reserved.id} records an exact branch head`);
+    assert.ok(reserved.reason.trim().length > 0, `${reserved.id} states why it is withheld`);
 
     if (reserved.status === 'superseded') {
-      assert.ok(reserved.canonical, `${reserved.operationId} must name the id that owns the behaviour`);
+      assert.ok(reserved.canonical, `${reserved.id} must name the id that owns the behaviour`);
       assert.ok(ids.has(reserved.canonical), `${reserved.canonical} must be a published operation`);
-      assert.notEqual(reserved.canonical, reserved.operationId);
+      assert.notEqual(reserved.canonical, reserved.id);
     } else {
       assert.equal(
         reserved.canonical,
         undefined,
-        `${reserved.operationId} is blocked, so it cannot redirect to an implemented operation`,
+        `${reserved.id} is blocked, so it cannot redirect to an implemented operation`,
       );
     }
   }

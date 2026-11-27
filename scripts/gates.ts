@@ -29,7 +29,7 @@ export const GATES: readonly Gate[] = Object.freeze([
   { id: 'architecture', title: 'Dependency wiring, ownership and unused capability detection', directory: 'dist/tests/architecture', command: 'dist/scripts/check-architecture.js' },
   { id: 'artifacts', title: 'Package artifact integrity', directory: 'dist/tests/artifacts' },
   { id: 'e2e', title: 'End-to-end API-to-engine tests', directory: 'dist/tests/e2e' },
-  { id: 'audit', title: 'Dependency vulnerability scan', command: 'dist/scripts/check-audit.js' },
+  { id: 'audit', title: 'Dependency vulnerability scan', directory: 'dist/tests/release', command: 'dist/scripts/check-audit.js' },
   { id: 'mongo-live', title: 'Live MongoDB integration tests (real database)', directory: 'dist/tests/live', live: true },
 ]);
 

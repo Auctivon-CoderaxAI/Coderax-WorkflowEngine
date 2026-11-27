@@ -410,20 +410,6 @@ export const TeamConfig = z
   })
   .strict();
 
-export const ToolsConfig = z
-  .object({
-    enabled: z.boolean().default(true),
-    /** Shell and network are off unless the owner turns them on explicitly. */
-    shellEnabled: z.boolean().default(false),
-    allowedCommands: z.array(z.string().min(1).max(120)).max(50).default([]),
-    networkEnabled: z.boolean().default(false),
-    allowedHosts: z.array(z.string().min(1).max(255)).max(50).default([]),
-    maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(65_536),
-    commandTimeoutMs: z.number().int().min(100).max(60_000).default(15_000),
-    maxSearchFiles: z.number().int().min(1).max(20_000).default(2_000),
-  })
-  .strict();
-
 export const KnowledgeConfig = z
   .object({
     enabled: z.boolean().default(true),
@@ -452,6 +438,27 @@ export const McpServerConfig = z.discriminatedUnion('transport', [
     })
     .strict(),
 ]);
+
+export const ToolsConfig = z
+  .object({
+    enabled: z.boolean().default(true),
+    shellEnabled: z.boolean().default(false),
+    /** Bare executable names; a path separator is a configuration error. */
+    allowedCommands: z.array(z.string().trim().min(1).max(64)).max(40).default([]),
+    networkEnabled: z.boolean().default(false),
+    /** Hostnames or `.suffix` entries; a scheme or path is a configuration error. */
+    allowedHosts: z.array(z.string().trim().min(1).max(253)).max(100).default([]),
+    allowInsecureLoopback: z.boolean().default(false),
+    maxOutputBytes: z.number().int().min(256).max(200_000).default(20_000),
+    commandTimeoutMs: z.number().int().min(1_000).max(120_000).default(20_000),
+    maxSearchFiles: z.number().int().min(1).max(5_000).default(500),
+    catalogueMaxChars: z.number().int().min(1_000).max(60_000).default(12_000),
+    maxKnowledgeDocuments: z.number().int().min(1).max(10_000).default(500),
+    /** Directory of plugin manifests; absent means no plugin directory. */
+    pluginDirectory: z.string().trim().min(1).max(1024).nullable().default(null),
+    mcp: z.array(McpServerConfig).max(20).default([]),
+  })
+  .strict();
 
 export const McpConfig = z
   .object({ servers: z.array(McpServerConfig).max(10).default([]) })
