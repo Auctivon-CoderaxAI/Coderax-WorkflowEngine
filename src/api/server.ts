@@ -55,6 +55,7 @@ export function createHttpServer(input: {
             input.router.bodyLimit(
               request.method ?? 'GET',
               request.url ?? '/',
+              request.headers.authorization,
             ) ?? MAX_BODY_BYTES;
           bodyText = await readBody(request, limit);
         }

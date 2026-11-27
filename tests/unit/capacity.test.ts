@@ -81,8 +81,7 @@ test('reconcile refuses to reset availability while an admission is live', async
   await store.reconcile({
     ownerId: base.ownerId,
     mode: base.mode,
-    usedBytes: 0,
-    usedArtifacts: 0,
+    usage: async () => ({ bytes: 0, artifacts: 0 }),
     maxBytes: 100,
     maxArtifacts: 2,
   });
@@ -95,8 +94,7 @@ test('reconcile refuses to reset availability while an admission is live', async
   await store.reconcile({
     ownerId: base.ownerId,
     mode: base.mode,
-    usedBytes: 40,
-    usedArtifacts: 1,
+    usage: async () => ({ bytes: 40, artifacts: 1 }),
     maxBytes: 100,
     maxArtifacts: 2,
   });
@@ -144,10 +142,20 @@ test('the Mongo ledger admits the last slot exactly once under ten concurrent re
   await store.reconcile({
     ownerId: base.ownerId,
     mode: base.mode,
-    usedBytes: 50,
-    usedArtifacts: 0,
+    usage: async () => ({ bytes: 50, artifacts: 0 }),
     maxBytes: 50,
     maxArtifacts: 10,
   });
   assert.equal(capacity.documents[0]?.availableBytes, 0);
+});
+
+test('a committed admission racing a stale reconciliation snapshot stays spent', async () => {
+  const store = createMongoCapacityStore({ capacity: createFakeCollection(), reservations: createFakeCollection() });
+  await store.reconcile({ ...base, usage: async () => {
+    const raced = await store.reserve({ ...base, bytes: 100 });
+    assert.ok(raced.ok);
+    await store.commit(raced.reservation);
+    return { bytes: 0, artifacts: 0 };
+  } });
+  assert.deepEqual(await store.reserve({ ...base, bytes: 1 }), { ok: false, reason: 'bytes' });
 });

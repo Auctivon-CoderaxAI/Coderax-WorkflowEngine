@@ -8,7 +8,6 @@ import {
   Sha256,
   TaskId,
 } from './primitives.js';
-import { DurableDeliverableRequest, VerificationCheck } from './deliverables.js';
 
 /**
  * Durable artifacts.
@@ -187,6 +186,7 @@ export const ArtifactUploadRequest = z
     note: z.string().max(500).optional(),
   })
   .strict();
+export type ArtifactUploadInput = z.input<typeof ArtifactUploadRequest>;
 export type ArtifactUploadRequest = z.infer<typeof ArtifactUploadRequest>;
 
 export const ArtifactVersionRequest = z
@@ -200,8 +200,15 @@ export const ArtifactVersionRequest = z
     mode: DataMode.default('private'),
     retentionDays: z.number().int().min(0).max(3650).optional(),
     note: z.string().max(500).optional(),
+    /**
+     * Optimistic concurrency. When a caller read version N and sends N here, the
+     * append happens only while the artifact is still at N; otherwise the write
+     * is refused with `conflict` instead of silently replacing a concurrent edit.
+     */
+    expectedVersion: z.number().int().positive().optional(),
   })
   .strict();
+export type ArtifactVersionInput = z.input<typeof ArtifactVersionRequest>;
 export type ArtifactVersionRequest = z.infer<typeof ArtifactVersionRequest>;
 
 export const ArtifactUploadResult = z
@@ -286,47 +293,6 @@ export const ArtifactManifestQuery = z
   .object({ mode: DataMode.default('private'), projectId: ProjectId })
   .strict();
 export type ArtifactManifestQuery = z.infer<typeof ArtifactManifestQuery>;
-
-/**
- * Durable generation. The request names a deliverable that artifact
- * intelligence can render; the engine generates, verifies and persists it
- * through the same tree adapter as an upload.
- *
- * `mode` is read from the deliverable rather than repeated on the envelope, so
- * a request cannot name two data partitions. The response is the persisted
- * project manifest: every file is pinned to an artifact id and immutable
- * version, and `checks` is the verification the producer actually ran.
- */
-export const ArtifactGenerationRequest = z
-  .object({
-    projectId: ProjectId,
-    deliverable: DurableDeliverableRequest,
-    conversationId: ConversationId.optional(),
-    taskId: TaskId.optional(),
-    /** 0 keeps generated artifacts until they are deleted. */
-    retentionDays: z.number().int().min(0).max(3650).optional(),
-  })
-  .strict();
-export type ArtifactGenerationRequest = z.infer<typeof ArtifactGenerationRequest>;
-
-export const GeneratedArtifactKind = z.enum([
-  'document',
-  'spreadsheet',
-  'presentation',
-  'software',
-]);
-export type GeneratedArtifactKind = z.infer<typeof GeneratedArtifactKind>;
-
-export const ArtifactGenerationResult = z
-  .object({
-    projectId: ProjectId,
-    kind: GeneratedArtifactKind,
-    title: z.string().min(1).max(200),
-    manifest: ArtifactProjectManifest,
-    checks: z.array(VerificationCheck).min(1).max(60),
-  })
-  .strict();
-export type ArtifactGenerationResult = z.infer<typeof ArtifactGenerationResult>;
 
 export const ArtifactDeleteResult = z
   .object({

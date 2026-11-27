@@ -148,11 +148,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       permissions: createPermissionStore({ clock, ids: input.ids }),
       notifications: createNotificationStore(),
-      schedules: createScheduleRepository(),
-      scheduleNotices: createScheduleNoticeStore(),
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      schedules: createScheduleRepository(),
+      scheduleNotices: createScheduleNoticeStore(),
       close: NO_CLOSE,
     };
   }

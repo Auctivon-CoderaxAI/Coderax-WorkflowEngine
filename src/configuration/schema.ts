@@ -252,6 +252,8 @@ export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
 export type PersistenceSettings = z.infer<typeof PersistenceConfig>;
+export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;
+
 export type BrowserSettings = z.infer<typeof BrowserConfig>;
 export type BrowserRemoteSettings = z.infer<typeof BrowserRemoteConfig>;
 
@@ -264,4 +266,3 @@ export function browserLimits(browsers: BrowserSettings): BrowserLimits {
     maxUploadBytes: browsers.maxUploadBytes,
   };
 }
-export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;

@@ -73,9 +73,12 @@ export type CapacityStore = {
     maxArtifacts: number;
   }) => Promise<void>;
   reserve: (input: ReserveInput) => Promise<CapacityDecision>;
-  commit: (reservation: CapacityReservation) => Promise<void>;
+  commit: (reservation: Pick<CapacityReservation, 'reservationId'>) => Promise<void>;
+  commitLegacyVersion?: (key: { ownerId: string; mode: DataMode; artifactId: string; version: number }) => Promise<void>;
   release: (reservation: CapacityReservation) => Promise<void>;
   refund: (input: {
+    ticket?: string;
+    legacyTicket?: string;
     ownerId: string;
     mode: DataMode;
     bytes: number;
@@ -85,8 +88,7 @@ export type CapacityStore = {
   reconcile: (input: {
     ownerId: string;
     mode: DataMode;
-    usedBytes: number;
-    usedArtifacts: number;
+    usage: () => Promise<{ bytes: number; artifacts: number } | null>;
     maxBytes: number;
     maxArtifacts: number;
   }) => Promise<void>;
@@ -123,6 +125,7 @@ type MemoryReservation = {
 };
 
 export function createInMemoryCapacityStore(): CapacityStore {
+  let revision = 0;
   const documents = new Map<string, MemoryDocument>();
   const reservations = new Map<string, MemoryReservation>();
 
@@ -164,6 +167,7 @@ export function createInMemoryCapacityStore(): CapacityStore {
       const artifacts = bounded(input.artifacts);
       if (document.availableBytes < bytes) return { ok: false, reason: 'bytes' };
       if (document.availableArtifacts < artifacts) return { ok: false, reason: 'artifacts' };
+      revision++;
       document.availableBytes -= bytes;
       document.availableArtifacts -= artifacts;
       const expiresAtMs = Date.parse(input.now) + Math.max(1, input.ttlMs);
@@ -196,6 +200,7 @@ export function createInMemoryCapacityStore(): CapacityStore {
     release: async (reservation) => {
       const held = reservations.get(reservation.reservationId);
       if (!held || held.state !== 'held') return;
+      revision++;
       reservations.delete(reservation.reservationId);
       const document = documents.get(reservation.key);
       if (!document) return;
@@ -210,7 +215,8 @@ export function createInMemoryCapacityStore(): CapacityStore {
     },
 
     refund: async ({ ownerId, mode, bytes, artifacts }) => {
-      const document = ensureDocument({
+      revision++;
+      const document = documents.get(keyFor(ownerId, mode)) ?? ensureDocument({
         ownerId,
         mode,
         maxBytes: bounded(bytes),
@@ -239,11 +245,16 @@ export function createInMemoryCapacityStore(): CapacityStore {
         (entry) => entry.state === 'held' && entry.reservation.key === key,
       );
       if (live) return;
+      const snapshot = revision;
+      const usage = await input.usage();
+      if (!usage) return;
+      if (snapshot !== revision) return;
+      revision++;
       documents.set(key, {
         ownerId: input.ownerId,
         mode: input.mode,
-        availableBytes: Math.max(0, bounded(input.maxBytes) - bounded(input.usedBytes)),
-        availableArtifacts: Math.max(0, bounded(input.maxArtifacts) - bounded(input.usedArtifacts)),
+        availableBytes: Math.max(0, bounded(input.maxBytes) - bounded(usage.bytes)),
+        availableArtifacts: Math.max(0, bounded(input.maxArtifacts) - bounded(usage.artifacts)),
         maxBytes: bounded(input.maxBytes),
         maxArtifacts: bounded(input.maxArtifacts),
       });
@@ -419,7 +430,7 @@ export function createMongoCapacityStore(
             availableBytes: { $gte: bytes },
             availableArtifacts: { $gte: artifacts },
           },
-          { $inc: { availableBytes: -bytes, availableArtifacts: -artifacts } },
+          { $push: { tickets: reservation.reservationId, ...(artifacts ? { slots: reservation.artifactId } : {}) }, $inc: { revision: 1, availableBytes: -bytes, availableArtifacts: -artifacts } },
           { upsert: false },
         );
         if ((admitted.matchedCount ?? 0) === 1) return { ok: true, reservation };
@@ -445,6 +456,10 @@ export function createMongoCapacityStore(
       };
     },
 
+    commitLegacyVersion: async key => {
+      await reservations.deleteMany({ ...key, state: 'held' });
+    },
+
     commit: async (reservation) => {
       await reservations.deleteOne({
         reservationId: reservation.reservationId,
@@ -462,7 +477,9 @@ export function createMongoCapacityStore(
       await capacity.updateOne(
         { key: reservation.key },
         {
+          $pull: { tickets: reservation.reservationId, ...(reservation.artifacts ? { slots: reservation.artifactId } : {}) },
           $inc: {
+            revision: 1,
             availableBytes: reservation.bytes,
             availableArtifacts: reservation.artifacts,
           },
@@ -474,11 +491,16 @@ export function createMongoCapacityStore(
       });
     },
 
-    refund: async ({ ownerId, mode, bytes, artifacts }) => {
+    refund: async ({ ownerId, mode, bytes, artifacts, ticket, legacyTicket }) => {
+      const field = artifacts ? 'slots' : 'tickets';
       await capacity.updateOne(
-        { key: keyFor(ownerId, mode) },
+        { key: keyFor(ownerId, mode), ...(ticket ? { [field]: ticket } : {}),
+          ...(legacyTicket ? { legacyRefunds: { $nin: [legacyTicket] } } : {}) },
         {
+          ...(ticket ? { $pull: { [field]: ticket } } : {}),
+          ...(legacyTicket ? { $push: { legacyRefunds: legacyTicket } } : {}),
           $inc: {
+            revision: 1,
             availableBytes: bounded(bytes),
             availableArtifacts: bounded(artifacts),
           },
@@ -502,29 +524,35 @@ export function createMongoCapacityStore(
 
     reconcile: async (input) => {
       const key = keyFor(input.ownerId, input.mode);
+      await ensure(input);
+      const snapshot = await capacity.findOne({ key });
+      if (!snapshot) return;
       const live = await reservations
         .find({ key, state: 'held' })
         .limit(1)
         .toArray();
       if (live.length > 0) return;
+      const usage = await input.usage();
+      if (!usage) return;
       await capacity.updateOne(
-        { key },
+        { key, revision: snapshot.revision ?? { $exists: false } },
         {
+          $inc: { revision: 1 },
           $set: {
             key,
             ownerId: input.ownerId,
             mode: input.mode,
-            availableBytes: Math.max(0, bounded(input.maxBytes) - bounded(input.usedBytes)),
+            availableBytes: Math.max(0, bounded(input.maxBytes) - bounded(usage.bytes)),
             availableArtifacts: Math.max(
               0,
-              bounded(input.maxArtifacts) - bounded(input.usedArtifacts),
+              bounded(input.maxArtifacts) - bounded(usage.artifacts),
             ),
             maxBytes: bounded(input.maxBytes),
             maxArtifacts: bounded(input.maxArtifacts),
             updatedAt: new Date().toISOString(),
           },
         },
-        { upsert: true },
+        { upsert: false },
       );
     },
 

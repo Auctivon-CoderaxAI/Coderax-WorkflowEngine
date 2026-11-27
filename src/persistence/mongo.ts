@@ -68,6 +68,8 @@ export type MongoCollectionLike = {
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
   deleteMany: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
+  countDocuments: (filter: MongoFilter) => Promise<number>;
+  aggregate: (pipeline: Record<string, unknown>[]) => { toArray: () => Promise<Record<string, unknown>[]> };
   find: (filter: MongoFilter) => MongoCursor;
 };
 

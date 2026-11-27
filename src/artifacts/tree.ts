@@ -1,4 +1,5 @@
 import type {
+  ArtifactDescriptor,
   ArtifactKind,
   ArtifactMediaType,
   ArtifactProjectManifest,
@@ -40,6 +41,7 @@ export type TreeWriteRequest = {
 export type TreeWriteResult = {
   projectId: string;
   files: ArtifactProjectManifest['files'];
+  descriptors: ArtifactDescriptor[];
   manifest: ArtifactProjectManifest;
 };
 
@@ -49,6 +51,7 @@ type PlannedFile = {
   filename: string;
   mediaType: ArtifactMediaType;
   kind: ArtifactKind;
+  sha256: string;
   contentBase64: string;
   note?: string;
 };
@@ -92,6 +95,7 @@ export function createArtifactTreeWriter(deps: { artifacts: ArtifactService }) {
           filename: validated.value.filename,
           mediaType: validated.value.mediaType,
           kind: validated.value.kind,
+          sha256: validated.value.sha256,
           contentBase64: Buffer.from(validated.value.bytes).toString('base64'),
           ...(file.note ? { note: file.note } : {}),
         });
@@ -122,8 +126,24 @@ export function createArtifactTreeWriter(deps: { artifacts: ArtifactService }) {
         current.value.files.map((entry) => [artifactPathKey(entry.relativePath), entry]),
       );
 
+      // Resolve unchanged files before writing anything. Changed files already
+      // return their descriptor from the write itself.
+      const descriptors = new Map<string, ArtifactDescriptor>();
+      for (const file of planned) {
+        const previous = existing.get(file.pathKey);
+        if (!previous || previous.sha256 !== file.sha256 || previous.relativePath !== file.relativePath ||
+            previous.kind !== file.kind || previous.mediaType !== file.mediaType) continue;
+        const descriptor = await deps.artifacts.get(principal, previous.artifactId, request.mode);
+        if (!descriptor.ok) return descriptor;
+        if (descriptor.value.version !== previous.version || descriptor.value.sha256 !== file.sha256) {
+          return fail('conflict', 'A project file changed while preparing the tree.');
+        }
+        descriptors.set(file.pathKey, descriptor.value);
+      }
+
       const created: string[] = [];
       for (const file of planned) {
+        if (descriptors.has(file.pathKey)) continue;
         const previous = existing.get(file.pathKey);
         const body = {
           filename: file.filename,
@@ -155,6 +175,7 @@ export function createArtifactTreeWriter(deps: { artifacts: ArtifactService }) {
           }
           return written;
         }
+        descriptors.set(file.pathKey, written.value.artifact);
         if (!previous) created.push(written.value.artifact.artifactId);
       }
 
@@ -166,6 +187,7 @@ export function createArtifactTreeWriter(deps: { artifacts: ArtifactService }) {
       return ok({
         projectId: request.projectId,
         files: manifest.value.files,
+        descriptors: Array.from(descriptors.values()),
         manifest: manifest.value,
       });
     },

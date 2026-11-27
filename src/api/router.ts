@@ -144,7 +144,7 @@ export type Router = {
    * `undefined` for the transport default. The server reads the body before a
    * handler runs, so only the route that carries file content may raise it.
    */
-  bodyLimit: (method: string, path: string) => number | undefined;
+  bodyLimit: (method: string, path: string, authorization?: string) => number | undefined;
 };
 
 export function createRouter(input: {
@@ -160,13 +160,13 @@ export function createRouter(input: {
 
   return {
     registry: input.registry,
-    bodyLimit: (method, path) => {
+    bodyLimit: (method, path, authorization) => {
       const [pathname = ''] = path.split('?');
       const upper = method.toUpperCase();
       for (const route of routes) {
         if (route.spec.method !== upper) continue;
         if (!route.matcher.test(pathname)) continue;
-        return route.spec.maxBodyBytes;
+        return input.auth.authenticate(authorization) ? route.spec.maxBodyBytes : undefined;
       }
       return undefined;
     },

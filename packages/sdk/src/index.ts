@@ -13,7 +13,6 @@ import {
   ArtifactDescriptor,
   ArtifactDescriptorList,
   ArtifactExport,
-  ArtifactGenerationResult,
   ArtifactProjectManifest,
   ArtifactPruneResult,
   ArtifactUploadResult,
@@ -21,6 +20,7 @@ import {
   CapabilityHandshake,
   ChatReply,
   Conversation,
+  Deliverable,
   ConversationList,
   ExecutionEvent,
   GameBuild,
@@ -62,11 +62,13 @@ import type {
   BrowserCloseRequest,
   BrowserSessionCreateInput,
   BrowserTakeoverRequest,
-  ArtifactGenerationRequest,
   ArtifactKind,
+  ArtifactUploadInput,
   ArtifactUploadRequest,
+  ArtifactVersionInput,
   ArtifactVersionRequest,
   ChatRequest,
+  DeliverableRequestInput,
   CreateGameRequest,
   CreateGameSessionRequest,
   DataMode,
@@ -169,7 +171,7 @@ export const SDK_OPERATIONS = Object.freeze({
   getBrowserArtifact: 'browserArtifact',
   listArtifacts: 'artifacts',
   artifactProjectManifest: 'artifactManifest',
-  generateArtifact: 'generateArtifact',
+  generateDeliverable: 'generateDeliverable',
   uploadArtifact: 'uploadArtifact',
   pruneArtifacts: 'pruneArtifacts',
   getArtifact: 'artifact',
@@ -712,19 +714,18 @@ export class CoderaxClient {
   }
 
   /**
-   * Renders a deliverable and persists it as a durable project tree. The
-   * response is the manifest, so every file can then be downloaded by artifact
-   * id and immutable version.
+   * Generates and durably persists a document, workbook, deck, analysis or
+   * software project. The response names stored artifacts, never workspace paths.
    */
-  generateArtifact(request: ArtifactGenerationRequest): Promise<ArtifactGenerationResult> {
-    return this.request<ArtifactGenerationResult>(ArtifactGenerationResult, {
+  generateDeliverable(request: DeliverableRequestInput): Promise<Deliverable> {
+    return this.request<Deliverable>(Deliverable, {
       method: 'POST',
-      path: '/v1/artifacts/generate',
+      path: '/v1/deliverables',
       body: request,
     });
   }
 
-  uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
+  uploadArtifact(request: ArtifactUploadInput): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
       path: '/v1/artifacts',
@@ -734,7 +735,7 @@ export class CoderaxClient {
 
   uploadArtifactVersion(
     artifactId: string,
-    request: ArtifactVersionRequest,
+    request: ArtifactVersionInput,
   ): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
@@ -994,9 +995,10 @@ export type {
   ScheduleUpdateRequest,
   ScheduleEventRequest,
   ScheduleTriggerRequest,
-  ArtifactGenerationRequest,
   ArtifactKind,
+  ArtifactUploadInput,
   ArtifactUploadRequest,
+  ArtifactVersionInput,
   ArtifactVersionRequest,
   WorkSubmitRequest,
 };

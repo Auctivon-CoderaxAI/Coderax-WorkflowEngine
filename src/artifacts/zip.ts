@@ -246,6 +246,26 @@ export function writeZip(entries: ZipEntry[]): Buffer {
   return Buffer.concat([...localParts, central, eocd]);
 }
 
+/**
+ * Rewrites an OOXML package with `[Content_Types].xml` as its first entry.
+ *
+ * OOXML does not require a part order, but a consumer that identifies a package
+ * from its leading bytes does. Re-zipping also makes the output deterministic:
+ * every entry carries the same fixed timestamp.
+ */
+export function normalizePackage(archive: Buffer): Buffer {
+  const entries = readZip(archive);
+  const types = entries.get('[Content_Types].xml');
+  if (!types) throw new ZipError('The package has no [Content_Types].xml part.');
+  const ordered: ZipEntry[] = [{ name: '[Content_Types].xml', data: types }];
+  for (const [name, data] of entries) {
+    if (name === '[Content_Types].xml' || name.endsWith('/')) continue;
+    if (ordered.some((entry) => entry.name === name)) continue;
+    ordered.push({ name, data });
+  }
+  return writeZip(ordered);
+}
+
 export function partText(entries: Map<string, Buffer>, name: string): string {
   const part = entries.get(name);
   if (!part) throw new ZipError(`The archive is missing ${name}.`);

@@ -29,9 +29,10 @@ import { createRunSupervisor } from '../execution/supervisor.js';
 import { validateRemoteEndpoint } from '../configuration/endpoint.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
-import type { ApplicationService } from '../orchestration/service.js';
 import { createArtifactService } from '../artifacts/service.js';
-import { createArtifactGenerator } from '../artifacts/generate.js';
+import { createArtifactToolkit } from '../artifacts/toolkit.js';
+import { createDeliverableService } from '../artifacts/deliver.js';
+import type { ApplicationService } from '../orchestration/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
@@ -271,6 +272,30 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const schedules = persistence.schedules;
   const scheduleNotices = persistence.scheduleNotices;
   const audit = createAuditLog({ clock, ids });
+  const artifactService = createArtifactService({
+    artifacts: persistence.artifacts,
+    blobs: persistence.blobs,
+    capacity: persistence.capacity,
+    ownerId: config.auth.ownerId,
+    conversations,
+    tasks,
+    audit,
+    clock,
+    ids,
+    settings: config.artifacts,
+  });
+  const artifactRoots = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
+  if (!artifactRoots.ok) {
+    throw new StartupError([artifactRoots.detail]);
+  }
+  const deliverables = createDeliverableService({
+    toolkit: createArtifactToolkit(),
+    artifacts: artifactService,
+    audit,
+    clock,
+    ids,
+    roots: artifactRoots.value,
+  });
   const browserProvider =
     input.browserProvider ??
     buildBrowserProvider({
@@ -287,19 +312,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     provider: browserProvider,
     store: createBrowserStore(),
   });
-  const artifactService = createArtifactService({
-    artifacts: persistence.artifacts,
-    blobs: persistence.blobs,
-    capacity: persistence.capacity,
-    ownerId: config.auth.ownerId,
-    conversations,
-    tasks,
-    audit,
-    clock,
-    ids,
-    settings: config.artifacts,
-  });
-  const artifactGenerator = createArtifactGenerator({ artifacts: artifactService });
   const events = createEventBus({
     store: persistence.events,
     // The task row is the fenced sequence authority; the bus never numbers an
@@ -361,20 +373,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
-        name: 'persistence',
-        required: true,
-        check: async () => ({
-          status: 'ok' as const,
-          detail:
-            persistence.driver === 'mongo'
-              ? `Tasks, conversations, memory and leases are stored in MongoDB (${config.persistence.database}).`
-              : 'Tasks, conversations, memory and leases are process-local; a restart loses them.',
-        }),
-      },
-      {
-        // Required only when the deployment selected durable persistence. A
-        // memory deployment still starts, but reports honestly that artifact
-        // writes are refused rather than pretending they would survive.
         name: 'artifacts',
         required: persistence.driver === 'mongo',
         check: async () => {
@@ -401,6 +399,17 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
             };
           }
         },
+      },
+      {
+        name: 'persistence',
+        required: true,
+        check: async () => ({
+          status: 'ok' as const,
+          detail:
+            persistence.driver === 'mongo'
+              ? `Tasks, conversations, memory and leases are stored in MongoDB (${config.persistence.database}).`
+              : 'Tasks, conversations, memory and leases are process-local; a restart loses them.',
+        }),
       },
       {
         name: 'engine',
@@ -465,10 +474,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    artifactService,
+    deliverables,
     schedules,
     scheduleNotices,
-    artifactService,
-    artifactGenerator,
     audit,
     events,
     runner,
@@ -556,7 +565,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Stop accepting new HTTP work immediately; in-flight requests may finish
       // while the service drains, but they cannot admit new execution.
       const serverClosed = server.close();
-      const drain = Promise.all([service.shutdown(), serverClosed]);
+      const drain = Promise.all([service.shutdown(), serverClosed]).then(() => persistence.close());
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([
@@ -571,8 +580,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       } finally {
         if (timer) clearTimeout(timer);
       }
-      // Persistence is closed only after the service and listener have drained.
-      await persistence.close();
     })();
     return stopPromise;
   };
@@ -586,17 +593,21 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     start: async () => {
       // Rebuild quota availability from committed rows before the socket is
       // open, so an early request cannot be admitted against stale capacity.
-      // The reconcile refuses to run while another replica's reservation is live.
       await service.artifacts.reconcile();
       const { url } = await server.listen();
-      // Startup ownership verification: a task whose lease died with a previous
-      // process is retired now, so no client sees it as running forever.
-      await service.recoverInterrupted();
-      // The schedule loop belongs to the engine process, not to a request. Both
-      // Coderax and CoderaxCLI can disconnect and a due occurrence still runs.
-      service.startSchedules();
-      // Retention and abandoned reservations are enforced at startup too.
-      await service.artifacts.sweepExpiredArtifacts();
+      try {
+        await service.recoverInterrupted();
+        await service.artifacts.sweepExpiredArtifacts();
+        await deliverables.sweepStaging();
+        service.startSchedules();
+      } catch (error) {
+        try {
+          await stop();
+        } catch (stopError) {
+          if (!(stopError instanceof ShutdownTimeoutError)) await persistence.close();
+        }
+        throw error;
+      }
       return { url };
     },
     stop,
