@@ -5,5 +5,7 @@ dist/
 .env.*
 !.env.example
 coverage/
+.audit/
+.run/
 .DS_Store
 Thumbs.db

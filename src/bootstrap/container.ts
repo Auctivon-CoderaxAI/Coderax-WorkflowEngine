@@ -22,6 +22,8 @@ import type { BrowserService } from '../orchestration/browser.js';
 import type { ArtifactService } from '../artifacts/service.js';
 import type { ArtifactGenerator } from '../artifacts/generate.js';
 import type { Router } from '../api/router.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
 
 /**
  * Dependencies are named, not positional.
@@ -54,6 +56,9 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
   browser: BrowserService;
   supervisor: RunSupervisor;
 };
@@ -81,6 +86,9 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'scheduler',
   'health',
+  'studio',
+  'sessions',
+  'gaming',
   'browser',
   'supervisor',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];

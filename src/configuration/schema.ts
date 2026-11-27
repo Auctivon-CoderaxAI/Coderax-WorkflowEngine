@@ -113,6 +113,19 @@ export const ExecutionConfig = z
   })
   .strict();
 
+export const GamesConfig = z
+  .object({
+    /** Off disables both game capabilities at the route boundary. */
+    enabled: z.boolean().default(true),
+    /** The gaming agent can be disabled without disabling the studio. */
+    agentEnabled: z.boolean().default(true),
+    maxProjectsPerOwner: z.number().int().min(1).max(500).default(50),
+    /** The hard ceiling a session request may not exceed. */
+    maxSessionTicks: z.number().int().min(600).max(200_000).default(40_000),
+    /** A paused session holds its task slot for at most this long. */
+    maxPauseMs: z.number().int().min(1_000).max(3_600_000).default(900_000),
+  })
+  .strict();
 export const BrowserRemoteConfig = z
   .object({
     /** An HTTPS endpoint that implements the versioned browser protocol. */
@@ -218,13 +231,12 @@ export const EngineConfigSchema = z
     workspaces: WorkspacesConfig,
     engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
-    // `prefault` applies the empty object before nested defaults are parsed.
-    // Zod 4's `default` requires the fully-populated output shape as its input.
     execution: ExecutionConfig.prefault({}),
     browsers: BrowserConfig.prefault({}),
     schedules: SchedulesConfig.prefault({}),
     artifacts: ArtifactsConfig.prefault({}),
     persistence: PersistenceConfig.prefault({}),
+    games: GamesConfig.prefault({}),
   })
   .strict();
 

@@ -177,7 +177,7 @@ export function createNativeAgent(input: {
           retryable: false,
         };
       }
-      if (!gateway || !planner || !executor) {
+      if (!gateway || !planner || !executor || !request.model) {
         return {
           ok: false,
           code: 'not_configured',

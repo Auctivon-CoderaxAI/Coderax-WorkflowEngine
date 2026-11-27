@@ -33,6 +33,7 @@ export type {
 } from './deliverables.js';
 export * from './events.js';
 export * from './permissions.js';
+export * from './games.js';
 export * from './browser.js';
 export * from './routes.js';
 export * from './json-schema.js';
