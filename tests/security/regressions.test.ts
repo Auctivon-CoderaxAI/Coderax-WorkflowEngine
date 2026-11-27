@@ -56,7 +56,7 @@ regression('F1', 'provider and adapter text is redacted before persistence, even
     assert.doesNotMatch(detail, /sk-|owner|\/home\//);
 
     const frames = JSON.stringify(
-      started.app.dependencies.events.replay(submitted.value.taskId, 0).events,
+      (await started.app.dependencies.events.replay(submitted.value.taskId, 0)).events,
     );
     assert.doesNotMatch(frames, /sk-|owner|\/home\//);
     const notifications = await started.app.service.notifications(principal);
@@ -136,7 +136,7 @@ regression('F4', 'every emitted event validates, has a unique id and a monotonic
     if (!submitted.ok) return;
     await started.app.dependencies.scheduler.idle();
 
-    const events = started.app.dependencies.events.replay(submitted.value.taskId, 0).events;
+    const events = (await started.app.dependencies.events.replay(submitted.value.taskId, 0)).events;
     assert.ok(events.length > 0);
     const ids = new Set<string>();
     events.forEach((event, index) => {

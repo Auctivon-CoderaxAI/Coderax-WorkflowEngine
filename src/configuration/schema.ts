@@ -103,8 +103,15 @@ export const ExecutionConfig = z
     leaseTtlMs: z.number().int().min(3_000).max(600_000).default(30_000),
     heartbeatIntervalMs: z.number().int().min(500).max(60_000).default(10_000),
     maxConcurrentTasks: z.number().int().min(1).max(64).default(4),
-    /** Events retained per task for replay; older events require a new query. */
+    /**
+     * Bounds one replay read and the memory driver's retained window. The durable
+     * log keeps everything else; a tail reads the next page on its next poll.
+     */
     eventBufferSize: z.number().int().min(16).max(100_000).default(2_000),
+    /** How often a live tail re-reads the durable log for new events. */
+    eventPollMs: z.number().int().min(10).max(5_000).default(100),
+    /** Age at which a stored event expires; the only source of truncation. */
+    eventRetentionMs: z.number().int().min(60_000).max(2_592_000_000).default(604_800_000),
     /** A crashed run's row is readable for this long before a sweep reclaims it. */
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */

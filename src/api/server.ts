@@ -109,9 +109,13 @@ export function createHttpServer(input: {
           connection: 'close',
         });
         response.flushHeaders();
-        for await (const event of result.events) {
+        for await (const frame of result.events) {
           if (response.destroyed || response.writableEnded) break;
-          response.write(`data: ${JSON.stringify(event)}\n\n`);
+          response.write(
+            frame.kind === 'comment'
+              ? `: ${frame.comment}\n\n`
+              : `data: ${JSON.stringify(frame.event)}\n\n`,
+          );
         }
         response.end();
       } catch {

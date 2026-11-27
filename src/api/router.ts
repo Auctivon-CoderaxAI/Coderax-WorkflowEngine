@@ -13,10 +13,19 @@ export type RequestContext = {
   signal?: AbortSignal;
 };
 
+/**
+ * One server-sent frame. A `comment` is written as a `:` line, which is valid
+ * SSE that every client must ignore; carrying metadata that way lets the stream
+ * report its own log bounds without changing the event contract.
+ */
+export type SseFrame =
+  | { kind: 'event'; event: unknown }
+  | { kind: 'comment'; comment: string };
+
 export type HandlerResult =
   | { kind: 'json'; status: number; body: unknown }
   | { kind: 'text'; status: number; contentType: string; body: string }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | { kind: 'sse'; status: number; events: AsyncIterable<SseFrame> };
 
 export type RouteHandler = (context: RequestContext) => Promise<HandlerResult>;
 
@@ -33,7 +42,7 @@ export type RawRequest = {
 export type RouterResult =
   | { kind: 'json'; status: number; body: unknown }
   | { kind: 'text'; status: number; contentType: string; body: string }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | { kind: 'sse'; status: number; events: AsyncIterable<SseFrame> };
 
 export type RouteRegistry = {
   register: (operationId: string, handler: RouteHandler) => void;

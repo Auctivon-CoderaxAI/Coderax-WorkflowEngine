@@ -29,7 +29,7 @@ test('replay from zero is ordered, unique and ends with the terminal event', asy
   const started = await startTestApp();
   try {
     const taskId = await completedTask(started);
-    const replay = started.app.dependencies.events.replay(taskId, 0);
+    const replay = await started.app.dependencies.events.replay(taskId, 0);
     assert.equal(replay.truncated, false);
     const sequences = replay.events.map((event) => event.seq);
     assert.deepEqual(
@@ -47,9 +47,9 @@ test('a cursor returns only newer events and never rewinds', async () => {
   const started = await startTestApp();
   try {
     const taskId = await completedTask(started);
-    const all = started.app.dependencies.events.replay(taskId, 0);
+    const all = await started.app.dependencies.events.replay(taskId, 0);
     const cursor = all.events[2]?.seq ?? 0;
-    const tail = started.app.dependencies.events.replay(taskId, cursor);
+    const tail = await started.app.dependencies.events.replay(taskId, cursor);
     assert.equal(tail.truncated, false);
     assert.ok(tail.events.length > 0);
     assert.ok(tail.events.every((event) => event.seq > cursor));
@@ -74,7 +74,8 @@ test('the SSE endpoint replays once and closes on completion', async () => {
     assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/);
     const frames = (await response.text())
       .split('\n\n')
-      .filter((frame) => frame.trim().length > 0)
+      .map((frame) => frame.trim())
+      .filter((frame) => frame.length > 0 && frame.startsWith('data:'))
       .map((frame) => JSON.parse(frame.replace(/^data: /, '')) as Frame);
     assert.ok(frames.length > 0);
     assert.equal(frames.at(-1)?.type, 'task.completed');

@@ -38,6 +38,8 @@ const ALLOWED_DIRECT = new Set([
   'pptxgenjs',
   // Local Chromium for the browser acceptance harness; no paid service.
   'playwright',
+  // SHA-256 for the published contract fingerprint; audited, pure JS.
+  '@noble/hashes',
 ]);
 
 function manifest(relative: string): Manifest {

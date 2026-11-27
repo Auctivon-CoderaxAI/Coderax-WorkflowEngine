@@ -103,7 +103,7 @@ test('approval.required publishes a request but grants nothing by itself', async
     assert.ok(submitted.ok);
     await started.app.dependencies.scheduler.idle();
 
-    const replay = started.app.dependencies.events.replay(submitted.value.taskId, 0);
+    const replay = await started.app.dependencies.events.replay(submitted.value.taskId, 0);
     assert.ok(replay.events.some((event) => event.type === 'approval.required'));
 
     const listed = await started.app.service.permissions(principal, submitted.value.taskId);

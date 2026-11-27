@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -300,7 +301,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
   const artifactGenerator = createArtifactGenerator({ artifacts: artifactService });
   const events = createEventBus({
-    bufferSize: config.execution.eventBufferSize,
+    store: persistence.events,
+    // The task row is the fenced sequence authority; the bus never numbers an
+    // event on its own, so a superseded generation cannot append one.
+    seq: tasks,
+    pollMs: config.execution.eventPollMs,
     eventId: ids.eventId,
     iso: clock.iso,
   });
@@ -487,7 +492,21 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
 
   const registry = createRouteRegistry();
-  registerRoutes(registry, service);
+  registerRoutes(registry, service, {
+    server: { name: 'coderax-workflow-engine', version: '0.1.0', startedAt: clock.iso() },
+    limits: {
+      maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+      eventBufferSize: config.execution.eventBufferSize,
+      maxConcurrentTasks: config.execution.maxConcurrentTasks,
+      // The scheduler cannot fire a slot faster than its own tick, so that is
+      // the smallest interval the engine can actually honour.
+      scheduleMinIntervalMs: config.schedules.tickMs,
+      artifactMaxBytes: config.artifacts.maxBytesPerArtifact,
+      memoryMaxValueLength: 20_000,
+    },
+    externalAgents:
+      config.engines.opencode.enabled || config.engines.freebuff.enabled,
+  });
   const missingRoutes = registry.missing();
   if (missingRoutes.length > 0) {
     throw new StartupError(

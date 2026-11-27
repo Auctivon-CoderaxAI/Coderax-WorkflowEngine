@@ -111,8 +111,7 @@ test('two concurrent cancellations produce exactly one terminal event', async ()
     const status = await started.app.service.task(principal, submitted.value.taskId);
     assert.ok(status.ok);
     assert.equal(status.value.state, 'cancelled');
-    const terminals = deps.events
-      .replay(submitted.value.taskId, 0)
+    const terminals = (await deps.events.replay(submitted.value.taskId, 0))
       .events.filter((event) => TERMINAL.has(event.type));
     assert.equal(terminals.length, 1);
     assert.equal(terminals[0]?.type, 'task.cancelled');

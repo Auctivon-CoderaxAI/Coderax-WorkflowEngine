@@ -41,8 +41,7 @@ test('a run that stops heartbeating is retired as interrupted and can resume', a
     const raw = await deps.tasks.get(submitted.value.taskId);
     assert.equal(raw?.failure?.retryable, true);
     assert.ok(
-      deps.events
-        .replay(submitted.value.taskId, 0)
+      (await deps.events.replay(submitted.value.taskId, 0))
         .events.some((event) => event.type === 'task.interrupted'),
     );
 

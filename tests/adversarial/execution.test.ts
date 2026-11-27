@@ -103,8 +103,7 @@ test('an adapter that resolves successfully after cancellation is still cancelle
     assert.ok(status.ok);
     assert.equal(status.value.state, 'cancelled');
     assert.equal(status.value.result, undefined);
-    const terminals = deps.events
-      .replay(submitted.value.taskId, 0)
+    const terminals = (await deps.events.replay(submitted.value.taskId, 0))
       .events.filter((event) => TERMINAL.has(event.type));
     assert.deepEqual(terminals.map((event) => event.type), ['task.cancelled']);
   } finally {
@@ -132,7 +131,7 @@ test('a report delivered after settlement is ignored', async () => {
     await deps.scheduler.idle();
     late?.();
     assert.doesNotMatch(
-      JSON.stringify(deps.events.replay(submitted.value.taskId, 0)),
+      JSON.stringify(await deps.events.replay(submitted.value.taskId, 0)),
       /STALE REPORT/,
     );
   } finally {

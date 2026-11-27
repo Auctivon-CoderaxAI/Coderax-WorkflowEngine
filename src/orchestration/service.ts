@@ -150,9 +150,10 @@ export type ApplicationServiceDeps = {
 };
 
 export type EventStream = {
+  /** The first page at the caller's cursor, with the durable log's own metadata. */
   replay: Replay;
+  /** Tails strictly after the last replayed event, so the hand-off loses nothing. */
   subscribe: (listener: (event: unknown) => void) => Unsubscribe;
-  lastSeq: number;
 };
 
 export type ApplicationService = {
@@ -464,16 +465,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return ok(binding.record);
   }
 
-  function publish(
+  /**
+   * Appends one event to the durable log for the generation that owns the task.
+   * Callers that can be told about a failure await it, so a settlement never
+   * announces state the stream has not recorded. A refused append means this
+   * generation no longer holds the fence, and writing nothing is the outcome.
+   */
+  async function publish(
     task: TaskRecord,
     type: Parameters<EventBus['publish']>[0]['type'],
     payload?: unknown,
     /** Present for run-origin events: a revoked generation may not publish. */
     token?: string,
-  ): void {
+  ): Promise<void> {
     if (token !== undefined && !deps.supervisor.isLive(task.taskId, token)) return;
-    deps.events.publish({
+    await deps.events.publish({
       taskId: task.taskId,
+      runToken: task.runToken ?? '',
       agent: task.agent,
       generation: task.generation,
       type,
@@ -745,15 +753,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
     try {
       if (outcome.kind === 'completed') {
-        publish(settled, 'task.completed', {
+        await publish(settled, 'task.completed', {
           summary: outcome.summary.slice(0, 20_000),
           ...(task.model ? { model: task.model } : {}),
           ...(outcome.usage ? { usage: outcome.usage } : {}),
         });
       } else if (outcome.kind === 'cancelled') {
-        publish(settled, 'task.cancelled', {});
+        await publish(settled, 'task.cancelled', {});
       } else {
-        publish(settled, 'task.failed', {
+        await publish(settled, 'task.failed', {
           code: outcome.code, detail: failureDetail, retryable: outcome.retryable,
         });
       }
@@ -952,10 +960,38 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       generation: started.task.generation,
       workspaceRoot: workspace.value.root,
     });
-    publish(started.task, 'task.started');
+    await publish(started.task, 'task.started');
 
     const controller = new AbortController();
     controllers.set(taskId, controller);
+
+    /**
+     * A report arrives synchronously but the append is asynchronous. Chaining the
+     * appends preserves the order the adapter produced, and `drain` makes the run
+     * wait for the log before it settles, so a replay can never show a settlement
+     * whose deltas were not written.
+     */
+    let emitted: Promise<void> = Promise.resolve();
+    let emitFailure: { error: unknown } | null = null;
+    const emit = (
+      type: Parameters<EventBus['publish']>[0]['type'],
+      payload?: unknown,
+    ): void => {
+      emitted = emitted
+        .then(() => publish(started.task, type, payload, token))
+        .then(
+          () => undefined,
+          (error: unknown) => {
+            emitFailure ??= { error };
+          },
+        );
+    };
+    const drain = async (): Promise<void> => {
+      await emitted;
+      const failed = emitFailure;
+      emitFailure = null;
+      if (failed) throw failed.error;
+    };
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
@@ -978,9 +1014,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) {
-        publish(started.task, 'text.replace', { text: next }, token);
+        emit('text.replace', { text: next });
       } else if (next !== visible) {
-        publish(started.task, 'text.delta', { text: next.slice(visible.length) }, token);
+        emit('text.delta', { text: next.slice(visible.length) });
       }
       visible = next;
     };
@@ -1052,7 +1088,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             ...(planned ? { dependsOn: [...planned.dependsOn] } : {}),
           });
         }
-        publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
+        emit('step.started', { stepId: event.stepId, title: event.title });
         persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
@@ -1076,7 +1112,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           if (index === -1) evidence.push(safeEvidence);
           else evidence[index] = safeEvidence;
         }
-        publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
+        emit('step.completed', { stepId: event.stepId, title: event.title });
         persist({
           steps,
           checkpoint: { completedSteps: [...completed], text: visible, plan, evidence, iterations },
@@ -1100,27 +1136,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return;
       }
       if (event.type === 'tool.call') {
-        publish(started.task, 'tool.call', {
+        emit('tool.call', {
           callId: event.callId,
           tool: event.tool,
           ...(event.input === undefined ? {} : { input: redactToolInput(event.input) }),
-        }, token);
+        });
         return;
       }
       if (event.type === 'tool.result') {
-        publish(started.task, 'tool.result', {
+        emit('tool.result', {
           callId: event.callId,
           tool: event.tool,
           ok: event.ok,
           ...(event.output === undefined ? {} : { output: redactText(event.output) }),
-        }, token);
+        });
         return;
       }
       if (event.type === 'file.edit') {
         if (typeof event.path !== 'string' || event.path.length < 1 || event.path.length > 1024) {
           throw new RangeError('file.edit path must contain 1–1024 characters.');
         }
-        publish(started.task, 'file.edit', { path: event.path }, token);
+        emit('file.edit', { path: event.path });
         return;
       }
       /**
@@ -1128,11 +1164,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
        * authority that can approve a resource, and the adapter must have created
        * that request before reporting it.
        */
-      publish(started.task, 'approval.required', {
+      emit('approval.required', {
         requestId: event.requestId,
         tool: event.tool,
         description: redactText(event.description, [], 2000),
-      }, token);
+      });
     };
 
     const history = await historyFor(
@@ -1213,6 +1249,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
       const safeText = redactContent(text);
       emitText(safeText);
+      await drain();
       const outcome = result.outcome.kind === 'completed'
         ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
         : result.outcome;
@@ -1266,7 +1303,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
-        publish(applied.task, 'task.interrupted', {
+        await publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
         await notifyTerminal(applied.task, 'interrupted');
@@ -1294,7 +1331,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
     });
     if (applied.applied) {
-      publish(applied.task, 'task.cancelled', {});
+      await publish(applied.task, 'task.cancelled', {});
       await notifyTerminal(applied.task, 'cancelled');
       deps.audit.record({
         actor: task.ownerId,
@@ -1364,6 +1401,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       state: 'queued',
       generation: 1,
       runToken: null,
+      eventSeq: 0,
       reasoning: null,
       steps: [],
       checkpoint: {
@@ -1421,7 +1459,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       );
     }
 
-    publish(created.task, 'task.queued');
+    await publish(created.task, 'task.queued');
 
     deps.audit.record({
       actor: input.principal.ownerId,
@@ -1547,6 +1585,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       state: 'queued',
       generation: 1,
       runToken: null,
+      eventSeq: 0,
       reasoning,
       steps: [],
       checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
@@ -1665,7 +1704,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     }
 
-    publish(created.task, 'task.queued');
+    await publish(created.task, 'task.queued');
     deps.audit.record({
       actor: principal.ownerId,
       action: 'work.accepted',
@@ -2029,7 +2068,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
       if (!applied.applied) return lostCancellation(task);
-      publish(applied.task, 'task.interrupted', {
+      await publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
       await notifyTerminal(applied.task, 'interrupted');
@@ -2089,8 +2128,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await releaseLease(task, token);
         return fail('conflict', 'That task cannot be resumed.');
       }
-      publish(applied.task, 'task.queued', {});
-      publish(applied.task, 'text.replace', { text: '' });
+      await publish(applied.task, 'task.queued', {});
+      await publish(applied.task, 'text.replace', { text: '' });
       if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
         return rejectUnscheduledRun(applied.task, token);
       }
@@ -2154,8 +2193,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           await releaseLease(task, token);
           return fail('conflict', 'That task cannot be retried.');
         }
-        publish(applied.task, 'task.queued', {});
-        publish(applied.task, 'text.replace', { text: '' });
+        await publish(applied.task, 'task.queued', {});
+        await publish(applied.task, 'text.replace', { text: '' });
         if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
           return rejectUnscheduledRun(applied.task, token);
         }
@@ -2343,10 +2382,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
+      const replay = await deps.events.replay(taskId, after);
+      // Tail strictly after what was replayed; a poll re-reads the log from that
+      // cursor, so an event that lands between the read and the subscription is
+      // picked up instead of falling into the gap a listener-only bus had.
+      const cursor = replay.events.at(-1)?.seq ?? after;
       return ok({
-        replay: deps.events.replay(taskId, after),
-        subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
-        lastSeq: deps.events.lastSeq(taskId),
+        replay,
+        subscribe: (listener) => deps.events.subscribe(taskId, cursor, listener),
       });
     },
 
