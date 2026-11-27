@@ -135,6 +135,12 @@ export function auditFromResult(result: AuditRun): AuditReport {
   const summary = ['critical', 'high', 'moderate', 'low', 'info']
     .map((severity) => `${severity}=${counts[severity] ?? 0}`)
     .join(' ');
+  if (findings.length === 0 && ((counts.high ?? 0) > 0 || (counts.critical ?? 0) > 0)) {
+    findings.push({
+      rule: 'audit-inconsistent-counts',
+      detail: `dependency audit reports high or critical vulnerabilities without matching details (${summary})`,
+    });
+  }
   if (findings.length === 0) {
     warnings.push({
       rule: 'audit-summary',

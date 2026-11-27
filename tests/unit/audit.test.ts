@@ -117,3 +117,13 @@ test('moderate and low advisories warn but do not fail the gate', () => {
     ['audit-low', 'audit-moderate', 'audit-summary'],
   );
 });
+
+test('positive high or critical counts without matching details fail closed', () => {
+  for (const counts of [{ high: 1 }, { critical: 1 }]) {
+    const result = auditFromResult({
+      stdout: JSON.stringify({ vulnerabilities: {}, metadata: { vulnerabilities: counts } }),
+    });
+    assert.equal(result.findings[0]?.rule, 'audit-inconsistent-counts');
+    assert.equal(result.warnings.some(({ rule }) => rule === 'audit-summary'), false);
+  }
+});

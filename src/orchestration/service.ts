@@ -134,6 +134,7 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  const admissions = new Set<Promise<unknown>>();
   let shuttingDown = false;
   let shutdownPromise: Promise<void> | null = null;
 
@@ -604,14 +605,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
+  function trackAdmission(admit: ApplicationService['submitWork']): ApplicationService['submitWork'] {
+    return async (principal, request) => {
+      if (shuttingDown) return unavailable();
+      // Register before admission can call any collaborator.
+      const admission = Promise.resolve().then(() => admit(principal, request));
+      admissions.add(admission);
+      try {
+        return await admission;
+      } finally {
+        admissions.delete(admission);
+      }
+    };
+  }
+
   const service: ApplicationService = {
     health: () => deps.health.report(),
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
-    submitWork: async (principal, request) => {
-      if (shuttingDown) return unavailable();
+    submitWork: trackAdmission(async (principal, request) => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
@@ -731,7 +745,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: 1,
         eventsPath: `/v1/work/${task.taskId}/events`,
       });
-    },
+    }),
 
     task: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
@@ -1078,7 +1092,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
-      shutdownPromise = deps.scheduler.idle();
+      shutdownPromise = Promise.all([deps.scheduler.idle(), Promise.allSettled(admissions)])
+        .then(() => undefined);
       return shutdownPromise;
     },
   };

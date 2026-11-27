@@ -96,7 +96,7 @@ jobs:
 
       - name: Reject committed secrets and local owner paths
         run: |
-          if grep -rIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git \
+          if grep -rIl --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git \
             -E '(CODERAX_OWNER_TOKEN|CODERAX_INFERENCE_KEY)=[A-Za-z0-9]' .; then
             echo "A secret value appears to be committed."
             exit 1

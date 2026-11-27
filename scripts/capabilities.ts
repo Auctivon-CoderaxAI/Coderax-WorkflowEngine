@@ -244,13 +244,14 @@ export function inspectCapabilities(
       entry.type !== null && (entry.type.flags & unresolved) === 0,
   );
 
-  const owners: CapabilityOwner[] = [];
+  const unique = new Map<string, Map<ts.Declaration, CapabilityOwner>>();
   for (const source of program.getSourceFiles()) {
     const file = relative(root, source.fileName);
     if (!file.startsWith('src/') || file.endsWith('.d.ts')) continue;
     const module = checker.getSymbolAtLocation(source);
     if (!module) continue;
-    for (const symbol of checker.getExportsOfModule(module)) {
+    for (const exported of checker.getExportsOfModule(module)) {
+      const symbol = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
       // Interfaces, aliases and types have no runtime implementation to count.
       if (
         symbol.flags &
@@ -262,7 +263,9 @@ export function inspectCapabilities(
         continue;
       }
       const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
-      if (!declaration) continue;
+      if (!declaration || !(symbol.flags & ts.SymbolFlags.Value)) continue;
+      const implementationFile = relative(root, declaration.getSourceFile().fileName);
+      if (!implementationFile.startsWith('src/') || implementationFile.endsWith('.d.ts')) continue;
       let type: ts.Type;
       try {
         type = valueType(checker, symbol, declaration);
@@ -274,20 +277,20 @@ export function inspectCapabilities(
       if ((type.flags & unresolved) !== 0) continue;
       for (const target of targets) {
         if (!checker.isTypeAssignableTo(type, target.type)) continue;
-        owners.push({
-          capability: target.spec.capability,
+        const capability = target.spec.capability;
+        const implementations = unique.get(capability) ?? new Map<ts.Declaration, CapabilityOwner>();
+        implementations.set(declaration, {
+          capability,
           exportName: symbol.name,
-          file,
+          file: implementationFile,
           typeName: target.spec.typeName,
         });
+        unique.set(capability, implementations);
       }
     }
   }
 
-  const unique = new Map(
-    owners.map((owner) => [`${owner.capability}|${owner.file}|${owner.exportName}`, owner]),
-  );
-  const normalized = [...unique.values()];
+  const normalized = [...unique.values()].flatMap((implementations) => [...implementations.values()]);
   const findings: CapabilityFinding[] = [];
   const byCapability = new Map<string, CapabilityOwner[]>();
   for (const owner of normalized) {

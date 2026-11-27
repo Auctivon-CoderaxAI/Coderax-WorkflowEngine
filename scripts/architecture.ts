@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 
 /**
  * Static architecture enforcement.
@@ -21,20 +22,34 @@ export type Repository = {
   entry: string;
 };
 
-export function parseImports(text: string): ImportRef[] {
-  const withoutBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, '');
-  const withoutLineComments = withoutBlockComments.replace(/^\s*\/\/.*$/gm, '');
-  const refs: ImportRef[] = [];
-  const staticImport =
-    /(?:^|\n)\s*(?:import|export)\s+(type\s+)?(?:[^;]*?\sfrom\s+)?["']([^"']+)["']/g;
-  for (const match of withoutLineComments.matchAll(staticImport)) {
-    if (match[2]) refs.push({ specifier: match[2], typeOnly: match[1] !== undefined });
+type ParsedImport = ImportRef & { dynamic: boolean };
+
+function scanImports(text: string): ParsedImport[] {
+  const source = ts.createSourceFile('module.ts', text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const refs: ParsedImport[] = [];
+  function visit(node: ts.Node): void {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      const name = node.moduleSpecifier;
+      if (name && ts.isStringLiteral(name)) {
+        const typeOnly = ts.isImportDeclaration(node)
+          ? node.importClause?.isTypeOnly === true
+          : node.isTypeOnly;
+        refs.push({ specifier: name.text, typeOnly, dynamic: false });
+      }
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const name = node.arguments[0];
+      if (name && ts.isStringLiteralLike(name)) {
+        refs.push({ specifier: name.text, typeOnly: false, dynamic: true });
+      }
+    }
+    ts.forEachChild(node, visit);
   }
-  const dynamicImport = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-  for (const match of withoutLineComments.matchAll(dynamicImport)) {
-    if (match[1]) refs.push({ specifier: match[1], typeOnly: false });
-  }
+  visit(source);
   return refs;
+}
+
+export function parseImports(text: string): ImportRef[] {
+  return scanImports(text).map(({ specifier, typeOnly }) => ({ specifier, typeOnly }));
 }
 
 /** Resolve a relative `.js` import to the `.ts` file that produced it. */
@@ -91,6 +106,18 @@ const BOUNDARIES: ReadonlyArray<{
   detail: string;
 }> = [
   {
+    rule: 'boundary_api',
+    from: /^src\/api\//,
+    to: /^src\/(execution|agents|models|persistence|events)\//,
+    detail: 'api must access lower layers through orchestration',
+  },
+  {
+    rule: 'boundary_lower_layers',
+    from: /^src\/(execution|persistence|events)\//,
+    to: /^src\/(api|orchestration)\//,
+    detail: 'lower layers may not depend on api or orchestration',
+  },
+  {
     rule: 'boundary_agents',
     from: /^src\/agents\//,
     to: /^src\/(orchestration|api|persistence)\//,
@@ -121,14 +148,15 @@ const CONSTRUCTIONS: ReadonlyArray<{
   token: string;
   allowed: string[];
   minimum?: number;
+  singleton?: boolean;
 }> = [
-  { rule: 'single_workflow_engine', token: 'createApplicationService({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_task_runner', token: 'createTaskRunner({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_model_router', token: 'createModelCatalog({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_event_bus', token: 'createEventBus({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_route_registry', token: 'createRouteRegistry();', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_http_server', token: 'createHttpServer({', allowed: ['src/bootstrap/compose.ts'] },
-  { rule: 'single_scheduler', token: 'createTaskScheduler({', allowed: ['src/bootstrap/compose.ts'] },
+  { rule: 'single_workflow_engine', token: 'createApplicationService', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_task_runner', token: 'createTaskRunner', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_model_router', token: 'createModelCatalog', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_event_bus', token: 'createEventBus', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_route_registry', token: 'createRouteRegistry', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_http_server', token: 'createHttpServer', allowed: ['src/bootstrap/compose.ts'], singleton: true },
+  { rule: 'single_scheduler', token: 'createTaskScheduler', allowed: ['src/bootstrap/compose.ts'], singleton: true },
   { rule: 'single_run_dispatch', token: 'scheduler.enqueue(', allowed: ['src/orchestration/service.ts'] },
   { rule: 'single_run_ownership', token: 'runner.run(', allowed: ['src/orchestration/service.ts'] },
   { rule: 'single_lease_claim', token: 'lease.claim(', allowed: ['src/orchestration/service.ts'] },
@@ -258,6 +286,20 @@ const UNIQUE_DECLARATIONS: ReadonlyArray<{
   { rule: 'duplicate_route_catalogue', token: 'export const ROUTES' },
 ];
 
+function factoryCalls(text: string): Map<string, number> {
+  const calls = new Map<string, number>();
+  const source = ts.createSourceFile('module.ts', text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const name = node.expression.text;
+      calls.set(name, (calls.get(name) ?? 0) + 1);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return calls;
+}
+
 function occurrenceCount(files: SourceFile[], token: string): number {
   return files.reduce(
     (total, file) => total + (file.text.split(token).length - 1),
@@ -296,10 +338,13 @@ export function checkArchitecture(repository: Repository): Finding[] {
     }
   }
 
+  const calls = new Map(files.map((file) => [file.path, factoryCalls(file.text)]));
   for (const construction of CONSTRUCTIONS) {
     let count = 0;
     for (const file of files) {
-      const occurrences = file.text.split(construction.token).length - 1;
+      const occurrences = construction.singleton
+        ? calls.get(file.path)?.get(construction.token) ?? 0
+        : file.text.split(construction.token).length - 1;
       if (occurrences === 0) continue;
       count += occurrences;
       if (!construction.allowed.includes(file.path)) {
@@ -315,6 +360,13 @@ export function checkArchitecture(repository: Repository): Finding[] {
         rule: construction.rule,
         path: construction.allowed[0] ?? entry,
         detail: `expected at least ${construction.minimum} occurrence of "${construction.token}"`,
+      });
+    }
+    if (construction.singleton && count > 1) {
+      findings.push({
+        rule: construction.rule,
+        path: construction.allowed[0] ?? entry,
+        detail: `expected at most one call to "${construction.token}", found ${count}`,
       });
     }
   }
@@ -425,10 +477,9 @@ export function checkArchitecture(repository: Repository): Finding[] {
   // `import()` is still reachable, while a dynamically imported second
   // composition root is still a second root.
   const dynamicImports = files.flatMap((file) =>
-    [...file.text.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)].map((match) => ({
-      from: file.path,
-      specifier: match[1] as string,
-    })),
+    scanImports(file.text)
+      .filter((ref) => ref.dynamic)
+      .map(({ specifier }) => ({ from: file.path, specifier })),
   );
   for (const dynamic of dynamicImports) {
     const target = resolveRelative(dynamic.from, dynamic.specifier);

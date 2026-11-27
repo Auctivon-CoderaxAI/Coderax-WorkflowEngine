@@ -43,6 +43,7 @@ export function createHttpServer(input: {
   host: string;
   port: number;
 }): HttpServer {
+  const streamShutdown = new AbortController();
   const server: Server = createServer((request, response) => {
     void (async () => {
       let bodyText = '';
@@ -66,12 +67,15 @@ export function createHttpServer(input: {
         return;
       }
 
+      const disconnected = new AbortController();
+      response.once('close', () => disconnected.abort());
       try {
         const result = await input.router.handle({
           method: request.method ?? 'GET',
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
+          signal: AbortSignal.any([streamShutdown.signal, disconnected.signal]),
         });
 
         if (result.kind === 'json') {
@@ -82,8 +86,10 @@ export function createHttpServer(input: {
         response.writeHead(result.status, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',
-          connection: 'keep-alive',
+          // Closing the response must also release its connection during shutdown.
+          connection: 'close',
         });
+        response.flushHeaders();
         for await (const event of result.events) {
           if (response.destroyed || response.writableEnded) break;
           response.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -125,6 +131,7 @@ export function createHttpServer(input: {
           return;
         }
         server.close(() => resolve());
+        streamShutdown.abort();
       });
       return closePromise;
     },

@@ -275,3 +275,35 @@ test('the route catalogue has a single declaration site', () => {
   const findings = checkArchitecture({ files, entry: 'src/main.ts' });
   assert.ok(findings.some((finding) => finding.rule === 'duplicate_route_catalogue'));
 });
+
+test('dependency rules see same-line imports and ignore dynamic imports in comments', () => {
+  const files = [
+    ...baseRepository(),
+    file('src/agents/extra.ts', "import 'zod'; import type { ApplicationService } from '../orchestration/service.js';"),
+    file('src/api/extra.ts', "import '../persistence/store.js'; // import('./retired.js')"),
+    file('src/persistence/store.ts', ''),
+    file('src/execution/extra.ts', "import '../orchestration/service.js'; import('./missing.js');"),
+  ].map((entry) => entry.path === 'src/orchestration/service.ts'
+    ? { ...entry, text: "import '../execution/extra.js';\n" + entry.text }
+    : entry);
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some(({ rule }) => rule === 'boundary_agents'));
+  assert.ok(findings.some(({ rule }) => rule === 'boundary_api'));
+  assert.deepEqual(findings.filter(({ rule }) => rule === 'boundary_lower_layers').map(({ path }) => path), [
+    'src/execution/extra.ts',
+  ]);
+  assert.deepEqual(findings.filter(({ rule }) => rule === 'unresolved_dynamic_import').map(({ path }) => path), [
+    'src/execution/extra.ts',
+  ]);
+});
+
+test('singleton construction limits apply inside the composition root only to factories', () => {
+  const files = baseRepository().map((entry) => {
+    if (entry.path === 'src/bootstrap/compose.ts') return { ...entry, text: entry.text + '\ncreateTaskRunner /* another instance */ ({});' };
+    if (entry.path === 'src/orchestration/service.ts') return { ...entry, text: entry.text + '\ntasks.updateFenced({});' };
+    return entry;
+  });
+  const findings = checkArchitecture({ files, entry: 'src/main.ts' });
+  assert.ok(findings.some(({ rule, path }) => rule === 'single_task_runner' && path === 'src/bootstrap/compose.ts'));
+  assert.ok(!findings.some(({ rule }) => rule === 'single_terminal_writer'));
+});

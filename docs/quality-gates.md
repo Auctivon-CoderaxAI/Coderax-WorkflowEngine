@@ -267,10 +267,12 @@ gate, so the protected check cannot pass while the database lane fails.
 The detailed protection endpoint (`/branches/main/protection`) requires
 authentication and returned HTTP 401 to this host. Required review counts,
 dismissal rules and the full settings were therefore not inspected, and no
-protection setting was changed. No pull request exists for
-`ci/permanent-quality-gates`. Run `45888790260` passed the single `verify` job at
+protection setting was changed. Run `45888790260` passed the single `verify` job at
 exact head `d00156a1597e5d908d21d3886272f5710a0df721`, including the real-MongoDB
-step; the reconciliation commit on top of that head has no hosted run yet.
+step. Hosted run `45901507390` passed for the final reconciliation tree
+`119e315`, merged as `2e4fcea` (see [acceptance](acceptance.md)). That run
+covers the reconciliation tree; the later documentation commit `b571ad9`
+is a separate head.
 
 ## Zero-cost and hosted-CI state
 

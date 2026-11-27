@@ -7,9 +7,14 @@ const argument = process.argv[2] ?? 'all';
 
 function runPlan(plan: GatePlan): boolean {
   process.stdout.write(`\n▶ ${plan.gate.id}: ${plan.gate.title}\n`);
+  if (plan.gate.live && plan.tests.length === 0) {
+    process.stderr.write('required live gate has no test files\n');
+    return false;
+  }
   if (plan.tests.length > 0) {
     const relative = plan.tests.map((file) => path.relative(root, file));
-    const result = spawnSync(process.execPath, ['--test', ...relative], {
+    const runner = plan.gate.live ? path.join(import.meta.dirname, 'run-live-tests.js') : '--test';
+    const result = spawnSync(process.execPath, [runner, ...relative], {
       cwd: root,
       stdio: 'inherit',
       // A required live gate must fail, not skip, when infrastructure is absent.

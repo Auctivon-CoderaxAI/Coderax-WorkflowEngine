@@ -112,3 +112,23 @@ test('the generated schema keeps strictness, records and arrays intact', () => {
   assert.deepEqual(properties.values, { type: 'array', items: { type: 'string' } });
   assert.ok(!((json.required as string[]) ?? []).includes('optional'));
 });
+
+test('published enums use runtime values and preserve strings and numbers', () => {
+  enum Numeric { Zero, One }
+  assert.deepEqual(toJsonSchema(z.enum(Numeric)), { type: 'number', enum: [0, 1] });
+  const mixed = z.enum({ Private: 'private', Default: 0 });
+  assert.equal(mixed.safeParse('Private').success, false);
+  assert.deepEqual(toJsonSchema(mixed), { type: ['string', 'number'], enum: ['private', 0] });
+  assert.deepEqual(toJsonSchema(z.enum(['a', 'b'])), { type: 'string', enum: ['a', 'b'] });
+});
+
+test('record conversion does not publish broader key constraints', () => {
+  const constrained = z.record(z.enum(['a', 'b']), z.number());
+  assert.equal(constrained.safeParse({}).success, false);
+  assert.throws(() => toJsonSchema(constrained), /unconstrained string record keys/);
+  assert.throws(() => toJsonSchema(z.record(z.string().min(1), z.number())), /record keys/);
+  assert.deepEqual(toJsonSchema(z.record(z.string(), z.number())), {
+    type: 'object',
+    additionalProperties: { type: 'number' },
+  });
+});

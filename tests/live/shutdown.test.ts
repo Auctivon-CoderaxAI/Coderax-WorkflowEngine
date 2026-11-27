@@ -140,3 +140,68 @@ test('a delayed checkpoint write is drained before persistence closes', { skip }
     rmSync(dirs.root, { recursive: true, force: true });
   }
 });
+
+test('shutdown keeps persistence open for an admitted submitWork call', { skip }, async () => {
+  requiresDatabase();
+  const dirs = workspace();
+  const database = await createMongoConnector()({ uri: uri as string, database: databaseName });
+  let signalEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let closed = false;
+  let hold = true;
+  const delayed: MongoDatabase = {
+    collection: (name) => {
+      const collection = database.collection(name);
+      return new Proxy(collection, {
+        get(target, property, receiver) {
+          if (name.endsWith('conversations') && property === 'findOne') {
+            return async (...args: Parameters<typeof target.findOne>) => {
+              if (hold) {
+                hold = false;
+                signalEntered();
+                await released;
+                assert.equal(closed, false);
+              }
+              return target.findOne(...args);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+    close: () => {
+      closed = true;
+      return database.close();
+    },
+  };
+  const app = await composeApplication({
+    config: baseConfig(dirs, {
+      persistence: { driver: 'mongo', uriEnv: 'CODERAX_TEST_MONGO_URI', database: databaseName },
+    }),
+    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+    gateway: fakeGateway(),
+    persistence: { database: delayed },
+  });
+  try {
+    const request = { objective: 'finish admitting work during shutdown', mode: 'cloud' as const, requireApproval: true };
+    const admission = app.service.submitWork(principal, request);
+    await entered;
+    const stopped = app.stop();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(closed, false);
+    const refused = await app.service.submitWork(principal, request);
+    assert.ok(!refused.ok && refused.code === 'not_ready');
+    release();
+    assert.equal((await admission).ok, true);
+    await stopped;
+    assert.equal(closed, true);
+  } finally {
+    release();
+    await app.stop().catch(() => undefined);
+    await cleanDatabase();
+    rmSync(dirs.root, { recursive: true, force: true });
+  }
+});

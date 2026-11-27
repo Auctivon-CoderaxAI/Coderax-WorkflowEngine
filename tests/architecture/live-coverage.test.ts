@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -53,6 +54,30 @@ test('a live database suite with the required variable is accepted', () => {
       "const uri = process.env.CODERAX_TEST_MONGO_URI;\ntest('artifact', () => undefined);\n",
     );
     assert.deepEqual(checkLiveCoverage(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('required live runner rejects a skipped test even with the Mongo marker and another passing suite', () => {
+  const root = fixture();
+  try {
+    const skipped = path.join(root, 'artifacts.test.cjs');
+    const passing = path.join(root, 'passing.test.cjs');
+    writeFileSync(skipped, [
+      "const { test } = require('node:test');",
+      'const uri = process.env.CODERAX_TEST_MONGO_URI;',
+      "test('artifact', { skip: true }, () => { throw Error(uri); });",
+    ].join('\n'));
+    writeFileSync(passing, "require('node:test').test('executed', () => {});");
+    const runner = path.resolve(import.meta.dirname, '../../scripts/run-live-tests.js');
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const run = (...files: string[]) => spawnSync(process.execPath, [runner, ...files], { encoding: 'utf8', env });
+    assert.equal(run(passing).status, 0);
+    const result = run(passing, skipped);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /required live suite.*artifacts\.test\.cjs/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

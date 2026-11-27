@@ -33,7 +33,8 @@ type SchemaDef = {
   type?: string;
   checks?: CheckLike[];
   values?: unknown[];
-  entries?: Record<string, string>;
+  keyType?: z.ZodTypeAny;
+  coerce?: boolean;
   element?: z.ZodTypeAny;
   valueType?: z.ZodTypeAny;
   innerType?: z.ZodTypeAny;
@@ -45,7 +46,7 @@ type SchemaDef = {
 
 type SchemaInternals = {
   _def?: SchemaDef;
-  _zod?: { def?: SchemaDef };
+  _zod?: { def?: SchemaDef; values?: Set<unknown> };
   shape?: Record<string, z.ZodTypeAny>;
   options?: z.ZodTypeAny[] | Map<string, z.ZodTypeAny>;
   isOptional?: () => boolean;
@@ -119,17 +120,30 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       return {};
     case 'literal':
       return literalValue(schema);
-    case 'enum':
-      return { type: 'string', enum: Object.keys(definition.entries ?? {}) };
+    case 'enum': {
+      const values = [...(internals(schema)._zod?.values ?? [])];
+      if (values.length === 0 || values.some((value) =>
+        typeof value !== 'string' && (typeof value !== 'number' || !Number.isFinite(value))
+      )) {
+        throw new Error('toJsonSchema does not support these enum values');
+      }
+      const types = [...new Set(values.map((value) => typeof value))];
+      return { type: types.length === 1 ? types[0] : types, enum: values };
+    }
     case 'array': {
       const item = definition.element ? toJsonSchema(definition.element) : {};
       return { type: 'array', items: item };
     }
-    case 'record':
+    case 'record': {
+      const key = definition.keyType;
+      if (!key || def(key).type !== 'string' || def(key).coerce || checks(key).length > 0) {
+        throw new Error('toJsonSchema supports only unconstrained string record keys');
+      }
       return {
         type: 'object',
         additionalProperties: definition.valueType ? toJsonSchema(definition.valueType) : true,
       };
+    }
     case 'optional':
     case 'nullable': {
       const inner = definition.innerType ? toJsonSchema(definition.innerType) : {};

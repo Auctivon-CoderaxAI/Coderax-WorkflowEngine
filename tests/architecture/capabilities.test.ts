@@ -135,13 +135,15 @@ test('class implementations and wrapper factories are still competitors', () => 
   }
 });
 
-test('one implementation is accepted and reported as the only owner', () => {
+test('local export aliases and re-exports count as one implementation', () => {
   const root = fixture({
     'src/models/types.ts': 'export type ModelCatalog = { list: () => string[] };',
     'src/models/only.ts': `
       import type { ModelCatalog } from './types.js';
       export function renamedButAuthoritative(): ModelCatalog { return { list: () => [] }; }
+      export { renamedButAuthoritative as localAlias };
     `,
+    'src/barrel.ts': "export { renamedButAuthoritative as publicAlias } from './models/only.js';",
   });
   try {
     const result = inspectCapabilities(createProgram(root), root);
