@@ -19,12 +19,13 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 
 export type EmbeddingProvider = {
   id: string;
-  cloudOnly?: boolean;
   /**
-   * The mode travels with the batch so the governed implementation authorizes
-   * the exact operation for that mode; the store never decides eligibility.
+   * A hosted model transmits text off-process, so it can never index a private
+   * document. The flag is a capability, declared once by the provider, and the
+   * store refuses private text before calling rather than letting the batch fail.
    */
-  embed: (texts: string[], mode: DataMode) => Promise<number[][]>;
+  cloudOnly?: boolean;
+  embed: (texts: string[]) => Promise<number[][]>;
 };
 
 export type KnowledgeStore = {
@@ -134,7 +135,7 @@ export function createKnowledgeStore(input: {
       let vectors: number[][] | null = null;
       if (input.embeddings && !(mode === 'private' && input.embeddings.cloudOnly)) {
         try {
-          vectors = await input.embeddings.embed(pieces, mode);
+          vectors = await input.embeddings.embed(pieces);
           if (vectors.length !== pieces.length) vectors = null;
         } catch {
           // Retrieval still works lexically; the result says so.
@@ -172,7 +173,7 @@ export function createKnowledgeStore(input: {
       let queryVector: number[] | null = null;
       if (input.embeddings && !(mode === 'private' && input.embeddings.cloudOnly)) {
         try {
-          const embedded = await input.embeddings.embed([query], mode);
+          const embedded = await input.embeddings.embed([query]);
           queryVector = embedded[0] ?? null;
         } catch {
           queryVector = null;

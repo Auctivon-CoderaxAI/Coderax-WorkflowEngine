@@ -1,4 +1,4 @@
-import type { DataMode, ModelRef } from '@coderax/contracts';
+import type { ModelRef } from '@coderax/contracts';
 import type { EmbeddingProvider } from '../knowledge/store.js';
 import type { ModelRouter } from './router.js';
 
@@ -29,13 +29,14 @@ export function createRouterEmbeddings(input: {
   return {
     id: `router:${input.model.providerId}/${input.model.modelId}`,
     // A hosted embedding always transmits text to a provider, so it can never
-    // serve private-mode documents. The store refuses before it is called.
+    // serve private-mode documents. The store refuses before it is called, which
+    // is why the batch below needs no mode argument.
     cloudOnly: true,
-    embed: async (texts: string[], mode: DataMode) => {
+    embed: async (texts: string[]) => {
       if (texts.length === 0) return [];
       const result = await embed({
         ownerId: input.ownerId,
-        mode,
+        mode: 'cloud',
         texts,
         requested: input.model,
       });
