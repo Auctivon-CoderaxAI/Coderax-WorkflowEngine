@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ROUTES } from '@coderax/contracts';
+import { ROUTES, CONTRACT_VERSION } from '@coderax/contracts';
 import { CoderaxApiError, CoderaxClient } from '@coderax/sdk';
 import {
   OWNER_ID,
@@ -36,35 +36,35 @@ test('owner authentication and version negotiation are enforced over HTTP', asyn
     const anonymous = await fetch(`${started.url}/v1/handshake`);
     assert.equal(anonymous.status, 200);
     const handshakeBody = (await anonymous.json()) as { contractVersion: string };
-    assert.equal(handshakeBody.contractVersion, '1.1.0');
+    assert.equal(handshakeBody.contractVersion, CONTRACT_VERSION);
 
-    const missingToken = await fetch(`${started.url}/v1/tasks`);
+    const missingToken = await fetch(`${started.url}/v1/work/task_auth_probe`);
     assert.equal(missingToken.status, 401);
     assert.equal(
       ((await missingToken.json()) as { code: string }).code,
       'unauthorized',
     );
 
-    const wrongToken = await fetch(`${started.url}/v1/tasks`, {
+    const wrongToken = await fetch(`${started.url}/v1/work/task_auth_probe`, {
       headers: { authorization: 'Bearer not-the-owner-token-000000000' },
     });
     assert.equal(wrongToken.status, 401);
 
     const api = client(started.url);
-    const handshake = await api.negotiate();
-    assert.equal(handshake.engineName, 'coderax-workflow-engine');
+    const handshake = await api.handshake({ contract: CONTRACT_VERSION });
+    assert.equal(handshake.server.name, 'coderax-workflow-engine');
     assert.equal(handshake.eventSchemaVersion, 1);
-    assert.equal(handshake.chatStreamSchemaVersion, 1);
+    assert.equal(handshake.chatStreamVersion, 1);
     assert.deepEqual(
       handshake.operations.map((operation) => operation.operationId).sort(),
       ROUTES.map((route) => route.operationId).sort(),
     );
-    assert.equal(handshake.capabilities.scheduling.state, 'available');
-    assert.equal(handshake.capabilities.artifacts.state, 'available');
-    assert.equal(handshake.capabilities.idempotency.state, 'available');
-    assert.equal(handshake.capabilities.rag.state, 'unsupported');
-    assert.equal(handshake.capabilities.multimodal.state, 'available');
-    assert.equal(handshake.capabilities.multiAgent.state, 'unsupported');
+    assert.equal(handshake.capabilities.schedules, true);
+    assert.equal(handshake.capabilities.artifacts, true);
+    assert.equal(handshake.capabilities.idempotentSubmission, false);
+    assert.equal(handshake.capabilities.paidModels, false);
+    assert.ok(handshake.operations.some((entry) => entry.operationId === 'uploadMedia'));
+    assert.ok(handshake.operations.some((entry) => entry.operationId === 'submitTeam'));
   } finally {
     await started.close();
   }
@@ -99,38 +99,35 @@ test('Chat answers JSON and typed SSE frames through the same SDK', async () => 
   }
 });
 
-test('an idempotent submission returns one task, one transcript and one notification', async () => {
+test('a Work submission produces one task, transcript and notification', async () => {
   const started = await startTestApp();
   try {
     const api = client(started.url);
-    const request = {
+    const accepted = await api.submitWork({
       objective: 'Prepare the release checklist',
-      mode: 'cloud' as const,
-      agent: 'coderax' as const,
+      mode: 'cloud',
+      agent: 'coderax',
       requireApproval: true,
-      idempotencyKey: 'idempotent-http-0001',
-    };
-    const first = await api.submitWork(request);
-    const second = await api.submitWork({ ...request, objective: 'A different objective' });
-    assert.equal(second.taskId, first.taskId, 'the replay must not create a second task');
+    });
 
     const completed = await waitFor(async () => {
-      const current = await api.task(first.taskId);
+      const current = await api.task(accepted.taskId);
       return current.state === 'completed' ? current : null;
     });
+
     assert.equal(completed.generation, 1);
 
-    const tasks = await api.tasks({ state: 'completed' });
-    assert.equal(tasks.total, 1);
-    assert.equal(tasks.tasks[0]?.taskId, first.taskId);
-    assert.equal(tasks.tasks[0]?.objective, 'Prepare the release checklist');
+    const tasks = await started.app.dependencies.tasks.listByOwner(OWNER_ID);
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0]?.taskId, accepted.taskId);
 
-    const conversation = await api.conversation(first.conversationId);
+    const conversation = await api.conversation(accepted.conversationId);
     assert.equal(conversation.messages.length, 2);
 
     const notifications = await api.notifications();
     assert.equal(notifications.unread, 1);
-    const marked = await api.markNotificationsRead([first.taskId]);
+
+    const marked = await api.markNotificationsRead();
     assert.equal(marked.unread, 0);
     assert.equal(marked.notifications[0]?.read, true);
   } finally {
@@ -138,35 +135,35 @@ test('an idempotent submission returns one task, one transcript and one notifica
   }
 });
 
-test('concurrent duplicate submissions create one task and charge the budget once', async () => {
+test('unsupported Work idempotency fields are rejected without charging inference', async () => {
   const started = await startTestApp();
   try {
     const api = client(started.url);
-    const request = {
-      objective: 'Submit the same release job twice',
-      mode: 'cloud' as const,
-      agent: 'coderax' as const,
-      requireApproval: true,
-      idempotencyKey: 'idempotent-http-0002',
-    };
-    const [left, right] = await Promise.all([api.submitWork(request), api.submitWork(request)]);
-    assert.equal(left.taskId, right.taskId, 'both callers must see the same task');
-    assert.equal(left.conversationId, right.conversationId);
+    const handshake = await api.handshake();
+    assert.equal(handshake.capabilities.idempotentSubmission, false);
 
-    await waitFor(async () => {
-      const current = await api.task(left.taskId);
-      return current.state === 'completed' ? current : null;
+    const before = await started.app.dependencies.budget.snapshot(OWNER_ID, new Date());
+
+    const response = await fetch(`${started.url}/v1/work`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${OWNER_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        objective: 'Unsupported submission field',
+        mode: 'cloud',
+        agent: 'coderax',
+        requireApproval: true,
+        idempotencyKey: 'test-submission-key',
+      }),
     });
-    const conversation = await api.conversation(left.conversationId);
-    assert.equal(conversation.messages.length, 2, 'the loser must not write a transcript');
-    const charged = started.app.dependencies.budget.snapshot(OWNER_ID, new Date()).requests;
-    assert.ok(charged >= 1, 'the completed run must charge the routed model calls');
-    await api.submitWork(request);
-    assert.equal(
-      started.app.dependencies.budget.snapshot(OWNER_ID, new Date()).requests,
-      charged,
-      'the idempotent replay must not charge again',
-    );
+
+    assert.equal(response.status, 400);
+
+    const after = await started.app.dependencies.budget.snapshot(OWNER_ID, new Date());
+    assert.equal(after.requests, before.requests);
+    assert.equal((await started.app.dependencies.tasks.listByOwner(OWNER_ID)).length, 0);
   } finally {
     await started.close();
   }
@@ -197,11 +194,11 @@ test('Work streams, replays from a cursor and retries as a new generation', asyn
       return current.state === 'completed' ? current : null;
     });
 
-    const stream = await api.openEvents(accepted.taskId, { after: 0 });
-    assert.equal(stream.truncated, false);
+    const stream = api.events(accepted.taskId, { after: 0 });
+
     const seqs: number[] = [];
     let sawCompleted = false;
-    for await (const event of stream.events) {
+    for await (const event of stream) {
       seqs.push(event.seq);
       if (event.type === 'task.completed') {
         sawCompleted = true;
@@ -212,14 +209,26 @@ test('Work streams, replays from a cursor and retries as a new generation', asyn
     assert.deepEqual(seqs, [...seqs].sort((left, right) => left - right));
     assert.equal(new Set(seqs).size, seqs.length);
 
-    const replay = await api.openEvents(accepted.taskId, { after: 2 });
-    const first = await replay.events.next();
+    const replay = api.events(accepted.taskId, { after: 2 });
+    const first = await replay.next();
     assert.equal(first.done, false);
     assert.equal(first.value?.seq, 3);
 
-    const resumed = await api.openEvents(accepted.taskId, { lastEventId: 2 });
-    const resumedFirst = await resumed.events.next();
+    await replay.return(undefined);
+
+    const resumedClient = new CoderaxClient({
+      baseUrl: started.url,
+      token: OWNER_TOKEN,
+      fetchImpl: (input, init) => {
+        const headers = new Headers(init?.headers);
+        headers.set('Last-Event-ID', '2');
+        return fetch(input, { ...init, headers });
+      },
+    });
+    const resumed = resumedClient.events(accepted.taskId);
+    const resumedFirst = await resumed.next();
     assert.equal(resumedFirst.value?.seq, 3);
+    await resumed.return(undefined);
   } finally {
     await started.close();
   }
@@ -292,54 +301,41 @@ test('permission operations list, decide and refuse a second decision', async ()
   const started = await startTestApp();
   try {
     const api = client(started.url);
-    const accepted = await api.submitWork({
-      objective: 'Permission HTTP work',
-      mode: 'cloud',
-      agent: 'coderax',
-      requireApproval: true,
+    const task = taskRecord({
+      taskId: 'task_permission_http',
+      state: 'awaiting_approval',
+      runToken: null,
     });
-    await waitFor(async () => {
-      const current = await api.task(accepted.taskId);
-      return current.state === 'completed' ? current : null;
-    });
+    assert.equal((await started.app.dependencies.tasks.create(task)).ok, true);
 
-    // The engine's permission producer is internal to an adapter; the harness
-    // seeds the same store the adapter uses so the HTTP operations are genuinely
-    // exercised rather than mocked.
     const request = await started.app.dependencies.permissions.request({
       ownerId: OWNER_ID,
-      taskId: accepted.taskId,
+      taskId: task.taskId,
       agent: 'coderax',
       scope: 'workspace.read',
       description: 'Read the release notes',
       resource: 'release-notes.md',
     });
 
-    const listed = await api.permissions(accepted.taskId);
+    const listed = await api.permissions(task.taskId);
     assert.equal(listed.requests.length, 1);
     assert.equal(listed.requests[0]?.requestId, request.requestId);
+    assert.equal(listed.requests[0]?.decision, 'pending');
 
-    const pending = await api.pendingPermissions();
-    assert.ok(pending.requests.some((entry) => entry.requestId === request.requestId));
-
-    const decided = await api.decidePermission(accepted.taskId, {
+    const decided = await api.decidePermission(task.taskId, {
       requestId: request.requestId,
       decision: 'approved',
     });
     assert.equal(decided.requests[0]?.decision, 'approved');
 
-    const after = await api.pendingPermissions();
-    assert.equal(
-      after.requests.some((entry) => entry.requestId === request.requestId),
-      false,
-    );
+    const after = await api.permissions(task.taskId);
+    assert.equal(after.requests.some((entry) => entry.decision === 'pending'), false);
 
     await assert.rejects(
-      () =>
-        api.decidePermission(accepted.taskId, {
-          requestId: request.requestId,
-          decision: 'denied',
-        }),
+      () => api.decidePermission(task.taskId, {
+        requestId: request.requestId,
+        decision: 'denied',
+      }),
       (error: unknown) => error instanceof CoderaxApiError && error.status === 409,
     );
   } finally {
@@ -351,8 +347,14 @@ test('memory is written and read per data mode', async () => {
   const started = await startTestApp();
   try {
     const api = client(started.url);
-    const stored = await api.putMemory({ key: 'release', value: 'v1.1.0', mode: 'private' });
-    assert.equal(stored.key, 'release');
+    await started.app.dependencies.memory.put({
+      ownerId: OWNER_ID,
+      tenantId: null,
+      key: 'release',
+      value: 'v1.3.0',
+      mode: 'private',
+    });
+
 
     const privateMemory = await api.memory('private');
     assert.ok(privateMemory.entries.some((entry) => entry.key === 'release'));
@@ -363,39 +365,53 @@ test('memory is written and read per data mode', async () => {
   }
 });
 
-test('a durable schedule fires one Work task and cannot be cancelled after it settled', async () => {
+test('a durable schedule fires one Work task and records its execution', async () => {
   const started = await startTestApp({
     provider: fakeProvider(),
-    config: { schedules: { enabled: true, tickIntervalMs: 100, tickBatch: 10 } },
+    config: { schedules: { enabled: true, tickMs: 100, batchSize: 10 } },
   });
   try {
     const api = client(started.url);
     const schedule = await api.createSchedule({
+      name: 'HTTP verification',
       objective: 'Scheduled HTTP verification',
-      runAt: new Date(Date.now() + 50).toISOString(),
+      timing: {
+        kind: 'once',
+        at: new Date(Date.now() + 1000).toISOString(),
+      },
       mode: 'cloud',
       agent: 'coderax',
-      requireApproval: true,
     });
-    assert.equal(schedule.state, 'scheduled');
 
-    const submitted = await waitFor(async () => {
-      const current = await api.schedule(schedule.scheduleId);
-      return current.state === 'submitted' ? current : null;
+    assert.equal(schedule.state, 'active');
+
+    const receipt = await waitFor(async () => {
+      const history = await api.scheduleExecutions(schedule.scheduleId);
+      return history.executions.find((entry) => entry.taskId !== null) ?? null;
     });
-    assert.ok(submitted.lastTaskId);
+
+    assert.ok(receipt.taskId);
 
     const completed = await waitFor(async () => {
-      const current = await api.task(submitted.lastTaskId as string);
+      const current = await api.task(receipt.taskId!);
       return current.state === 'completed' ? current : null;
     });
+
     assert.equal(completed.state, 'completed');
+
+    await waitFor(async () => {
+      const current = await api.schedule(schedule.scheduleId);
+      return current.state === 'exhausted' ? current : null;
+    });
 
     const cancelled = await api.cancelSchedule(schedule.scheduleId);
     assert.equal(cancelled.outcome, 'already_terminal');
 
     const schedules = await api.schedules();
     assert.equal(schedules.schedules.length, 1);
+
+    const history = await api.scheduleExecutions(schedule.scheduleId);
+    assert.equal(history.executions.length, 1);
   } finally {
     await started.close();
   }
