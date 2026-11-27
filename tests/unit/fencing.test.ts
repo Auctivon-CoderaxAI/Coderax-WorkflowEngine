@@ -113,7 +113,7 @@ test('a failed generation can be reissued or claimed for scheduled retry, never 
       const task = taskRecord({ taskId: String(schedulerFirst), conversationId: String(schedulerFirst), generation: 1, state: 'failed' });
       await tasks.create(task);
       const claim = () => tasks.claimScheduledRetry(task.taskId, 1);
-      const reissue = () => tasks.reissue({ taskId: task.taskId, now: task.updatedAt, leaseExpiresAt: task.updatedAt, token: 'new' });
+      const reissue = () => tasks.reissue({ taskId: task.taskId, now: task.updatedAt, leaseExpiresAt: task.updatedAt, token: 'new', from: ['failed'] });
       if (schedulerFirst) {
         assert.equal(await claim(), true);
         assert.equal((await reissue()).applied, false);
