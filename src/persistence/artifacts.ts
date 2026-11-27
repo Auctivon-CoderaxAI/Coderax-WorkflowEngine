@@ -21,7 +21,7 @@ export type ArtifactListFilter = {
   projectId?: string;
   conversationId?: string;
   taskId?: string;
-  limit: number;
+  limit?: number;
 };
 
 export type ArtifactUsage = { bytes: number; artifacts: number };
@@ -66,6 +66,8 @@ export type ArtifactRepository = {
   usage: (input: { ownerId: string; mode: DataMode }) => Promise<ArtifactUsage>;
   /** True while any retained version still points at the digest. */
   referenced: (input: { ownerId: string; mode: DataMode; sha256: string }) => Promise<boolean>;
+  pendingRemovals?: (limit: number, partition?: { ownerId: string; mode: DataMode }) => Promise<RemoveArtifactOutcome[]>;
+  finishRemoval?: (key: ArtifactKey) => Promise<void>;
   remove: (key: ArtifactKey) => Promise<RemoveArtifactOutcome>;
   /** Removes an older version only; the current version is never removable. */
   removeVersion: (
@@ -148,7 +150,8 @@ export function createArtifactRepository(): ArtifactRepository {
       const key = partition(artifact);
       const current = artifacts.get(key);
       if (!current) return { ok: false, reason: 'not_found' };
-      if (current.version !== expectedVersion) return { ok: false, reason: 'conflict' };
+      if (current.version !== expectedVersion || artifact.versions !== current.versions + 1 ||
+          (artifact.mutationRevision ?? 1) !== (current.mutationRevision ?? 0) + 1) return { ok: false, reason: 'conflict' };
       const rows = versionsFor(key);
       if (rows.has(version.version)) return { ok: false, reason: 'conflict' };
       if (pathTaken(artifact, key)) return { ok: false, reason: 'conflict' };
@@ -274,6 +277,7 @@ export function createArtifactRepository(): ArtifactRepository {
       if (!target) return { ok: false, reason: 'not_found' };
       const restored: ArtifactRecord = {
         ...artifact,
+        mutationRevision: (artifact.mutationRevision ?? 0) + 1,
         kind: target.kind,
         filename: target.filename,
         mediaType: target.mediaType,

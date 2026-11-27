@@ -7,6 +7,7 @@ import type {
   EngineCapabilities,
   EngineFailureCode,
   EngineId,
+  MediaReference,
   ModelRef,
   Usage,
 } from '@coderax/contracts';
@@ -50,6 +51,11 @@ export type AgentRunRequest = {
    * is passed separately so an agent never answers the same message twice.
    */
   history?: AgentHistoryTurn[];
+  /**
+   * Validated images for this turn. Only a native adapter may receive them; an
+   * adapter that cannot carry an image is refused instead of dropping it.
+   */
+  media?: Array<{ reference: MediaReference; dataUrl: string }>;
   /** Already resolved by the model catalogue; null for a deterministic game session. */
   model: ModelRef | null;
   mode: DataMode;

@@ -13,6 +13,7 @@ import {
   fakeGateway,
   OWNER_TOKEN,
   startTestApp,
+  taskRecord,
 } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
@@ -298,7 +299,7 @@ test('an abandoned adapter loses its workspace and its events', { timeout: 15_00
     assert.ok(quarantined.some((entry) => entry.startsWith(path.basename(workspaceRoot))));
 
     late();
-    const replay = JSON.stringify(deps.events.replay(task.value.taskId, 0));
+    const replay = JSON.stringify(await deps.events.replay(task.value.taskId, 0));
     assert.doesNotMatch(replay, /stale-after-revocation/);
 
     const lateWrite = await writeFile(path.join(workspaceRoot, 'stale.txt'), 'x').then(
@@ -517,7 +518,7 @@ test('failure, event, notification and audit text is scrubbed', async () => {
     assert.equal(status.value.state, 'failed');
     assert.doesNotMatch(JSON.stringify(status.value.failure), /b{32}/);
 
-    const replay = JSON.stringify(deps.events.replay(task.value.taskId, 0));
+    const replay = JSON.stringify(await deps.events.replay(task.value.taskId, 0));
     assert.doesNotMatch(replay, /b{32}/);
     assert.match(replay, /\[redacted\]/);
 
@@ -542,10 +543,19 @@ test('every event payload is scrubbed at the bus, not only known types', async (
   const started = await startTestApp();
   try {
     const events = started.app.dependencies.events;
-    events.publish({
+    // The log only stores a write the fenced task row allocates a sequence for,
+    // so the test seeds its owner instead of bypassing the fence.
+    await started.app.dependencies.tasks.create(
+      taskRecord({ taskId: 'task_bus', runToken: 'run-bus' }),
+    );
+    const draft = {
       taskId: 'task_bus',
-      agent: 'coderax',
+      runToken: 'run-bus',
+      agent: 'coderax' as const,
       generation: 1,
+    };
+    await events.publish({
+      ...draft,
       type: 'tool.call',
       payload: {
         callId: 'call_1',
@@ -553,15 +563,13 @@ test('every event payload is scrubbed at the bus, not only known types', async (
         input: { authorization: 'Bearer cccccccccccccccccccccccc', note: 'password=supersecret' },
       },
     });
-    events.publish({
-      taskId: 'task_bus',
-      agent: 'coderax',
-      generation: 1,
+    await events.publish({
+      ...draft,
       type: 'step.started',
       payload: { stepId: 's1', title: 'key sk-' + 'd'.repeat(24) },
     });
 
-    const replay = JSON.stringify(events.replay('task_bus', 0));
+    const replay = JSON.stringify(await events.replay('task_bus', 0));
     assert.doesNotMatch(replay, /c{24}/);
     assert.doesNotMatch(replay, /supersecret/);
     assert.doesNotMatch(replay, /sk-d{24}/);

@@ -36,6 +36,23 @@ test('a heartbeat that cannot sustain the lease is refused at startup', () => {
   }
 });
 
+test('shutdown has a bounded default and rejects an unusably short deadline', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    assert.equal(config.execution.shutdownGraceMs, 10_000);
+    assert.equal(
+      EngineConfigSchema.safeParse({
+        ...config,
+        execution: { ...config.execution, shutdownGraceMs: 1 },
+      }).success,
+      false,
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('paid routing cannot be configured at all', () => {
   const ws = workspace();
   try {
@@ -162,6 +179,28 @@ test('duplicate zero-cost candidates are refused', () => {
   }
 });
 
+test('removed retry settings are rejected visibly, not silently ignored', () => {
+  const ws = workspace();
+  try {
+    assert.throws(
+      () =>
+        EngineConfigSchema.parse({
+          auth: { ownerId: 'owner' },
+          workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+          models: { route: [{ providerId: 'free', modelId: 'm' }] },
+          execution: { maxAttempts: 3, retryDelayMs: 100 },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /execution|maxAttempts|retryDelayMs/i);
+        return true;
+      },
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('the persistence driver can be selected from the environment', () => {
   const ws = workspace();
   try {
@@ -227,4 +266,16 @@ test('a short owner token is refused instead of accepted as authentication', () 
   } finally {
     ws.cleanup();
   }
+});
+
+test('default artifact retention cannot exceed the maximum; zero keeps indefinitely', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    const issues = (days: number) => validateInvariants({
+      ...config, artifacts: { ...config.artifacts, defaultRetentionDays: days, maxRetentionDays: 1 },
+    });
+    assert.ok(issues(2).some(issue => issue.includes('defaultRetentionDays')));
+    assert.deepEqual(issues(0), []);
+  } finally { ws.cleanup(); }
 });

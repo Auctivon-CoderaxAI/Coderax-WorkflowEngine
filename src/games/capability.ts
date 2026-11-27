@@ -88,24 +88,27 @@ export function createGameCapabilityReport(input: GameCapabilityInput): GameCapa
   const aiAssistedCapability: GameCapability = {
     id: 'native.game-studio.ai-assisted',
     title: 'Native Game Studio — AI-assisted generation',
-    status: input.modelAssisted ? 'degraded' : 'blocked',
+    // A configured route is not participation and a test-double narrative is not
+    // a build. Only an executed, verified zero-cost model build would move this
+    // row, and none exists here, so the status stays blocked either way.
+    status: 'blocked',
     available: false,
     summary:
       'A verified zero-cost model may add design narrative through the model catalogue and daily budget; code, levels and rules remain deterministic and measured.',
     detail: input.modelAssisted
-      ? 'A zero-cost model route is configured, but this deployment has no executed model-assisted build to point at, so AI-assisted generation is not claimed as verified.'
+      ? 'A zero-cost model route is configured, but no model-assisted build has been executed and verified in this deployment, so AI-assisted generation is not claimed.'
       : 'No authorized zero-cost model credential is configured in this deployment. Natural-language interpretation, source generation and verification are deterministic and operational; no model output is being claimed.',
     evidence: [
       'src/games/assistant.ts — optional narrative-only model call through the verified zero-cost catalogue',
       'src/models/catalog.ts — paid models refused, budget enforced',
-      'tests/unit/games.test.ts — deterministic generation and verification',
+      'tests/unit/games.test.ts — deterministic generation and verification; a model-assisted flag changes no generated source byte',
     ],
     environments: ['coderax-cloud-engine'],
     isolation: null,
     modelAssisted: input.modelAssisted,
     blockedBy: input.modelAssisted
-      ? 'No executed model-assisted build exists to verify; a configured route is not evidence of participation.'
-      : 'An owner-provided zero-cost model credential is required before AI-assisted generation can be claimed.',
+      ? 'No executed and verified model-assisted build exists; a configured route or a test narrative is not evidence of participation.'
+      : 'An owner-provided zero-cost model credential and one executed model-assisted build are required before AI-assisted generation can be claimed.',
   };
 
   const browserAgentCapability: GameCapability = {

@@ -162,6 +162,7 @@ export function createNativeExecutor(gateway: ModelGateway): ActionExecutor {
           }),
           signal: input.signal,
           ...(input.maxOutputTokens ? { maxOutputTokens: input.maxOutputTokens } : {}),
+          ...(input.images && input.images.length > 0 ? { images: input.images } : {}),
         });
         const text = completion.text.trim();
         if (text.length === 0) {

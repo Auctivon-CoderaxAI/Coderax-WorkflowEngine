@@ -23,6 +23,7 @@ type CheckDef = {
   value?: number;
   inclusive?: boolean;
   format?: string;
+  pattern?: RegExp;
 };
 
 type ZodDef = {
@@ -77,7 +78,8 @@ function stringBounds(schema: z.ZodTypeAny): JsonSchema {
       out.maxLength = check.maximum;
     }
     if (check.check === 'string_format' && typeof check.format === 'string') {
-      if (check.format === 'datetime') out.format = 'date-time';
+      if (check.format === 'regex' && check.pattern && !check.pattern.flags) out.pattern = check.pattern.source;
+      else if (check.format === 'datetime') out.format = 'date-time';
       else if (check.format === 'email') out.format = 'email';
       else if (check.format === 'url') out.format = 'uri';
     }
@@ -112,8 +114,24 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       if (values.length === 1) return { const: values[0] };
       return { enum: values };
     }
-    case 'enum':
-      return { type: 'string', enum: Object.values(d.entries ?? {}) };
+    case 'enum': {
+      // A numeric enum's `entries` carry reverse-mapped names; the runtime
+      // value set is what a client must be allowed to send.
+      const runtime = (schema as unknown as { _zod?: { values?: Set<unknown> } })._zod?.values;
+      const values = runtime ? [...runtime] : Object.values(d.entries ?? {});
+      if (
+        values.length === 0 ||
+        values.some(
+          (value) =>
+            typeof value !== 'string' &&
+            (typeof value !== 'number' || !Number.isFinite(value)),
+        )
+      ) {
+        throw new Error('toJsonSchema does not support these enum values');
+      }
+      const types = [...new Set(values.map((value) => typeof value))];
+      return { type: types.length === 1 ? types[0] : types, enum: values };
+    }
     case 'array': {
       const item = d.element ? toJsonSchema(d.element) : {};
       const out: JsonSchema = { type: 'array', items: item };
@@ -127,11 +145,16 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       }
       return out;
     }
-    case 'record':
+    case 'record': {
+      const key = d.keyType;
+      if (!key || def(key).type !== 'string' || checksOf(key).length > 0) {
+        throw new Error('toJsonSchema supports only unconstrained string record keys');
+      }
       return {
         type: 'object',
         additionalProperties: d.valueType ? toJsonSchema(d.valueType) : true,
       };
+    }
     case 'optional': {
       return d.innerType ? toJsonSchema(d.innerType) : {};
     }

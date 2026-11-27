@@ -51,7 +51,10 @@ function toTask(document: Record<string, unknown>): TaskRecord {
   ) {
     throw new Error('A stored task row is malformed.');
   }
-  return strip(document) as unknown as TaskRecord;
+  const task = strip(document) as unknown as TaskRecord;
+  // A row written before the event log existed has no head yet; the first
+  // allocation creates it. Reading it as 0 keeps old rows usable.
+  return { ...task, eventSeq: typeof document.eventSeq === 'number' ? document.eventSeq : 0 };
 }
 
 function toConversation(document: Record<string, unknown>): ConversationRecord {
@@ -238,6 +241,27 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       );
       if (!updated) return { applied: false, reason: 'superseded' };
       return { applied: true, task: toTask(updated) };
+    },
+
+    allocateSeq: async ({ taskId, token }) => {
+      // The increment is atomic in the database and the fence is part of the
+      // filter: no read-then-compare window, and no way for a superseded
+      // generation to consume a sequence the new owner is about to use. The
+      // terminal-state check is deliberately absent so the owner can append the
+      // event that announces its own settlement.
+      const updated = await collection.findOneAndUpdate(
+        { taskId, runToken: token },
+        { $inc: { eventSeq: 1 } },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      const seq = updated?.eventSeq;
+      return typeof seq === 'number' ? seq : null;
+    },
+
+    adoptSeq: async ({ taskId, seq }) => {
+      // `$max` is monotone, so two replicas adopting the same replay converge on
+      // the higher head instead of fighting over the field.
+      await collection.updateOne({ taskId }, { $max: { eventSeq: seq } }, { upsert: false });
     },
 
     listByConversation: async (conversationId) => {

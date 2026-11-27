@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MediaAttachmentInput, MediaReference } from './media.js';
 import { Budget } from './models.js';
 import {
   AgentId,
@@ -15,6 +16,11 @@ import {
 export const ChatRequest = z
   .object({
     message: z.string().min(1).max(200_000),
+    /**
+     * Optional image attachments. Validated against their own bytes before a
+     * provider is called; the accepted references are part of the stored turn.
+     */
+    attachments: z.array(MediaAttachmentInput).max(4).optional(),
     conversationId: ConversationId.optional(),
     agent: AgentId.default('coderax'),
     model: ModelRef.optional(),
@@ -168,6 +174,8 @@ export const Message = z
     createdAt: IsoDateTime,
     unfinished: z.boolean().optional(),
     agent: AgentId.optional(),
+    /** Metadata for images accepted on this turn; never the bytes. */
+    media: z.array(MediaReference).optional(),
   })
   .strict();
 export type Message = z.infer<typeof Message>;

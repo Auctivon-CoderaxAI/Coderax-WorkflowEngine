@@ -8,6 +8,7 @@ import type {
   GameAction,
   GameObjective,
   IsoDateTime,
+  MediaReference,
   MissedRunPolicy,
   ModelRef,
   ScheduleCondition,
@@ -161,6 +162,12 @@ export type TaskRecord = {
   state: TaskState;
   generation: number;
   runToken: string | null;
+  /**
+   * The highest event sequence the durable log holds for this task, absent rows
+   * read as 0. It lives on the fenced row so allocating a sequence and proving
+   * ownership are one atomic operation.
+   */
+  eventSeq: number;
   /** Resolved on the first planning pass; never guessed by a client. */
   reasoning: ReasoningMode | null;
   steps: TaskStep[];
@@ -216,6 +223,8 @@ export type StoredMessage = {
   createdAt: IsoDateTime;
   unfinished?: boolean;
   agent?: AgentId;
+  /** Metadata for images accepted on this turn; never the encoded bytes. */
+  media?: MediaReference[];
 };
 
 export type MemoryRecord = {
@@ -366,6 +375,8 @@ export type ScheduleNoticeRecord = {
  * named only by `sha256`; the file name here is metadata and never a path.
  */
 export type ArtifactRecord = {
+  mutationRevision?: number;
+  slotTracked?: boolean;
   artifactId: string;
   ownerId: string;
   tenantId: string | null;
@@ -392,6 +403,7 @@ export type ArtifactRecord = {
 };
 
 export type ArtifactVersionRecord = {
+  reservationId?: string;
   ownerId: string;
   mode: DataMode;
   artifactId: string;

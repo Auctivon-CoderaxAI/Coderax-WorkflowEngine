@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { WrittenArtifact } from './types.js';
+
+export type WrittenFile = { path: string; bytes: number; sha256: string };
 
 /** A relative artifact path that cannot leave the confined workspace root. */
 export class ArtifactPathError extends Error {
@@ -11,8 +12,9 @@ export class ArtifactPathError extends Error {
   }
 }
 
+/** Lowercase hex, the one digest convention the artifact contract uses. */
 export function digestOf(data: Buffer | string): string {
-  return `sha256:${createHash('sha256').update(data).digest('hex')}`;
+  return createHash('sha256').update(data).digest('hex');
 }
 
 function isInside(candidate: string, parent: string): boolean {
@@ -47,7 +49,7 @@ export async function writeArtifact(input: {
   root: string;
   relative: string;
   data: Buffer | string;
-}): Promise<WrittenArtifact> {
+}): Promise<WrittenFile> {
   const data = typeof input.data === 'string' ? Buffer.from(input.data, 'utf8') : input.data;
   const absolute = resolveInside(input.root, input.relative);
   await mkdir(path.dirname(absolute), { recursive: true });
@@ -55,7 +57,7 @@ export async function writeArtifact(input: {
   return {
     path: input.relative,
     bytes: data.length,
-    digest: digestOf(data),
+    sha256: digestOf(data),
   };
 }
 
