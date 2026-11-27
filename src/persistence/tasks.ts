@@ -8,7 +8,7 @@ export type CreateTaskResult =
 
 export type FencedWriteResult =
   | { applied: true; task: TaskRecord }
-  | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' };
+  | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' | 'guard_rejected' };
 
 /**
  * The only writer of task state.
@@ -22,7 +22,13 @@ export type TaskRepository = {
   create: (task: TaskRecord) => Promise<CreateTaskResult>;
   get: (taskId: string) => Promise<TaskRecord | null>;
   updateFenced: (
-    input: { taskId: string; token: string; patch: TaskPatch },
+    input: {
+      taskId: string;
+      token: string;
+      patch: TaskPatch;
+      /** Optional atomic guard for the cancellation/suspension handoff. */
+      guard?: 'not_cancel_requested' | 'not_awaiting_approval';
+    },
   ) => Promise<FencedWriteResult>;
   /**
    * Settles a task that was never claimed (no run token). It refuses anything a
@@ -30,11 +36,15 @@ export type TaskRepository = {
    */
   abandon: (input: { taskId: string; patch: TaskPatch }) => Promise<boolean>;
   /** Claim a new generation for resume/retry; refuses a live task. */
+  takeHandoff: (taskId: string, generation: number, token: string, leaseExpiresAt: string) => Promise<TaskRecord | null>;
+  claimScheduledRetry: (taskId: string, generation: number) => Promise<boolean>;
   reissue: (input: {
     taskId: string;
     token: string;
     now: string;
     leaseExpiresAt: string;
+    /** States this caller is authorized to replace; checked atomically. */
+    from: TaskRecord['state'][];
   }) => Promise<FencedWriteResult>;
   listByConversation: (conversationId: string) => Promise<TaskRecord[]>;
   /** Tasks that are not terminal, used by startup ownership verification. */
@@ -75,7 +85,7 @@ export function createTaskRepository(): TaskRepository {
       const task = tasks.get(taskId);
       return task ? { ...task } : null;
     },
-    updateFenced: async ({ taskId, token, patch }) => {
+    updateFenced: async ({ taskId, token, patch, guard }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
       if (!isAuthorizedGeneration(task.runToken, token)) {
@@ -83,6 +93,10 @@ export function createTaskRepository(): TaskRepository {
       }
       if (isTerminalState(task.state)) {
         return { applied: false, reason: 'terminal' };
+      }
+      if ((guard === 'not_cancel_requested' && task.cancelRequested) ||
+          (guard === 'not_awaiting_approval' && task.state === 'awaiting_approval')) {
+        return { applied: false, reason: 'guard_rejected' };
       }
       const next: TaskRecord = { ...task, ...patch, runToken: task.runToken };
       tasks.set(taskId, next);
@@ -99,10 +113,25 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(next.state)) settle(next);
       return true;
     },
-    reissue: async ({ taskId, token, now, leaseExpiresAt }) => {
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const task = tasks.get(taskId);
+      if (!task?.handoffPending || task.generation !== generation ||
+          (task.state !== 'queued' && task.state !== 'interrupted')) return null;
+      const next: TaskRecord = { ...task, state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt };
+      tasks.set(taskId, next);
+      activeByConversation.set(task.conversationId, taskId);
+      return { ...next };
+    },
+    claimScheduledRetry: async (taskId, generation) => {
+      const task = tasks.get(taskId);
+      if (!task || task.state !== 'failed' || task.generation !== generation) return false;
+      tasks.set(taskId, { ...task, scheduleRetryClaimed: true });
+      return true;
+    },
+    reissue: async ({ taskId, token, now, leaseExpiresAt, from }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if (task.scheduleRetryClaimed || !from.includes(task.state)) {
         return { applied: false, reason: 'superseded' };
       }
       const next: TaskRecord = {

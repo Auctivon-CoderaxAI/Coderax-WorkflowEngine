@@ -3,13 +3,13 @@ import type { Router } from './router.js';
 
 const MAX_BODY_BYTES = 1_048_576;
 
-function readBody(request: IncomingMessage, limit: number): Promise<string> {
+function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > limit) {
+      if (size > MAX_BODY_BYTES) {
         reject(new Error('request body is too large'));
         request.destroy();
         return;
@@ -46,19 +46,14 @@ export function createHttpServer(input: {
       let bodyText = '';
       try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          const limit =
-            input.router.bodyLimit(
-              request.method ?? 'GET',
-              request.url ?? '/',
-            ) ?? MAX_BODY_BYTES;
-          bodyText = await readBody(request, limit);
+          bodyText = await readBody(request);
         }
       } catch {
         sendJson(response, 413, {
-          type: 'https://coderax.dev/problems/payload_too_large',
-          title: 'payload too large',
+          type: 'https://coderax.dev/problems/validation_failed',
+          title: 'validation failed',
           status: 413,
-          code: 'payload_too_large',
+          code: 'validation_failed',
           detail: 'The request body is too large.',
           retryable: false,
         });

@@ -17,6 +17,7 @@ Do not infer deployment from a green build.
 | Workflow engine | Authorized Oracle Always Free instance (the existing OCI host) | $0 | Not deployed |
 | Database | The existing authorized MongoDB deployment | $0 | Available |
 | Cloud workloads | DeploymentPlatformAI where verified | $0 | Not wired |
+| Cloud browsers | Authorized zero-cost provider over browser protocol v1 | $0 | Contract + fail-closed adapter; no verified provider |
 | Inference | Verified zero-cost OpenAI-compatible endpoint | $0 | Configured per deployment |
 
 No Vercel dependency is introduced, no new paid service is used and no trial is
@@ -61,6 +62,9 @@ The engine refuses to start until all of these pass, and reports each failure:
 - No TLS termination, process supervisor unit or backup policy is defined here.
   Those belong to the host configuration and must be recorded before go-live.
 - DeploymentPlatformAI integration is not implemented.
+- The cloud browser surface is implemented as a versioned contract with a
+  fail-closed adapter; no provider is configured or verified, so every browser
+  operation is refused. See `docs/browser.md` before claiming it works.
 
 ## Zero-cost guardrails
 

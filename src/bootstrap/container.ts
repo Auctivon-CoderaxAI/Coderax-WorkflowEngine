@@ -8,6 +8,7 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -16,6 +17,7 @@ import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import type { BrowserService } from '../orchestration/browser.js';
 import type { ArtifactService } from '../artifacts/service.js';
 import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
@@ -44,11 +46,14 @@ export type InfrastructureDependencies = {
   notifications: NotificationStore;
   artifactService: ArtifactService;
   deliverables: DeliverableService;
+  schedules: ScheduleRepository;
+  scheduleNotices: ScheduleNoticeStore;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  browser: BrowserService;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -67,11 +72,14 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'notifications',
   'artifactService',
   'deliverables',
+  'schedules',
+  'scheduleNotices',
   'audit',
   'events',
   'runner',
   'scheduler',
   'health',
+  'browser',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

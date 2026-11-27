@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildOpenApiDocument, ROUTES, ROUTE_INDEX } from '@coderax/contracts';
+import {
+  buildOpenApiDocument,
+  ROUTES,
+  ROUTE_INDEX,
+  TaskStatus,
+  toJsonSchema,
+} from '@coderax/contracts';
 import {
   createRouteRegistry,
   RouterConfigurationError,
@@ -34,6 +40,23 @@ test('the OpenAPI document covers every operation and is deterministic', () => {
   }
   assert.equal(JSON.stringify(document), JSON.stringify(buildOpenApiDocument()));
   assert.ok(document.components.schemas.Problem);
+
+  // Array bounds are part of the published contract, not only the runtime
+  // schema: a generated client must reject the same oversized payload.
+  const status = toJsonSchema(TaskStatus) as {
+    properties: {
+      steps: { items: { properties: { dependsOn: { maxItems?: number } } } };
+      result: {
+        properties: {
+          verification: {
+            properties: { evidence: { maxItems?: number } };
+          };
+        };
+      };
+    };
+  };
+  assert.equal(status.properties.steps.items.properties.dependsOn.maxItems, 64);
+  assert.equal(status.properties.result.properties.verification.properties.evidence.maxItems, 20);
 });
 
 test('an operation outside the catalogue cannot be registered', () => {

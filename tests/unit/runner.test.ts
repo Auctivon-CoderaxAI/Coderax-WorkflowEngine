@@ -38,6 +38,7 @@ function adapter(run: AgentAdapter['run']): AgentAdapter {
   return {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities: {
       streaming: true,
       tools: false,
@@ -148,4 +149,43 @@ test('a completed run is not cut short by the grace bound', async () => {
     outcome: { kind: 'completed', summary: 'finished' },
     ownershipLost: false,
   });
+});
+
+test('a pending admission check cannot start an adapter after cancellation', async () => {
+  const external = new AbortController();
+  let starts = 0;
+  const pending = runnerWith(lease()).run({
+    scope, token: 'pending', request: request(external.signal), report: () => {},
+    adapter: adapter(async () => { starts++; return { ok: true, summary: '' }; }),
+    cancellationRequested: () => new Promise(() => {}),
+  });
+  external.abort();
+  assert.deepEqual(await pending, { ownershipLost: false, outcome: { kind: 'cancelled' } });
+  assert.equal(starts, 0);
+});
+
+test('an unavailable pre-start check interrupts without starting the provider', async () => {
+  const result = await runnerWith(lease()).run({
+    scope, token: 'pending', request: request(new AbortController().signal), report: () => {},
+    adapter: adapter(() => assert.fail('adapter started')),
+    cancellationRequested: async () => { throw new Error('unavailable'); },
+  });
+  assert.equal(result.outcome.kind, 'interrupted');
+  assert.equal(result.ownershipLost, false);
+});
+
+test('a late false admission response cannot start Work after lease loss', async () => {
+  let finish!: (allowed: boolean) => void;
+  const blocked = new Promise<boolean>(resolve => { finish = resolve; });
+  let starts = 0;
+  const result = await runnerWith(lease({ renew: async () => {
+    setImmediate(() => finish(false));
+    return { renewed: false, cancelRequested: false };
+  } }), { heartbeatIntervalMs: 5 }).run({
+    scope, token: 'retired', request: request(new AbortController().signal), report: () => {},
+    adapter: adapter(async () => { starts++; return { ok: true, summary: '' }; }),
+    cancellationRequested: () => blocked,
+  });
+  assert.equal(starts, 0);
+  assert.equal(result.ownershipLost, true);
 });

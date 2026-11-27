@@ -18,10 +18,15 @@ export type IdGenerator = {
   messageId: () => string;
   artifactId: () => string;
   eventId: () => string;
+  scheduleId: () => string;
+  executionId: () => string;
+  noticeId: () => string;
   /** A unique fencing token per claim; never a counter that can be reused. */
   runToken: () => string;
   requestId: () => string;
   receipt: () => string;
+  browserSessionId: () => string;
+  browserArtifactId: () => string;
 };
 
 export function createIdGenerator(): IdGenerator {
@@ -31,8 +36,13 @@ export function createIdGenerator(): IdGenerator {
     messageId: () => `msg_${randomUUID()}`,
     artifactId: () => `art_${randomUUID()}`,
     eventId: () => `evt_${randomUUID()}`,
+    scheduleId: () => `sch_${randomUUID()}`,
+    executionId: () => `exe_${randomUUID()}`,
+    noticeId: () => `ntc_${randomUUID()}`,
     runToken: () => `run_${randomUUID()}`,
     requestId: () => `req_${randomUUID()}`,
     receipt: () => `rcpt_${randomUUID()}`,
+    browserSessionId: () => `bs_${randomUUID()}`,
+    browserArtifactId: () => `baf_${randomUUID()}`,
   };
 }

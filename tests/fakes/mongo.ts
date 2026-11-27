@@ -12,6 +12,21 @@ type Index = {
   options?: { unique?: boolean; name?: string; partialFilterExpression?: MongoFilter };
 };
 
+/**
+ * Comparison operators follow MongoDB's type bracketing: a range comparison
+ * matches only when both sides are Dates or both are strings. ISO-8601 UTC
+ * strings therefore compare chronologically, and a null field never matches a
+ * string range.
+ */
+function compare(left: unknown, right: unknown): number | null {
+  if (left instanceof Date && right instanceof Date) return left.getTime() - right.getTime();
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  if (typeof left === 'string' && typeof right === 'string') {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  return null;
+}
+
 /** Reads a dotted path; an array segment yields the values of its elements. */
 function readPath(document: Document, path: string): unknown {
   let current: unknown = document;
@@ -38,65 +53,28 @@ function matches(document: Document, filter: MongoFilter): boolean {
     const value = readPath(document, field);
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
-      if ('$exists' in operators) {
-        const shouldExist = operators.$exists === true;
-        if ((value !== undefined) !== shouldExist) return false;
-      }
-      if ('$type' in operators && operators.$type === 'string' && typeof value !== 'string') {
-        return false;
-      }
-      if ('$lte' in operators) {
-        const bound = operators.$lte;
-        if (bound instanceof Date) {
-          if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
-        } else if (typeof bound === 'number') {
-          if (typeof value !== 'number' || value > bound) return false;
+      for (const [operator, operand] of Object.entries(operators)) {
+        if (operator === '$lte' || operator === '$lt' || operator === '$gte' || operator === '$gt') {
+          const order = compare(value, operand);
+          if (order === null) return false;
+          if (operator === '$lte' && order > 0) return false;
+          if (operator === '$lt' && order >= 0) return false;
+          if (operator === '$gte' && order < 0) return false;
+          if (operator === '$gt' && order <= 0) return false;
+        } else if (operator === '$type') {
+          if (operand === 'string' && typeof value !== 'string') return false;
+        } else if (operator === '$exists') {
+          if (Object.hasOwn(document, field) !== operand) return false;
+        } else if (operator === '$in') {
+          if (!(operand as unknown[]).includes(value)) return false;
+        } else if (operator === '$nin') {
+          if ((operand as unknown[]).includes(value)) return false;
+        } else if (operator === '$ne') {
+          if (value === operand) return false;
         } else {
+          // An operator the fake does not model must fail loudly, not match.
           return false;
         }
-      }
-      if ('$gt' in operators) {
-        const bound = operators.$gt;
-        if (bound instanceof Date) {
-          if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
-        } else if (typeof bound === 'number') {
-          if (typeof value !== 'number' || value <= bound) return false;
-        } else {
-          return false;
-        }
-      }
-      if ('$gte' in operators) {
-        const bound = operators.$gte;
-        if (bound instanceof Date) {
-          if (!(value instanceof Date) || value.getTime() < bound.getTime()) return false;
-        } else if (typeof bound === 'number') {
-          if (typeof value !== 'number' || value < bound) return false;
-        } else {
-          return false;
-        }
-      }
-      if ('$lt' in operators) {
-        const bound = operators.$lt;
-        if (bound instanceof Date) {
-          if (!(value instanceof Date) || value.getTime() >= bound.getTime()) return false;
-        } else if (typeof bound === 'number') {
-          if (typeof value !== 'number' || value >= bound) return false;
-        } else if (typeof bound === 'string') {
-          if (typeof value !== 'string' || value >= bound) return false;
-        } else {
-          return false;
-        }
-      }
-      if ('$ne' in operators) {
-        if (value === operators.$ne) return false;
-      }
-      if ('$in' in operators) {
-        const list = operators.$in as unknown[];
-        if (!list.includes(value)) return false;
-      }
-      if ('$nin' in operators) {
-        const list = operators.$nin as unknown[];
-        if (list.includes(value)) return false;
       }
       return true;
     }
@@ -109,6 +87,7 @@ function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
   return JSON.stringify(Object.keys(keys).map((field) => document[field] ?? null));
 }
 
+/** `$inc`, `$push` and `$pull` are how quota counters and blob leases move. */
 function applyUpdate(document: Document, update: MongoUpdate): Document {
   const next = { ...document, ...(update.$set ?? {}) };
   for (const [field, amount] of Object.entries(update.$inc ?? {})) {
@@ -168,10 +147,7 @@ export function createFakeCollection(): FakeCollection {
       if (partial && !matches(candidate, partial)) continue;
       const key = indexValue(candidate, index.keys);
       const clash = documents.some(
-        (document, position) =>
-          position !== skip &&
-          (!partial || matches(document, partial)) &&
-          indexValue(document, index.keys) === key,
+        (document, position) => position !== skip && (!partial || matches(document, partial)) && indexValue(document, index.keys) === key,
       );
       if (clash) throw duplicateKey();
     }
@@ -224,7 +200,9 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = applyUpdate(documents[index], update);
+      const next = applyUpdate(documents[index], update);
+      assertUnique(next, index);
+      documents[index] = next;
       return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {

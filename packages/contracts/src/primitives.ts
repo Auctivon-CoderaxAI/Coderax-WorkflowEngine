@@ -5,7 +5,7 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-export const CONTRACT_VERSION = '1.0.0' as const;
+export const CONTRACT_VERSION = '1.1.0' as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -40,6 +40,17 @@ export const Sha256 = z
   .regex(/^[a-f0-9]{64}$/, 'sha256 must be 64 lowercase hexadecimal characters')
   .describe('SHA-256 content hash');
 export type Sha256 = z.infer<typeof Sha256>;
+export const BrowserSessionId = identifier('browser session identifier');
+export type BrowserSessionId = z.infer<typeof BrowserSessionId>;
+
+export const BrowserArtifactId = identifier('browser artifact identifier');
+export type BrowserArtifactId = z.infer<typeof BrowserArtifactId>;
+
+export const ScheduleId = identifier('schedule identifier');
+export type ScheduleId = z.infer<typeof ScheduleId>;
+
+export const ExecutionId = identifier('schedule execution identifier');
+export type ExecutionId = z.infer<typeof ExecutionId>;
 
 export const RequestId = identifier('request correlation identifier');
 export type RequestId = z.infer<typeof RequestId>;
@@ -84,6 +95,12 @@ export const EngineFailureCode = z.enum([
   'provider_error',
   'budget_exhausted',
   'paid_model_refused',
+  /** The run is suspended until the owner decides a scoped permission request. */
+  'approval_required',
+  /** The plan finished but its evidence did not verify the objective. */
+  'verification_failed',
+  /** The bounded autonomy budget was exhausted before the objective settled. */
+  'iteration_exhausted',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;
 

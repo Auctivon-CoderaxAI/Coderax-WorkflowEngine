@@ -1,12 +1,24 @@
 import type { EngineFailureCode, Usage } from '@coderax/contracts';
+import type { TaskVerification } from '../domain.js';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore, RunScope } from './lease.js';
 import { workRunKey } from './lease.js';
 import type { AgentAdapter, AgentReport, AgentRunRequest } from '../agents/types.js';
 
 export type RunOutcome =
-  | { kind: 'completed'; summary: string; usage?: Usage }
-  | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
+  | {
+      kind: 'completed';
+      summary: string;
+      usage?: Usage;
+      verification?: TaskVerification;
+    }
+  | {
+      kind: 'failed';
+      code: EngineFailureCode;
+      detail: string;
+      retryable: boolean;
+      usage?: Usage;
+    }
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
   | { kind: 'interrupted'; detail: string };
@@ -27,6 +39,7 @@ export type TaskRunner = {
     adapter: AgentAdapter;
     request: AgentRunRequest;
     report: AgentReport;
+    cancellationRequested?: () => Promise<boolean>;
     /** The fencing generation this run belongs to (used when it is abandoned). */
     generation?: number;
     /** The directory the run may write, quarantined if the adapter is abandoned. */
@@ -75,6 +88,7 @@ export function createTaskRunner(input: {
       adapter,
       request,
       report,
+      cancellationRequested,
       generation = 0,
       workspaceRoot = '',
     }) => {
@@ -105,7 +119,7 @@ export function createTaskRunner(input: {
           controller.abort();
           return;
         }
-        if (result.cancelRequested) {
+        if (result.cancelRequested || (cancellationRequested && await cancellationRequested())) {
           cancelRequested = true;
           controller.abort();
         }
@@ -152,6 +166,15 @@ export function createTaskRunner(input: {
           : { outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) }, ownershipLost: false };
 
       try {
+        if (controller.signal.aborted) return cancelled(false);
+        if (cancellationRequested) {
+          try {
+            if (await Promise.race([cancellationRequested(), grace]) || controller.signal.aborted) return cancelled(false);
+          } catch {
+            if (controller.signal.aborted) return cancelled(false);
+            return { ownershipLost: false, outcome: { kind: 'interrupted', detail: 'Work admission could not be verified.' } };
+          }
+        }
         const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
         const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
         if (settled === null) {
@@ -183,6 +206,7 @@ export function createTaskRunner(input: {
               kind: 'completed',
               summary: outcome.summary,
               ...(outcome.usage ? { usage: outcome.usage } : {}),
+              ...(outcome.verification ? { verification: outcome.verification } : {}),
             },
             ownershipLost: false,
           };
@@ -193,6 +217,7 @@ export function createTaskRunner(input: {
             code: outcome.code,
             detail: outcome.detail,
             retryable: outcome.retryable,
+            ...(outcome.usage ? { usage: outcome.usage } : {}),
           },
           ownershipLost: false,
         };

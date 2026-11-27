@@ -1,4 +1,4 @@
-import { TERMINAL_TASK_STATES, isTerminalState } from '@coderax/contracts';
+import { isTerminalState, TERMINAL_TASK_STATES } from '@coderax/contracts';
 import type {
   ConversationRecord,
   MemoryRecord,
@@ -167,9 +167,14 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return document ? toTask(document) : null;
     },
 
-    updateFenced: async ({ taskId, token, patch }): Promise<FencedWriteResult> => {
+    updateFenced: async ({ taskId, token, patch, guard }): Promise<FencedWriteResult> => {
       const updated = await collection.findOneAndUpdate(
-        { taskId, runToken: token, state: { $nin: TERMINAL } },
+        {
+          taskId,
+          runToken: token,
+          state: { $nin: guard === 'not_awaiting_approval' ? [...TERMINAL, 'awaiting_approval'] : TERMINAL },
+          ...(guard === 'not_cancel_requested' ? { cancelRequested: { $nin: [true] } } : {}),
+        },
         { $set: { ...defined(patch), runToken: token } },
         { returnDocument: 'after', includeResultMetadata: false },
       );
@@ -181,7 +186,7 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       if (!isAuthorizedGeneration(task.runToken, token)) {
         return { applied: false, reason: 'superseded' };
       }
-      return { applied: false, reason: 'terminal' };
+      return { applied: false, reason: guard && !isTerminalState(task.state) ? 'guard_rejected' : 'terminal' };
     },
 
     abandon: async ({ taskId, patch }) => {
@@ -193,17 +198,27 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
-    reissue: async ({ taskId, token, now, leaseExpiresAt }): Promise<FencedWriteResult> => {
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const updated = await collection.findOneAndUpdate(
+        { taskId, generation, state: { $in: ['queued', 'interrupted'] }, handoffPending: true },
+        { $set: { state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt } },
+        { returnDocument: 'after', includeResultMetadata: false });
+      return updated ? toTask(updated) : null;
+    },
+    claimScheduledRetry: async (taskId, generation) => !!await collection.findOneAndUpdate(
+      { taskId, state: 'failed', generation }, { $set: { scheduleRetryClaimed: true } },
+      { returnDocument: 'after', includeResultMetadata: false }),
+    reissue: async ({ taskId, token, now, leaseExpiresAt, from }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
       const task = toTask(current);
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if (!from.includes(task.state)) {
         return { applied: false, reason: 'superseded' };
       }
       // Generation and state are part of the filter: two replicas resuming the
       // same task cannot both issue a new generation.
       const updated = await collection.findOneAndUpdate(
-        { taskId, generation: task.generation, state: task.state, runToken: task.runToken },
+        { taskId, generation: task.generation, state: task.state, runToken: task.runToken, scheduleRetryClaimed: { $ne: true } },
         {
           $set: {
             state: 'queued',
@@ -417,6 +432,7 @@ export function createMongoNotificationStore(collection: MongoCollectionLike): N
           createdAt: entry.createdAt,
           read: entry.read,
         })),
+        schedules: [],
         unread: owned.filter((entry) => !entry.read).length,
       };
     },

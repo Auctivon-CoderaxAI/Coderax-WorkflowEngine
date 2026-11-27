@@ -1,5 +1,10 @@
 /**
- * A bounded queue for accepted Work tasks.
+ * The bounded execution queue for accepted Work tasks.
+ *
+ * This is not a second scheduler: `engine.ts` is the durable recurrence engine,
+ * and it admits a scheduled occurrence through this same queue after
+ * orchestration has written the task and claimed its lease. There is one
+ * execution path for client work and scheduled work alike.
  *
  * Submission returns before execution finishes, so the queue is what makes a
  * task durable from the caller's point of view: the caller may disconnect, and

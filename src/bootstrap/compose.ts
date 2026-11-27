@@ -9,22 +9,26 @@ import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
+import { createBrowserService } from '../orchestration/browser.js';
+import { createBrowserStore } from '../browser/store.js';
+import type { BrowserProvider } from '../browser/types.js';
+import { buildBrowserProvider } from './browser.js';
+import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionStore } from '../permissions/store.js';
+import { createPermissionGate } from '../permissions/gate.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
-import type { ApplicationService } from '../orchestration/service.js';
 import { createArtifactService } from '../artifacts/service.js';
 import { createArtifactToolkit } from '../artifacts/toolkit.js';
 import { createDeliverableService } from '../artifacts/deliver.js';
-import type { DeliverableService } from '../artifacts/deliver.js';
+import type { ApplicationService } from '../orchestration/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
@@ -60,6 +64,8 @@ export type ComposeInput = {
   /** Test and future-adapter injection; nothing here changes production defaults. */
   gateway?: ModelGateway | null;
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
+  /** Test and future-provider injection; the default is configuration-driven. */
+  browserProvider?: BrowserProvider;
   fetchImpl?: typeof fetch;
   /**
    * Persistence injection for tests and for a host that owns its own driver. A
@@ -133,6 +139,12 @@ function modelDescriptors(input: {
 export async function composeApplication(input: ComposeInput): Promise<Application> {
   const env = input.env ?? process.env;
   const { config } = input;
+  // `loadConfig` validates this for the normal entry point. Programmatic
+  // callers must not be able to bypass the same fail-closed invariants.
+  const invariantIssues = validateInvariants(config);
+  if (invariantIssues.length > 0) {
+    throw new StartupError(invariantIssues);
+  }
   const clock = createClock();
   const ids = createIdGenerator();
 
@@ -147,57 +159,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
 
   const gateway = buildGateway(input);
-  // The generator is constructed after persistence exists; the agent receives a
-  // delegating port so composition order stays one-directional.
-  let deliverableService: DeliverableService | null = null;
-  const native = createNativeAgent({
-    enabled: config.engines.native.enabled,
-    gateway,
-    deliverable: async (tool) => {
-      const service = deliverableService;
-      if (!service) {
-        return {
-          ok: false,
-          code: 'not_configured',
-          detail: 'Deliverable generation is not available on this deployment.',
-        };
-      }
-      const result = await service.deliver(
-        { ownerId: tool.ownerId, isOwner: true },
-        tool.request,
-        {
-          conversationId: tool.conversationId,
-          ...(tool.taskId ? { taskId: tool.taskId } : {}),
-          signal: tool.signal,
-        },
-      );
-      if (!result.ok) {
-        return {
-          ok: false,
-          code:
-            result.code === 'cancelled'
-              ? 'cancelled'
-              : result.code === 'busy'
-                ? 'busy'
-                : result.code === 'budget_exhausted'
-                  ? 'budget_exhausted'
-                  : result.code === 'paid_model_refused'
-                    ? 'paid_model_refused'
-                    : result.code === 'engine_not_configured'
-                      ? 'not_configured'
-                      : 'protocol_error',
-          detail: result.detail,
-        };
-      }
-      return {
-        ok: true,
-        descriptors: result.value.artifacts,
-        summary: `${result.value.title}: ${result.value.artifacts.length} stored artifact(s) (${result.value.artifacts
-          .map((artifact) => artifact.filename)
-          .join(', ')}). ${result.value.summary}`.slice(0, 4000),
-      };
-    },
-  });
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
@@ -221,16 +182,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
-  const adapters: AgentAdapter[] = [native, opencode, freebuff];
-  const agents = createAgentRegistry({
-    adapters,
-    defaultAgent: config.engines.default === 'opencode'
-      ? 'opencode'
-      : config.engines.default === 'freebuff'
-        ? 'freebuff'
-        : 'coderax',
-  });
-
   const models = createModelCatalog({
     descriptors: modelDescriptors({ config, gateway }),
     route: config.models.route,
@@ -246,14 +197,39 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     config,
     env,
     clock,
+    ids,
     ...(input.persistence ?? {}),
   });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = persistence.permissions;
+  const permissionsGate = createPermissionGate({ permissions, clock });
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway,
+    authorizer: permissionsGate,
+    limits: {
+      maxSteps: config.engines.native.maxSteps,
+      maxParallelSteps: config.engines.native.maxParallelSteps,
+      maxReplans: config.engines.native.maxReplans,
+      maxStepAttempts: config.engines.native.maxStepAttempts,
+      maxIterations: config.engines.native.maxIterations,
+    },
+  });
+  const adapters: AgentAdapter[] = [native, opencode, freebuff];
+  const agents = createAgentRegistry({
+    adapters,
+    defaultAgent: config.engines.default === 'opencode'
+      ? 'opencode'
+      : config.engines.default === 'freebuff'
+        ? 'freebuff'
+        : 'coderax',
+  });
   const notifications = persistence.notifications;
+  const schedules = persistence.schedules;
+  const scheduleNotices = persistence.scheduleNotices;
   const audit = createAuditLog({ clock, ids });
   const artifactService = createArtifactService({
     artifacts: persistence.artifacts,
@@ -267,9 +243,9 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ids,
     settings: config.artifacts,
   });
-  const roots = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
-  if (!roots.ok) {
-    throw new StartupError([roots.detail]);
+  const artifactRoots = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
+  if (!artifactRoots.ok) {
+    throw new StartupError([artifactRoots.detail]);
   }
   const deliverables = createDeliverableService({
     toolkit: createArtifactToolkit(),
@@ -277,10 +253,24 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     audit,
     clock,
     ids,
-    roots: roots.value,
+    roots: artifactRoots.value,
   });
-  deliverableService = deliverables;
-
+  const browserProvider =
+    input.browserProvider ??
+    buildBrowserProvider({
+      config,
+      env,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    });
+  const browser = createBrowserService({
+    config,
+    clock,
+    ids,
+    permissions,
+    audit,
+    provider: browserProvider,
+    store: createBrowserStore(),
+  });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -339,37 +329,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         }),
       },
       {
-        // Required only when the deployment selected durable persistence. A
-        // memory deployment still starts, but reports honestly that artifact
-        // writes are refused rather than pretending they would survive.
-        name: 'artifacts',
-        required: persistence.driver === 'mongo',
-        check: async () => {
-          if (!persistence.blobs.durable) {
-            // Consistent with the persistence probe: a memory deployment is a
-            // known non-durable configuration, reported as ok-with-limitation
-            // rather than as a fault. What matters is that it is never silent.
-            return {
-              status: 'ok' as const,
-              detail:
-                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
-            };
-          }
-          try {
-            await persistence.blobs.check();
-            return {
-              status: 'ok' as const,
-              detail: 'Artifact metadata and content are stored durably in MongoDB.',
-            };
-          } catch {
-            return {
-              status: 'failed' as const,
-              detail: 'Artifact storage could not be read.',
-            };
-          }
-        },
-      },
-      {
         name: 'engine',
         required: true,
         check: async () => {
@@ -395,6 +354,26 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
+      ...(config.browsers.enabled
+        ? [
+            {
+              // Optional: no verified browser provider is required to run Work.
+              // It is reported truthfully, and an unavailable one degrades rather
+              // than blocks the engine.
+              name: 'browser',
+              required: false,
+              check: async () => {
+                const capabilities = await browser.capabilities();
+                return capabilities.operational
+                  ? {
+                      status: 'ok' as const,
+                      detail: `Browser provider ${capabilities.provider} is operational.`,
+                    }
+                  : { status: 'degraded' as const, detail: capabilities.detail };
+              },
+            },
+          ]
+        : []),
     ],
   });
 
@@ -414,11 +393,14 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     notifications,
     artifactService,
     deliverables,
+    schedules,
+    scheduleNotices,
     audit,
     events,
     runner,
     scheduler,
     health,
+    browser,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -458,6 +440,10 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     );
   }
 
+  const rootCheck = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
+  if (!rootCheck.ok) {
+    throw new StartupError([rootCheck.detail]);
+  }
   const startupIssues = await health.verifyStartup();
   if (startupIssues.length > 0) {
     throw new StartupError(startupIssues);
@@ -477,18 +463,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     server,
     persistence: { driver: persistence.driver },
     start: async () => {
-      // Rebuild quota availability from committed rows before the socket is
-      // open, so an early request cannot be admitted against stale capacity.
-      // The reconcile refuses to run while another replica's reservation is live.
-      await service.artifacts.reconcile();
       const { url } = await server.listen();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
-      // Retention and abandoned reservations are enforced at startup too, and a
-      // staging directory left by a crashed generation is removed.
-      await service.artifacts.sweepExpiredArtifacts();
-      await deliverables.sweepStaging();
+      // The schedule loop belongs to the engine process, not to a request. Both
+      // Coderax and CoderaxCLI can disconnect and a due occurrence still runs.
+      service.startSchedules();
       return { url };
     },
     stop: async () => {
