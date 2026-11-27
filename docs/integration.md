@@ -97,7 +97,10 @@ conflict was resolved by keeping one implementation per concern:
    suites are removed; the SDK method is renamed to match the operation id, which
    the contract test enforces. This is a breaking migration for interim clients;
    the published version remains 1.2.0. The owner SDK handles typed Problem codes:
-   model_missing and browser_unavailable now return HTTP 503 instead of 500.
+   `model_missing` and `browser_unavailable` now return HTTP 503 instead of 500.
+   Coderax's v1 gateway (`packages/api/src/gateway/client.ts`, revision
+   `88efe0b`) and CoderaxCLI's v1 transport (`packages/workflow-sdk/src/v1`,
+   revision `92c4b9a`) handle these server failures without requiring status 500.
 2. **One artifact store.** The durable service, repository, tree adapter, chunked
    blob store and quota admission stay exactly as `main` has them. `media.ts`
    keeps `main`'s structural OOXML central-directory check (it does not inflate

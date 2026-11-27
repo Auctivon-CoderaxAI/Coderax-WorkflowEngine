@@ -533,7 +533,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         artifactId: reservation.artifactId,
         version: reservation.version,
       });
-      if (materialized) await deps.capacity.commit(reservation);
+      if (materialized && (!materialized.reservationId || materialized.reservationId === reservation.reservationId)) await deps.capacity.commit(reservation);
       else await deps.capacity.release(reservation);
     }
     await deps.capacity.discardStale({
@@ -939,7 +939,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           });
           // Re-read after pruning: the response must describe the retained set,
           // not the pre-prune count.
-          const finalArtifact = (await deps.artifacts.get(key).catch(() => null)) ?? appended.artifact;
+          const observed = await deps.artifacts.get(key).catch(() => null);
+          const finalArtifact = observed?.version === version.version ? observed : appended.artifact;
           return ok({
             artifact: toDescriptor(finalArtifact),
             version: toVersionDescriptor(version),
@@ -1175,8 +1176,8 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           mode,
           usage: async () => {
             const partition = { ownerId: deps.ownerId, mode };
-            const usage = await deps.artifacts.usage(partition);
-            return (await deps.artifacts.pendingRemovals?.(1, partition))?.length ? null : usage;
+            if ((await deps.artifacts.pendingRemovals?.(1, partition))?.length) return null;
+            return deps.artifacts.usage(partition);
           },
           maxBytes: settings.maxBytesPerOwner,
           maxArtifacts: settings.maxArtifactsPerOwner,

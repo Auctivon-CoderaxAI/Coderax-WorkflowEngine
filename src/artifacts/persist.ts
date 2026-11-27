@@ -10,7 +10,7 @@ import {
 import { readFile } from 'node:fs/promises';
 import type { ArtifactService } from './service.js';
 import type { Principal } from '../security/auth.js';
-import type { ServiceResult } from '../support/result.js';
+import type { ServiceFailure, ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import type { ProducedDeliverable, StagedArtifact } from './types.js';
 import { digestOf } from './file.js';
@@ -83,27 +83,44 @@ export async function persistProduced(
   }
 
   const stored: Stored[] = [];
-  const rollback = async (): Promise<void> => {
+  const rollback = async (primary: ServiceFailure): Promise<ServiceFailure> => {
+    const recovery: string[] = [];
     const sourceId = input.produced.document?.versionOf?.artifactId;
-    const source = sourceId && await input.artifacts.download(input.principal, sourceId, { mode: input.mode });
-    const committed = source && source.ok
-      ? DocumentSourceArtifact.parse(JSON.parse(Buffer.from(source.value.contentBase64, 'base64').toString('utf8')))
-      : undefined;
+    let committed: DocumentSourceArtifact | undefined;
+    if (sourceId) {
+      try {
+        const source = await input.artifacts.download(input.principal, sourceId, { mode: input.mode });
+        if (source.ok) committed = DocumentSourceArtifact.parse(JSON.parse(Buffer.from(source.value.contentBase64, 'base64').toString('utf8')));
+      } catch { /* If the authoritative pointer is unknown, leave the output in place. */ }
+    }
     for (const entry of [...stored].reverse()) {
       if (!entry.created) {
-        const previous = committed?.outputs.find(output => output.artifactId === entry.descriptor.artifactId)?.version
-          ?? entry.staged.versionOf?.previousVersion;
-        if (previous !== undefined) {
-          await input.artifacts.restore(input.principal, entry.descriptor.artifactId, {
-            mode: input.mode, expectedVersion: entry.descriptor.version, version: previous,
-          });
+        const { artifactId, version } = entry.descriptor;
+        const previous = committed?.outputs.find(output => output.artifactId === artifactId)?.version;
+        if (previous === undefined) {
+          recovery.push(`${artifactId} v${version}: committed source unavailable`);
+        } else if (previous !== version) {
+          try {
+            const restored = await input.artifacts.restore(input.principal, artifactId, {
+              mode: input.mode, expectedVersion: version, version: previous,
+            });
+            if (!restored.ok) recovery.push(`${artifactId} v${version} to v${previous}: ${restored.code}`);
+          } catch {
+            recovery.push(`${artifactId} v${version} to v${previous}: restore unavailable`);
+          }
         }
+        continue;
+      }
+      if (committed?.outputs.some(output => output.artifactId === entry.descriptor.artifactId)) continue;
+      if (sourceId && !committed) {
+        recovery.push(`${entry.descriptor.artifactId} v${entry.descriptor.version}: committed source unavailable`);
         continue;
       }
       await input.artifacts
         .remove(input.principal, entry.descriptor.artifactId, input.mode)
         .catch(() => undefined);
     }
+    return recovery.length ? { ...primary, detail: primary.detail + '; rollback: ' + recovery.join('; ') } : primary;
   };
   const aborted = (): boolean => input.signal?.aborted === true;
 
@@ -133,11 +150,11 @@ export async function persistProduced(
       ...(input.projectId ? { projectId: input.projectId } : {}),
     };
     if (file.versionOf) {
+      const current = await input.artifacts.get(input.principal, file.versionOf.artifactId, input.mode);
+      if (!current.ok) return current;
       const appended = await input.artifacts.addVersion(input.principal, file.versionOf.artifactId, {
         ...request,
-        ...(file.versionOf.expectedVersion !== undefined
-          ? { expectedVersion: file.versionOf.expectedVersion }
-          : {}),
+        expectedVersion: file.versionOf.expectedVersion ?? current.value.version,
       });
       if (!appended.ok) return appended;
       return ok({ staged: file, descriptor: appended.value.artifact, created: false });
@@ -167,14 +184,12 @@ export async function persistProduced(
 
   const outputResult = await storeAll(outputs);
   if (!outputResult.ok) {
-    await rollback();
-    return outputResult;
+    return rollback(outputResult);
   }
   if (!input.produced.project) {
     const partResult = await storeAll(parts);
     if (!partResult.ok) {
-      await rollback();
-      return partResult;
+      return rollback(partResult);
     }
   }
 
@@ -186,11 +201,10 @@ export async function persistProduced(
   if (input.produced.project) {
     const tree = input.produced.project;
     if (!input.projectId) {
-      await rollback();
-      return fail(
+      return rollback(fail(
         'validation_failed',
         'A generated project must name the projectId its files belong to.',
-      );
+      ));
     }
     const files = [];
     for (const file of parts) {
@@ -198,15 +212,13 @@ export async function persistProduced(
       try {
         content = await readFile(file.absolute);
       } catch {
-        await rollback();
-        return fail('storage_unavailable', 'A staged file disappeared before it could be stored.');
+        return rollback(fail('storage_unavailable', 'A staged file disappeared before it could be stored.'));
       }
       if (content.length !== file.bytes || digestOf(content) !== file.sha256) {
-        await rollback();
-        return fail(
+        return rollback(fail(
           'internal_error',
           'A staged file did not match the digest recorded when it was verified.',
-        );
+        ));
       }
       files.push({
         relativePath: file.projectPath ?? file.filename,
@@ -229,15 +241,13 @@ export async function persistProduced(
       },
     );
     if (!written.ok) {
-      await rollback();
-      return written;
+      return rollback(written);
     }
     const submitted = new Set(files.map(file => file.relativePath.normalize('NFC').toLowerCase()));
     for (const entry of written.value.manifest.files.filter(file => submitted.has(file.relativePath.normalize('NFC').toLowerCase()))) {
       const descriptor = await input.artifacts.get(input.principal, entry.artifactId, input.mode);
       if (!descriptor.ok) {
-        await rollback();
-        return descriptor;
+        return rollback(descriptor);
       }
       treeDescriptors.push(descriptor.value);
     }
@@ -274,8 +284,7 @@ export async function persistProduced(
       outputs: mapped,
     });
     if (!body.success) {
-      await rollback();
-      return fail('internal_error', 'The document model could not be serialised for storage.');
+      return rollback(fail('internal_error', 'The document model could not be serialised for storage.'));
     }
     const text = `${JSON.stringify(body.data, null, 2)}\n`;
     const digest = digestOf(text);
@@ -295,8 +304,7 @@ export async function persistProduced(
         },
       );
       if (!appended.ok) {
-        await rollback();
-        return appended;
+        return rollback(appended);
       }
       source = {
         artifactId: appended.value.artifact.artifactId,
@@ -330,8 +338,7 @@ export async function persistProduced(
         ...(input.taskId ? { taskId: input.taskId } : {}),
       });
       if (!uploaded.ok) {
-        await rollback();
-        return uploaded;
+        return rollback(uploaded);
       }
       source = {
         artifactId: uploaded.value.artifact.artifactId,

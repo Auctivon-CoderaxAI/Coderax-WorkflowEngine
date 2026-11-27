@@ -51,7 +51,7 @@ export type StagedArtifact = {
    * creating a second artifact, so history stays on one identity and a
    * concurrent edit is refused rather than overwritten.
    */
-  versionOf?: { artifactId: string; expectedVersion?: number; previousVersion?: number };
+  versionOf?: { artifactId: string; expectedVersion?: number };
 };
 
 /** One previously produced artifact of a document being revised. */

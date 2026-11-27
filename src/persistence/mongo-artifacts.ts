@@ -43,6 +43,7 @@ function strip(document: Document): Document {
   const copy = { ...document };
   delete copy._id;
   delete copy.cleanup;
+  delete copy.pruning;
   delete copy.expiresAtMs;
   return copy;
 }
@@ -288,18 +289,22 @@ export function createMongoArtifactRepository(
       const stored = await artifacts.findOne(key);
       if (!stored) return null;
       const artifact = toArtifact(stored);
-      if (input.version >= artifact.version) return null;
+      const pending = Array.isArray(stored.pruning) && stored.pruning.includes(input.version);
+      if (!pending && input.version >= artifact.version) return null;
       const row = await versions.findOne({ ...key, version: input.version });
       if (!row) return null;
+      const marker = { ...key, pruning: input.version };
       const claimed = await artifacts.updateOne(
-        { ...key, cleanup: { $exists: false }, version: artifact.version, versions: artifact.versions,
+        { ...key, cleanup: { $exists: false }, pruning: { $nin: [input.version] },
+          version: artifact.version, versions: artifact.versions,
           mutationRevision: artifact.mutationRevision ?? { $exists: false } },
-        { $inc: { versions: -1, mutationRevision: 1 } }, { upsert: false },
+        { $push: { pruning: input.version }, $inc: { versions: -1, mutationRevision: 1 } },
+        { upsert: false },
       );
-      if (!claimed.matchedCount) return null;
-      if (!(await versions.deleteOne({ ...key, version: input.version })).deletedCount) {
-        throw new Error('Claimed artifact version disappeared during pruning');
-      }
+      if (!claimed.matchedCount && !(await artifacts.findOne(marker))) return null;
+      const deleted = await versions.deleteOne({ ...key, version: input.version });
+      await artifacts.updateOne(marker, { $pull: { pruning: input.version } }, { upsert: false });
+      if (!deleted.deletedCount) return null;
       return toVersion(row);
     },
 
@@ -352,7 +357,7 @@ export function createMongoArtifactRepository(
       if (!row) return { ok: false, reason: 'not_found' };
       const target = toVersion(row);
       const updated = await artifacts.updateOne(
-        { ...key, cleanup: { $exists: false }, version: input.expectedVersion, mutationRevision: artifact.mutationRevision ?? { $exists: false } },
+        { ...key, cleanup: { $exists: false }, pruning: { $nin: [input.version] }, version: input.expectedVersion, mutationRevision: artifact.mutationRevision ?? { $exists: false } },
         {
           $set: {
             kind: target.kind,

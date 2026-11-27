@@ -180,12 +180,9 @@ function outputName(input: {
   if (previous) {
     return {
       filename: previous.filename,
-      // The source artifact is the only concurrency token for an edit. A
-      // previous attempt can have appended an output version before its source
-      // write failed, so pinning an output to the version the source records
-      // would make every retry conflict forever; the derived file follows the
-      // source, which is what a reader actually resolves.
-      versionOf: { artifactId: previous.artifactId, previousVersion: previous.version },
+      // A source pins historical bytes. Persistence reads the current output
+      // pointer immediately before appending and uses it as the write fence.
+      versionOf: { artifactId: previous.artifactId },
     };
   }
   const extension = input.format === 'markdown' ? 'md' : input.format;

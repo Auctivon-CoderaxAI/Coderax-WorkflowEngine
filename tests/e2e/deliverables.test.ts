@@ -513,6 +513,17 @@ test('an edit that fails after the output appends leaves the stored source on it
       ).toString('utf8'),
     ) as { outputs: Array<{ artifactId: string; format: string; version: number }> };
     assert.ok(retriedSource.outputs.every((output) => output.version === 3));
+
+    artifacts.restore = async () => ({ ok: false, code: 'conflict', detail: 'restore was refused', retryable: false });
+    const recovery = await service.deliver({ ownerId: OWNER_ID, isOwner: true }, {
+      kind: 'document', mode: 'cloud', filename: 'memo', title: 'Recovery evidence',
+      edits: [{ op: 'append', blocks: [{ type: 'paragraph', text: 'After retry' }] }],
+      formats: ['docx'], base: { artifactId: sourceId, expectedVersion: 2 },
+    });
+    assert.ok(!recovery.ok);
+    assert.equal(recovery.code, 'storage_unavailable');
+    assert.ok(recovery.detail.startsWith('injected: the source write failed'));
+    assert.ok(recovery.detail.includes(`${docxId} v4 to v3: conflict`));
   } finally {
     await first.close();
   }
@@ -547,8 +558,28 @@ test('two concurrent edits at the same expected version have one winner and one 
         base: { artifactId: sourceId, mode: 'cloud', expectedVersion: 1 },
       });
 
-    // Both readers saw version 1, so exactly one may append it.
-    const settled = await Promise.allSettled([edit('Written by A.'), edit('Written by B.')]);
+    // Exercise a source-write race specifically: A has already appended its
+    // outputs when B reads them, but both edits are based on source version 1.
+    const artifacts = first.app.dependencies.artifactService;
+    const append = artifacts.addVersion.bind(artifacts);
+    let waiting = false;
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    artifacts.addVersion = async (principal, id, request) => {
+      if (id === sourceId) {
+        if (waiting) release();
+        else { waiting = true; await barrier; }
+      }
+      return append(principal, id, request);
+    };
+    const left = edit('Written by A.');
+    const right = (async () => {
+      try {
+        await waitFor(async () => waiting || null);
+        return await edit('Written by B.');
+      } finally { release(); }
+    })();
+    const settled = await Promise.allSettled([left, right]);
     const fulfilled = settled.filter(
       (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof edit>>> =>
         result.status === 'fulfilled',
@@ -589,4 +620,27 @@ test('two concurrent edits at the same expected version have one winner and one 
   } finally {
     await first.close();
   }
+});
+
+test('a refused terminal fence leaves no deliverable associated with the stale run', async () => {
+  const app = await startTestApp({ config: { persistence: { driver: 'mongo' } }, persistence: { database: createFakeDatabase() } });
+  try {
+    const tasks = app.app.dependencies.tasks;
+    const write = tasks.updateFenced.bind(tasks);
+    let refused = false;
+    tasks.updateFenced = async request => {
+      if (request.patch.state !== 'completed') return write(request);
+      refused = true;
+      return { applied: false, reason: 'superseded' };
+    };
+    const api = client(app.url);
+    const task = await api.submitWork({
+      objective: ['Produce a document.', '```deliverable', JSON.stringify({
+        kind: 'document', mode: 'cloud', filename: 'stale', title: 'Memo',
+        blocks: [{ type: 'paragraph', text: 'A stale run cannot publish this.' }], formats: ['markdown'],
+      }), '```'].join('\n'), mode: 'cloud', requireApproval: false,
+    });
+    await waitFor(async () => refused || null);
+    assert.deepEqual((await api.artifacts({ taskId: task.taskId, mode: 'cloud' })).artifacts, []);
+  } finally { await app.close(); }
 });

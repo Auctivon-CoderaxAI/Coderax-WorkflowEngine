@@ -556,33 +556,26 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return status;
   }
 
-  type ProducedArtifact = { path: string; bytes?: number; digest?: string };
-
   /**
    * Produces the deliverable a Work objective declared, if any. A malformed or
    * mismatched directive produces nothing rather than substituting a different
    * deliverable, and a refused generation leaves the run's own result intact.
    */
-  async function produceDeliverable(task: TaskRecord, signal: AbortSignal): Promise<ProducedArtifact[]> {
+  async function produceDeliverable(task: TaskRecord, signal: AbortSignal, authorizePersistence: () => Promise<boolean>): Promise<void> {
     const directive = readDeliverableDirective(task.objective);
-    if (!directive.present || directive.error) return [];
+    if (!directive.present || directive.error) return;
     const parsed = DeliverableRequest.safeParse(directive.value);
-    if (!parsed.success || parsed.data.mode !== task.mode) return [];
-    const delivered = await deps.deliverables.deliver(
+    if (!parsed.success || parsed.data.mode !== task.mode) return;
+    await deps.deliverables.deliver(
       { ownerId: task.ownerId, isOwner: true },
       parsed.data,
       {
         conversationId: task.conversationId,
         taskId: task.taskId,
         signal,
+        authorizePersistence,
       },
     );
-    if (!delivered.ok) return [];
-    return delivered.value.artifacts.map((artifact) => ({
-      path: artifact.relativePath ?? artifact.filename,
-      bytes: artifact.bytes,
-      digest: artifact.sha256,
-    }));
   }
 
   function toStatus(task: TaskRecord): TaskStatus {
@@ -693,6 +686,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     checkpoint?: TaskRecord['checkpoint'],
     steps?: TaskRecord['steps'],
     signal?: AbortSignal,
+    lostOwnership?: () => boolean,
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       return;
@@ -773,8 +767,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     }
 
-    const produced = outcome.kind === 'completed' && signal && !signal.aborted
-      ? await produceDeliverable(task, signal).catch(() => []) : [];
     if (outcome.kind === 'completed' && signal?.aborted) outcome = { kind: 'cancelled' };
 
     const patch =
@@ -784,7 +776,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: now,
             result: {
               summary: outcome.summary.slice(0, 20_000),
-              artifacts: task.kind === 'game' ? (outcome.artifacts ?? []) : produced,
+              artifacts: task.kind === 'game' ? (outcome.artifacts ?? []) : [],
               ...(outcome.verification
                 ? {
                     verification: {
@@ -819,12 +811,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
       ...(mergedUsage ? { usage: mergedUsage } : {}),
     };
-    const applied = await deps.tasks.updateFenced({
+    const commit = () => deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
       patch: statePatch,
+      ...(outcome.kind === 'completed' ? { guard: 'not_cancel_requested' as const } : {}),
     });
+    let decision: ReturnType<typeof commit> | undefined;
+    if (outcome.kind === 'completed' && signal) {
+      // Only a completed generation is immutable. Authorize publication at the
+      // last boundary before storage, after generation and validation finish.
+      await produceDeliverable(task, signal, async () => {
+        if (lostOwnership?.() || signal.aborted) return false;
+        return (await (decision ??= commit())).applied;
+      }).catch(() => undefined);
+      if (!decision && lostOwnership?.()) return;
+      if (!decision && signal.aborted) {
+        return settle(task, token, { kind: 'cancelled' }, checkpoint, steps);
+      }
+    }
+    const applied = await (decision ?? commit());
     if (!applied.applied) {
+      if (applied.reason === 'guard_rejected' && outcome.kind === 'completed') {
+        await settle(task, token, { kind: 'cancelled' }, checkpoint, steps);
+        return;
+      }
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
         await releaseLease(task, token);
       }
@@ -1272,9 +1283,60 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       adapter,
     );
 
-    let result: RunResult;
+    let finishing = false;
+    const finish = async (result: RunResult, signal: AbortSignal, lostOwnership: () => boolean): Promise<void> => {
+      finishing = true;
+      const current = controllers.get(taskId);
+      const superseded = current !== undefined && current !== controller;
+      await writeChain.catch(() => undefined);
+
+      const verified = result.terminated;
+      try {
+        if (superseded || result.ownershipLost) {
+          return;
+        }
+        const safeText = redactContent(text);
+        emitText(safeText);
+        await drain();
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(started.task)), now: deps.clock.now() });
+        if (lostOwnership() || !lease?.live || lease.token !== token) return;
+        const outcome = result.outcome.kind === 'completed'
+          ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
+          : result.outcome;
+        await settle(
+          started.task,
+          token,
+          outcome,
+          {
+            completedSteps: completed,
+            text: safeText,
+            plan,
+            evidence,
+            iterations,
+          },
+          steps,
+          signal,
+          lostOwnership,
+        );
+      } finally {
+        if (controllers.get(taskId) === controller) controllers.delete(taskId);
+        // Verified termination means the adapter returned. Anything else means it
+        // may still be running, so its capability and workspace are revoked rather
+        // than left available to a generation the engine can no longer supervise.
+        if (verified) {
+          deps.supervisor.finish(taskId, token);
+        } else {
+          await deps.supervisor.abandon({
+            taskId,
+            token,
+            reason: 'The adapter did not verify termination within the cancellation grace period.',
+          });
+        }
+      }
+    };
     try {
-      result = await deps.runner.run({
+      await deps.runner.run({
+        onSettled: finish,
         scope: scopeOf(started.task),
         ...((task.scheduleAdmission ||
           task.taskId.startsWith('task_sched_')) && {
@@ -1308,7 +1370,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: started.task.generation,
         workspaceRoot: workspace.value.root,
       });
-    } catch {
+    } catch (error) {
+      if (finishing) throw error;
       await deps.supervisor.abandon({
         taskId,
         token,
@@ -1323,51 +1386,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (controllers.get(taskId) === controller) controllers.delete(taskId);
       }
       return;
-    }
-
-    const current = controllers.get(taskId);
-    const superseded = current !== undefined && current !== controller;
-    await writeChain.catch(() => undefined);
-
-    const verified = result.terminated;
-    try {
-      if (superseded || result.ownershipLost) {
-        return;
-      }
-      const safeText = redactContent(text);
-      emitText(safeText);
-      await drain();
-      const outcome = result.outcome.kind === 'completed'
-        ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
-        : result.outcome;
-      await settle(
-        started.task,
-        token,
-        outcome,
-        {
-          completedSteps: completed,
-          text: safeText,
-          plan,
-          evidence,
-          iterations,
-        },
-        steps,
-        controller.signal,
-      );
-    } finally {
-      if (controllers.get(taskId) === controller) controllers.delete(taskId);
-      // Verified termination means the adapter returned. Anything else means it
-      // may still be running, so its capability and workspace are revoked rather
-      // than left available to a generation the engine can no longer supervise.
-      if (verified) {
-        deps.supervisor.finish(taskId, token);
-      } else {
-        await deps.supervisor.abandon({
-          taskId,
-          token,
-          reason: 'The adapter did not verify termination within the cancellation grace period.',
-        });
-      }
     }
   }
 
@@ -2056,6 +2074,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = await reconcile(found.value);
+      if (task.state === 'completed' && readDeliverableDirective(task.objective).present) {
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
+        if (lease?.live && lease.token === task.runToken) {
+          return ok(toStatus({ ...task, state: 'running', result: null, leaseExpiresAt: lease.expiresAt.toISOString() }));
+        }
+      }
       if (task.state === 'awaiting_approval') {
         const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
         // A durable suspension is ready to expose only after its run no longer

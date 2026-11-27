@@ -637,7 +637,7 @@ export function profileDataset(table: DataTable): DatasetProfile {
       .map((row) =>
         table.columns.map((column) => {
           const value = row[column] ?? null;
-          return typeof value === 'boolean' ? String(value) : value;
+          return typeof value === 'string' ? value.slice(0, 4000) : typeof value === 'boolean' ? String(value) : value;
         }),
       ),
   };

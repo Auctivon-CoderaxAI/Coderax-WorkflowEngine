@@ -565,7 +565,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Stop accepting new HTTP work immediately; in-flight requests may finish
       // while the service drains, but they cannot admit new execution.
       const serverClosed = server.close();
-      const drain = Promise.all([service.shutdown(), serverClosed]);
+      const drain = Promise.all([service.shutdown(), serverClosed]).then(() => persistence.close());
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([
@@ -580,7 +580,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       } finally {
         if (timer) clearTimeout(timer);
       }
-      await persistence.close();
     })();
     return stopPromise;
   };
@@ -604,8 +603,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       } catch (error) {
         try {
           await stop();
-        } catch {
-          await persistence.close();
+        } catch (stopError) {
+          if (!(stopError instanceof ShutdownTimeoutError)) await persistence.close();
         }
         throw error;
       }

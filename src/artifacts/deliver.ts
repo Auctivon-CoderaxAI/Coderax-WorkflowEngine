@@ -1,5 +1,6 @@
 import {
   DeliverableRequest,
+  DatasetAnalysis,
   DocumentSourceArtifact,
   type ArtifactDescriptor,
   type DataMode,
@@ -34,6 +35,8 @@ const STAGING_MAX_AGE_MS = 3_600_000;
 const SWEEP_LIMIT = 100;
 
 export type DeliverOptions = {
+  /** Work publication is authorized by its fenced completion after staging. */
+  authorizePersistence?: () => Promise<boolean>;
   conversationId?: string;
   taskId?: string;
   projectId?: string;
@@ -194,6 +197,10 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
         return produced;
       }
 
+      if (normalised.kind === 'dataset' && !DatasetAnalysis.safeParse(produced.value.analysis).success) {
+        return fail('internal_error', 'The generated dataset analysis did not match its contract.');
+      }
+
       // A generated project needs a project to belong to: the one the request
       // names, the one the caller associated, or a new one for this deliverable.
       const projectId =
@@ -203,6 +210,9 @@ export function createDeliverableService(deps: DeliverableServiceDeps): Delivera
             `proj_${deps.ids.receipt().replace(/^rcpt_/, '')}`)
           : options.projectId;
 
+      if (options.signal?.aborted || (options.authorizePersistence && !await options.authorizePersistence())) {
+        return fail('cancelled', 'The producing run no longer owns publication.');
+      }
       const persisted = await persistProduced({
         artifacts: deps.artifacts,
         principal,
