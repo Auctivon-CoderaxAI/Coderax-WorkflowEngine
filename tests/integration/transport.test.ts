@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { request } from 'node:http';
 import { test } from 'node:test';
 import { OWNER_TOKEN, startTestApp } from '../helpers.js';
 
@@ -87,6 +88,38 @@ test('ordinary operations keep the small transport default', { timeout: 60_000 }
     const body = (await response.json()) as { code: string };
     assert.equal(body.code, 'payload_too_large');
   } finally {
+    await started.close();
+  }
+});
+
+test('an overflow receives a structured 413 before the upload ends', { timeout: 10_000 }, async () => {
+  const started = await startTestApp();
+  const upload = request(`${started.url}/v1/chat`, { method: 'POST', headers: authHeaders() });
+  try {
+    const problem = await new Promise<{ status: number | undefined; code: string }>((resolve, reject) => {
+      upload.once('error', reject);
+      upload.once('response', (response) => {
+        response.setEncoding('utf8');
+        let data = '';
+        response.on('data', (chunk: string) => { data += chunk; });
+        response.once('error', reject);
+        response.once('end', () => {
+          try {
+            const { code } = JSON.parse(data) as { code: string };
+            resolve({ status: response.statusCode, code });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      upload.setTimeout(5_000, () => upload.destroy(new Error('timed out waiting for 413')));
+      // Leave the chunked request open without sending its terminating chunk.
+      upload.write(Buffer.alloc(1_200_000, 'x'));
+    });
+    assert.equal(upload.writableEnded, false);
+    assert.deepEqual(problem, { status: 413, code: 'payload_too_large' });
+  } finally {
+    upload.destroy();
     await started.close();
   }
 });
