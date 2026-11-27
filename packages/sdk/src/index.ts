@@ -128,6 +128,92 @@ export type CoderaxClientOptions = {
   timeoutMs?: number;
 };
 
+/**
+ * Every operation the SDK implements, keyed by the contract operation id.
+ *
+ * The route-completeness gate compares this map with the route catalogue: a new
+ * HTTP operation is not complete until a client can call it, and removing a
+ * client method without removing the route fails the same check. The map is
+ * also checked against the class at runtime so a renamed method cannot hide.
+ */
+export const SDK_OPERATIONS = Object.freeze({
+  getHealth: 'health',
+  getReadiness: 'readiness',
+  listAgents: 'agents',
+  listModels: 'models',
+  submitChat: 'chat',
+  submitWork: 'submitWork',
+  getTask: 'task',
+  cancelTask: 'cancel',
+  resumeTask: 'resume',
+  retryTask: 'retry',
+  streamTaskEvents: 'events',
+  listConversations: 'conversations',
+  getConversation: 'conversation',
+  listMemory: 'memory',
+  listPermissions: 'permissions',
+  decidePermission: 'decidePermission',
+  listNotifications: 'notifications',
+  browserCapabilities: 'browserCapabilities',
+  listBrowserSessions: 'browserSessions',
+  getBrowserSession: 'browserSession',
+  createBrowserSession: 'createBrowserSession',
+  browserAction: 'browserAction',
+  pauseBrowserSession: 'pauseBrowserSession',
+  resumeBrowserSession: 'resumeBrowserSession',
+  takeoverBrowserSession: 'takeoverBrowserSession',
+  closeBrowserSession: 'closeBrowserSession',
+  authorizeBrowserSession: 'authorizeBrowserSession',
+  decideBrowserAuthorization: 'decideBrowserAuthorization',
+  listBrowserReceipts: 'browserReceipts',
+  getBrowserArtifact: 'browserArtifact',
+  listArtifacts: 'artifacts',
+  artifactProjectManifest: 'artifactManifest',
+  generateDeliverable: 'generateDeliverable',
+  uploadArtifact: 'uploadArtifact',
+  pruneArtifacts: 'pruneArtifacts',
+  getArtifact: 'artifact',
+  uploadArtifactVersion: 'uploadArtifactVersion',
+  restoreArtifactVersion: 'restoreArtifactVersion',
+  listArtifactVersions: 'artifactVersions',
+  downloadArtifact: 'downloadArtifact',
+  exportArtifact: 'exportArtifact',
+  deleteArtifact: 'deleteArtifact',
+  createSchedule: 'createSchedule',
+  listSchedules: 'schedules',
+  getSchedule: 'schedule',
+  pauseSchedule: 'pauseSchedule',
+  resumeSchedule: 'resumeSchedule',
+  cancelSchedule: 'cancelSchedule',
+  triggerSchedule: 'triggerSchedule',
+  listScheduleExecutions: 'scheduleExecutions',
+  dispatchScheduleEvent: 'scheduleEvent',
+  updateSchedule: 'updateSchedule',
+  getScheduleUpcoming: 'scheduleUpcoming',
+  markNotificationsRead: 'markNotificationsRead',
+  getHandshake: 'handshake',
+  getGameCapabilities: 'gameCapabilities',
+  listGames: 'games',
+  createGame: 'createGame',
+  getGame: 'game',
+  saveGameSpec: 'saveGameSpec',
+  buildGame: 'buildGame',
+  listGameBuilds: 'gameBuilds',
+  restoreGameBuild: 'restoreGameBuild',
+  iterateGame: 'iterateGame',
+  previewGame: 'gamePreview',
+  exportGame: 'exportGame',
+  createGameSession: 'createGameSession',
+  listGameSessions: 'gameSessions',
+  getGameSession: 'gameSession',
+  observeGameSession: 'observeGameSession',
+  controlGameSession: 'controlGameSession',
+  gameSessionLogs: 'gameSessionLogs',
+  gameSessionVerification: 'gameSessionVerification',
+} as const);
+
+export type SdkOperationId = keyof typeof SDK_OPERATIONS;
+
 type RequestInput = {
   method: 'GET' | 'POST' | 'PATCH';
   path: string;
@@ -629,7 +715,7 @@ export class CoderaxClient {
    * Generates and durably persists a document, workbook, deck, analysis or
    * software project. The response names stored artifacts, never workspace paths.
    */
-  deliver(request: DeliverableRequestInput): Promise<Deliverable> {
+  generateDeliverable(request: DeliverableRequestInput): Promise<Deliverable> {
     return this.request<Deliverable>(Deliverable, {
       method: 'POST',
       path: '/v1/deliverables',

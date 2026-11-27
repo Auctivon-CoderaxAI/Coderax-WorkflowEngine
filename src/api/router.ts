@@ -10,6 +10,7 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
+  signal?: AbortSignal;
 };
 
 /**
@@ -35,6 +36,7 @@ export type RawRequest = {
   path: string;
   authorization: string | undefined;
   bodyText: string;
+  signal?: AbortSignal;
 };
 
 export type RouterResult =
@@ -102,8 +104,8 @@ function problem(
   requestId: string,
   retryable = false,
 ): { kind: 'json'; status: number; body: unknown } {
-  // One table, shared with the contracts, so a new problem code cannot map to a
-  // different status here than it does in the published document.
+  // One table decides the status for both the router and any handler, so a new
+  // failure code cannot mean two different HTTP statuses in two places.
   const status = HTTP_STATUS_FOR_CODE[code];
   return {
     kind: 'json',
@@ -137,6 +139,12 @@ export const problemResult = problem;
 export type Router = {
   handle: (request: RawRequest) => Promise<RouterResult>;
   registry: RouteRegistry;
+  /**
+   * The body ceiling for the operation that matches this method and path, or
+   * `undefined` for the transport default. The server reads the body before a
+   * handler runs, so only the route that carries file content may raise it.
+   */
+  bodyLimit: (method: string, path: string) => number | undefined;
 };
 
 export function createRouter(input: {
@@ -152,10 +160,20 @@ export function createRouter(input: {
 
   return {
     registry: input.registry,
+    bodyLimit: (method, path) => {
+      const [pathname = ''] = path.split('?');
+      const upper = method.toUpperCase();
+      for (const route of routes) {
+        if (route.spec.method !== upper) continue;
+        if (!route.matcher.test(pathname)) continue;
+        return route.spec.maxBodyBytes;
+      }
+      return undefined;
+    },
     handle: async (raw) => {
       const requestId = input.requestId();
       const [pathname, search = ''] = raw.path.split('?');
-      const query = Object.fromEntries(new URLSearchParams(search).entries());
+      const rawQuery = Object.fromEntries(new URLSearchParams(search).entries());
       const method = raw.method.toUpperCase();
 
       for (const route of routes) {
@@ -168,18 +186,23 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = (match.groups ?? {}) as Record<string, string>;
+        let params = (match.groups ?? {}) as Record<string, string>;
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
+          params = parsed.data as Record<string, string>;
         }
+        // Handlers receive the coerced data, not the raw query string: a numeric
+        // `after` or `limit` must be a number before any service sees it.
+        let query: Record<string, unknown> = rawQuery;
         if (route.spec.query) {
-          const parsed = route.spec.query.safeParse(query);
+          const parsed = route.spec.query.safeParse(rawQuery);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
+          query = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;
@@ -214,6 +237,7 @@ export function createRouter(input: {
             query,
             body,
             requestId,
+            signal: raw.signal,
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);

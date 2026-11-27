@@ -29,7 +29,7 @@ are clients of the same versioned API.
 | Atomic claim, renewal, durable cancel, prune | Implemented | `src/persistence/work-runs.ts` |
 | Terminal-state fencing (stale run cannot overwrite) | Implemented | `src/persistence/tasks.ts`, fencing tests |
 | Heartbeat, crash detection, interrupted-task recovery | Implemented | `src/execution/runner.ts`, `src/orchestration/service.ts` |
-| Cancellation, resume, bounded same-engine retry | Implemented | `src/orchestration/service.ts`, e2e tests |
+| Cancellation, resume, owner-triggered retry | Implemented | `src/orchestration/service.ts`, e2e tests |
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
 | Durable schedules: one-time, interval, hourly, daily/weekly calendar (IANA zone), monthly and named events | Implemented | `src/scheduling`, `src/persistence/schedules.ts` |
 | Cross-replica schedule idempotency: unique receipt key, deterministic task id, Work lease | Implemented; Mongo adapter fake-verified, not live-verified | `src/scheduling/identity.ts`, `src/persistence/mongo-schedules.ts`, two-replica test |
@@ -76,10 +76,16 @@ exact dependency and the narrow ports the game code exposes for that migration.
 npm install
 npm run build
 npm test                          # unit, contract, integration, security and e2e suites
+npm run verify                    # build + every quality gate, including real MongoDB
 npm run game:evidence             # regenerates the playable game evidence frames
 npm run game:browser -- --base-url <origin>   # real-Chromium acceptance; needs Playwright
 npm run openapi:check             # fails if the published contract drifted
 ```
+
+`npm run verify` requires `CODERAX_TEST_MONGO_URI` to name a disposable MongoDB;
+the gate fails rather than skipping when no database is present. The gate matrix,
+the pinned MongoDB job and the coordination notes are in
+`docs/quality-gates.md`.
 
 Run the engine (it refuses to start until every startup check passes):
 

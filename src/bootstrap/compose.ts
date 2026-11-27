@@ -55,6 +55,13 @@ import { createGameSessions } from '../games/session.js';
 
 export { StartupError } from './startup-error.js';
 
+export class ShutdownTimeoutError extends Error {
+  constructor(deadlineMs: number) {
+    super(`Graceful shutdown exceeded ${deadlineMs}ms; persistence was left open`);
+    this.name = 'ShutdownTimeoutError';
+  }
+}
+
 export type Application = {
   dependencies: ApplicationDependencies;
   service: ApplicationService;
@@ -550,6 +557,35 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     port: config.server.port,
   });
 
+  let stopPromise: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      service.beginShutdown();
+      // Stop accepting new HTTP work immediately; in-flight requests may finish
+      // while the service drains, but they cannot admit new execution.
+      const serverClosed = server.close();
+      const drain = Promise.all([service.shutdown(), serverClosed]);
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          drain,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new ShutdownTimeoutError(config.execution.shutdownGraceMs)),
+              config.execution.shutdownGraceMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      // Persistence is closed only after the service and listener have drained.
+      await persistence.close();
+    })();
+    return stopPromise;
+  };
+
   return {
     dependencies: finalContainer.dependencies,
     service,
@@ -573,11 +609,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       service.startSchedules();
       return { url };
     },
-    stop: async () => {
-      await service.shutdown();
-      await server.close();
-      await persistence.close();
-    },
+    stop,
   };
 }
 

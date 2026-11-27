@@ -62,6 +62,25 @@ test('an unknown route is a typed not-found, not an HTML fallback', async () => 
   }
 });
 
+test('an oversized request body is refused before parsing', async () => {
+  const started = await startTestApp();
+  try {
+    const response = await fetch(`${started.url}/v1/work`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${OWNER_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ objective: 'x'.repeat(1_048_577) }),
+    });
+    assert.equal(response.status, 413);
+    const body = (await response.json()) as { code: string };
+    assert.equal(body.code, 'payload_too_large');
+  } finally {
+    await started.close();
+  }
+});
+
 test('a request body is validated against the published contract', async () => {
   const started = await startTestApp();
   try {

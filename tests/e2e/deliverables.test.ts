@@ -23,7 +23,7 @@ test('a deliverable is stored, revised by artifact id, versioned, restarted and 
   const first = await startTestApp({ config, persistence: { database } });
   const api = client(first.url);
   try {
-    const created = await api.deliver({
+    const created = await api.generateDeliverable({
       kind: 'document',
       mode: 'cloud',
       filename: 'spec',
@@ -52,7 +52,7 @@ test('a deliverable is stored, revised by artifact id, versioned, restarted and 
     assert.equal(firstBytes.version.sha256, docx.sha256);
 
     // Revision is addressed by artifact id, with the version the client read.
-    const revised = await api.deliver({
+    const revised = await api.generateDeliverable({
       kind: 'document',
       mode: 'cloud',
       filename: 'spec',
@@ -90,7 +90,7 @@ test('a deliverable is stored, revised by artifact id, versioned, restarted and 
 
     // A second edit built on the stale version is refused, not silently applied.
     await assert.rejects(
-      api.deliver({
+      api.generateDeliverable({
         kind: 'document',
         mode: 'cloud',
         filename: 'spec',
@@ -149,7 +149,7 @@ test('a dataset and a software project are stored as descriptors, not paths', as
   });
   try {
     const api = client(first.url);
-    const dataset = await api.deliver({
+    const dataset = await api.generateDeliverable({
       kind: 'dataset',
       mode: 'cloud',
       filename: 'orders',
@@ -167,7 +167,7 @@ test('a dataset and a software project are stored as descriptors, not paths', as
       assert.ok(!artifact.filename.includes('/'));
     }
 
-    const software = await api.deliver({
+    const software = await api.generateDeliverable({
       kind: 'software',
       mode: 'cloud',
       name: 'toolkit-demo',
@@ -212,7 +212,7 @@ test('a dataset and a software project are stored as descriptors, not paths', as
 
     // A later generation can extend the same project; a path gains a version
     // instead of a second artifact.
-    const extended = await api.deliver({
+    const extended = await api.generateDeliverable({
       kind: 'software',
       mode: 'cloud',
       name: 'toolkit-demo',
@@ -252,7 +252,7 @@ test('a software deliverable still reports that its program was never executed',
   });
   try {
     const api = client(first.url);
-    const software = await api.deliver({
+    const software = await api.generateDeliverable({
       kind: 'software',
       mode: 'cloud',
       name: 'never-run',
@@ -284,7 +284,7 @@ test('exhausting the artifact quota fails the deliverable and leaves nothing beh
   try {
     const api = client(first.url);
     await assert.rejects(
-      api.deliver({
+      api.generateDeliverable({
         kind: 'document',
         mode: 'cloud',
         filename: 'large',
@@ -353,7 +353,7 @@ test('a deliverable requires the owner token and validates its request', async (
   try {
     const unauthenticated = new CoderaxClient({ baseUrl: first.url, token: 'wrong-token-value' });
     await assert.rejects(
-      unauthenticated.deliver({
+      unauthenticated.generateDeliverable({
         kind: 'document',
         filename: 'x',
         title: 'X',
@@ -365,7 +365,7 @@ test('a deliverable requires the owner token and validates its request', async (
 
     const api = client(first.url);
     await assert.rejects(
-      api.deliver({
+      api.generateDeliverable({
         kind: 'document',
         filename: '../escape',
         title: 'X',
@@ -386,7 +386,7 @@ test('an edit that fails after the output appends leaves the stored source on it
   });
   try {
     const api = client(first.url);
-    const created = await api.deliver({
+    const created = await api.generateDeliverable({
       kind: 'document',
       mode: 'cloud',
       filename: 'memo',
@@ -481,7 +481,7 @@ test('an edit that fails after the output appends leaves the stored source on it
     }
 
     // The pointer never moved, so the same expected version wins a retry.
-    const retried = await api.deliver({
+    const retried = await api.generateDeliverable({
       kind: 'document',
       mode: 'cloud',
       filename: 'memo',
@@ -512,7 +512,7 @@ test('two concurrent edits at the same expected version have one winner and one 
   });
   try {
     const api = client(first.url);
-    const created = await api.deliver({
+    const created = await api.generateDeliverable({
       kind: 'document',
       mode: 'cloud',
       filename: 'race',
@@ -524,7 +524,7 @@ test('two concurrent edits at the same expected version have one winner and one 
     const docxId = created.artifacts.find((artifact) => artifact.filename === 'race.docx')!.artifactId;
 
     const edit = (text: string) =>
-      api.deliver({
+      api.generateDeliverable({
         kind: 'document',
         mode: 'cloud',
         filename: 'race',

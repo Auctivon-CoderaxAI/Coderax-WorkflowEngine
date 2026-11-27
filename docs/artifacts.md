@@ -152,7 +152,7 @@ Generation renders a real deliverable and persists it through the same adapter, 
 the response names stored artifacts rather than workspace paths:
 
 ```ts
-const generated = await client.deliver({
+const generated = await client.generateDeliverable({
   kind: 'document',
   mode: 'cloud',
   filename: 'quarterly-report',

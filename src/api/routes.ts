@@ -100,7 +100,6 @@ async function* toEventStream(stream: EventStream): AsyncIterable<SseFrame> {
     unsubscribe();
   }
 }
-
 export function registerRoutes(
   registry: RouteRegistry,
   service: ApplicationService,

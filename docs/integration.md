@@ -24,6 +24,8 @@ metadata of its own and no capability list.
 | Ref | Commit |
 | --- | --- |
 | `main` (base) | `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd` |
+| `main` (first merge) | `ec4a707…` — durable artifacts (`dd5e1db`), games and contracts 1.2.0 |
+| `main` (second merge) | `49cb999…` — permanent quality gates (PR #23) |
 | `feat/durable-artifacts` (branch base) | `8eceaad36c0eb433aafd919e38ac893a2f331e76` |
 | `feat/artifact-intelligence` (recovery baseline) | `c9bac16b0bd78252d39282853bd9ef842b8f228c` |
 | `feat/multimodal-creative-intelligence` (not merged) | `c0cfa993ef2d890b7abf4e2d33506c9f34214c85` |
@@ -32,14 +34,15 @@ metadata of its own and no capability list.
 | `feat/zero-cost-model-router` (PR #4) | `b6e002bc11c4a402c04d652681f75744cf428d65` |
 | `feat/execution-supervisor` (PR #5) | `13d4b4f7796f819e4e58bd18006efc4970929e6e` |
 
-The integration branch is stacked on `feat/durable-artifacts` at `8eceaad`,
+The integration branch was stacked on `feat/durable-artifacts` at `8eceaad`,
 because that branch owns persistence. It was first built on `fd5edef`, rebased
 once for validated tree paths and the `software`/`dataset` kinds, and rebased
 again for the durable project manifest, restore operation and generator tree
-adapter; all three are now the only implementation used here. It does not merge PRs #2–#5: each of those
-changes the planner, router, permissions or supervisor this branch consumes
-through an existing port rather than duplicating. Merging them is an owner
-decision and is listed as outstanding.
+adapter. Because `main` has since merged that branch (`dd5e1db`), this branch is
+now a merge of `main` at `49cb999` plus the deliverable integration, and every
+persistence decision above is `main`'s rather than a second copy. The planner,
+router, permissions and supervisor arrive through `main`; nothing here
+duplicates them.
 
 ## The five semantic conflicts and their resolution
 
@@ -77,6 +80,39 @@ decision and is listed as outstanding.
    productivity producers with the multimodal registry is a dependency-linked
    follow-up: `feat/multimodal-creative-intelligence` has no merged registry to
    register into yet.
+
+## Merging with the durable branch after it landed on `main`
+
+`feat/durable-artifacts` reached `main` (`dd5e1db`) with its own generation
+bridge while this branch was stacked on `8eceaad`. Merging `main` produced 24
+conflicted files, plus a second round after PR #23 took `main` to `49cb999`. Each
+conflict was resolved by keeping one implementation per concern:
+
+1. **One generation surface.** `POST /v1/deliverables` (`generateDeliverable`)
+   replaces the interim `POST /v1/artifacts/generate` (`generateArtifact`,
+   `ArtifactGenerationRequest`, `ArtifactGenerationResult`). The deliverable
+   service is a superset — five kinds, revision by artifact id and the
+   never-executed disclosure — so keeping both would have been two
+   implementations of one capability. `src/artifacts/generate.ts` and its two
+   suites are removed; the SDK method is renamed to match the operation id, which
+   the contract test enforces.
+2. **One artifact store.** The durable service, repository, tree adapter, chunked
+   blob store and quota admission stay exactly as `main` has them. `media.ts`
+   keeps `main`'s structural OOXML central-directory check (it does not inflate
+   attacker-controlled entries) and `zip.ts` keeps it plus this branch's
+   `normalizePackage`.
+3. **Main's newer runtime is preserved**, not reverted: games and the game
+   studio, browser control plane, schedules and notices, notifications,
+   handshake 1.2.0, zod 4 (`prefault({})` defaults) and the quality-gate
+   workflow. Where the merge had duplicated a block (two `artifactService`
+   constructions, two artifact handler sets, two `schedules` entries), the
+   duplicate was deleted rather than the newer one.
+4. **Contracts are `main`'s catalogue plus `generateDeliverable`.**
+   `openapi.json` is regenerated with `npm run openapi:write`.
+5. **Test-only MongoDB.** `mongodb-memory-server` stays a devDependency so the
+   durability lanes run instead of skipping; the dependency gate records it as
+   the one reviewed install-script exception and it ships in no runtime
+   artifact.
 
 ## Contract changes to coordinate with the durable owner
 
@@ -119,14 +155,21 @@ with `executed: false` for generated software.
 
 ## Verification evidence
 
-At the branch head, `npm run verify`:
+At the branch head, `npm run verify` runs the permanent gate: `tsc -b` across
+contracts, SDK and engine, then `node dist/scripts/run-gates.js all` and
+`node dist/scripts/run-gates.js coverage`. The result at this tree:
 
-- `tsc -b` across contracts, SDK and engine;
-- `node --test "dist/tests/**/*.test.js"` — 186 tests, 186 pass, 0 fail,
-  **0 skipped**, against a real `mongod` (7.0.14). `mongodb-memory-server` is now
-  a dev dependency, so the real-Mongo durability lanes start their own server
-  instead of skipping; `.github/workflows/verify.yml` additionally pins
-  `CODERAX_REQUIRE_MONGODB=1`, so CI fails rather than reporting a green skip;
+- **11 gates passed, 0 failed, 0 skipped** — unit, integration (fake Mongo
+explicitly labelled), security, adversarial, contract, OpenAPI drift,
+architecture, package artifacts, end-to-end, dependency audit and the live
+real-MongoDB lane;
+- `gate coverage passed: 77 test file(s) assigned, none unclaimed`, so no suite
+can be added and silently left unrun;
+- the live lane ran against a real `mongod` (7.0.14) started with
+`CODERAX_TEST_MONGO_URI` and `CODERAX_REQUIRE_MONGO=1`; `mongodb-memory-server`
+is a dev dependency, so the same lanes start their own server locally instead of
+skipping. `.github/workflows/verify.yml` pins the same flags, so a missing
+database fails the required check rather than reporting a green skip;
 - `openapi.json` matches the published contracts.
 
 The generation suite reads files back instead of trusting the writer: DOCX parts

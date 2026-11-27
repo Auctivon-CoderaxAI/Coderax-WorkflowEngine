@@ -78,6 +78,8 @@ export const EnginesConfig = z
      * external dependency, so an unconfigured deployment still has one engine.
      */
     default: EngineId.default('native'),
+    // `prefault` applies the empty object before nested defaults are parsed.
+    // Zod 4's `default` requires the fully-populated output shape as its input.
     native: NativeConfig.prefault({}),
     opencode: OpenCodeConfig.prefault({}),
     freebuff: FreebuffConfig.prefault({}),
@@ -100,9 +102,6 @@ export const ExecutionConfig = z
     /** A run holds its lease only while it heartbeats inside this window. */
     leaseTtlMs: z.number().int().min(3_000).max(600_000).default(30_000),
     heartbeatIntervalMs: z.number().int().min(500).max(60_000).default(10_000),
-    /** Total attempts, including the first. 1 disables retry. */
-    maxAttempts: z.number().int().min(1).max(5).default(1),
-    retryDelayMs: z.number().int().min(0).max(1_000).default(250),
     maxConcurrentTasks: z.number().int().min(1).max(64).default(4),
     /**
      * Bounds one replay read and the memory driver's retained window. The durable
@@ -117,6 +116,8 @@ export const ExecutionConfig = z
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */
     cancelGraceMs: z.number().int().min(100).max(30_000).default(5_000),
+    /** How long graceful shutdown may drain before it fails closed. */
+    shutdownGraceMs: z.number().int().min(100).max(300_000).default(10_000),
   })
   .strict();
 

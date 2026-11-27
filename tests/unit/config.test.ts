@@ -36,6 +36,23 @@ test('a heartbeat that cannot sustain the lease is refused at startup', () => {
   }
 });
 
+test('shutdown has a bounded default and rejects an unusably short deadline', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    assert.equal(config.execution.shutdownGraceMs, 10_000);
+    assert.equal(
+      EngineConfigSchema.safeParse({
+        ...config,
+        execution: { ...config.execution, shutdownGraceMs: 1 },
+      }).success,
+      false,
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('paid routing cannot be configured at all', () => {
   const ws = workspace();
   try {
@@ -157,6 +174,28 @@ test('duplicate zero-cost candidates are refused', () => {
       },
     });
     assert.ok(validateInvariants(config).some((issue) => issue.includes('more than once')));
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('removed retry settings are rejected visibly, not silently ignored', () => {
+  const ws = workspace();
+  try {
+    assert.throws(
+      () =>
+        EngineConfigSchema.parse({
+          auth: { ownerId: 'owner' },
+          workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+          models: { route: [{ providerId: 'free', modelId: 'm' }] },
+          execution: { maxAttempts: 3, retryDelayMs: 100 },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /execution|maxAttempts|retryDelayMs/i);
+        return true;
+      },
+    );
   } finally {
     ws.cleanup();
   }

@@ -123,3 +123,30 @@ test('a failed task can be retried on the same agent with a new generation', asy
     await started.close();
   }
 });
+
+test('shutdown closes an attached event stream while its task is still running', async () => {
+  const started = await startTestApp({
+    gateway: slowGateway(60_000),
+    config: { execution: { shutdownGraceMs: 2_000 } },
+  });
+  const api = client(started.url);
+  const controller = new AbortController();
+  try {
+    const accepted = await api.submitWork({ objective: 'Wait for shutdown', mode: 'cloud', requireApproval: true });
+    await waitFor(async () => (await api.task(accepted.taskId)).state === 'running' || null);
+    const response = await fetch(new URL(accepted.eventsPath, started.url), {
+      headers: { authorization: `Bearer ${OWNER_TOKEN}` },
+      signal: controller.signal,
+    });
+    assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/);
+    const reader = response.body!.getReader();
+    assert.equal((await reader.read()).done, false);
+    await started.app.stop();
+    while (!(await reader.read()).done) {
+      // Allow buffered events to drain before checking EOF.
+    }
+  } finally {
+    controller.abort();
+    await started.close().finally(started.workspace.cleanup);
+  }
+});

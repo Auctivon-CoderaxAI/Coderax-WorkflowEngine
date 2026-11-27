@@ -401,6 +401,9 @@ export type ApplicationService = {
   tickSchedules: () => Promise<ScheduleTickReport>;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
+  /** Stop admitting new execution work before the listener is closed. */
+  beginShutdown: () => void;
+  /** Abort active work, drain the scheduler and settle its writes. */
   shutdown: () => Promise<void>;
 };
 
@@ -414,6 +417,13 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  const admissions = new Set<Promise<unknown>>();
+  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | null = null;
+
+  function unavailable(): ServiceResult<never> {
+    return fail('not_ready', 'The engine is shutting down.');
+  }
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -687,6 +697,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
     const now = deps.clock.iso();
+    const failureDetail = outcome.kind === 'failed' ? redactText(outcome.detail, [], 1000) : undefined;
     const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
     const mergedUsage = mergeUsage(task.usage, generationUsage);
     let partialSaved = false;
@@ -724,7 +735,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           leaseExpiresAt: null,
           failure: {
             code: outcome.code,
-            detail: outcome.detail,
+            detail: failureDetail,
             retryable: false,
           },
           ...(checkpoint ? { checkpoint } : {}),
@@ -792,7 +803,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               updatedAt: now,
               failure: {
                 code: outcome.code,
-                detail: outcome.detail,
+                // Provider text is redacted before it is stored, not only on read.
+                detail: failureDetail,
                 retryable: outcome.retryable,
               },
             };
@@ -833,7 +845,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await publish(settled, 'task.cancelled', {});
       } else {
         await publish(settled, 'task.failed', {
-          code: outcome.code, detail: outcome.detail, retryable: outcome.retryable,
+          code: outcome.code, detail: failureDetail, retryable: outcome.retryable,
         });
       }
 
@@ -848,8 +860,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           agent: task.agent,
         }).catch(() => undefined);
       }
-      const detail = outcome.kind === 'completed' ? outcome.summary
-        : outcome.kind === 'failed' ? outcome.detail : undefined;
+      const detail = outcome.kind === 'completed' ? outcome.summary : failureDetail;
       await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
       deps.audit.record({
         actor: task.ownerId,
@@ -931,6 +942,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const schedule = await deps.schedules.get(admission.scheduleId);
     if (!schedule || schedule.state === 'cancelled') return false;
     return admission.complete ?? (schedule.lastExecutionId === admission.executionId || task.steps.length > 0);
+  }
+
+  async function rejectUnscheduledRun(task: TaskRecord, token: string): Promise<ServiceResult<never>> {
+    await settle(task, token, {
+      kind: 'failed',
+      code: 'server_unavailable',
+      detail: 'The engine shut down before the run could be scheduled.',
+      retryable: true,
+    });
+    return unavailable();
   }
 
   async function execute(taskId: string, token: string): Promise<void> {
@@ -1549,6 +1570,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
   }
 
+  function trackAdmission<Args extends unknown[], Reply>(
+    admit: (...args: Args) => Promise<ServiceResult<Reply>>,
+  ): (...args: Args) => Promise<ServiceResult<Reply>> {
+    return async (...args) => {
+      if (shuttingDown) return unavailable();
+      // Register before admission can call any collaborator.
+      const admission = Promise.resolve().then(() => admit(...args));
+      admissions.add(admission);
+      try {
+        return await admission;
+      } finally {
+        admissions.delete(admission);
+      }
+    };
+  }
+
+
 
   type SubmitOptions = { scheduleAdmission?: TaskRecord['scheduleAdmission']; eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
 
@@ -1759,7 +1797,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
     });
 
-    deps.scheduler.enqueue(() => execute(task.taskId, token));
+    if (!deps.scheduler.enqueue(() => execute(task.taskId, token))) {
+      return rejectUnscheduledRun(created.task, token);
+    }
 
     return ok({
       taskId: task.taskId,
@@ -2001,7 +2041,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     browserArtifact: (principal, artifactId) =>
       deps.browser.artifact(principal.ownerId, artifactId),
 
-    submitWork: (principal, request) => acceptTask(principal, request),
+    submitWork: trackAdmission<[Principal, WorkSubmitRequest], TaskAccepted>(
+      (principal, request) => acceptTask(principal, request),
+    ),
 
 
     task: async (principal, taskId) => {
@@ -2099,7 +2141,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    resumeTask: async (principal, taskId, generation) => {
+    resumeTask: trackAdmission<[Principal, string, number], TaskControlResult>(async (principal, taskId, generation) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = await reconcile(found.value);
@@ -2149,16 +2191,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
       await publish(applied.task, 'task.queued', {});
       await publish(applied.task, 'text.replace', { text: '' });
-      deps.scheduler.enqueue(() => execute(taskId, token));
+      if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+        return rejectUnscheduledRun(applied.task, token);
+      }
       return ok({
         taskId,
         state: 'queued',
         generation: applied.task.generation,
         outcome: 'accepted',
       });
-    },
+    }),
 
-    retryTask: async (principal, taskId, generation) => {
+    retryTask: trackAdmission<[Principal, string, number], TaskControlResult>(async (principal, taskId, generation) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = found.value;
@@ -2210,10 +2254,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           await releaseLease(task, token);
           return fail('conflict', 'That task cannot be retried.');
         }
-        accepted = true;
         await publish(applied.task, 'task.queued', {});
         await publish(applied.task, 'text.replace', { text: '' });
-        deps.scheduler.enqueue(() => execute(taskId, token));
+        if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+          return rejectUnscheduledRun(applied.task, token);
+        }
+        accepted = true;
         return ok({
           taskId,
           state: 'queued',
@@ -2223,9 +2269,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       } finally {
         if (!accepted) reservation.release();
       }
-    },
+    }),
 
-    chat: async (principal, request) => {
+    chat: trackAdmission<[Principal, ChatRequest], ChatReply>(async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
       const model = deps.models.resolve(request.model, request.mode);
@@ -2298,12 +2344,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!outcome.ok) {
         return fail(
           outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          outcome.detail,
+          redactText(outcome.detail, [], 1000),
           outcome.retryable,
         );
       }
-      const reply = redactContent(outcome.summary);
       deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
+      // Chat output is adapter text too: scrub it before storage and before it is
+      // returned, so a provider echoing a credential cannot persist it.
+      const reply = redactContent(outcome.summary);
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
@@ -2322,7 +2370,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(outcome.usage ? { usage: outcome.usage } : {}),
         createdAt: deps.clock.iso(),
       });
-    },
+    }),
 
     conversations: (principal) => deps.conversations.list(principal.ownerId),
 
@@ -2971,24 +3019,34 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return { interrupted };
     },
 
-    shutdown: async () => {
-      await scheduleEngine.stop();
+    beginShutdown: () => {
+      shuttingDown = true;
       deps.scheduler.stop();
-      for (const controller of controllers.values()) controller.abort();
-      controllers.clear();
-      // Wait for the runner's grace bound to turn every aborted run into a
-      // settled outcome, then revoke whatever is still registered. The second
-      // step is the verified part: no capability survives shutdown.
-      await Promise.race([
-        deps.scheduler.idle(),
-        new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, deps.config.execution.cancelGraceMs + 1_000);
-          timer.unref();
-        }),
-      ]);
-      await deps.supervisor.shutdown();
-      // Release cloud browsers rather than letting them run until their TTL.
-      await deps.browser.shutdown();
+    },
+
+    shutdown: () => {
+      if (shutdownPromise) return shutdownPromise;
+      shuttingDown = true;
+      deps.scheduler.stop();
+      shutdownPromise = (async () => {
+        await scheduleEngine.stop();
+        for (const controller of controllers.values()) controller.abort();
+        controllers.clear();
+        // Wait for the runner's grace bound to turn every aborted run into a
+        // settled outcome, then revoke whatever is still registered. The second
+        // step is the verified part: no capability survives shutdown.
+        await Promise.race([
+          Promise.all([deps.scheduler.idle(), Promise.allSettled(admissions)]),
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, deps.config.execution.cancelGraceMs + 1_000);
+            timer.unref();
+          }),
+        ]);
+        await deps.supervisor.shutdown();
+        // Release cloud browsers rather than letting them run until their TTL.
+        await deps.browser.shutdown();
+      })();
+      return shutdownPromise;
     },
   };
 
