@@ -8,6 +8,7 @@ import type {
   GameAction,
   GameObjective,
   IsoDateTime,
+  MediaReference,
   MissedRunPolicy,
   ModelRef,
   ScheduleCondition,
@@ -216,6 +217,8 @@ export type StoredMessage = {
   createdAt: IsoDateTime;
   unfinished?: boolean;
   agent?: AgentId;
+  /** Metadata for images accepted on this turn; never the encoded bytes. */
+  media?: MediaReference[];
 };
 
 export type MemoryRecord = {

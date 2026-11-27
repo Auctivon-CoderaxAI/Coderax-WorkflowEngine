@@ -38,6 +38,8 @@ import type {
   GameSessionLogs,
   GameSessionVerification,
   IterateGameRequest,
+  MediaIntakeRequest,
+  MediaIntakeResult,
   MemoryList,
   ModelList,
   ModelRef,
@@ -65,7 +67,7 @@ import type {
   Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import { isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
+import { engineForAgent, isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import type {
   ConversationRecord,
@@ -92,6 +94,7 @@ import type { RunSupervisor } from '../execution/supervisor.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
+import { intakeMedia, mediaDataUrl } from '../media/intake.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
@@ -232,6 +235,11 @@ export type ApplicationService = {
     generation: number,
   ) => Promise<ServiceResult<TaskControlResult>>;
   chat: (principal: Principal, request: ChatRequest) => Promise<ServiceResult<ChatReply>>;
+  /** Validates an attachment set without persisting it or calling a model. */
+  intakeMedia: (
+    principal: Principal,
+    request: MediaIntakeRequest,
+  ) => Promise<ServiceResult<MediaIntakeResult>>;
   conversations: (principal: Principal) => Promise<ConversationList>;
   conversation: (
     principal: Principal,
@@ -2126,9 +2134,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     chat: async (principal, request) => {
+      // Attachments are validated before anything is resolved or written: an
+      // image that fails intake never reaches a model, a budget reservation or
+      // the transcript.
+      const validated = intakeMedia(request.attachments);
+      if (!validated.ok) return validated;
+      const media = validated.value;
+
+      // An external engine has no image channel, so the refusal is decided from
+      // the requested agent rather than from whether that agent is available.
+      if (media.length > 0 && engineForAgent(request.agent) !== 'native') {
+        return fail(
+          'unsupported_media_type',
+          'The selected agent cannot accept image attachments; use Coderax Native.',
+        );
+      }
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model, request.mode);
+      // An image turn may only route to a model the catalogue verified for
+      // image input. With no such route the turn is refused before the
+      // conversation is bound or a message is appended.
+      const model = deps.models.resolve(
+        request.model,
+        request.mode,
+        media.length > 0 ? { requireVision: true } : {},
+      );
       if (!model.ok) return model;
 
       const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
@@ -2165,6 +2195,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         role: 'user',
         text: request.message,
         createdAt: now,
+        ...(media.length > 0 ? { media: media.map((entry) => entry.reference) } : {}),
       });
 
       const history = await historyFor(conversation, request.message, adapter.value);
@@ -2189,6 +2220,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             reasoning: 'fast',
             completedSteps: [],
             plan: null,
+            ...(media.length > 0
+              ? {
+                  media: media.map((entry) => ({
+                    reference: entry.reference,
+                    dataUrl: mediaDataUrl(entry),
+                  })),
+                }
+              : {}),
           },
           () => undefined,
         );
@@ -2222,6 +2261,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(outcome.usage ? { usage: outcome.usage } : {}),
         createdAt: deps.clock.iso(),
       });
+    },
+
+    intakeMedia: async (_principal, request) => {
+      const validated = intakeMedia(request.attachments);
+      if (!validated.ok) return validated;
+      return ok({ media: validated.value.map((entry) => entry.reference) });
     },
 
     conversations: (principal) => deps.conversations.list(principal.ownerId),

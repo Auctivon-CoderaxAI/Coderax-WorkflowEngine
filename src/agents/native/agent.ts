@@ -235,6 +235,9 @@ export function createNativeAgent(input: {
           workspaceRoot: request.workspaceRoot,
           model: request.model,
           signal: request.signal,
+          ...(request.media && request.media.length > 0
+            ? { images: request.media.map((entry) => entry.dataUrl) }
+            : {}),
         });
         if (request.signal.aborted) return cancelled();
         if (!execution.ok) {

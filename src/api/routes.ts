@@ -129,6 +129,12 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     body: service.models(),
   }));
 
+  registry.register('intakeMedia', async (context) => {
+    const result = await service.intakeMedia(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('submitChat', async (context) => {
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);

@@ -47,6 +47,7 @@ are clients of the same versioned API.
 | Native Gaming Agent — cloud browser | **Blocked** | no verified zero-cost browser session/observation interface; the browser acceptance controller is test code, not the agent |
 | Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
 | Coderax Native reasoning and planning | Implemented — fast/complex modes, dependency-aware plans, parallel execution, bounded replanning, evidence-based verification, approval escalation | `src/agents/native`, `tests/unit/native-reasoning.test.ts`, `tests/integration/approval.test.ts` |
+| Validated image attachments on Chat | Implemented, fail-closed — PNG/JPEG/WebP identified from their own bytes, metadata stored, metadata-only `POST /v1/media`, image turns require a `models.vision` route and external engines reject them | `src/media/intake.ts`, `tests/e2e/media.test.ts` |
 | Cloud browser surface (sessions, navigation, inspection, screenshots, inputs, tabs, files, takeover, receipts) | Implemented, fail-closed | `packages/contracts/src/browser.ts`, `src/browser`, `src/orchestration/browser.ts` |
 | Verified zero-cost cloud browser provider | **Not configured** | no provider endpoint exists here; capabilities report `not_configured` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
@@ -99,10 +100,17 @@ CODERAX_ENGINE_CONFIG=./engine.json npm start
 {
   "auth": { "ownerId": "owner" },
   "workspaces": { "privateRoot": "/srv/coderax/private", "cloudRoot": "/srv/coderax/cloud" },
-  "models": { "route": [{ "providerId": "openrouter", "modelId": "coderax:free" }] },
+  "models": {
+    "route": [{ "providerId": "openrouter", "modelId": "coderax:free" }],
+    "vision": [{ "providerId": "openrouter", "modelId": "coderax:free" }]
+  },
   "engines": { "default": "native" }
 }
 ```
+
+`models.vision` names the models verified to accept image input. It defaults to
+empty, which refuses every image turn instead of sending it to a model that may
+drop it; a text-only route keeps serving text turns.
 
 The engine binds `127.0.0.1` by default and is never public-facing.
 

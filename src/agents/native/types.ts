@@ -12,6 +12,8 @@ export type ModelCompletionRequest = {
   model: ModelRef;
   system: string;
   prompt: string;
+  /** Data URLs for validated image attachments on this turn. */
+  images?: string[];
   signal: AbortSignal;
   maxOutputTokens?: number;
 };
@@ -68,6 +70,8 @@ export type ActionExecutor = {
     model: ModelRef;
     signal: AbortSignal;
     maxOutputTokens?: number;
+    /** Data URLs for validated image attachments on a Chat turn. */
+    images?: string[];
     /** Set after a rejected answer so the correction is grounded in the failure. */
     feedback?: string;
   }) => Promise<ActionExecution>;
