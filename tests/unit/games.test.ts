@@ -98,6 +98,37 @@ test('generation is deterministic and the seed changes the level geometry', () =
   assert.notDeepEqual(first.blueprint.levels, reseeded.blueprint.levels);
 });
 
+test('model-assisted narrative changes the design plan but no generated source byte', () => {
+  const spec = interpretPrompt(PLATFORMER);
+  const deterministic = generateGame({
+    spec,
+    gameId: 'game_unit',
+    buildId: 'game_unit-r1-a1',
+    modelAssisted: false,
+  });
+  const assisted = generateGame({
+    spec,
+    gameId: 'game_unit',
+    buildId: 'game_unit-r1-a1',
+    modelAssisted: true,
+    narrative: { logline: 'A narrative supplied by a route.', pillars: ['light'] },
+  });
+
+  // Provenance is on the plan...
+  assert.equal(deterministic.plan.modelAssisted, false);
+  assert.equal(assisted.plan.modelAssisted, true);
+  assert.equal(assisted.plan.logline, 'A narrative supplied by a route.');
+
+  // ...while every emitted file, including the manifest and its digests, is
+  // byte-identical. Source, levels and audio are never model output.
+  assert.equal(assisted.digest, deterministic.digest);
+  assert.deepEqual(
+    assisted.files.map((file) => [file.path, file.digest, file.bytes]),
+    deterministic.files.map((file) => [file.path, file.digest, file.bytes]),
+  );
+  assert.deepEqual(assisted.blueprint.levels, deterministic.blueprint.levels);
+});
+
 test('every supported camera generates a playable, independently verified build', () => {
   const prompts: Array<[string, GameCamera]> = [
     [PLATFORMER, 'side_view'],
