@@ -522,7 +522,16 @@ test('without a model route the AI-assisted row is blocked by its prerequisite',
   // an injected external transport keeps the engine alive without changing the
   // fact that no model route exists.
   const app = await composeApplication({
-    config: baseConfig(workspace, { engines: { opencode: { enabled: true } } }),
+    config: baseConfig(workspace, {
+      engines: {
+        opencode: {
+          enabled: true,
+          baseURL: 'https://opencode.invalid',
+          model: 'test/model',
+          passwordEnv: 'CODERAX_TEST_OPENCODE_PASSWORD',
+        },
+      },
+    }),
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
     gateway: null,
     externals: {

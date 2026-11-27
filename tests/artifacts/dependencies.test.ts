@@ -36,6 +36,8 @@ const ALLOWED_DIRECT = new Set([
   'exceljs',
   'pdf-lib',
   'pptxgenjs',
+  // Local Chromium for the browser acceptance harness; no paid service.
+  'playwright',
 ]);
 
 function manifest(relative: string): Manifest {
