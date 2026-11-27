@@ -99,6 +99,7 @@ import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
+import { holdBudget } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -749,7 +750,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             // terminal. The resumed generation is charged separately, so the daily
             // ledger matches the cumulative usage the owner sees.
             if (generationUsage) {
-              deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+              deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
             }
             deps.audit.record({
               actor: task.ownerId,
@@ -846,7 +847,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // Charge the usage produced by this generation, not the merged task total:
     // the previous generation was already charged when it settled.
     if (generationUsage) {
-      deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+      deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
     }
     try {
       if (outcome.kind === 'completed') {
@@ -1661,7 +1662,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!bound.ok) return bound;
     const conversationId = bound.value.conversationId;
 
-    const reserve = () => deps.budget.reserve(principal.ownerId, deps.clock.now()).allowed;
+    const reserve = () => {
+      const held = holdBudget(deps.budget, principal.ownerId, deps.clock.now());
+      if (!held.allowed) return false;
+      held.commit();
+      return true;
+    };
     if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
       return fail(
         'budget_exhausted',
@@ -1764,7 +1770,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (options.taskId) {
       // The unique task insert elects the only writer of admission effects.
       // The task is now visible to cancellation, but cannot execute until enqueue.
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         await settle(created.task, token, { kind: 'failed', code: 'budget_exhausted', detail: 'The daily request budget is exhausted.', retryable: false });
         return fail('budget_exhausted', 'The daily request budget is exhausted.');
@@ -1804,11 +1810,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         }
         if (!marked.applied) {
           const durable = await deps.tasks.get(task.taskId);
-          if (durable && durable.runToken !== token) return fail('conflict', 'Another generation owns this handoff.');
+          if (durable && durable.runToken !== token) {
+            reservation.commit();
+            return fail('conflict', 'Another generation owns this handoff.');
+          }
           reservation.release();
           return fail('validation_failed', 'Scheduled Work lost ownership before enqueue.');
         }
       }
+      reservation.commit();
     }
 
     await publish(created.task, 'task.queued');
@@ -2260,7 +2270,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (task.failure?.code === 'budget_exhausted') {
         return fail('budget_exhausted', 'This task was refused before admission; submit a new request.');
       }
-      const reservation = deps.budget.reserve(principal.ownerId, now);
+      const reservation = holdBudget(deps.budget, principal.ownerId, now);
       if (!reservation.allowed) return fail('budget_exhausted', 'The daily request budget is exhausted.');
       let accepted = false;
       try {
@@ -2297,7 +2307,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'accepted',
         });
       } finally {
-        if (!accepted) reservation.release();
+        if (accepted) reservation.commit();
+        else reservation.release();
       }
     }),
 
@@ -2307,99 +2318,106 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
-      // A chat turn is a run too, so it gets its own empty directory instead of
-      // the shared mode root. It is removed afterwards when it produced nothing.
-      const workspace = await createRunWorkspace({
-        mode: request.mode,
-        roots: workspaceRoots(deps.config.workspaces),
-        runId: deps.ids.runToken(),
-        generation: 0,
-      });
-      if (!workspace.ok) return workspace;
-
-      const now = deps.clock.iso();
-      const bound = await bindConversation({
-        principal,
-        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
-        mode: request.mode,
-        isWork: false,
-        agent: request.agent,
-      });
-      if (!bound.ok) {
-        await removeRunWorkspaceIfEmpty(workspace.value.root);
-        return bound;
-      }
-      const conversation = bound.value;
-      const conversationId = conversation.conversationId;
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId,
-        role: 'user',
-        text: request.message,
-        createdAt: now,
-      });
-
-      const history = await historyFor(conversation, request.message, adapter.value);
-      const controller = new AbortController();
-      let outcome: Awaited<ReturnType<AgentAdapter['run']>>;
+      let dispatched = false;
       try {
-        outcome = await adapter.value.run(
-          {
-            ownerId: principal.ownerId,
-            tenantId: conversation.tenantId,
-            conversationId,
-            workload: 'work',
-            game: null,
-            objective: request.message,
-            history,
-            model: model.value.ref,
-            mode: request.mode,
-            workspaceRoot: workspace.value.root,
-            maxSteps: 1,
-            budget: null,
-            signal: controller.signal,
-            reasoning: 'fast',
-            completedSteps: [],
-            plan: null,
-          },
-          () => undefined,
-        );
+        // A chat turn is a run too, so it gets its own empty directory instead of
+        // the shared mode root. It is removed afterwards when it produced nothing.
+        const workspace = await createRunWorkspace({
+          mode: request.mode,
+          roots: workspaceRoots(deps.config.workspaces),
+          runId: deps.ids.runToken(),
+          generation: 0,
+        });
+        if (!workspace.ok) return workspace;
+
+        const now = deps.clock.iso();
+        const bound = await bindConversation({
+          principal,
+          ...(request.conversationId ? { conversationId: request.conversationId } : {}),
+          mode: request.mode,
+          isWork: false,
+          agent: request.agent,
+        });
+        if (!bound.ok) {
+          await removeRunWorkspaceIfEmpty(workspace.value.root);
+          return bound;
+        }
+        const conversation = bound.value;
+        const conversationId = conversation.conversationId;
+        await deps.conversations.appendMessage({
+          messageId: deps.ids.messageId(),
+          conversationId,
+          role: 'user',
+          text: request.message,
+          createdAt: now,
+        });
+
+        const history = await historyFor(conversation, request.message, adapter.value);
+        const controller = new AbortController();
+        let outcome: Awaited<ReturnType<AgentAdapter['run']>>;
+        try {
+          dispatched = true;
+          outcome = await adapter.value.run(
+            {
+              ownerId: principal.ownerId,
+              tenantId: conversation.tenantId,
+              conversationId,
+              workload: 'work',
+              game: null,
+              objective: request.message,
+              history,
+              model: model.value.ref,
+              mode: request.mode,
+              workspaceRoot: workspace.value.root,
+              maxSteps: 1,
+              budget: null,
+              signal: controller.signal,
+              reasoning: 'fast',
+              completedSteps: [],
+              plan: null,
+            },
+            () => undefined,
+          );
+        } finally {
+          await removeRunWorkspaceIfEmpty(workspace.value.root);
+        }
+        if (!outcome.ok) {
+          return fail(
+            outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
+            redactText(outcome.detail, [], 1000),
+            outcome.retryable,
+          );
+        }
+        deps.budget.settle(reservation.reservationId, outcome.usage ?? {});
+        // Chat output is adapter text too: scrub it before storage and before it is
+        // returned, so a provider echoing a credential cannot persist it.
+        const reply = redactContent(outcome.summary);
+        const messageId = deps.ids.messageId();
+        await deps.conversations.appendMessage({
+          messageId,
+          conversationId,
+          role: 'assistant',
+          text: reply,
+          createdAt: deps.clock.iso(),
+          agent: request.agent,
+        });
+        return ok({
+          conversationId,
+          messageId,
+          text: reply,
+          agent: request.agent,
+          model: model.value.ref,
+          ...(outcome.usage ? { usage: outcome.usage } : {}),
+          createdAt: deps.clock.iso(),
+        });
       } finally {
-        await removeRunWorkspaceIfEmpty(workspace.value.root);
+        if (dispatched) reservation.commit();
+        else reservation.release();
       }
-      if (!outcome.ok) {
-        return fail(
-          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          redactText(outcome.detail, [], 1000),
-          outcome.retryable,
-        );
-      }
-      deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
-      // Chat output is adapter text too: scrub it before storage and before it is
-      // returned, so a provider echoing a credential cannot persist it.
-      const reply = redactContent(outcome.summary);
-      const messageId = deps.ids.messageId();
-      await deps.conversations.appendMessage({
-        messageId,
-        conversationId,
-        role: 'assistant',
-        text: reply,
-        createdAt: deps.clock.iso(),
-        agent: request.agent,
-      });
-      return ok({
-        conversationId,
-        messageId,
-        text: reply,
-        agent: request.agent,
-        model: model.value.ref,
-        ...(outcome.usage ? { usage: outcome.usage } : {}),
-        createdAt: deps.clock.iso(),
-      });
     }),
 
     conversations: (principal) => deps.conversations.list(principal.ownerId),
