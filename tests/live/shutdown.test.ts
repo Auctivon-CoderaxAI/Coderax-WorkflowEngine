@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { MongoClient } from 'mongodb';
 import { composeApplication } from '../../src/bootstrap/compose.js';
 import { createMongoConnector, type MongoDatabase } from '../../src/persistence/mongo-connect.js';
-import { baseConfig, fakeGateway, OWNER_TOKEN } from '../helpers.js';
+import { baseConfig, fakeGateway, OWNER_TOKEN, taskRecord } from '../helpers.js';
 
 /**
  * Deterministic shutdown evidence against a real server.
@@ -255,3 +255,63 @@ test('shutdown drains admitted chat through its assistant write', { skip }, asyn
     rmSync(dirs.root, { recursive: true, force: true });
   }
 });
+
+for (const method of ['resumeTask', 'retryTask'] as const) {
+  test(`shutdown drains an admitted ${method} through reissue`, { skip }, async () => {
+    requiresDatabase();
+    const dirs = workspace();
+    const database = await createMongoConnector()({ uri: uri as string, database: databaseName });
+    let closed = false;
+    const app = await composeApplication({
+      config: baseConfig(dirs, {
+        persistence: { driver: 'mongo', uriEnv: 'CODERAX_TEST_MONGO_URI', database: databaseName },
+      }),
+      env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+      gateway: fakeGateway(),
+      persistence: { database: { collection: database.collection, close: () => {
+        closed = true;
+        return database.close();
+      } } },
+    });
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let admission: ReturnType<typeof app.service.resumeTask> | undefined;
+    try {
+      const tasks = app.dependencies.tasks;
+      const task = taskRecord({
+        ownerId: principal.ownerId,
+        state: method === 'resumeTask' ? 'awaiting_approval' : 'failed',
+      });
+      assert.ok((await tasks.create(task)).ok);
+      const get = tasks.get;
+      tasks.get = async (taskId) => {
+        signalEntered();
+        await released;
+        return get(taskId);
+      };
+
+      admission = app.service[method](principal, task.taskId, task.generation);
+      await entered;
+      const stopping = app.stop();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(closed, false);
+      const refused = await app.service[method](principal, task.taskId, task.generation);
+      assert.ok(!refused.ok && refused.code === 'not_ready');
+      release();
+      const reply = await admission;
+      assert.ok(reply.ok);
+      assert.equal(reply.value.outcome, 'accepted');
+      assert.equal(reply.value.generation, task.generation + 1);
+      await stopping;
+      assert.equal(closed, true);
+    } finally {
+      release();
+      await admission?.catch(() => undefined);
+      await app.stop().catch(() => undefined);
+      await cleanDatabase();
+      rmSync(dirs.root, { recursive: true, force: true });
+    }
+  });
+}

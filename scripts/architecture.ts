@@ -286,18 +286,42 @@ const UNIQUE_DECLARATIONS: ReadonlyArray<{
   { rule: 'duplicate_route_catalogue', token: 'export const ROUTES' },
 ];
 
-function factoryCalls(text: string): Map<string, number> {
-  const calls = new Map<string, number>();
-  const source = ts.createSourceFile('module.ts', text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  function visit(node: ts.Node): void {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
-      const name = node.expression.text;
-      calls.set(name, (calls.get(name) ?? 0) + 1);
+function factoryCalls(files: SourceFile[]): Map<string, Map<string, number>> {
+  const sources = new Map(files.map(({ path, text }) => [
+    path, ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS),
+  ]));
+  // Bind local identifiers without loading dependencies. The import declaration
+  // gives us the exported name and the checker distinguishes shadowed bindings.
+  const options: ts.CompilerOptions = { noLib: true, noResolve: true, types: [] };
+  const program = ts.createProgram([...sources.keys()], options, {
+    ...ts.createCompilerHost(options),
+    getSourceFile: (name) => sources.get(name),
+  });
+  const checker = program.getTypeChecker();
+  const binding = (name: ts.Identifier) => checker.getSymbolAtLocation(name)?.declarations?.[0];
+
+  return new Map([...sources].map(([file, source]) => {
+    const calls = new Map<string, number>();
+    function visit(node: ts.Node): void {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression;
+        let name: string | undefined;
+        if (ts.isIdentifier(callee)) {
+          const declaration = binding(callee);
+          name = declaration && ts.isImportSpecifier(declaration)
+            ? (declaration.propertyName ?? declaration.name).text
+            : callee.text;
+        } else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+          const declaration = binding(callee.expression);
+          if (declaration && ts.isNamespaceImport(declaration)) name = callee.name.text;
+        }
+        if (name) calls.set(name, (calls.get(name) ?? 0) + 1);
+      }
+      ts.forEachChild(node, visit);
     }
-    ts.forEachChild(node, visit);
-  }
-  visit(source);
-  return calls;
+    visit(source);
+    return [file, calls];
+  }));
 }
 
 function occurrenceCount(files: SourceFile[], token: string): number {
@@ -338,7 +362,7 @@ export function checkArchitecture(repository: Repository): Finding[] {
     }
   }
 
-  const calls = new Map(files.map((file) => [file.path, factoryCalls(file.text)]));
+  const calls = factoryCalls(files);
   for (const construction of CONSTRUCTIONS) {
     let count = 0;
     for (const file of files) {

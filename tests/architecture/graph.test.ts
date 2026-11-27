@@ -307,3 +307,30 @@ test('singleton construction limits apply inside the composition root only to fa
   assert.ok(findings.some(({ rule, path }) => rule === 'single_task_runner' && path === 'src/bootstrap/compose.ts'));
   assert.ok(!findings.some(({ rule }) => rule === 'single_terminal_writer'));
 });
+
+test('namespace and renamed imports count toward the same singleton limit', () => {
+  const check = (calls: string) => checkArchitecture({
+    entry: 'src/main.ts',
+    files: baseRepository().map((entry) => entry.path === 'src/bootstrap/compose.ts'
+      ? {
+          ...entry,
+          text: [
+            "import * as factories from './factories.js';",
+            "import { createTaskRunner as makeRunner } from './factories.js';",
+            entry.text.replace('createTaskRunner({});', calls),
+          ].join('\n').replace("import { factories } from './factories.js';\nfactories();", ''),
+        }
+      : entry),
+  }).filter(({ rule }) => rule === 'single_task_runner');
+
+  assert.deepEqual(check('factories.createTaskRunner({});'), []);
+  assert.deepEqual(check('makeRunner({});'), []);
+  assert.deepEqual(check('makeRunner({}); function example(factories: any) { factories.createTaskRunner({}); }'), []);
+  for (const calls of [
+    'factories.createTaskRunner({}); factories.createTaskRunner({});',
+    'makeRunner({}); makeRunner({});',
+    'makeRunner({}); factories.createTaskRunner({});',
+  ]) {
+    assert.deepEqual(check(calls).map(({ path }) => path), ['src/bootstrap/compose.ts']);
+  }
+});

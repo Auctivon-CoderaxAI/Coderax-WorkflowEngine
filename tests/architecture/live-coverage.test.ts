@@ -82,3 +82,25 @@ test('required live runner rejects a skipped test even with the Mongo marker and
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('required live runner rejects a skipped or todo suite in a file with a passing test', () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, 'partly-executed.test.cjs');
+    const runner = path.resolve(import.meta.dirname, '../../scripts/run-live-tests.js');
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    for (const directive of ['skip', 'todo']) {
+      writeFileSync(file, [
+        "const { describe, test } = require('node:test');",
+        "test('executed', () => {});",
+        `describe('${directive} suite', { ${directive}: true }, () => {});`,
+      ].join('\n'));
+      const result = spawnSync(process.execPath, [runner, file], { encoding: 'utf8', env });
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /required live suite.*partly-executed\.test\.cjs/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

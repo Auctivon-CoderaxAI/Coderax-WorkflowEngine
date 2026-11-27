@@ -605,13 +605,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
-  function trackAdmission<Request, Reply>(
-    admit: (principal: Principal, request: Request) => Promise<ServiceResult<Reply>>,
-  ): (principal: Principal, request: Request) => Promise<ServiceResult<Reply>> {
-    return async (principal, request) => {
+  function trackAdmission<Args extends unknown[], Reply>(
+    admit: (...args: Args) => Promise<ServiceResult<Reply>>,
+  ): (...args: Args) => Promise<ServiceResult<Reply>> {
+    return async (...args) => {
       if (shuttingDown) return unavailable();
       // Register before admission can call any collaborator.
-      const admission = Promise.resolve().then(() => admit(principal, request));
+      const admission = Promise.resolve().then(() => admit(...args));
       admissions.add(admission);
       try {
         return await admission;
@@ -627,7 +627,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
-    submitWork: trackAdmission<WorkSubmitRequest, TaskAccepted>(async (principal, request) => {
+    submitWork: trackAdmission<[Principal, WorkSubmitRequest], TaskAccepted>(async (principal, request) => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
       if (!adapter.ok) return adapter;
@@ -826,8 +826,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    resumeTask: async (principal, taskId, generation) => {
-      if (shuttingDown) return unavailable();
+    resumeTask: trackAdmission<[Principal, string, number], TaskControlResult>(async (principal, taskId, generation) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = await reconcile(found.value);
@@ -874,10 +873,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: applied.task.generation,
         outcome: 'accepted',
       });
-    },
+    }),
 
-    retryTask: async (principal, taskId, generation) => {
-      if (shuttingDown) return unavailable();
+    retryTask: trackAdmission<[Principal, string, number], TaskControlResult>(async (principal, taskId, generation) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = found.value;
@@ -924,9 +922,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: applied.task.generation,
         outcome: 'accepted',
       });
-    },
+    }),
 
-    chat: trackAdmission<ChatRequest, ChatReply>(async (principal, request) => {
+    chat: trackAdmission<[Principal, ChatRequest], ChatReply>(async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
       const model = deps.models.resolve(request.model, request.mode);
