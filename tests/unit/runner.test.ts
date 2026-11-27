@@ -197,3 +197,21 @@ test('a late false admission response cannot start Work after lease loss', async
   assert.equal(starts, 0);
   assert.equal(result.ownershipLost, true);
 });
+
+test('the runner renews ownership until its settlement callback finishes', async () => {
+  let settling = false;
+  let renewed = false;
+  const runner = runnerWith(lease({ renew: async () => {
+    if (settling) renewed = true;
+    return { renewed: true, cancelRequested: false };
+  } }), { heartbeatIntervalMs: 5 });
+  await runner.run({
+    scope, token: 'settling', request: request(new AbortController().signal), report: () => {},
+    adapter: adapter(async () => ({ ok: true, summary: 'finished' })),
+    onSettled: async () => {
+      settling = true;
+      await new Promise(resolve => setTimeout(resolve, 30));
+      assert.ok(renewed, 'a slow settlement keeps the conversation lease');
+    },
+  });
+});

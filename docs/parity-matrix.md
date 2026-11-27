@@ -24,7 +24,7 @@ Status vocabulary:
 | 8 | One settlement per run | `run.ts` | `src/execution/runner.ts` | Preserved |
 | 9 | Stream ending without a terminal event is a failure | `run.ts` (`protocol_error`) | `runner.ts` | Preserved |
 | 10 | Bounded cancellation cleanup (5 s) | `run.ts` | `src/execution/runner.ts` `cancelGraceMs` (5 s default) | Preserved |
-| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Preserved |
+| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Removed — the helper had no runtime caller; owner-triggered `retry` remains on the service |
 | 12 | Workspace confinement, symlink-resolved, mode-partitioned, Windows-safe | `workspace.ts` | `src/execution/workspace.ts` | Preserved |
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |
@@ -35,7 +35,7 @@ Status vocabulary:
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/store.ts` (one row per event, unique `(taskId, seq)` and `eventId`, TTL retention) with the sequence allocated on the fenced task row and an SSE metadata frame | Preserved (fake-verified; no live DB, TTL expiry not exercised) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
@@ -75,10 +75,10 @@ Status vocabulary:
 
 | Status | Count |
 | --- | --- |
-| Preserved | 23 |
+| Preserved | 24 |
 | Strengthened | 10 |
 | Simplified | 5 |
-| Missing | 9 |
+| Missing | 8 |
 | Changed (deliberate) | 6 |
 | Contract only (no verified provider) | 1 |
 | Not started (both) | 2 |
@@ -90,14 +90,16 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 46 and 47 are
+capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 46 and 47 are
 closed, migrating a client would remove functionality, which the brief forbids.
-Scheduling (row 44) is implemented here and no longer blocks a client cut-over.
+Scheduling (row 44) is implemented here and no longer blocks a client cut-over,
+and persistent events with replay across restart (row 22) are durable as of the
+event-log branch.
 
 Dependency order for closing them:
 
-1. Persistent execution events and replay across restart (row 22), then fenced
-   conversation writes (row 18).
+1. Fenced conversation writes (row 18). Persistent events and replay across
+   restart (row 22) are durable as of this branch.
 2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
    and the one that decides whether Coderax Native can replace the LibreChat
@@ -110,7 +112,24 @@ Dependency order for closing them:
 
 ## Verification status
 
-- Integrated revision: exact-head hosted verification pending.
+- `npm run verify` at this merge head: 398 tests, 398 passing, 0 failing, 0
+  skipped with a real `mongod` reachable (`CODERAX_TEST_MONGODB_URI` set,
+  `CODERAX_REQUIRE_MONGODB=1`), OpenAPI drift clean. The same command without a
+  database reports 382 passing and 16 skipped, all of them MongoDB suites.
+- Durable execution events are covered by store-contract, fenced-allocation,
+  replay-across-restart and SSE-metadata tests, and by a real-MongoDB suite
+  (`tests/integration/event-log-mongo.test.ts`) that proves the fenced `$inc`
+  allocation, unique-sequence refusal, two replicas appending concurrently, and
+  replay after an engine restart against a real `mongod`. TTL expiry is still not
+  executed: the retention index is asserted on the server, not its deletion
+  timing.
+- Durable stores are verified against a semantics-faithful collection fake in
+  the default offline run. The real-MongoDB suites run when
+  `CODERAX_TEST_MONGODB_URI` is set (the CI lane supplies one) and are skipped,
+  never passed, without it. The event-log suite was executed against a real
+  `mongod` 7.0.14 for this merge: 398 tests, 398 passing, nothing skipped.
+- No hosted CI run exists: the GitHub Actions job is blocked by account billing.
+  The local run above is the only executed evidence.
 - The Game Studio branch reports 132/132 passing tests and a clean OpenAPI drift check before integration.
 - The branch reports separate MongoDB 8.0.4 durability and concurrency verification. See `docs/evidence/mongo/`.
 - Game project and build bytes remain file-backed. Cross-replica game artifact concurrency is not claimed.
@@ -118,4 +137,3 @@ Dependency order for closing them:
 - See `docs/evidence/browser/` for the acceptance reports.
 - Safari, Firefox and physical mobile devices remain unverified.
 - Autonomous cloud-browser gameplay remains blocked pending a verified zero-cost provider.
-- All verification gates must be rerun against the final integrated revision.

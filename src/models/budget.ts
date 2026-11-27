@@ -152,7 +152,7 @@ export function createBudgetLedger(input: {
           requests: state.requests,
         };
       }
-      if (usedTokens(state) + inTokens + outTokens > input.maxTokensPerDay) {
+      if (usedTokens(state) >= input.maxTokensPerDay || usedTokens(state) + inTokens + outTokens > input.maxTokensPerDay) {
         return {
           allowed: false,
           reason: 'tokens',

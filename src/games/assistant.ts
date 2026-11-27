@@ -73,6 +73,7 @@ export function createDesignAssistant(input: {
           ...(pillars && pillars.length > 0 ? { pillars } : {}),
         };
       } catch {
+        input.budget.release(reserved.reservation.id, { dispatched: true });
         return null;
       }
     },

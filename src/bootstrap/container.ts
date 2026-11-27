@@ -20,7 +20,7 @@ import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { BrowserService } from '../orchestration/browser.js';
 import type { ArtifactService } from '../artifacts/service.js';
-import type { ArtifactGenerator } from '../artifacts/generate.js';
+import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
 import type { GameStudio } from '../games/studio.js';
 import type { GameSessionService, GamingAgent } from '../games/session.js';
@@ -47,10 +47,10 @@ export type InfrastructureDependencies = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifactService: ArtifactService;
+  deliverables: DeliverableService;
   schedules: ScheduleRepository;
   scheduleNotices: ScheduleNoticeStore;
-  artifactService: ArtifactService;
-  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -77,10 +77,10 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'memory',
   'permissions',
   'notifications',
+  'artifactService',
+  'deliverables',
   'schedules',
   'scheduleNotices',
-  'artifactService',
-  'artifactGenerator',
   'audit',
   'events',
   'runner',

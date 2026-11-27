@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import type { SoftwareRequest, SourceFile, VerificationCheck } from '@coderax/contracts';
-import { digestOf, resolveInside, writeArtifact } from './file.js';
+import { resolveInside, writeArtifact } from './file.js';
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -20,7 +20,8 @@ const require = createRequire(import.meta.url);
 export type SoftwareBuild = {
   folder: string;
   entry: string;
-  files: Array<{ path: string; bytes: number; digest: string }>;
+  /** Paths are relative to the staging root, never to a user workspace. */
+  files: Array<{ path: string; bytes: number; sha256: string }>;
   checks: VerificationCheck[];
 };
 
@@ -316,7 +317,6 @@ export async function buildSoftware(input: {
   request: SoftwareRequest;
   root: string;
   folder: string;
-  authorize: (relativePath: string) => Promise<boolean>;
 }): Promise<SoftwareBuild> {
   const generated = templateFiles(input.request);
   const files = input.request.files.length > 0 ? input.request.files : generated;
@@ -330,9 +330,6 @@ export async function buildSoftware(input: {
   if (!files.some((file) => file.path === entry)) {
     throw new RangeError('The declared entry point is not one of the delivered files.');
   }
-  if (!(await input.authorize(input.folder))) {
-    throw new PermissionError('Writing this deliverable was not authorized.');
-  }
 
   const written: SoftwareBuild['files'] = [];
   for (const file of files) {
@@ -342,7 +339,7 @@ export async function buildSoftware(input: {
       relative: `${input.folder}/${file.path}`,
       data: file.content,
     });
-    written.push({ path: `${input.folder}/${file.path}`, bytes: artifact.bytes, digest: artifact.digest });
+    written.push({ path: `${input.folder}/${file.path}`, bytes: artifact.bytes, sha256: artifact.sha256 });
   }
 
   const names = new Set(files.map((file) => file.path));
@@ -396,40 +393,5 @@ export async function buildSoftware(input: {
     });
   }
 
-  const manifest = {
-    name: input.request.name,
-    description: input.request.description,
-    language: input.request.language,
-    template: input.request.template,
-    entry,
-    files: files.map((file) => ({
-      path: file.path,
-      digest: digestOf(Buffer.from(file.content, 'utf8')),
-      bytes: Buffer.byteLength(file.content, 'utf8'),
-    })),
-    verification: {
-      executed: false,
-      method: 'parse-and-resolve',
-      note: 'Files were parsed and imports resolved; the generated program was not executed.',
-    },
-  };
-  const manifestArtifact = await writeArtifact({
-    root: input.root,
-    relative: `${input.folder}/MANIFEST.json`,
-    data: `${JSON.stringify(manifest, null, 2)}\n`,
-  });
-  written.push({
-    path: `${input.folder}/MANIFEST.json`,
-    bytes: manifestArtifact.bytes,
-    digest: manifestArtifact.digest,
-  });
-
   return { folder: input.folder, entry: `${input.folder}/${entry}`, files: written, checks };
-}
-
-export class PermissionError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'PermissionError';
-  }
 }
