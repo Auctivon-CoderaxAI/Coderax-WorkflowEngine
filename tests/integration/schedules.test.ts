@@ -199,7 +199,10 @@ test('an event is deduplicated by idempotency key and triggers each matching sch
 
 test('a failed scheduled run produces one failure notice and no retry when final', async () => {
   const started = await startTestApp({
-    gateway: failingGateway(1),
+    // The run retries a retryable provider failure inside its own bounds, so a
+    // final failure needs a gateway that exhausts them; the schedule must still
+    // record one failed occurrence and never replay it.
+    gateway: failingGateway(100),
     config: { schedules: FAST_SCHEDULES },
   });
   const api = client(started.url);
@@ -483,7 +486,7 @@ test('cancellation during task insertion prevents enqueue', async () => {
 });
 
 test('recovery winning a stalled submission charges and appends just once', async () => {
-  const started = await startTestApp({ config: { schedules: { ...FAST_SCHEDULES, dispatchTimeoutMs: 1000, tickMs: 60000 } } });
+  const started = await startTestApp({ config: { schedules: { ...FAST_SCHEDULES, dispatchTimeoutMs: 1000, tickMs: 100 } } });
   const api = client(started.url);
   try {
     const rule = await api.createSchedule({ name: 'Release', objective: 'Report release', timing: { kind: 'event', event: 'release' } });
@@ -528,7 +531,7 @@ test('cap edit winning the accounting CAS prevents Work submission', async () =>
 });
 
 test('append acknowledgement loss leaves a recoverable claim without a task or charge', async () => {
-  const started = await startTestApp({ config: { schedules: { ...FAST_SCHEDULES, dispatchTimeoutMs: 1000, tickMs: 60000 } } });
+  const started = await startTestApp({ config: { schedules: { ...FAST_SCHEDULES, dispatchTimeoutMs: 1000, tickMs: 100 } } });
   const api = client(started.url);
   try {
     const rule = await api.createSchedule({ name: 'Release', objective: 'Report', timing: { kind: 'event', event: 'release' } });

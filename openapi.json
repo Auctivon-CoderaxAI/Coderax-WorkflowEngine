@@ -5024,7 +5024,9 @@
                                       "type": "integer",
                                       "minimum": 0,
                                       "maximum": 6
-                                    }
+                                    },
+                                    "minItems": 1,
+                                    "maxItems": 7
                                   }
                                 },
                                 "required": [
@@ -5542,7 +5544,9 @@
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 6
-                              }
+                              },
+                              "minItems": 1,
+                              "maxItems": 7
                             }
                           },
                           "required": [
@@ -5993,7 +5997,9 @@
                               "type": "integer",
                               "minimum": 0,
                               "maximum": 6
-                            }
+                            },
+                            "minItems": 1,
+                            "maxItems": 7
                           }
                         },
                         "required": [
@@ -6402,7 +6408,9 @@
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 6
-                              }
+                              },
+                              "minItems": 1,
+                              "maxItems": 7
                             }
                           },
                           "required": [
@@ -6925,7 +6933,9 @@
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 6
-                              }
+                              },
+                              "minItems": 1,
+                              "maxItems": 7
                             }
                           },
                           "required": [
@@ -7383,7 +7393,9 @@
                               "type": "integer",
                               "minimum": 0,
                               "maximum": 6
-                            }
+                            },
+                            "minItems": 1,
+                            "maxItems": 7
                           }
                         },
                         "required": [
@@ -8249,7 +8261,8 @@
                       "items": {
                         "type": "string",
                         "format": "date-time"
-                      }
+                      },
+                      "maxItems": 20
                     }
                   },
                   "required": [

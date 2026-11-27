@@ -149,6 +149,8 @@ function testIds(): IdGenerator {
     runToken: () => next('run'),
     requestId: () => next('req'),
     receipt: () => next('rcpt'),
+    browserSessionId: () => next('bs'),
+    browserArtifactId: () => next('baf'),
   };
 }
 
