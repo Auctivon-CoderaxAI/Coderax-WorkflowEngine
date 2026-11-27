@@ -376,6 +376,17 @@ test('a version can be restored without deleting newer versions', async () => {
         }),
       (error: unknown) => error instanceof CoderaxApiError && error.code === 'conflict',
     );
+
+    const appended = await api.uploadArtifactVersion(first.artifact.artifactId, {
+      filename: 'report-v3.txt',
+      mediaType: 'text/plain',
+      contentBase64: base64(textBytes('third')),
+      mode: 'cloud',
+      expectedVersion: 1,
+    });
+    assert.equal(appended.artifact.version, 3);
+    const history = await api.artifactVersions(first.artifact.artifactId, 'cloud');
+    assert.deepEqual(history.versions.map((entry) => entry.version), [1, 2, 3]);
   } finally {
     await started.close();
   }

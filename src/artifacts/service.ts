@@ -814,7 +814,10 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
 
           const sha256 = prepared.value.sha256;
           const bytes = prepared.value.bytes.length;
-          const nextVersion = current.version + 1;
+          // Restore can point at an older version without removing newer rows.
+          // Allocate after the retained history while fencing on the current pointer.
+          const latest = (await deps.artifacts.versions(key)).at(-1);
+          const nextVersion = Math.max(current.version, latest?.version ?? 0) + 1;
           const reservation = await reserveQuota({
             principal,
             mode: request.mode,

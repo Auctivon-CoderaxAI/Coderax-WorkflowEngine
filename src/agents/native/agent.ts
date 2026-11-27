@@ -176,6 +176,14 @@ export function createNativeAgent(input: {
             retryable: false,
           };
         }
+        if (parsed.data.mode !== request.mode) {
+          return {
+            ok: false,
+            code: 'protocol_error',
+            detail: 'The deliverable directive must use the same data mode as the Work task.',
+            retryable: false,
+          };
+        }
         const callId = `deliverable-${steps.length + 1}`;
         report({
           type: 'tool.call',
