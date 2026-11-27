@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MongoClient } from 'mongodb';
-import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
+import { createMongoConnector, type MongoDatabase } from '../../src/persistence/mongo-connect.js';
 import {
   createMongoArtifactRepository,
   ensureArtifactIndexes,
+  type MongoArtifactCollections,
 } from '../../src/persistence/mongo-artifacts.js';
 import { artifactRecord, versionRecord } from '../fixtures/artifacts.js';
 
@@ -22,7 +23,7 @@ const required =
   process.env.CODERAX_REQUIRE_MONGO === '1' || process.env.CODERAX_REQUIRE_MONGODB === '1';
 const databaseName = `coderax_ci_artifacts_${process.pid}_${Date.now()}`;
 
-function collectionsOf(database: { collection: (name: string) => never }) {
+function collectionsOf(database: MongoDatabase): MongoArtifactCollections {
   return {
     artifacts: database.collection('artifacts'),
     versions: database.collection('artifact_versions'),
@@ -39,13 +40,13 @@ test(
     const connector = createMongoConnector();
     const first = await connector({ uri, database: databaseName });
     try {
-      const firstCollections = collectionsOf(first as never);
+      const firstCollections = collectionsOf(first);
       await ensureArtifactIndexes(firstCollections);
 
       const second = await connector({ uri, database: databaseName });
       try {
         const left = createMongoArtifactRepository(firstCollections);
-        const right = createMongoArtifactRepository(collectionsOf(second as never));
+        const right = createMongoArtifactRepository(collectionsOf(second));
 
         const artifact = artifactRecord();
         const version = versionRecord();
