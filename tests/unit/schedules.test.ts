@@ -152,6 +152,8 @@ function testIds(): IdGenerator {
     browserSessionId: () => next('bs'),
     browserArtifactId: () => next('baf'),
     artifactId: () => next('art'),
+    gameId: () => next('game'),
+    sessionId: () => next('ses'),
   };
 }
 
