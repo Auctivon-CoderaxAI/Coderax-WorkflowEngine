@@ -5,6 +5,8 @@ import type {
   Budget,
   DataMode,
   EngineId,
+  GameAction,
+  GameObjective,
   IsoDateTime,
   MissedRunPolicy,
   ModelRef,
@@ -20,6 +22,22 @@ import type {
   TaskState,
   Usage,
 } from '@coderax/contracts';
+
+/**
+ * A game session runs as a durable Work task. The workload discriminator is what
+ * lets the same lease, fencing, cancellation and event machinery supervise a
+ * gaming-agent session without a second executor.
+ */
+export type TaskWorkload = 'work' | 'game';
+
+export type GameRunSpec = {
+  sessionId: string;
+  gameId: string;
+  buildId: string;
+  objective: GameObjective;
+  allowedActions: GameAction[];
+  maxTicks: number;
+};
 
 /**
  * Fast reasoning answers directly; complex reasoning decomposes, parallelises
@@ -135,6 +153,9 @@ export type TaskRecord = {
   agent: AgentId;
   engine: EngineId;
   mode: DataMode;
+  /** Absent on records written before game sessions existed: read it as 'work'. */
+  kind?: TaskWorkload;
+  game?: GameRunSpec | null;
   objective: string;
   model: ModelRef | null;
   state: TaskState;

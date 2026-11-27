@@ -10,6 +10,7 @@ import type {
   ModelRef,
   Usage,
 } from '@coderax/contracts';
+import type { GameRunSpec, TaskWorkload } from '../domain.js';
 import type {
   ReasoningMode,
   TaskEvidence,
@@ -38,16 +39,19 @@ export type AgentRunRequest = {
   ownerId: string;
   tenantId: string | null;
   conversationId: string;
-  /** The durable task this run belongs to; absent for a one-shot Chat turn. */
+  /** Absent for a synchronous Chat turn, which is not a durable task. */
   taskId?: string;
+  /** `work` is the ordinary agent loop; `game` is a Native gaming-agent session. */
+  workload: TaskWorkload;
+  game: GameRunSpec | null;
   objective: string;
   /**
    * Earlier turns, oldest first. The current objective is not repeated here: it
    * is passed separately so an agent never answers the same message twice.
    */
   history?: AgentHistoryTurn[];
-  /** Already resolved by the model catalogue; never a raw provider override. */
-  model: ModelRef;
+  /** Already resolved by the model catalogue; null for a deterministic game session. */
+  model: ModelRef | null;
   mode: DataMode;
   workspaceRoot: string;
   maxSteps: number;
@@ -95,13 +99,22 @@ export type AgentReportEvent =
 export type AgentReport = (event: AgentReportEvent) => void;
 
 export type AgentRunOutcome =
-  | { ok: true; summary: string; usage?: Usage; verification?: TaskVerification }
+  | {
+      ok: true;
+      summary: string;
+      usage?: Usage;
+      verification?: TaskVerification;
+      artifacts?: Array<{
+        path: string;
+        bytes?: number;
+        digest?: string;
+      }>;
+    }
   | {
       ok: false;
       code: EngineFailureCode;
       detail: string;
       retryable: boolean;
-      /** Tokens spent before a terminal or suspended outcome. */
       usage?: Usage;
     };
 

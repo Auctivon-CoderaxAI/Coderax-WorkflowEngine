@@ -10,6 +10,7 @@ export type RunOutcome =
       kind: 'completed';
       summary: string;
       usage?: Usage;
+      artifacts?: Array<{ path: string; bytes?: number; digest?: string }>;
       verification?: TaskVerification;
     }
   | {
@@ -18,7 +19,7 @@ export type RunOutcome =
       detail: string;
       retryable: boolean;
       usage?: Usage;
-    }
+}
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
   | { kind: 'interrupted'; detail: string };
@@ -254,6 +255,7 @@ export function createTaskRunner(input: {
               kind: 'completed',
               summary: outcome.summary,
               ...(outcome.usage ? { usage: outcome.usage } : {}),
+              ...(outcome.artifacts ? { artifacts: outcome.artifacts } : {}),
               ...(outcome.verification ? { verification: outcome.verification } : {}),
             },
             ownershipLost: false,

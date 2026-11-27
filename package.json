@@ -28,6 +28,9 @@
     "test:e2e": "npm run build && node --test \"dist/tests/e2e/*.test.js\"",
     "test:live": "npm run build && node --test \"dist/tests/live/*.test.js\"",
     "openapi:write": "npm run build && node dist/scripts/write-openapi.js",
+    "game:evidence": "npm run build && node dist/scripts/write-game-evidence.js",
+    "game:browser": "node scripts/browser-acceptance.mjs",
+    "game:browser:install": "playwright install chromium",
     "openapi:check": "npm run build && node dist/scripts/check-openapi.js",
     "check:architecture": "npm run build && node dist/scripts/check-architecture.js",
     "check:audit": "npm run build && node dist/scripts/check-audit.js",
@@ -43,6 +46,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "playwright": "1.65.1",
     "mongodb": "^7.9.1",
     "typescript": "^5.9.3"
   },

@@ -17,16 +17,35 @@ import type {
   ArtifactGenerationRequest,
   ArtifactGenerationResult,
   BudgetState,
+  BuildGameRequest,
   ChatReply,
   ChatRequest,
   Conversation,
   ConversationList,
+  CreateGameRequest,
+  CreateGameSessionRequest,
   DataMode,
+  GameBuildList,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionControlRequest,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
+  IterateGameRequest,
   MemoryList,
   ModelList,
+  ModelRef,
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
+  RestoreGameBuildRequest,
+  SaveGameSpecRequest,
   PermissionRequest,
   Schedule,
   ScheduleControlResult,
@@ -48,7 +67,20 @@ import type {
 } from '@coderax/contracts';
 import { isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { ConversationRecord, ScheduleExecutionRecord, ScheduleRecord, TaskEvidence, TaskPatch, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
+import type {
+  ConversationRecord,
+  GameRunSpec,
+  ScheduleExecutionRecord,
+  ScheduleRecord,
+  TaskEvidence,
+  TaskPatch,
+  TaskPlan,
+  TaskRecord,
+  TaskStep,
+} from '../domain.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
+import { createGameCapabilityReport } from '../games/capability.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -110,6 +142,9 @@ export type ApplicationServiceDeps = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
   browser: BrowserService;
   supervisor: RunSupervisor;
 };
@@ -223,6 +258,70 @@ export type ApplicationService = {
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
   budget: (principal: Principal) => BudgetState;
+  gameCapabilities: (principal: Principal) => GameCapabilityReport;
+  listGames: (
+    principal: Principal,
+    query: { cursor?: string; limit?: number },
+  ) => Promise<GameProjectList>;
+  createGame: (
+    principal: Principal,
+    request: CreateGameRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  getGame: (principal: Principal, gameId: string) => Promise<ServiceResult<GameProject>>;
+  saveGameSpec: (
+    principal: Principal,
+    gameId: string,
+    request: SaveGameSpecRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  buildGame: (
+    principal: Principal,
+    gameId: string,
+    request: BuildGameRequest,
+  ) => Promise<ServiceResult<import('@coderax/contracts').GameBuild>>;
+  listGameBuilds: (
+    principal: Principal,
+    gameId: string,
+  ) => Promise<ServiceResult<GameBuildList>>;
+  restoreGameBuild: (
+    principal: Principal,
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  iterateGame: (
+    principal: Principal,
+    gameId: string,
+    request: IterateGameRequest,
+  ) => Promise<ServiceResult<GameIteration>>;
+  gamePreview: (principal: Principal, gameId: string) => Promise<ServiceResult<string>>;
+  exportGame: (principal: Principal, gameId: string) => Promise<ServiceResult<GameExport>>;
+  createGameSession: (
+    principal: Principal,
+    gameId: string,
+    request: CreateGameSessionRequest,
+  ) => Promise<ServiceResult<GameSession>>;
+  listGameSessions: (principal: Principal) => Promise<GameSessionList>;
+  getGameSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSession>>;
+  observeGameSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameObservation>>;
+  controlGameSession: (
+    principal: Principal,
+    sessionId: string,
+    request: GameSessionControlRequest,
+  ) => Promise<ServiceResult<GameSession>>;
+  gameSessionLogs: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSessionLogs>>;
+  gameSessionVerification: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSessionVerification>>;
   schedules: (principal: Principal) => Promise<ScheduleList>;
   schedule: (principal: Principal, scheduleId: string) => Promise<ServiceResult<Schedule>>;
   createSchedule: (
@@ -589,7 +688,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: now,
             result: {
               summary: outcome.summary.slice(0, 20_000),
-              artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+          artifacts: task.kind === 'game'
+            ? (outcome.artifacts ?? [])
+          : [],
               ...(outcome.verification
                 ? {
                     verification: {
@@ -683,6 +784,58 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
   }
 
+  /**
+   * The gaming workload is a Native capability, not a fourth agent identity. It
+   * borrows the supervisor's lease, fencing, cancellation and event path through
+   * the same adapter port; only the run body differs.
+   */
+  function gamingAdapter(task: TaskRecord): AgentAdapter {
+    return {
+      agent: task.agent,
+      engine: 'native',
+      sideEffects: 'gated',
+      capabilities: {
+        streaming: false,
+        tools: false,
+        cancellation: true,
+        resume: true,
+        modelSelection: false,
+        durable: true,
+      },
+      isolation: {
+        workspace: 'isolated',
+        memory: 'granted',
+        credentials: 'none',
+        conversations: 'none',
+      },
+      availability: () => ({
+        available: true,
+        reason: 'ready',
+        detail: 'The Native gaming workload is ready inside the isolated runtime.',
+      }),
+      run: (request, report) => {
+        if (!request.game) {
+          return Promise.resolve({
+            ok: false as const,
+            code: 'protocol_error' as const,
+            detail: 'A game task has no session payload.',
+            retryable: false,
+          });
+        }
+        return deps.gaming.run({
+          ownerId: request.ownerId,
+          taskId: request.taskId ?? task.taskId,
+          game: request.game,
+          signal: request.signal,
+          report,
+          loadBuild: (ownerId, gameId, buildId) =>
+            deps.studio.readVerifiedBuild({ ownerId, gameId, buildId }),
+          isApproved: (taskId, scope, resource) =>
+            deps.permissions.isApproved(taskId, scope, resource),
+        });
+      },
+    };
+  }
   // Earlier tasks have no explicit marker. Their accounting write or persisted
   // execution steps are evidence of admission; an interrupted claim alone is not.
   async function canRunScheduled(task: TaskRecord): Promise<boolean> {
@@ -730,28 +883,36 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    const adapter = deps.agents.resolve(task.agent);
-    if (!adapter.ok) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: 'not_configured',
-        detail: adapter.detail,
-        retryable: false,
-      });
-      return;
-    }
-
-    const model = task.model
-      ? deps.models.resolve(task.model, task.mode)
-      : deps.models.resolve(null, task.mode);
-    if (!model.ok) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: model.code === 'paid_model_refused' ? 'paid_model_refused' : 'not_configured',
-        detail: model.detail,
-        retryable: false,
-      });
-      return;
+    const workload = task.kind ?? 'work';
+    let adapter: AgentAdapter;
+    let modelRef: ModelRef | null = null;
+    if (workload === 'game') {
+      adapter = gamingAdapter(task);
+    } else {
+      const resolved = deps.agents.resolve(task.agent);
+      if (!resolved.ok) {
+        await settle(task, token, {
+          kind: 'failed',
+          code: 'not_configured',
+          detail: resolved.detail,
+          retryable: false,
+        });
+        return;
+      }
+      adapter = resolved.value;
+      const model = task.model
+        ? deps.models.resolve(task.model, task.mode)
+        : deps.models.resolve(null, task.mode);
+      if (!model.ok) {
+        await settle(task, token, {
+          kind: 'failed',
+          code: model.code === 'paid_model_refused' ? 'paid_model_refused' : 'not_configured',
+          detail: model.detail,
+          retryable: false,
+        });
+        return;
+      }
+      modelRef = model.value.ref;
     }
 
     // One directory per task and generation. Two runs in the same mode, and two
@@ -781,7 +942,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(task.handoffPending && { handoffPending: false }),
         updatedAt: deps.clock.iso(),
         leaseExpiresAt: lease.expiresAt.toISOString(),
-        model: model.value.ref,
+        ...(modelRef ? { model: modelRef } : {}),
       },
     });
     if (!started.applied) return;
@@ -986,23 +1147,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         updatedAt: task.updatedAt,
       },
       task.objective,
-      adapter.value as AgentAdapter,
+      adapter,
     );
+
     let result: RunResult;
     try {
       result = await deps.runner.run({
         scope: scopeOf(started.task),
-        ...((task.scheduleAdmission || task.taskId.startsWith('task_sched_')) && { cancellationRequested: async () => !(await canRunScheduled(task)) }),
+        ...((task.scheduleAdmission ||
+          task.taskId.startsWith('task_sched_')) && {
+          cancellationRequested: async () =>
+            !(await canRunScheduled(task)),
+        }),
         token,
-        adapter: adapter.value as AgentAdapter,
+        adapter,
         request: {
           ownerId: task.ownerId,
           tenantId: task.tenantId,
           conversationId: task.conversationId,
           taskId: task.taskId,
+          workload,
+          game: task.game ?? null,
           objective: task.objective,
           history,
-          model: model.value.ref,
+          model: modelRef,
           mode: task.mode,
           workspaceRoot: workspace.value.root,
           maxSteps: deps.config.engines.native.maxSteps,
@@ -1033,9 +1201,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    // Only a *different live controller* means a newer generation took over.
-    // A missing entry is shutdown (which clears the map): this run still holds
-    // the lease and must settle instead of leaving the task running forever.
     const current = controllers.get(taskId);
     const superseded = current !== undefined && current !== controller;
     if (!superseded) controllers.delete(taskId);
@@ -1044,8 +1209,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const verified = result.terminated;
     try {
       if (superseded || result.ownershipLost) {
-        // Deliberately no terminal write and no notification: this run no longer
-        // owns the task, and the new owner is the only writer of its state.
         return;
       }
       const safeText = redactContent(text);
@@ -1150,6 +1313,131 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return lostCancellation(task);
   }
 
+  async function admitTask(input: {
+    principal: Principal;
+    agentId: 'coderax';
+    objective: string;
+    mode: 'cloud';
+    model: null;
+    budget: null;
+    requireApproval: boolean;
+    kind: 'game';
+    game: GameRunSpec;
+  }): Promise<ServiceResult<{
+    task: TaskRecord;
+    token: string;
+    conversationId: string;
+  }>> {
+    const now = deps.clock.iso();
+
+    const bound = await bindConversation({
+      principal: input.principal,
+      mode: input.mode,
+      isWork: true,
+      agent: input.agentId,
+      title: input.objective.slice(0, 120),
+    });
+    if (!bound.ok) return bound;
+
+    const conversationId = bound.value.conversationId;
+
+    await deps.conversations.appendMessage({
+      messageId: deps.ids.messageId(),
+      conversationId,
+      role: 'user',
+      text: input.objective,
+      createdAt: now,
+    });
+
+    const task: TaskRecord = {
+      taskId: deps.ids.taskId(),
+      ownerId: input.principal.ownerId,
+      tenantId: null,
+      conversationId,
+      agent: input.agentId,
+      engine: 'native',
+      mode: input.mode,
+      kind: input.kind,
+      game: input.game,
+      objective: input.objective,
+      model: null,
+      state: 'queued',
+      generation: 1,
+      runToken: null,
+      reasoning: null,
+      steps: [],
+      checkpoint: {
+        completedSteps: [],
+        text: '',
+        plan: null,
+        evidence: [],
+      },
+      createdAt: now,
+      updatedAt: now,
+      leaseExpiresAt: null,
+      cancelRequested: false,
+      requireApproval: input.requireApproval,
+      budget: null,
+      usage: null,
+      result: null,
+      failure: null,
+    };
+
+    const token = deps.ids.runToken();
+    const claimedAt = deps.clock.now();
+    const key = workRunKey(scopeOf(task));
+    const expiresAt = new Date(
+      claimedAt.getTime() +
+        deps.config.execution.leaseTtlMs,
+    );
+
+    const claimed = await deps.lease.claim({
+      key,
+      owner: task.ownerId,
+      token,
+      now: claimedAt,
+      expiresAt,
+    });
+
+    if (!claimed) {
+      return fail(
+        'busy',
+        'This conversation already has a live Work run.',
+      );
+    }
+
+    const created = await deps.tasks.create({
+      ...task,
+      runToken: token,
+      leaseExpiresAt: expiresAt.toISOString(),
+    });
+
+    if (!created.ok) {
+      await deps.lease.release({ key, token })
+        .catch(() => false);
+      return fail(
+        'busy',
+        'This conversation already has an active Work task.',
+      );
+    }
+
+    publish(created.task, 'task.queued');
+
+    deps.audit.record({
+      actor: input.principal.ownerId,
+      action: 'game.session.accepted',
+      taskId: task.taskId,
+      conversationId,
+      outcome: 'accepted',
+    });
+
+    return ok({
+      task: created.task,
+      token,
+      conversationId,
+    });
+  }
+  
   async function lostCancellation(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
     const current = await deps.tasks.get(task.taskId);
     const cancelled = current?.runToken === task.runToken && current?.state === 'cancelled';
@@ -1508,7 +1796,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           !(task.scheduleAdmission.complete ??
             ((await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId === task.scheduleAdmission.executionId || task.steps.length > 0)) }),
         generation: reconciled.generation,
-        state: reconciled.state,
+
+     state: reconciled.state,
         summary: reconciled.result?.summary ?? null,
         failure: reconciled.failure
           ? {
@@ -1933,6 +2222,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             ownerId: principal.ownerId,
             tenantId: conversation.tenantId,
             conversationId,
+            workload: 'work',
+            game: null,
             objective: request.message,
             history,
             model: model.value.ref,
@@ -2077,6 +2368,200 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       };
     },
 
+    gameCapabilities: () => {
+      const modelReady = deps.models
+        .list()
+        .models.some((model) => model.availability.available);
+      return createGameCapabilityReport({
+        now: deps.clock.iso(),
+        studioEnabled: deps.config.games.enabled,
+        agentEnabled: deps.config.games.enabled && deps.config.games.agentEnabled,
+        sandboxReady: deps.config.games.enabled,
+        modelAssisted: modelReady && deps.studio.modelAssisted,
+        studioMessage: deps.config.games.enabled
+          ? 'Builds are generated and verified in the cloud engine; no owner device runs a game or a model.'
+          : 'Native Game Studio is disabled in this deployment.',
+        agentMessage:
+          deps.config.games.enabled && deps.config.games.agentEnabled
+            ? `Sessions run in the engine's isolated runtime with a ${deps.config.games.maxSessionTicks} tick ceiling; nothing executes on the owner device.`
+            : 'Native Gaming Agent is disabled in this deployment.',
+      });
+    },
+
+    listGames: async (principal, query) =>
+      deps.studio.list(principal.ownerId, {
+        limit: query.limit ?? 20,
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+      }),
+
+    createGame: async (principal, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.create(principal.ownerId, request);
+    },
+
+    getGame: async (principal, gameId) => deps.studio.get(principal.ownerId, gameId),
+
+    saveGameSpec: async (principal, gameId, request) =>
+      deps.studio.saveSpec({
+        ownerId: principal.ownerId,
+        gameId,
+        spec: request.spec,
+        expectedRevision: request.expectedRevision,
+      }),
+    buildGame: async (principal, gameId, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.build({
+        ownerId: principal.ownerId,
+        gameId,
+        ...(request.expectedSpecRevision !== undefined
+          ? { expectedSpecRevision: request.expectedSpecRevision }
+          : {}),
+      });
+    },
+
+    listGameBuilds: async (principal, gameId) =>
+      deps.studio.listBuilds(principal.ownerId, gameId),
+
+    restoreGameBuild: async (principal, gameId, buildId, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.restore({
+        ownerId: principal.ownerId,
+        gameId,
+        buildId,
+        expectedRevision: request.expectedRevision,
+      });
+    },
+
+    iterateGame: async (principal, gameId, request) =>
+      deps.studio.iterate({
+        ownerId: principal.ownerId,
+        gameId,
+        instruction: request.instruction,
+        expectedRevision: request.expectedRevision,
+      }),
+
+    gamePreview: async (principal, gameId) => deps.studio.preview(principal.ownerId, gameId),
+
+    exportGame: async (principal, gameId) => deps.studio.export(principal.ownerId, gameId),
+
+    createGameSession: async (principal, gameId, request) => {
+      if (!deps.config.games.enabled || !deps.config.games.agentEnabled) {
+        return fail('engine_not_configured', 'Native Gaming Agent is disabled in this deployment.');
+      }
+      if (request.maxTicks > deps.config.games.maxSessionTicks) {
+        return fail(
+          'validation_failed',
+          `The tick budget exceeds this deployment's ceiling of ${deps.config.games.maxSessionTicks}.`,
+        );
+      }
+      const project = await deps.studio.get(principal.ownerId, gameId);
+      if (!project.ok) return project;
+      if (!project.value.spec || !project.value.build) {
+        return fail('conflict', 'Build and verify this game before starting a session.');
+      }
+      const buildId = request.buildId ?? project.value.build.buildId;
+      const loaded = await deps.studio.readVerifiedBuild({
+        ownerId: principal.ownerId,
+        gameId,
+        buildId,
+      });
+      if (!loaded.ok) return loaded;
+      const created = await deps.sessions.create({
+        ownerId: principal.ownerId,
+        project: { gameId, spec: project.value.spec },
+        build: loaded.value.build,
+        request,
+      });
+      if (!created.ok) return created;
+      const session = created.value;
+      const admitted = await admitTask({
+        principal,
+        agentId: 'coderax',
+        objective: `Play ${project.value.name}: ${request.objective.kind}`,
+        mode: 'cloud',
+        model: null,
+        budget: null,
+        requireApproval: false,
+        kind: 'game',
+        game: {
+          sessionId: session.sessionId,
+          gameId,
+          buildId,
+          objective: request.objective,
+          allowedActions: request.allowedActions,
+          maxTicks: request.maxTicks,
+        },
+      });
+      if (!admitted.ok) {
+        await deps.sessions.fail(session.sessionId, admitted.code, admitted.detail);
+        return admitted;
+      }
+      const grant = await deps.permissions.request({
+        ownerId: principal.ownerId,
+        taskId: admitted.value.task.taskId,
+        agent: 'coderax',
+        scope: 'command.execute',
+        description: `Bounded control of game session ${session.sessionId}.`,
+        resource: `game-session:${session.sessionId}`,
+        ttlMs: 60 * 60_000,
+      });
+      const decided = await deps.permissions.decide({
+        ownerId: principal.ownerId,
+        taskId: admitted.value.task.taskId,
+        requestId: grant.requestId,
+        decision: 'approved',
+        reason: 'Owner authorized the session when creating it.',
+      });
+      if (!decided.ok) {
+        await deps.sessions.fail(session.sessionId, decided.code, decided.detail);
+        return decided;
+      }
+      await deps.sessions.attachTask(session.sessionId, admitted.value.task.taskId, 1);
+      deps.scheduler.enqueue(() => execute(admitted.value.task.taskId, admitted.value.token));
+      return deps.sessions.get(principal.ownerId, session.sessionId);
+    },
+
+    listGameSessions: async (principal) => deps.sessions.list(principal.ownerId),
+
+    getGameSession: async (principal, sessionId) => {
+      const found = await deps.sessions.get(principal.ownerId, sessionId);
+      if (!found.ok) return found;
+      const taskId = found.value.taskId;
+      if (!taskId) return found;
+      const task = await deps.tasks.get(taskId);
+      return ok({ ...found.value, generation: task?.generation ?? found.value.generation });
+    },
+
+    observeGameSession: async (principal, sessionId) =>
+      deps.sessions.observation(principal.ownerId, sessionId),
+
+    controlGameSession: async (principal, sessionId, request) => {
+      const controlled = await deps.sessions.control({
+        ownerId: principal.ownerId,
+        sessionId,
+        request,
+      });
+      if (!controlled.ok) return controlled;
+      const taskId = controlled.value.taskId;
+      if (request.action === 'cancel' && taskId) {
+        await service
+          .cancelTask(principal, taskId, request.reason)
+          .catch(() => undefined);
+      }
+      return controlled;
+    },
+
+    gameSessionLogs: async (principal, sessionId) =>
+      deps.sessions.logs(principal.ownerId, sessionId),
+
+    gameSessionVerification: async (principal, sessionId) =>
+      deps.sessions.verification(principal.ownerId, sessionId),
     schedules: async (principal) => ({
       schedules: (await deps.schedules.listByOwner(principal.ownerId)).map(toSchedule),
     }),
