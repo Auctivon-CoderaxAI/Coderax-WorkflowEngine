@@ -186,6 +186,7 @@ function delay(ms: number): Promise<void> {
 
 export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSupervisor {
   const active = new Map<string, ActiveExecution>();
+  const pendingAdmissions = new Set<Promise<void>>();
   const activeRoots = new Map<string, string>();
   const heldRoots = new Map<
     string,
@@ -375,20 +376,42 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         capabilityRevokedAt: null,
         processUseCount: 0,
       };
-      let created: boolean;
+      let finishAdmission!: () => void;
+      const admission = new Promise<void>((resolve) => { finishAdmission = resolve; });
+      pendingAdmissions.add(admission);
       try {
-        created = await deps.executions.create(record);
+        if (!await deps.executions.create(record)) {
+          rollbackReservation();
+          return refused(
+            'execution_duplicate',
+            'That execution identity already exists.',
+            input.identity.executionId,
+          );
+        }
+        if (draining) {
+          const finishedAt = deps.clock.iso();
+          await deps.executions.finish({
+            executionId: record.executionId,
+            cause: 'shutdown',
+            finishedAt,
+            // No grant was issued and no workload was launched.
+            termination: toTerminationRecord({ kind: 'verified', method: 'no-child-processes', observedAt: finishedAt }),
+            capabilityRevokedAt: finishedAt,
+            processUseCount: 0,
+          }).catch(() => null); // Startup can retire the row if storage is unavailable.
+          rollbackReservation();
+          return refused(
+            'shutting_down',
+            'The engine is shutting down and is not admitting new executions.',
+            input.identity.executionId,
+          );
+        }
       } catch (error) {
         rollbackReservation();
         throw error;
-      }
-      if (!created) {
-        rollbackReservation();
-        return refused(
-          'execution_duplicate',
-          'That execution identity already exists.',
-          input.identity.executionId,
-        );
+      } finally {
+        pendingAdmissions.delete(admission);
+        finishAdmission();
       }
 
       deps.capabilities.issue({
@@ -592,7 +615,7 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         entry.controller.abort();
       }
       await Promise.race([
-        Promise.all(entries.map((entry) => entry.done)),
+        Promise.all([...pendingAdmissions, ...entries.map((entry) => entry.done)]),
         delay(deps.shutdownGraceMs),
       ]);
 

@@ -83,6 +83,7 @@ export function createOpenCodeHttpTransport(input: {
     probe,
     run: async (run: AgentRunRequest, report: AgentReport): Promise<AgentRunOutcome> => {
       let sessionId: string | null = null;
+      let objectiveDispatched = false;
       const controller = new AbortController();
       const onAbort = (): void => controller.abort();
       run.signal.addEventListener('abort', onAbort, { once: true });
@@ -112,7 +113,7 @@ export function createOpenCodeHttpTransport(input: {
             ok: false,
             code: 'server_unavailable',
             detail: `OpenCode refused to create a session (HTTP ${created.status}).`,
-            retryable: created.status >= 500,
+            retryable: false,
           };
         }
         const session = (await created.json()) as { id?: unknown };
@@ -134,6 +135,7 @@ export function createOpenCodeHttpTransport(input: {
           'Execute the objective and return the concrete result. Do not ask a question unless you are blocked.',
         ].join('\n');
 
+        objectiveDispatched = true;
         const response = await fetchImpl(`${base}/session/${encodeURIComponent(sessionId)}/message`, {
           method: 'POST',
           headers: headers(),
@@ -149,8 +151,8 @@ export function createOpenCodeHttpTransport(input: {
           return {
             ok: false,
             code: 'provider_error',
-            detail: `OpenCode run failed (HTTP ${response.status}).`,
-            retryable: response.status === 429 || response.status >= 500,
+            detail: `OpenCode did not confirm completion (HTTP ${response.status}). Verify the remote session before retrying.`,
+            retryable: false,
           };
         }
 
@@ -219,8 +221,10 @@ export function createOpenCodeHttpTransport(input: {
         return {
           ok: false,
           code: 'server_unavailable',
-          detail: 'The OpenCode transport failed.',
-          retryable: true,
+          detail: objectiveDispatched
+            ? 'OpenCode did not confirm completion. Verify the remote session before retrying.'
+            : 'OpenCode did not confirm session setup. Check the remote server before retrying.',
+          retryable: false,
         };
       } finally {
         clearTimeout(timer);

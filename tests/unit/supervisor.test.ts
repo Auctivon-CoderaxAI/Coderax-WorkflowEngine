@@ -508,3 +508,56 @@ for (const finishFirst of [false, true]) {
     });
   }
 }
+
+test('shutdown waits for a pending admission and closes it without launching', { timeout: 3_000 }, async () => {
+  const h = harness({ graceMs: 1_000 });
+  const id = identity();
+  const creating = barrier();
+  const allowCreate = barrier();
+  const finishing = barrier();
+  const allowFinish = barrier();
+  const create = h.executions.create;
+  const finish = h.executions.finish;
+  h.executions.create = async (record) => {
+    creating.resolve();
+    await allowCreate.promise;
+    return create(record);
+  };
+  h.executions.finish = async (patch) => {
+    finishing.resolve();
+    await allowFinish.promise;
+    return finish(patch);
+  };
+
+  let launched = false;
+  const run = h.supervisor.run({
+    identity: id,
+    adapter: { agent: 'opencode', workload: 'external' },
+    workspaceRoot: '/work/cloud',
+    scopes: SCOPES,
+    launch: async () => {
+      launched = true;
+      return { outcome: { kind: 'completed', summary: 'done' } };
+    },
+  });
+  await creating.promise;
+  let stopped = false;
+  const shutdown = h.supervisor.shutdown().then(() => { stopped = true; });
+  allowCreate.resolve();
+  await finishing.promise;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  try {
+    assert.equal(stopped, false);
+    assert.equal(h.capabilities.isLive(id.executionId), false);
+  } finally {
+    allowFinish.resolve();
+    await shutdown;
+  }
+
+  const result = await run;
+  assert.equal(!result.admitted && result.code, 'shutting_down');
+  assert.equal(launched, false);
+  const record = await h.executions.get(id.executionId);
+  assert.equal(record?.cause, 'shutdown');
+  assert.equal(record?.termination?.status, 'verified');
+});

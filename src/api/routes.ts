@@ -44,9 +44,10 @@ function eventId(value: unknown): string {
 async function* toEventStream(stream: {
   replay: { events: unknown[] };
   subscribe: (listener: (event: unknown) => void) => () => void;
-}): AsyncIterable<unknown> {
+}, signal?: AbortSignal): AsyncIterable<unknown> {
   const seen = new Set<string>();
   for (const event of stream.replay.events) {
+    if (signal?.aborted) return;
     seen.add(eventId(event));
     yield event;
     if (isTerminalPayload(event)) return;
@@ -54,6 +55,8 @@ async function* toEventStream(stream: {
 
   const pending: unknown[] = [];
   let wake: (() => void) | null = null;
+  const abort = (): void => { wake?.(); };
+  signal?.addEventListener('abort', abort, { once: true });
   const unsubscribe = stream.subscribe((event) => {
     const id = eventId(event);
     if (id && seen.has(id)) return;
@@ -63,7 +66,7 @@ async function* toEventStream(stream: {
   });
 
   try {
-    for (;;) {
+    while (!signal?.aborted) {
       const next = pending.shift();
       if (next !== undefined) {
         yield next;
@@ -72,12 +75,11 @@ async function* toEventStream(stream: {
       }
       await new Promise<void>((resolve) => {
         wake = resolve;
-        const timer = setTimeout(resolve, 30_000);
-        timer.unref();
       });
       wake = null;
     }
   } finally {
+    signal?.removeEventListener('abort', abort);
     unsubscribe();
   }
 }
@@ -203,7 +205,7 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     const cursor = typeof after === 'number' ? after : 0;
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'sse', status: 200, events: toEventStream(result.value) };
+    return { kind: 'sse', status: 200, events: toEventStream(result.value, context.signal) };
   });
 
   registry.register('listConversations', async (context) => ({

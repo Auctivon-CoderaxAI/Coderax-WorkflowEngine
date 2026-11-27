@@ -64,3 +64,25 @@ test('the OpenCode transport creates a session, sends the objective and reads it
   // The session is deleted after the run so the server does not accumulate them.
   assert.ok(calls.some((call) => call.startsWith('DELETE ')));
 });
+
+for (const failure of ['session response lost', 'message response lost', 'message HTTP 500'] as const) {
+  test(`OpenCode does not signal safe retry when ${failure}`, async () => {
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push(init?.method ?? 'GET');
+      if (String(input).endsWith('/session')) {
+        if (failure === 'session response lost') throw new Error('connection lost');
+        return Response.json({ id: 'session-1' });
+      }
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+      if (failure === 'message response lost') throw new Error('connection lost');
+      return new Response(null, { status: 500 });
+    };
+    const transport = createOpenCodeHttpTransport({ baseURL: 'http://127.0.0.1:4096', fetchImpl });
+    const result = await transport.run(request(), () => undefined);
+    assert.equal(result.ok, false);
+    assert.equal(!result.ok && result.retryable, false);
+    assert.match(!result.ok ? result.detail : '', /before retrying/);
+    assert.deepEqual(calls, failure === 'session response lost' ? ['POST'] : ['POST', 'POST', 'DELETE']);
+  });
+}

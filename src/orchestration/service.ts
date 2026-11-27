@@ -774,6 +774,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
 
       if (!supervised.admitted) {
+        if (supervised.code === 'shutting_down') return;
         await settle(started.task, token, {
           kind: 'failed',
           code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
