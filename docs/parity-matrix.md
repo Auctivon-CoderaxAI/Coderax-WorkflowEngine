@@ -112,16 +112,22 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at this merge head: 391 tests, 377 passing, 0 failing, 14
-  skipped, OpenAPI drift clean. The skipped tests are the real-MongoDB artifact
-  suites, which need `CODERAX_TEST_MONGODB_URI`; nothing else is skipped.
+- `npm run verify` at this merge head: 398 tests, 398 passing, 0 failing, 0
+  skipped with a real `mongod` reachable (`CODERAX_TEST_MONGODB_URI` set,
+  `CODERAX_REQUIRE_MONGODB=1`), OpenAPI drift clean. The same command without a
+  database reports 382 passing and 16 skipped, all of them MongoDB suites.
 - Durable execution events are covered by store-contract, fenced-allocation,
-  replay-across-restart and SSE-metadata tests. TTL expiry, a concurrent append
-  race on two replicas and a live MongoDB are not exercised.
-- Durable stores are verified against a semantics-faithful collection fake that
-  enforces unique indexes and cursor semantics. **No live MongoDB has been
-  contacted**; "durable" here means the adapter and wiring are proven, not that a
-  real server has stored a row.
+  replay-across-restart and SSE-metadata tests, and by a real-MongoDB suite
+  (`tests/integration/event-log-mongo.test.ts`) that proves the fenced `$inc`
+  allocation, unique-sequence refusal, two replicas appending concurrently, and
+  replay after an engine restart against a real `mongod`. TTL expiry is still not
+  executed: the retention index is asserted on the server, not its deletion
+  timing.
+- Durable stores are verified against a semantics-faithful collection fake in
+  the default offline run. The real-MongoDB suites run when
+  `CODERAX_TEST_MONGODB_URI` is set (the CI lane supplies one) and are skipped,
+  never passed, without it. The event-log suite was executed against a real
+  `mongod` 7.0.14 for this merge: 398 tests, 398 passing, nothing skipped.
 - No hosted CI run exists: the GitHub Actions job is blocked by account billing.
   The local run above is the only executed evidence.
 - The Game Studio branch reports 132/132 passing tests and a clean OpenAPI drift check before integration.
