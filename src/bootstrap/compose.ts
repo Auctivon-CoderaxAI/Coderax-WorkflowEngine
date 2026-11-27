@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
+import { modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
@@ -135,12 +136,14 @@ function modelDescriptors(input: {
   config: EngineConfig;
   gateway: ModelGateway | null;
 }): ModelDescriptor[] {
+  const vision = new Set(input.config.models.vision.map((ref) => modelKey(ref)));
   return input.config.models.route.map((ref) => ({
     ref,
     label: `${ref.providerId} ${ref.modelId}`,
     costClass: 'free' as const,
     toolCalling: false,
     streaming: false,
+    ...(vision.has(modelKey(ref)) ? { vision: true } : {}),
     availability: input.gateway
       ? { available: true, reason: 'ready' as const, detail: 'Verified zero-cost endpoint.' }
       : {

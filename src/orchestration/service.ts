@@ -38,6 +38,8 @@ import type {
   GameSessionLogs,
   GameSessionVerification,
   IterateGameRequest,
+  MediaIntakeRequest,
+  MediaIntakeResult,
   MemoryList,
   ModelList,
   ModelRef,
@@ -67,6 +69,7 @@ import type {
 } from '@coderax/contracts';
 import {
   DeliverableRequest,
+  engineForAgent,
   isTerminalExecution,
   isTerminalState,
   modelKey,
@@ -97,6 +100,7 @@ import type { RunSupervisor } from '../execution/supervisor.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
+import { intakeMedia, mediaDataUrl } from '../media/intake.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
 import { holdBudget } from '../models/budget.js';
@@ -259,6 +263,11 @@ export type ApplicationService = {
     generation: number,
   ) => Promise<ServiceResult<TaskControlResult>>;
   chat: (principal: Principal, request: ChatRequest) => Promise<ServiceResult<ChatReply>>;
+  /** Validates an attachment set without persisting it or calling a model. */
+  intakeMedia: (
+    principal: Principal,
+    request: MediaIntakeRequest,
+  ) => Promise<ServiceResult<MediaIntakeResult>>;
   conversations: (principal: Principal) => Promise<ConversationList>;
   conversation: (
     principal: Principal,
@@ -2313,9 +2322,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }),
 
     chat: trackAdmission<[Principal, ChatRequest], ChatReply>(async (principal, request) => {
+      // Validate attachments before model routing or persistence.
+      const validated = intakeMedia(request.attachments);
+      if (!validated.ok) return validated;
+      const media = validated.value;
+
+      if (media.length > 0 && engineForAgent(request.agent) !== 'native') {
+        return fail(
+          'unsupported_media_type',
+          'The selected agent cannot accept image attachments; use Coderax Native.',
+        );
+      }
       const adapter = deps.agents.resolve(request.agent);
       if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model, request.mode);
+      // An image turn may only route to a model the catalogue verified for
+      // image input. With no such route the turn is refused before the
+      // conversation is bound or a message is appended.
+      const model = deps.models.resolve(
+        request.model,
+        request.mode,
+        media.length > 0 ? { requireVision: true } : {},
+      );
       if (!model.ok) return model;
 
       const reservation = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
@@ -2354,6 +2381,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           role: 'user',
           text: request.message,
           createdAt: now,
+          ...(media.length > 0
+            ? { media: media.map((entry) => entry.reference) }
+            : {}),
         });
 
         const history = await historyFor(conversation, request.message, adapter.value);
@@ -2379,6 +2409,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               reasoning: 'fast',
               completedSteps: [],
               plan: null,
+              ...(media.length > 0
+                ? {
+                    media: media.map((entry) => ({
+                      reference: entry.reference,
+                      dataUrl: mediaDataUrl(entry),
+                    })),
+                  }
+                : {}),
             },
             () => undefined,
           );
@@ -2393,8 +2431,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           );
         }
         await deps.budget.settle(reservation.reservationId, outcome.usage ?? {});
-        // Chat output is adapter text too: scrub it before storage and before it is
-        // returned, so a provider echoing a credential cannot persist it.
         const reply = redactContent(outcome.summary);
         const messageId = deps.ids.messageId();
         await deps.conversations.appendMessage({
@@ -2419,6 +2455,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         else await reservation.release();
       }
     }),
+
+    intakeMedia: async (_principal, request) => {
+      const validated = intakeMedia(request.attachments);
+      if (!validated.ok) return validated;
+      return ok({ media: validated.value.map((entry) => entry.reference) });
+    },
 
     conversations: (principal) => deps.conversations.list(principal.ownerId),
 

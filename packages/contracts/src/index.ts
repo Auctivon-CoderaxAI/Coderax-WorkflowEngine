@@ -2,6 +2,7 @@ export * from './primitives.js';
 export * from './errors.js';
 export * from './capabilities.js';
 export * from './models.js';
+export * from './media.js';
 export * from './health.js';
 export * from './handshake.js';
 export * from './fingerprint.js';

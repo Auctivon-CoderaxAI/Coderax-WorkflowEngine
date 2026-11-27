@@ -204,6 +204,11 @@ export const ModelsConfig = z
   .object({
     /** Ordered candidates for free inference routing; first usable one wins. */
     route: z.array(ModelRef).min(1),
+    /**
+     * Models verified to accept image input. Empty is the fail-closed default:
+     * an image turn is refused rather than sent to a model that may drop it.
+     */
+    vision: z.array(ModelRef).default([]),
     /** Zero-cost is a literal: there is no configuration that enables paid use. */
     allowPaid: z.literal(false).default(false),
     dailyRequestBudget: z.number().int().min(1).max(100_000).default(1_000),
