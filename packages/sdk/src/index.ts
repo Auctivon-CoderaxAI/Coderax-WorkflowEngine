@@ -18,6 +18,7 @@ import {
   ArtifactPruneResult,
   ArtifactUploadResult,
   ArtifactVersionList,
+  CapabilityHandshake,
   ChatReply,
   Conversation,
   ConversationList,
@@ -258,6 +259,18 @@ export class CoderaxClient {
 
   health(): Promise<HealthReport> {
     return this.request<HealthReport>(HealthReport, { method: 'GET', path: '/v1/health' });
+  }
+
+  /**
+   * The first call a client should make. It carries the served contract, the
+   * catalogue fingerprint and the operations this build actually publishes.
+   */
+  handshake(input: { contract?: string; fingerprint?: string } = {}): Promise<CapabilityHandshake> {
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+      query: { contract: input.contract, fingerprint: input.fingerprint },
+    });
   }
 
   readiness(): Promise<ReadinessReport> {
