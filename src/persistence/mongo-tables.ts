@@ -6,8 +6,10 @@ import type {
   StoredMessage,
   TaskRecord,
 } from '../domain.js';
-import type { ConversationRepository } from './conversations.js';
+import type { ConversationBinding, ConversationRepository } from './conversations.js';
 import type { NotificationStore } from './notifications.js';
+import { sanitizeTaskPatch } from './tasks.js';
+import { redactContent } from '../observability/redact.js';
 import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { Clock } from '../support/clock.js';
@@ -175,7 +177,7 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
           state: { $nin: guard === 'not_awaiting_approval' ? [...TERMINAL, 'awaiting_approval'] : TERMINAL },
           ...(guard === 'not_cancel_requested' ? { cancelRequested: { $nin: [true] } } : {}),
         },
-        { $set: { ...defined(patch), runToken: token } },
+        { $set: { ...defined(sanitizeTaskPatch(patch)), runToken: token } },
         { returnDocument: 'after', includeResultMetadata: false },
       );
       if (updated) return { applied: true, task: toTask(updated) };
@@ -264,28 +266,25 @@ export function createMongoConversationRepository(input: {
 }): ConversationRepository {
   const { conversations, messages } = input;
 
-  function collision(): never {
-    throw new Error('conversation identity collision across owners');
+  function binding(found: ConversationRecord, record: ConversationRecord): ConversationBinding {
+    if (found.ownerId !== record.ownerId) return { ok: false, reason: 'owner' };
+    if (found.mode !== record.mode) return { ok: false, reason: 'mode' };
+    if (found.isWork !== record.isWork) return { ok: false, reason: 'surface' };
+    return { ok: true, record: found };
   }
 
-  async function ensure(record: ConversationRecord): Promise<ConversationRecord> {
+  async function ensure(record: ConversationRecord): Promise<ConversationBinding> {
     const existing = await conversations.findOne({ conversationId: record.conversationId });
-    if (existing) {
-      const found = toConversation(existing);
-      if (found.ownerId !== record.ownerId) collision();
-      return found;
-    }
+    if (existing) return binding(toConversation(existing), record);
     try {
       await conversations.insertOne({ ...record });
-      return { ...record };
+      return { ok: true, record: { ...record } };
     } catch (error) {
       if (!isDuplicateKey(error)) throw error;
       // Another replica created it between the read and the insert.
       const raced = await conversations.findOne({ conversationId: record.conversationId });
       if (!raced) throw error;
-      const found = toConversation(raced);
-      if (found.ownerId !== record.ownerId) collision();
-      return found;
+      return binding(toConversation(raced), record);
     }
   }
 
@@ -314,7 +313,7 @@ export function createMongoConversationRepository(input: {
       const existing = await conversations.findOne({ conversationId: message.conversationId });
       if (!existing) return false;
       try {
-        await messages.insertOne({ ...message });
+        await messages.insertOne({ ...message, text: redactContent(message.text) });
       } catch (error) {
         if (isDuplicateKey(error)) return false;
         throw error;
@@ -327,7 +326,9 @@ export function createMongoConversationRepository(input: {
       return true;
     },
 
-    messages: async (conversationId) => {
+    messages: async ({ ownerId, conversationId, mode }) => {
+      const record = await conversations.findOne({ conversationId, ownerId, mode });
+      if (!record) return null;
       const documents = await messages
         .find({ conversationId })
         .sort({ createdAt: 1 })
@@ -413,7 +414,14 @@ export function createMongoNotificationStore(collection: MongoCollectionLike): N
     record: async (notification) => {
       await collection.updateOne(
         { taskId: notification.taskId },
-        { $set: { ...notification } },
+        {
+          $set: {
+            ...notification,
+            ...(notification.summary !== undefined
+              ? { summary: redactContent(notification.summary) }
+              : {}),
+          },
+        },
         { upsert: true },
       );
     },

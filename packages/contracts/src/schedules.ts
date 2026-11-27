@@ -207,6 +207,20 @@ export const ScheduleLimits = z
   .strict();
 export type ScheduleLimits = z.infer<typeof ScheduleLimits>;
 
+/**
+ * Update shape. Zod 4's `partial()` keeps a field's creation default, so an
+ * omitted `maxRunsPerDay` would be re-applied instead of preserved. Every field
+ * here is explicitly optional and carries no default.
+ */
+export const ScheduleLimitsPatch = z
+  .object({
+    maxRunsPerDay: z.number().int().min(1).max(500).optional(),
+    maxRunsTotal: z.number().int().min(1).max(1_000_000).optional(),
+    budget: Budget.optional(),
+  })
+  .strict();
+export type ScheduleLimitsPatch = z.infer<typeof ScheduleLimitsPatch>;
+
 export const MissedRunPolicy = z.enum(['skip', 'run_once']);
 export type MissedRunPolicy = z.infer<typeof MissedRunPolicy>;
 
@@ -254,14 +268,7 @@ export const ScheduleUpdateRequest = z
     retry: ScheduleRetry.optional(),
     priority: z.number().int().min(0).max(9).optional(),
     /** Partial: omitted fields keep their stored values, never creation defaults. */
-    limits: z
-      .object({
-        maxRunsPerDay: z.number().int().min(1).max(500).optional(),
-        maxRunsTotal: z.number().int().min(1).max(1_000_000).optional(),
-        budget: Budget.optional(),
-      })
-      .strict()
-      .optional(),
+    limits: ScheduleLimitsPatch.optional(),
     missedRunPolicy: MissedRunPolicy.optional(),
     enabled: z.boolean().optional(),
   })

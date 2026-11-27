@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fakeGateway, startTestApp, waitFor } from '../helpers.js';
@@ -62,6 +62,18 @@ test('a scoped read suspends for owner approval, then resumes with the real gran
     assert.equal(submitted.ok, true);
     if (!submitted.ok) return;
     const { taskId, generation } = submitted.value;
+
+    // Each Work generation runs in its own confined directory under the mode
+    // root, so the file the plan reads is seeded for both generations.
+    for (const gen of [1, 2]) {
+      const dir = path.join(
+        started.workspace.cloudRoot,
+        '.coderax-runs',
+        `${taskId}-g${gen}`,
+      );
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, 'notes.txt'), 'alpha beta gamma', 'utf8');
+    }
 
     const awaiting = await waitFor(async () => {
       const status = await started.app.service.task(principal, taskId);
@@ -180,6 +192,18 @@ test('approval suspension survives a failed lease release and becomes resumable 
     });
     assert.ok(submitted.ok);
     const { taskId, generation } = submitted.value;
+
+    // Each Work generation runs in its own confined directory under the mode
+    // root, so the file the resumed plan reads is seeded for both generations.
+    for (const gen of [1, 2]) {
+      const dir = path.join(
+        started.workspace.cloudRoot,
+        '.coderax-runs',
+        `${taskId}-g${gen}`,
+      );
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, 'notes.txt'), 'saved notes', 'utf8');
+    }
 
     await deps.scheduler.idle();
     assert.equal(release.mock.callCount(), 1);

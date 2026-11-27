@@ -8,69 +8,54 @@ import { z } from 'zod';
  * Only the constructs this contract package actually uses are supported, and an
  * unsupported construct throws instead of emitting a wrong schema.
  *
- * Zod 4 keeps the public schema objects but moves the definition into
- * `_zod.def`; both spellings are read so a schema imported from a package built
- * against the previous major still refuses rather than silently emits `{}`.
+ * The walker reads zod 4's public `_zod.def` shape. It intentionally does not
+ * call `z.toJSONSchema` because the OpenAPI document is part of this repository's
+ * contract and must stay byte-stable; a vendor upgrade must not silently rewrite
+ * every published schema.
  */
 
 export type JsonSchema = Record<string, unknown>;
 
 type CheckDef = {
   check?: string;
-  format?: string;
-  value?: unknown;
-  inclusive?: boolean;
   minimum?: number;
   maximum?: number;
+  value?: number;
+  inclusive?: boolean;
+  format?: string;
 };
 
-type CheckLike = {
-  def?: CheckDef;
-  _zod?: { def?: CheckDef };
-};
-
-type SchemaDef = {
+type ZodDef = {
   type?: string;
-  checks?: CheckLike[];
+  checks?: Array<{ _zod?: { def?: CheckDef } }>;
+  entries?: Record<string, unknown>;
   values?: unknown[];
-  keyType?: z.ZodTypeAny;
-  coerce?: boolean;
   element?: z.ZodTypeAny;
+  keyType?: z.ZodTypeAny;
   valueType?: z.ZodTypeAny;
   innerType?: z.ZodTypeAny;
   defaultValue?: unknown;
   shape?: Record<string, z.ZodTypeAny>;
   catchall?: z.ZodTypeAny;
   options?: z.ZodTypeAny[];
+  discriminator?: string;
 };
 
-type SchemaInternals = {
-  _def?: SchemaDef;
-  _zod?: { def?: SchemaDef; values?: Set<unknown> };
-  shape?: Record<string, z.ZodTypeAny>;
-  options?: z.ZodTypeAny[] | Map<string, z.ZodTypeAny>;
-  isOptional?: () => boolean;
-};
-
-function internals(schema: z.ZodTypeAny): SchemaInternals {
-  return schema as unknown as SchemaInternals;
+function def(schema: z.ZodTypeAny): ZodDef {
+  const modern = (schema as unknown as { _zod?: { def?: ZodDef } })._zod?.def;
+  if (modern) return modern;
+  throw new Error('toJsonSchema requires the zod 4 schema shape');
 }
 
-/** Zod 4 stores the definition on `_zod.def`; Zod 3 used `_def`. */
-function def(schema: z.ZodTypeAny): SchemaDef {
-  const value = internals(schema);
-  return value._zod?.def ?? value._def ?? {};
-}
-
-function checks(schema: z.ZodTypeAny): CheckDef[] {
-  return (def(schema).checks ?? []).map(
-    (entry) => entry.def ?? entry._zod?.def ?? (entry as CheckDef),
-  );
+function checksOf(schema: z.ZodTypeAny): CheckDef[] {
+  return (def(schema).checks ?? [])
+    .map((check) => check._zod?.def)
+    .filter((check): check is CheckDef => check !== undefined);
 }
 
 function numberBounds(schema: z.ZodTypeAny): JsonSchema {
   const out: JsonSchema = { type: 'number' };
-  for (const check of checks(schema)) {
+  for (const check of checksOf(schema)) {
     if (check.check === 'number_format' && check.format === 'safeint') out.type = 'integer';
     if (check.check === 'greater_than' && typeof check.value === 'number') {
       out[check.inclusive === false ? 'exclusiveMinimum' : 'minimum'] = check.value;
@@ -84,32 +69,33 @@ function numberBounds(schema: z.ZodTypeAny): JsonSchema {
 
 function stringBounds(schema: z.ZodTypeAny): JsonSchema {
   const out: JsonSchema = { type: 'string' };
-  for (const check of checks(schema)) {
+  for (const check of checksOf(schema)) {
     if (check.check === 'min_length' && typeof check.minimum === 'number') {
       out.minLength = check.minimum;
     }
     if (check.check === 'max_length' && typeof check.maximum === 'number') {
       out.maxLength = check.maximum;
     }
-    if (check.check === 'string_format' && check.format === 'datetime') {
-      out.format = 'date-time';
-    }
-    if (check.check === 'string_format' && check.format === 'url') {
-      out.format = 'uri';
+    if (check.check === 'string_format' && typeof check.format === 'string') {
+      if (check.format === 'datetime') out.format = 'date-time';
+      else if (check.format === 'email') out.format = 'email';
+      else if (check.format === 'url') out.format = 'uri';
     }
   }
   return out;
 }
 
-function literalValue(schema: z.ZodTypeAny): JsonSchema {
-  const values = def(schema).values ?? [];
-  return values.length === 1 ? { const: values[0] } : { enum: [...values] };
+function isOptional(schema: z.ZodTypeAny): boolean {
+  // One probe covers optional, default and prefault without branching on every
+  // wrapper type zod may add.
+  const parsed = (schema as unknown as { safeParse?: (value: unknown) => { success: boolean } })
+    .safeParse?.(undefined);
+  return parsed?.success === true;
 }
 
 export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
-  const definition = def(schema);
-  const type = definition.type;
-  switch (type) {
+  const d = def(schema);
+  switch (d.type) {
     case 'string':
       return stringBounds(schema);
     case 'number':
@@ -121,77 +107,81 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
     case 'any':
     case 'unknown':
       return {};
-    case 'literal':
-      return literalValue(schema);
+    case 'literal': {
+      const values = d.values ?? [];
+      if (values.length === 1) return { const: values[0] };
+      return { enum: values };
+    }
     case 'enum': {
-      const values = [...(internals(schema)._zod?.values ?? [])];
-      if (values.length === 0 || values.some((value) =>
-        typeof value !== 'string' && (typeof value !== 'number' || !Number.isFinite(value))
-      )) {
+      // A numeric enum's `entries` carry reverse-mapped names; the runtime
+      // value set is what a client must be allowed to send.
+      const runtime = (schema as unknown as { _zod?: { values?: Set<unknown> } })._zod?.values;
+      const values = runtime ? [...runtime] : Object.values(d.entries ?? {});
+      if (
+        values.length === 0 ||
+        values.some(
+          (value) =>
+            typeof value !== 'string' &&
+            (typeof value !== 'number' || !Number.isFinite(value)),
+        )
+      ) {
         throw new Error('toJsonSchema does not support these enum values');
       }
       const types = [...new Set(values.map((value) => typeof value))];
       return { type: types.length === 1 ? types[0] : types, enum: values };
     }
     case 'array': {
-      const item = definition.element ? toJsonSchema(definition.element) : {};
+      const item = d.element ? toJsonSchema(d.element) : {};
       const out: JsonSchema = { type: 'array', items: item };
-      for (const check of checks(schema)) {
-        if (check.check === 'min_length' && typeof check.minimum === 'number') out.minItems = check.minimum;
-        if (check.check === 'max_length' && typeof check.maximum === 'number') out.maxItems = check.maximum;
+      for (const check of checksOf(schema)) {
+        if (check.check === 'min_length' && typeof check.minimum === 'number') {
+          out.minItems = check.minimum;
+        }
+        if (check.check === 'max_length' && typeof check.maximum === 'number') {
+          out.maxItems = check.maximum;
+        }
       }
       return out;
     }
     case 'record': {
-      const key = definition.keyType;
-      if (!key || def(key).type !== 'string' || def(key).coerce || checks(key).length > 0) {
+      const key = d.keyType;
+      if (!key || def(key).type !== 'string' || checksOf(key).length > 0) {
         throw new Error('toJsonSchema supports only unconstrained string record keys');
       }
       return {
         type: 'object',
-        additionalProperties: definition.valueType ? toJsonSchema(definition.valueType) : true,
+        additionalProperties: d.valueType ? toJsonSchema(d.valueType) : true,
       };
     }
-    case 'optional':
+    case 'optional': {
+      return d.innerType ? toJsonSchema(d.innerType) : {};
+    }
     case 'nullable': {
-      const inner = definition.innerType ? toJsonSchema(definition.innerType) : {};
-      if (type === 'nullable') {
-        return { anyOf: [inner, { type: 'null' }] };
-      }
-      return inner;
+      const inner = d.innerType ? toJsonSchema(d.innerType) : {};
+      return { anyOf: [inner, { type: 'null' }] };
     }
     case 'default':
-    case 'prefault':
-      // Defaults are applied by the server but are not part of the published
-      // shape; this keeps the generated document identical across zod majors.
-      return definition.innerType ? toJsonSchema(definition.innerType) : {};
+    case 'prefault': {
+      const inner = d.innerType ? toJsonSchema(d.innerType) : {};
+      return d.defaultValue === undefined ? inner : { ...inner, default: d.defaultValue };
+    }
+    case 'union':
+      return { anyOf: (d.options ?? []).map(toJsonSchema) };
     case 'object': {
-      const shape = definition.shape ?? internals(schema).shape ?? {};
       const properties: Record<string, JsonSchema> = {};
       const required: string[] = [];
-      for (const [key, value] of Object.entries(shape)) {
+      for (const [key, value] of Object.entries(d.shape ?? {})) {
         properties[key] = toJsonSchema(value);
-        const valueDef = def(value);
-        const optional =
-          valueDef.type === 'optional' ||
-          valueDef.type === 'default' ||
-          (valueDef.type === 'nullable' && internals(value).isOptional?.() === true) ||
-          internals(value).isOptional?.() === true;
-        if (!optional) required.push(key);
+        if (!isOptional(value)) required.push(key);
       }
       const out: JsonSchema = { type: 'object', properties };
       if (required.length > 0) out.required = required;
-      if (def(definition.catchall ?? ({} as z.ZodTypeAny)).type === 'never') {
-        out.additionalProperties = false;
-      }
+      const catchall = d.catchall?._zod?.def?.type;
+      if (catchall === 'never') out.additionalProperties = false;
+      else if (catchall === 'unknown' || catchall === 'any') out.additionalProperties = true;
       return out;
     }
-    case 'union': {
-      const raw = internals(schema).options ?? definition.options ?? [];
-      const options = raw instanceof Map ? [...raw.values()] : raw;
-      return { anyOf: options.map(toJsonSchema) };
-    }
     default:
-      throw new Error(`toJsonSchema does not support ${String(type)}`);
+      throw new Error(`toJsonSchema does not support ${String(d.type)}`);
   }
 }

@@ -23,6 +23,8 @@ import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { createRunSupervisor } from '../execution/supervisor.js';
+import { validateRemoteEndpoint } from '../configuration/endpoint.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
@@ -104,6 +106,14 @@ function buildGateway(input: ComposeInput): ModelGateway | null {
   const baseURL = env.CODERAX_INFERENCE_BASE_URL;
   const apiKey = env.CODERAX_INFERENCE_KEY;
   if (!baseURL || !apiKey) return null;
+  // A key may only cross the network inside TLS. This is a startup gate: a
+  // deployment that would send its credential in plaintext does not start.
+  const endpoint = validateRemoteEndpoint({
+    url: baseURL,
+    name: 'CODERAX_INFERENCE_BASE_URL',
+    carriesCredential: true,
+  });
+  if (!endpoint.ok) throw new StartupError([endpoint.detail]);
   return createOpenAiCompatibleGateway({
     baseURL,
     apiKey,
@@ -256,12 +266,22 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     eventId: ids.eventId,
     iso: clock.iso,
   });
+  const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({
     lease,
     clock,
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
+    // The composition root is where supervision exists in production. An
+    // adapter that ignored its abort may still be running; its capability and
+    // workspace are revoked here even if the service already moved on.
+    onAbandoned: async ({ token }) => {
+      await supervisor.abandon({
+        token,
+        reason: 'A cancelled adapter did not stop within the grace period.',
+      });
+    },
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -379,6 +399,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     scheduler,
     health,
     browser,
+    supervisor,
   });
   if (!container.dependencies) {
     throw new StartupError(

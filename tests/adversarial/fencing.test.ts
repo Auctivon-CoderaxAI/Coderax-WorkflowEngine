@@ -207,5 +207,5 @@ test('a cancellation that races the start is honored, not ignored', async () => 
     report: () => undefined,
   });
   assert.equal(observedAbort, false, 'an already-cancelled run must not reach the adapter');
-  assert.deepEqual(result, { outcome: { kind: 'cancelled' }, ownershipLost: false });
+  assert.deepEqual(result, { outcome: { kind: 'cancelled' }, ownershipLost: false, terminated: true });
 });

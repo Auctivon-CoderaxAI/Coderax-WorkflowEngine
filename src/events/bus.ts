@@ -4,6 +4,7 @@ import type {
   ExecutionEventType,
 } from '@coderax/contracts';
 import { EVENT_SCHEMA_VERSION } from '@coderax/contracts';
+import { redactValue } from '../observability/redact.js';
 
 export type EventDraft = {
   taskId: string;
@@ -94,7 +95,9 @@ export function createEventBus(input: {
         agent: draft.agent,
         generation: draft.generation,
         type: draft.type,
-        ...(draft.payload === undefined ? {} : { payload: draft.payload }),
+        // Redaction is enforced here, not by each producer: every event that is
+        // streamed or persisted has already crossed this line.
+        ...(draft.payload === undefined ? {} : { payload: redactValue(draft.payload) }),
       } as ExecutionEvent;
       append(state, event);
       return event;
@@ -108,8 +111,14 @@ export function createEventBus(input: {
         return { accepted: false, reason: 'out_of_order' };
       }
       state.seq = event.seq;
-      append(state, event);
-      return { accepted: true, event };
+      // Some event variants have no payload at all, so the field is read
+      // through a shape check rather than a discriminated-union member access.
+      const payload = (event as { payload?: unknown }).payload;
+      const safe = (
+        payload === undefined ? event : { ...event, payload: redactValue(payload) }
+      ) as ExecutionEvent;
+      append(state, safe);
+      return { accepted: true, event: safe };
     },
     replay: (taskId, after) => {
       const state = streams.get(taskId);

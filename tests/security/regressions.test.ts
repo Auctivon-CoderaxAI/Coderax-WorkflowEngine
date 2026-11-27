@@ -291,6 +291,7 @@ regression('F6', 'cancellation is bounded and a late report never reaches the bu
   assert.deepEqual(result, {
     outcome: { kind: 'cancelled', abandoned: true },
     ownershipLost: false,
+    terminated: false,
   });
   assert.ok(Date.now() - started < 1_000);
 });

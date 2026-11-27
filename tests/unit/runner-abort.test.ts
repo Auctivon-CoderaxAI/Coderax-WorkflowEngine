@@ -84,6 +84,7 @@ test('an adapter that throws on abort is cancelled, not reported as a provider f
   assert.deepEqual(await running, {
     outcome: { kind: 'cancelled' },
     ownershipLost: false,
+    terminated: true,
   });
 });
 

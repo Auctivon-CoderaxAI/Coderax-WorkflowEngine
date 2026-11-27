@@ -321,18 +321,20 @@ test('SEC-10: a foreign conversation id cannot inject a turn or a task', async (
     assert.ok(submitted.ok);
     await started.app.dependencies.scheduler.idle();
 
-    await assert.rejects(
-      started.app.service.submitWork(other, {
-        objective: 'injected objective',
-        conversationId: submitted.value.conversationId,
-        mode: 'cloud',
-        requireApproval: true,
-      }),
-    );
-    const messages = await started.app.dependencies.conversations.messages(
-      submitted.value.conversationId,
-    );
-    assert.equal(messages.filter((message) => message.text === 'injected objective').length, 0);
+    const injected = await started.app.service.submitWork(other, {
+      objective: 'injected objective',
+      conversationId: submitted.value.conversationId,
+      mode: 'cloud',
+      requireApproval: true,
+    });
+    assert.equal(injected.ok, false);
+    assert.equal(injected.ok === false && injected.code, 'conflict');
+    const messages = await started.app.dependencies.conversations.messages({
+      ownerId: principal.ownerId,
+      conversationId: submitted.value.conversationId,
+      mode: 'cloud',
+    });
+    assert.equal((messages ?? []).filter((message) => message.text === 'injected objective').length, 0);
     assert.equal((await started.app.dependencies.tasks.listByOwner(other.ownerId)).length, 0);
   } finally {
     await started.close();
