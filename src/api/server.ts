@@ -3,13 +3,13 @@ import type { Router } from './router.js';
 
 const MAX_BODY_BYTES = 1_048_576;
 
-function readBody(request: IncomingMessage): Promise<string> {
+function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         reject(new Error('request body is too large'));
         // Do not destroy the socket before the typed 413 is written. Pause the
         // stream here; the request handler drains or closes it after responding.
@@ -49,7 +49,12 @@ export function createHttpServer(input: {
       let bodyText = '';
       try {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          bodyText = await readBody(request);
+          const limit =
+            input.router.bodyLimit(
+              request.method ?? 'GET',
+              request.url ?? '/',
+            ) ?? MAX_BODY_BYTES;
+          bodyText = await readBody(request, limit);
         }
       } catch {
         // The client may still be writing. Drain it so the response is not lost,
@@ -57,10 +62,10 @@ export function createHttpServer(input: {
         request.resume();
         response.setHeader('connection', 'close');
         sendJson(response, 413, {
-          type: 'https://coderax.dev/problems/validation_failed',
-          title: 'validation failed',
+          type: 'https://coderax.dev/problems/payload_too_large',
+          title: 'payload too large',
           status: 413,
-          code: 'validation_failed',
+          code: 'payload_too_large',
           detail: 'The request body is too large.',
           retryable: false,
         });

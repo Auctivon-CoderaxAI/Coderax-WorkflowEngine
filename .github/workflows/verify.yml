@@ -27,6 +27,12 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # A permanent, real MongoDB lane. The scheduling and artifact durability
+    # suites refuse to skip when their REQUIRE flag is set, so a missing or
+    # unreachable service fails the required check instead of reporting a green
+    # skip. The service is an ephemeral, pinned container on the standard
+    # free public-repository runner path; no managed database, production
+    # credential or paid minutes are added.
     services:
       mongodb:
         # Pinned so the gate cannot silently change server behavior. No
@@ -42,6 +48,8 @@ jobs:
     env:
       CODERAX_REQUIRE_MONGO: '1'
       CODERAX_TEST_MONGO_URI: mongodb://127.0.0.1:27017/coderax_ci
+      CODERAX_REQUIRE_MONGODB: '1'
+      CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

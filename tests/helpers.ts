@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ModelGateway } from '../src/agents/native/types.js';
 import type { BrowserProvider } from '../src/browser/types.js';
+import type { MongoConnector, MongoDatabase } from '../src/persistence/mongo-connect.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -183,6 +184,8 @@ export async function startTestApp(options: {
   config?: Record<string, unknown>;
   browser?: BrowserProvider;
   env?: NodeJS.ProcessEnv;
+  /** A shared database, so two app instances can prove they read the same rows. */
+  persistence?: { database?: MongoDatabase; connect?: MongoConnector };
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -196,6 +199,7 @@ export async function startTestApp(options: {
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, ...(options.env ?? {}) },
     gateway: options.gateway ?? fakeGateway(),
     ...(options.browser ? { browserProvider: options.browser } : {}),
+    ...(options.persistence ? { persistence: options.persistence } : {}),
   });
   const { url } = await app.start();
   return {

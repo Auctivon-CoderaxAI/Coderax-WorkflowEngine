@@ -151,6 +151,7 @@ function testIds(): IdGenerator {
     receipt: () => next('rcpt'),
     browserSessionId: () => next('bs'),
     browserArtifactId: () => next('baf'),
+    artifactId: () => next('art'),
   };
 }
 

@@ -30,6 +30,12 @@ const ALLOWED_DIRECT = new Set([
   'typescript',
   '@types/node',
   'mongodb',
+  // Artifact generators: each writes one documented office/media container
+  // locally so generation needs no external service.
+  'docx',
+  'exceljs',
+  'pdf-lib',
+  'pptxgenjs',
 ]);
 
 function manifest(relative: string): Manifest {

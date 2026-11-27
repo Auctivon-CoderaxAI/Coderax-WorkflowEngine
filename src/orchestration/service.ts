@@ -14,6 +14,8 @@ import type {
   BrowserSessionList,
   BrowserTakeoverRequest,
   BrowserTakeoverResult,
+  ArtifactGenerationRequest,
+  ArtifactGenerationResult,
   BudgetState,
   ChatReply,
   ChatRequest,
@@ -79,6 +81,8 @@ import {
   removeRunWorkspaceIfEmpty,
   workspaceRoots,
 } from '../execution/workspace.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { ArtifactGenerator } from '../artifacts/generate.js';
 import { buildTranscript } from './transcript.js';
 import type { BrowserService } from './browser.js';
 import { resolveReasoningMode } from '../agents/native/reason.js';
@@ -99,6 +103,8 @@ export type ApplicationServiceDeps = {
   notifications: NotificationStore;
   schedules: ScheduleRepository;
   scheduleNotices: ScheduleNoticeStore;
+  artifactService: ArtifactService;
+  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -204,6 +210,13 @@ export type ApplicationService = {
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
   notifications: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
+  /** Durable artifact storage; the only path that returns artifact bytes. */
+  artifacts: ArtifactService;
+  /** Renders a deliverable and persists it through the artifact tree adapter. */
+  generateArtifact: (
+    principal: Principal,
+    request: ArtifactGenerationRequest,
+  ) => Promise<ServiceResult<ArtifactGenerationResult>>;
   events: (
     principal: Principal,
     taskId: string,
@@ -1639,7 +1652,29 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           }));
         }
       }
-      return ok(toStatus(task));
+      const status = toStatus(task);
+      // Result artifacts are read from the artifact service rather than copied
+      // into the fenced task row. The task remains the authority on state; the
+      // artifact store is the authority on files, and a download can be made
+      // from exactly the descriptors reported here.
+      const listed = await deps.artifactService.list(principal, {
+        mode: task.mode,
+        taskId: task.taskId,
+        limit: 100,
+      });
+      if (listed.ok && listed.value.artifacts.length > 0) {
+        status.result = {
+          ...(status.result ?? {}),
+          artifacts: listed.value.artifacts.map((artifact) => ({
+            // A generated source tree keeps its directory-relative path; a flat
+            // artifact falls back to its file name. Neither is a host path.
+            path: artifact.relativePath ?? artifact.filename,
+            bytes: artifact.bytes,
+            digest: artifact.sha256,
+          })),
+        };
+      }
+      return ok(status);
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -2000,6 +2035,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (includeSchedules) await deps.scheduleNotices.markAllRead(principal.ownerId);
       return service.notifications(principal, includeSchedules);
     },
+
+    artifacts: deps.artifactService,
+
+    generateArtifact: (principal, request) =>
+      deps.artifactGenerator.generate(principal, {
+        projectId: request.projectId,
+        request: request.deliverable,
+        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
+        ...(request.taskId ? { taskId: request.taskId } : {}),
+        ...(request.retentionDays !== undefined
+          ? { retentionDays: request.retentionDays }
+          : {}),
+      }),
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);

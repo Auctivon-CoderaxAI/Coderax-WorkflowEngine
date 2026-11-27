@@ -24,7 +24,16 @@ import {
   WorkSubmitRequest,
 } from './tasks.js';
 import { z as zod } from 'zod';
-import { BrowserArtifactId, BrowserSessionId, ConversationId, ScheduleId, TaskId } from './primitives.js';
+import {
+  ArtifactId,
+  BrowserArtifactId,
+  BrowserSessionId,
+  ConversationId,
+  DataMode,
+  ProjectId,
+  ScheduleId,
+  TaskId,
+} from './primitives.js';
 import {
   BrowserAction,
   BrowserActionResult,
@@ -53,6 +62,27 @@ import {
   ScheduleUpdateRequest,
 } from './schedules.js';
 
+import {
+  ARTIFACT_BODY_LIMIT_BYTES,
+  ArtifactContent,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactGenerationRequest,
+  ArtifactGenerationResult,
+  ArtifactKind,
+  ArtifactManifestQuery,
+  ArtifactModeRequest,
+  ArtifactProjectManifest,
+  ArtifactPruneResult,
+  ArtifactRestoreRequest,
+  ArtifactUploadRequest,
+  ArtifactUploadResult,
+  ArtifactVersionList,
+  ArtifactVersionRequest,
+} from './artifacts.js';
+
 /**
  * The single authoritative HTTP surface.
  *
@@ -80,6 +110,12 @@ export type RouteSpec = {
   response: { status: number; description: string; schema: z.ZodTypeAny };
   /** Server-sent events rather than a single JSON body. */
   stream?: boolean;
+  /**
+   * Per-operation JSON body ceiling. Absent means the transport default. Only a
+   * route that carries encoded file content may raise it, so an ordinary write
+   * cannot be made to buffer an unbounded body.
+   */
+  maxBodyBytes?: number;
 };
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
@@ -92,6 +128,28 @@ const ExecutionHistoryQuery = zod
   .strict();
 const UpcomingQuery = zod
   .object({ limit: zod.coerce.number().int().positive().max(20).optional() })
+  .strict();
+
+const ArtifactParams = zod.object({ artifactId: ArtifactId }).strict();
+
+const ArtifactListQuery = zod
+  .object({
+    mode: DataMode.optional(),
+    kind: ArtifactKind.optional(),
+    projectId: ProjectId.optional(),
+    conversationId: ConversationId.optional(),
+    taskId: TaskId.optional(),
+    limit: zod.coerce.number().int().min(1).max(500).optional(),
+  })
+  .strict();
+
+const ArtifactModeQuery = zod.object({ mode: DataMode.optional() }).strict();
+
+const ArtifactContentQuery = zod
+  .object({
+    mode: DataMode.optional(),
+    version: zod.coerce.number().int().positive().optional(),
+  })
   .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
@@ -523,6 +581,141 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     query: ExecutionHistoryQuery,
     response: { status: 200, description: 'Execution history', schema: ScheduleExecutionList },
   },
+  {
+    operationId: 'listArtifacts',
+    method: 'GET',
+    path: '/v1/artifacts',
+    summary: 'Owner-scoped durable artifacts in one data-mode partition.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    query: ArtifactListQuery,
+    response: { status: 200, description: 'Artifact list and storage quota', schema: ArtifactDescriptorList },
+  },
+  {
+    operationId: 'artifactProjectManifest',
+    method: 'GET',
+    path: '/v1/artifacts/manifest',
+    summary: 'Version-pinned manifest for one project, with a digest of the entry list.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    query: ArtifactManifestQuery,
+    response: { status: 200, description: 'Project artifact manifest', schema: ArtifactProjectManifest },
+  },
+  {
+    operationId: 'generateArtifact',
+    method: 'POST',
+    path: '/v1/artifacts/generate',
+    summary: 'Generate a document, spreadsheet, presentation or source tree and persist it durably.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: ArtifactGenerationRequest,
+    maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+    response: {
+      status: 201,
+      description: 'Generated project manifest and verification checks',
+      schema: ArtifactGenerationResult,
+    },
+  },
+  {
+    operationId: 'uploadArtifact',
+    method: 'POST',
+    path: '/v1/artifacts',
+    summary: 'Store a new artifact version from base64-encoded bytes.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: ArtifactUploadRequest,
+    maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+    response: { status: 201, description: 'Stored artifact', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'pruneArtifacts',
+    method: 'POST',
+    path: '/v1/artifacts/prune',
+    summary: 'Delete this owner’s artifacts whose retention has expired.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: ArtifactModeRequest,
+    response: { status: 200, description: 'Prune result', schema: ArtifactPruneResult },
+  },
+  {
+    operationId: 'getArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}',
+    summary: 'Authoritative metadata for one artifact in the requested mode.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactModeQuery,
+    response: { status: 200, description: 'Artifact descriptor', schema: ArtifactDescriptor },
+  },
+  {
+    operationId: 'uploadArtifactVersion',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/versions',
+    summary: 'Append a new immutable version to an existing artifact.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactVersionRequest,
+    maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+    response: { status: 201, description: 'Stored artifact version', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'restoreArtifactVersion',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/restore',
+    summary: 'Point an artifact at an existing immutable version without deleting newer ones.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactRestoreRequest,
+    response: { status: 200, description: 'Restored artifact version', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'listArtifactVersions',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/versions',
+    summary: 'Retained version history for one artifact, newest last.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactModeQuery,
+    response: { status: 200, description: 'Artifact version list', schema: ArtifactVersionList },
+  },
+  {
+    operationId: 'downloadArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/content',
+    summary: 'Exact bytes of one artifact version, integrity-verified on read.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactContentQuery,
+    response: { status: 200, description: 'Artifact content', schema: ArtifactContent },
+  },
+  {
+    operationId: 'exportArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/export',
+    summary: 'Portable export: descriptor, version manifest and exact bytes.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactContentQuery,
+    response: { status: 200, description: 'Artifact export', schema: ArtifactExport },
+  },
+  {
+    operationId: 'deleteArtifact',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/delete',
+    summary: 'Delete an artifact and every retained version it owns.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactModeRequest,
+    response: { status: 200, description: 'Delete result', schema: ArtifactDeleteResult },
+  },
+
 ]);
 
 export const ROUTE_INDEX: ReadonlyMap<string, RouteSpec> = new Map(

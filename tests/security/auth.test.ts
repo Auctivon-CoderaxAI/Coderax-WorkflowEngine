@@ -75,7 +75,7 @@ test('an oversized request body is refused before parsing', async () => {
     });
     assert.equal(response.status, 413);
     const body = (await response.json()) as { code: string };
-    assert.equal(body.code, 'validation_failed');
+    assert.equal(body.code, 'payload_too_large');
   } finally {
     await started.close();
   }

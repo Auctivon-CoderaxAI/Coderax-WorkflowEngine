@@ -19,6 +19,8 @@ import type { RunSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { BrowserService } from '../orchestration/browser.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { ArtifactGenerator } from '../artifacts/generate.js';
 import type { Router } from '../api/router.js';
 
 /**
@@ -45,6 +47,8 @@ export type InfrastructureDependencies = {
   notifications: NotificationStore;
   schedules: ScheduleRepository;
   scheduleNotices: ScheduleNoticeStore;
+  artifactService: ArtifactService;
+  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -70,6 +74,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'notifications',
   'schedules',
   'scheduleNotices',
+  'artifactService',
+  'artifactGenerator',
   'audit',
   'events',
   'runner',

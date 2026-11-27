@@ -16,6 +16,7 @@ export type IdGenerator = {
   conversationId: () => string;
   taskId: () => string;
   messageId: () => string;
+  artifactId: () => string;
   eventId: () => string;
   scheduleId: () => string;
   executionId: () => string;
@@ -33,6 +34,7 @@ export function createIdGenerator(): IdGenerator {
     conversationId: () => `conv_${randomUUID()}`,
     taskId: () => `task_${randomUUID()}`,
     messageId: () => `msg_${randomUUID()}`,
+    artifactId: () => `art_${randomUUID()}`,
     eventId: () => `evt_${randomUUID()}`,
     scheduleId: () => `sch_${randomUUID()}`,
     executionId: () => `exe_${randomUUID()}`,
