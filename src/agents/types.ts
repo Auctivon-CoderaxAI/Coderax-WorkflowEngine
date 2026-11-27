@@ -159,6 +159,8 @@ export type AgentRunOutcome =
       code: EngineFailureCode;
       detail: string;
       retryable: boolean;
+      /** True only when the adapter knows the objective was never dispatched. */
+      preDispatch?: true;
       requests?: number;
     };
 

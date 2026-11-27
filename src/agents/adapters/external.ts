@@ -129,6 +129,7 @@ export function createExternalAgentAdapter(options: ExternalAdapterOptions): Age
           detail: probed.detail,
           // Nothing was dispatched, so replaying on this engine is safe.
           retryable: true,
+          preDispatch: true,
         };
       }
       if (request.signal.aborted) {

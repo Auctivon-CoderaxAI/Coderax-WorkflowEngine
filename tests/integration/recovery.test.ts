@@ -489,6 +489,7 @@ test('a retryable pre-dispatch failure is replayed inside the same lease and gen
           code: 'server_unavailable',
           detail: 'The endpoint refused before dispatch.',
           retryable: true,
+          preDispatch: true,
         };
       }
       report({ type: 'text.delta', text: 'final answer' });
@@ -529,7 +530,7 @@ test('a retryable pre-dispatch failure is replayed inside the same lease and gen
   }
 });
 
-test('a failure the adapter did not mark retryable is not replayed automatically', async () => {
+test('an ambiguous post-dispatch failure is not replayed automatically even when retryable', async () => {
   const started = await startTestApp({
     config: {
       execution: { maxAttempts: 3, retryDelayMs: 0, leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
@@ -545,7 +546,7 @@ test('a failure the adapter did not mark retryable is not replayed automatically
         ok: false,
         code: 'provider_error',
         detail: 'The provider failed after accepting the request.',
-        retryable: false,
+        retryable: true,
       };
     };
 

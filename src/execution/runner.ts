@@ -232,7 +232,7 @@ export function createTaskRunner(input: {
               code: outcome.code,
               detail: outcome.detail,
               retryable: outcome.retryable,
-              adapterRetryableStart: outcome.retryable,
+              adapterRetryableStart: outcome.retryable && outcome.preDispatch === true,
             },
             ownershipLost: false,
           };

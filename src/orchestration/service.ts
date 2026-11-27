@@ -41,7 +41,7 @@ import { ConversationModeConflict, type ConversationRepository } from '../persis
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
-import type { TaskRunner, RunOutcome } from '../execution/runner.js';
+import type { TaskRunner, RunOutcome, RunResult } from '../execution/runner.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type {
   AgentAdapter,
@@ -569,7 +569,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // state, not an assistant answer, and the summary is already on the result.
     const answer = checkpoint.resumeText || checkpoint.text || '';
     const text = answer.slice(0, 20_000);
-    if (text.length > 0) {
+    if (text.length > 0 && task.state !== 'interrupted') {
       try {
         const messageId = `${task.taskId}:g${task.generation}:assistant`;
         const messages = await deps.conversations.messages(task.conversationId);
@@ -812,6 +812,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         code: 'server_unavailable',
         detail: 'The execution event log is unavailable; the run was not started.',
         retryable: true,
+        adapterRetryableStart: true,
       });
       return;
     }
@@ -1095,15 +1096,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
      * runs under the heartbeat; the post-loop fallback covers a last attempt
      * whose retry the lease had no room for.
      */
-    const persistSettlement = async (outcome: RunOutcome, ownershipLost: boolean): Promise<void> => {
-      if (ownershipLost || controllers.get(taskId) !== controller) return;
+    const persistSettlement = async (current: () => RunResult): Promise<void> => {
+      if (current().ownershipLost || controllers.get(taskId) !== controller) return;
+      let { outcome } = current();
       // A shutdown abort is not an owner cancellation: the reclaim pass retires
       // the run as `interrupted`.
       if (stopping && outcome.kind === 'cancelled') return;
       acceptingReports = false;
       emitText(redactContent(text));
       await checkpointChain;
-      if (controllers.get(taskId) !== controller) return;
+      const latest = current();
+      if (latest.ownershipLost || controllers.get(taskId) !== controller) return;
+      outcome = latest.outcome;
+      if (stopping && outcome.kind === 'cancelled') return;
+      const live = await deps.lease.read({ key: workRunKey(scopeOf(started.task)), now: deps.clock.now() });
+      if (!live?.live || live.token !== token || current().ownershipLost) return;
+      if (live.cancelRequested) outcome = { kind: 'cancelled' };
       await settle(
         started.task,
         token,
@@ -1176,11 +1184,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
                       ),
                       executed: state.executed.map((entry) => ({ ...entry })),
                     };
-                    return (await deps.tasks.updateFenced({
-                      taskId,
-                      token,
-                      patch: { checkpoint: checkpointNow() },
-                    })).applied;
+                    const patch = { checkpoint: checkpointNow() };
+                    const write = checkpointChain.then(() => deps.tasks.updateFenced({ taskId, token, patch }));
+                    checkpointChain = write.then(() => undefined, () => undefined);
+                    checkpointWrites.set(token, checkpointChain);
+                    return (await write).applied;
                   },
                   saveStepResult: async (result) => {
                     // The step.completed report already carries this result into
@@ -1205,10 +1213,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
         settle: async (current) => {
           const { outcome, ownershipLost } = current();
+          if (ownershipLost) return;
           // A retry owns the next write; settling here would make the retried
           // attempt look like a second terminal transition.
           if (willRetry(outcome, attempt)) return;
-          await persistSettlement(outcome, ownershipLost);
+          await persistSettlement(current);
         },
       });
 
@@ -1228,10 +1237,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         result = await runOnce(attempt);
         lastOutcome = result.outcome;
       }
-      if (!terminalWrite && !stopping && !controller.signal.aborted && !result.ownershipLost) {
-        // The final attempt was retryable but the lease had no room for another
-        // try, so the runner's settle callback skipped it. Record it now.
-        await persistSettlement(result.outcome, result.ownershipLost);
+      if (!terminalWrite && !stopping && !result.ownershipLost) {
+        // A cancellation during backoff still needs a fenced terminal write.
+        // persistSettlement rechecks the actual lease before writing.
+        await persistSettlement(() => controller.signal.aborted
+          ? { outcome: { kind: 'cancelled' }, ownershipLost: false }
+          : result);
       }
     } finally {
       if (held) {
