@@ -6,11 +6,11 @@ import type {
   ArtifactVersionRequest,
   DataMode,
 } from '@coderax/contracts';
-import { buildHandshake, ROUTES } from '@coderax/contracts';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { RouteRegistry } from './router.js';
 import { problemResult } from './router.js';
 import type { ServiceFailure } from '../support/result.js';
+import { buildHandshake, type HandshakeContext } from './handshake.js';
 
 /**
  * Route handlers are wiring, not behavior.
@@ -105,7 +105,11 @@ async function* toEventStream(stream: {
   }
 }
 
-export function registerRoutes(registry: RouteRegistry, service: ApplicationService): void {
+export function registerRoutes(
+  registry: RouteRegistry,
+  service: ApplicationService,
+  handshake: HandshakeContext,
+): void {
   registry.register('getHealth', async () => ({
     kind: 'json',
     status: 200,
@@ -116,14 +120,6 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     kind: 'json',
     status: 200,
     body: await service.readiness(),
-  }));
-
-  // A projection of the catalogue the registry was built from, so it cannot
-  // advertise an operation this deployment did not register.
-  registry.register('getHandshake', async () => ({
-    kind: 'json',
-    status: 200,
-    body: buildHandshake(ROUTES),
   }));
 
   registry.register('listAgents', async () => ({
@@ -718,5 +714,19 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getHandshake', async (context) => {
+    const requested = context.query.contract;
+    const fingerprint = context.query.fingerprint;
+    return {
+      kind: 'json',
+      status: 200,
+      body: buildHandshake({
+        context: handshake,
+        ...(typeof requested === 'string' ? { requested } : {}),
+        ...(typeof fingerprint === 'string' ? { fingerprint } : {}),
+      }),
+    };
   });
 }

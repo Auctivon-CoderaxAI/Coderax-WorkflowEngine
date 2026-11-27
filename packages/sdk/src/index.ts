@@ -18,10 +18,10 @@ import {
   ArtifactPruneResult,
   ArtifactUploadResult,
   ArtifactVersionList,
+  CapabilityHandshake,
   ChatReply,
   Conversation,
   ConversationList,
-  EngineHandshake,
   ExecutionEvent,
   GameBuild,
   GameBuildList,
@@ -261,15 +261,20 @@ export class CoderaxClient {
     return this.request<HealthReport>(HealthReport, { method: 'GET', path: '/v1/health' });
   }
 
-  readiness(): Promise<ReadinessReport> {
-    return this.request<ReadinessReport>(ReadinessReport, { method: 'GET', path: '/v1/ready' });
-  }
-
-  handshake(): Promise<EngineHandshake> {
-    return this.request<EngineHandshake>(EngineHandshake, {
+  /**
+   * The first call a client should make. It carries the served contract, the
+   * catalogue fingerprint and the operations this build actually publishes.
+   */
+  handshake(input: { contract?: string; fingerprint?: string } = {}): Promise<CapabilityHandshake> {
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
       method: 'GET',
       path: '/v1/handshake',
+      query: { contract: input.contract, fingerprint: input.fingerprint },
     });
+  }
+
+  readiness(): Promise<ReadinessReport> {
+    return this.request<ReadinessReport>(ReadinessReport, { method: 'GET', path: '/v1/ready' });
   }
 
   agents(): Promise<AgentList> {

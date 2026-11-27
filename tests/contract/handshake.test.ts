@@ -1,50 +1,58 @@
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { buildHandshake, CONTRACT_VERSION, ROUTES } from '@coderax/contracts';
-import { CoderaxClient } from '@coderax/sdk';
-import { OWNER_TOKEN, startTestApp } from '../helpers.js';
+import {
+  CONTRACT_FINGERPRINT,
+  CONTRACT_VERSION,
+  ROUTE_INDEX,
+  contractFingerprint,
+  negotiateContract,
+} from '@coderax/contracts';
 
-/**
- * The handshake is a projection, not a second list.
- *
- * A client uses it to decide whether a deployment implements the operations it
- * needs, so it must describe exactly the published catalogue — no extra promise
- * and no missing operation.
- */
-
-test('the handshake describes every published operation exactly once', () => {
-  const handshake = buildHandshake(ROUTES);
-
-  assert.equal(handshake.engineName, 'coderax-workflow-engine');
-  assert.equal(handshake.contractVersion, CONTRACT_VERSION);
-  assert.equal(handshake.apiPrefix, '/v1');
-  assert.equal(handshake.operations.length, ROUTES.length);
-
-  const ids = handshake.operations.map((operation) => operation.operationId);
-  assert.equal(new Set(ids).size, ids.length);
-  assert.deepEqual([...ids].sort(), ROUTES.map((route) => route.operationId).sort());
-
-  for (const operation of handshake.operations) {
-    const route = ROUTES.find((candidate) => candidate.operationId === operation.operationId);
-    assert.ok(route);
-    assert.equal(operation.method, route.method);
-    assert.equal(operation.path, route.path);
-    assert.equal(operation.auth, route.auth);
-    assert.equal(operation.stream, route.stream === true);
-    assert.equal(operation.maxBodyBytes, route.maxBodyBytes);
-  }
+test('the handshake is published exactly once and is reachable without auth', () => {
+  const route = ROUTE_INDEX.get('getHandshake');
+  assert.ok(route, 'getHandshake must be declared in the catalogue');
+  assert.equal(route.method, 'GET');
+  assert.equal(route.path, '/v1/handshake');
+  assert.equal(route.auth, 'public');
+  const samePath = [...ROUTE_INDEX.values()].filter((entry) => entry.path === '/v1/handshake');
+  assert.equal(samePath.length, 1, 'one path, one operation');
 });
 
-test('a client reads the handshake from a running engine', async () => {
-  const started = await startTestApp();
-  try {
-    const client = new CoderaxClient({ baseUrl: started.url, token: OWNER_TOKEN });
-    const handshake = await client.handshake();
-    assert.equal(handshake.contractVersion, CONTRACT_VERSION);
-    assert.equal(handshake.operations.length, ROUTES.length);
-    assert.ok(handshake.operations.some((operation) => operation.operationId === 'submitWork'));
-    assert.ok(handshake.operations.some((operation) => operation.operationId === 'uploadArtifact'));
-  } finally {
-    await started.close();
-  }
+test('negotiation accepts the served version and an older advertised one', () => {
+  assert.equal(negotiateContract(CONTRACT_VERSION).negotiation, 'exact');
+  const older = negotiateContract('1.0.0');
+  assert.equal(older.compatible, true);
+  assert.equal(older.negotiation, 'client_supported');
+  assert.equal(older.negotiatedContractVersion, '1.0.0');
+  assert.equal(negotiateContract(undefined).negotiation, 'no_request');
+});
+
+test('negotiation refuses a newer minor, a foreign major and an unparseable value', () => {
+  assert.equal(negotiateContract('1.99.0').negotiation, 'client_ahead');
+  assert.equal(negotiateContract('1.99.0').compatible, false);
+  assert.equal(negotiateContract('2.0.0').negotiation, 'unsupported_major');
+  assert.equal(negotiateContract('not-a-version').negotiation, 'unparseable');
+});
+
+test('a matching version with a different catalogue is a fingerprint mismatch', () => {
+  const result = negotiateContract(CONTRACT_VERSION, {
+    provided: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+    expected: CONTRACT_FINGERPRINT,
+  });
+  assert.equal(result.compatible, false);
+  assert.equal(result.negotiation, 'fingerprint_mismatch');
+
+  const matching = negotiateContract(CONTRACT_VERSION, {
+    provided: CONTRACT_FINGERPRINT,
+    expected: CONTRACT_FINGERPRINT,
+  });
+  assert.equal(matching.compatible, true);
+});
+
+test('the fingerprint pins operation identity, so two versions cannot collide silently', () => {
+  const first = contractFingerprint([{ operationId: 'a', method: 'GET', path: '/v1/a' }]);
+  const second = contractFingerprint([{ operationId: 'a', method: 'GET', path: '/v1/b' }]);
+  assert.notEqual(first, second);
+  assert.match(first, /^sha256:[0-9a-f]{64}$/);
+  assert.match(CONTRACT_FINGERPRINT, /^sha256:[0-9a-f]{64}$/);
 });
