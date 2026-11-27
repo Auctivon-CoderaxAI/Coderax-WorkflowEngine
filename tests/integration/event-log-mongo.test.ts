@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import type { ExecutionEvent } from '@coderax/contracts';
 import { createEventBus, type SeqAuthority } from '../../src/events/bus.js';
 import {
@@ -35,6 +35,10 @@ import { startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const maybeMongo = await startRealMongo();
 requireRealMongo(maybeMongo);
+
+after(async () => {
+  await maybeMongo?.stop();
+});
 
 const skip =
   maybeMongo === null
@@ -237,7 +241,6 @@ test(
     } finally {
       await primary.close().catch(() => undefined);
       await replica.close().catch(() => undefined);
-      await real.stop();
     }
   },
 );
@@ -333,7 +336,6 @@ test(
       }
     } finally {
       for (const connection of connections) await connection.close().catch(() => undefined);
-      await real.stop();
     }
   },
 );
@@ -417,7 +419,6 @@ test(
     } finally {
       await owner.close().catch(() => undefined);
       await replica.close().catch(() => undefined);
-      await real.stop();
     }
   },
 );
@@ -519,7 +520,6 @@ test(
     } finally {
       await first.close().catch(() => undefined);
       await second.close().catch(() => undefined);
-      await real.stop();
     }
   },
 );
@@ -535,10 +535,9 @@ test(
 
     try {
       const collection = database.collection('events_retained');
-      // The server's TTL monitor sweeps about once a minute, so the window has to
-      // be longer than one sweep: the rows stamped an hour ago are already past it
-      // and go on the next pass, while the rows written now are still inside it.
-      await ensureEventIndexes(collection, { retentionSeconds: 120 });
+      // Keep new rows within the window for the entire polling budget. The rows
+      // stamped an hour ago remain expired when the server's TTL monitor runs.
+      await ensureEventIndexes(collection, { retentionSeconds: 300 });
       let stamp = Date.now() - 3_600_000;
       const tasks = createMongoTaskRepository(database.collection('tasks_retained'));
       const created = await tasks.create(
@@ -603,7 +602,6 @@ test(
       );
     } finally {
       await database.close().catch(() => undefined);
-      await real.stop();
     }
   },
 );

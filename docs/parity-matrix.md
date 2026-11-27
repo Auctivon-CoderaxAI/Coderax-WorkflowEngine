@@ -35,7 +35,7 @@ Status vocabulary:
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/store.ts` (one row per event, unique `(taskId, seq)` and `eventId`, TTL retention) with the sequence allocated on the fenced task row and an SSE metadata frame | Preserved (fake-verified; no live DB, TTL expiry not exercised) |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/store.ts` (one row per event, unique `(taskId, seq)` and `eventId`, TTL retention) with the sequence allocated on the fenced task row and an SSE metadata frame | Preserved (real MongoDB replay and TTL expiry covered; see verification status) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
