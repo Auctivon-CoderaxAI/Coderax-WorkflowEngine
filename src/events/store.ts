@@ -166,4 +166,3 @@ export function createMongoEventStore(input: {
     has: async (eventId) => (await input.collection.findOne({ eventId })) !== null,
   };
 }
-

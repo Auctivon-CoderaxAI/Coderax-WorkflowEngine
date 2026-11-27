@@ -60,13 +60,6 @@ export type EventBus = {
   lastSeq: (taskId: string) => Promise<number>;
 };
 
-const TERMINAL: ReadonlySet<ExecutionEventType> = new Set([
-  'task.completed',
-  'task.failed',
-  'task.cancelled',
-  'task.interrupted',
-]);
-
 export function createEventBus(input: {
   store: EventStore;
   seq: SeqAuthority;
@@ -74,11 +67,6 @@ export function createEventBus(input: {
   pollMs: number;
   eventId: () => string;
   iso: () => string;
-  log?: EventLog;
-  /** Pending events held before the oldest deltas are dropped. */
-  maxPending?: number;
-  /** Events kept per task after a terminal flush. */
-  retain?: number;
 }): EventBus {
   return {
     publish: async (draft) => {

@@ -324,8 +324,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     pollMs: config.execution.eventPollMs,
     eventId: ids.eventId,
     iso: clock.iso,
-    log: persistence.events,
-    retain: config.execution.eventRetain,
   });
   const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({

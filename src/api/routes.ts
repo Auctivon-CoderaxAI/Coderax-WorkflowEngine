@@ -188,7 +188,11 @@ export function registerRoutes(
 
   registry.register('streamTaskEvents', async (context) => {
     const after = context.query.after;
-    const cursor = typeof after === 'number' ? after : 0;
+    const fromQuery = typeof after === 'number' ? after : 0;
+    const fromHeader = Number(context.lastEventId ?? 0);
+    const cursor = Number.isSafeInteger(fromHeader) && fromHeader >= 0
+      ? Math.max(fromQuery, fromHeader)
+      : fromQuery;
     const result = await service.events(context.principal, context.params.taskId ?? '', cursor);
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'sse', status: 200, events: toEventStream(result.value) };

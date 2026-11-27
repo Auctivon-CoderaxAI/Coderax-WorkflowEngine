@@ -11,6 +11,7 @@ export type RequestContext = {
   body: unknown;
   requestId: string;
   signal?: AbortSignal;
+  lastEventId?: string | undefined;
 };
 
 /**
@@ -37,6 +38,7 @@ export type RawRequest = {
   authorization: string | undefined;
   bodyText: string;
   signal?: AbortSignal;
+  lastEventId?: string | undefined;
 };
 
 export type RouterResult =
@@ -238,6 +240,7 @@ export function createRouter(input: {
             body,
             requestId,
             signal: raw.signal,
+            lastEventId: raw.lastEventId,
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);
