@@ -40,6 +40,19 @@ export type ScheduleId = z.infer<typeof ScheduleId>;
 export const ExecutionId = identifier('schedule execution identifier');
 export type ExecutionId = z.infer<typeof ExecutionId>;
 
+export const ArtifactId = identifier('artifact identifier');
+export type ArtifactId = z.infer<typeof ArtifactId>;
+
+export const ProjectId = identifier('project identifier');
+export type ProjectId = z.infer<typeof ProjectId>;
+
+/** Content addresses are lowercase hex so two clients cannot disagree on case. */
+export const Sha256 = z
+  .string()
+  .regex(/^[a-f0-9]{64}$/, 'sha256 must be 64 lowercase hexadecimal characters')
+  .describe('SHA-256 content hash');
+export type Sha256 = z.infer<typeof Sha256>;
+
 export const RequestId = identifier('request correlation identifier');
 export type RequestId = z.infer<typeof RequestId>;
 

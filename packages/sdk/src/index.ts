@@ -8,6 +8,16 @@ import {
   BrowserSession,
   BrowserSessionList,
   BrowserTakeoverResult,
+  ArtifactContent,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactGenerationResult,
+  ArtifactProjectManifest,
+  ArtifactPruneResult,
+  ArtifactUploadResult,
+  ArtifactVersionList,
   ChatReply,
   Conversation,
   ConversationList,
@@ -38,6 +48,10 @@ import type {
   BrowserCloseRequest,
   BrowserSessionCreateInput,
   BrowserTakeoverRequest,
+  ArtifactGenerationRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
   ChatRequest,
   DataMode,
   PermissionDecisionRequest,
@@ -534,6 +548,139 @@ export class CoderaxClient {
     });
   }
 
+  /** Durable artifacts in one data-mode partition, with the storage quota. */
+  artifacts(
+    query: {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<ArtifactDescriptorList> {
+    return this.request<ArtifactDescriptorList>(ArtifactDescriptorList, {
+      method: 'GET',
+      path: '/v1/artifacts',
+      query,
+    });
+  }
+
+  artifact(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactDescriptor> {
+    return this.request<ArtifactDescriptor>(ArtifactDescriptor, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+      query: { mode },
+    });
+  }
+
+  artifactVersions(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactVersionList> {
+    return this.request<ArtifactVersionList>(ArtifactVersionList, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      query: { mode },
+    });
+  }
+
+  artifactManifest(
+    projectId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactProjectManifest> {
+    return this.request<ArtifactProjectManifest>(ArtifactProjectManifest, {
+      method: 'GET',
+      path: '/v1/artifacts/manifest',
+      query: { projectId, mode },
+    });
+  }
+
+  /**
+   * Renders a deliverable and persists it as a durable project tree. The
+   * response is the manifest, so every file can then be downloaded by artifact
+   * id and immutable version.
+   */
+  generateArtifact(request: ArtifactGenerationRequest): Promise<ArtifactGenerationResult> {
+    return this.request<ArtifactGenerationResult>(ArtifactGenerationResult, {
+      method: 'POST',
+      path: '/v1/artifacts/generate',
+      body: request,
+    });
+  }
+
+  uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: '/v1/artifacts',
+      body: request,
+    });
+  }
+
+  uploadArtifactVersion(
+    artifactId: string,
+    request: ArtifactVersionRequest,
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      body: request,
+    });
+  }
+
+  restoreArtifactVersion(
+    artifactId: string,
+    request: { mode?: DataMode; version: number; expectedVersion: number },
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/restore`,
+      body: {
+        mode: request.mode ?? 'private',
+        version: request.version,
+        expectedVersion: request.expectedVersion,
+      },
+    });
+  }
+
+  downloadArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactContent> {
+    return this.request<ArtifactContent>(ArtifactContent, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  exportArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactExport> {
+    return this.request<ArtifactExport>(ArtifactExport, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  deleteArtifact(
+    artifactId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactDeleteResult> {
+    return this.request<ArtifactDeleteResult>(ArtifactDeleteResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/delete`,
+      body: { mode },
+    });
+  }
+
+  pruneArtifacts(mode: DataMode = 'private'): Promise<ArtifactPruneResult> {
+    return this.request<ArtifactPruneResult>(ArtifactPruneResult, {
+      method: 'POST',
+      path: '/v1/artifacts/prune',
+      body: { mode },
+    });
+  }
+
   /** Replays and tails execution events from a sequence cursor. */
   async *events(
     taskId: string,
@@ -577,5 +724,9 @@ export type {
   ScheduleUpdateRequest,
   ScheduleEventRequest,
   ScheduleTriggerRequest,
+  ArtifactGenerationRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
   WorkSubmitRequest,
 };
