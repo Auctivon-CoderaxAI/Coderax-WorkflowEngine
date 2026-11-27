@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -34,17 +35,16 @@ import { createArtifactGenerator } from '../artifacts/generate.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
-import { createHttpServer, MAX_BODY_BYTES } from '../api/server.js';
+import { createHttpServer } from '../api/server.js';
 import type { HttpServer } from '../api/server.js';
 import { validateWorkspaceRoots, workspaceRoots } from '../execution/workspace.js';
-import { ENGINE_NAME, ENGINE_VERSION } from '../version.js';
 import {
   createApplicationContainer,
   createDependencyContainer,
   type ApplicationDependencies,
   type InfrastructureDependencies,
 } from './container.js';
-import { buildPersistence, MEMORY_VALUE_LIMIT } from './persistence.js';
+import { buildPersistence } from './persistence.js';
 import { StartupError } from './startup-error.js';
 import { createArtifactStore } from '../artifacts/store.js';
 import { createGameStore } from '../games/store.js';
@@ -53,6 +53,13 @@ import { createDesignAssistant } from '../games/assistant.js';
 import { createGameSessions } from '../games/session.js';
 
 export { StartupError } from './startup-error.js';
+
+export class ShutdownTimeoutError extends Error {
+  constructor(deadlineMs: number) {
+    super(`Graceful shutdown exceeded ${deadlineMs}ms; persistence was left open`);
+    this.name = 'ShutdownTimeoutError';
+  }
+}
 
 export type Application = {
   dependencies: ApplicationDependencies;
@@ -294,7 +301,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
   const artifactGenerator = createArtifactGenerator({ artifacts: artifactService });
   const events = createEventBus({
-    bufferSize: config.execution.eventBufferSize,
+    store: persistence.events,
+    // The task row is the fenced sequence authority; the bus never numbers an
+    // event on its own, so a superseded generation cannot append one.
+    seq: tasks,
+    pollMs: config.execution.eventPollMs,
     eventId: ids.eventId,
     iso: clock.iso,
   });
@@ -482,15 +493,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const registry = createRouteRegistry();
   registerRoutes(registry, service, {
-    server: { name: ENGINE_NAME, version: ENGINE_VERSION, startedAt: clock.iso() },
+    server: { name: 'coderax-workflow-engine', version: '0.1.0', startedAt: clock.iso() },
     limits: {
-      maxBodyBytes: MAX_BODY_BYTES,
+      maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
       eventBufferSize: config.execution.eventBufferSize,
       maxConcurrentTasks: config.execution.maxConcurrentTasks,
-      maxConcurrentScheduledRuns: config.schedules.maxConcurrentRuns,
+      // The scheduler cannot fire a slot faster than its own tick, so that is
+      // the smallest interval the engine can actually honour.
+      scheduleMinIntervalMs: config.schedules.tickMs,
       artifactMaxBytes: config.artifacts.maxBytesPerArtifact,
-      memoryMaxValueLength: MEMORY_VALUE_LIMIT,
+      memoryMaxValueLength: 20_000,
     },
+    externalAgents:
+      config.engines.opencode.enabled || config.engines.freebuff.enabled,
   });
   const missingRoutes = registry.missing();
   if (missingRoutes.length > 0) {
@@ -533,6 +548,35 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     port: config.server.port,
   });
 
+  let stopPromise: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      service.beginShutdown();
+      // Stop accepting new HTTP work immediately; in-flight requests may finish
+      // while the service drains, but they cannot admit new execution.
+      const serverClosed = server.close();
+      const drain = Promise.all([service.shutdown(), serverClosed]);
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          drain,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new ShutdownTimeoutError(config.execution.shutdownGraceMs)),
+              config.execution.shutdownGraceMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      // Persistence is closed only after the service and listener have drained.
+      await persistence.close();
+    })();
+    return stopPromise;
+  };
+
   return {
     dependencies: finalContainer.dependencies,
     service,
@@ -555,11 +599,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       await service.artifacts.sweepExpiredArtifacts();
       return { url };
     },
-    stop: async () => {
-      await service.shutdown();
-      await server.close();
-      await persistence.close();
-    },
+    stop,
   };
 }
 

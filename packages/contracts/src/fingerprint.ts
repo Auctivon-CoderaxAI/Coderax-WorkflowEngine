@@ -14,15 +14,10 @@ import { ROUTES } from './routes.js';
  *
  * It covers identity, not payload shape: a schema change without a route change
  * is caught by the OpenAPI drift gate, not here.
- *
- * The hash is computed with a portable implementation rather than `node:crypto`
- * because the SDK runs in browsers as well as in Node.
  */
-export function contractFingerprint(routes: readonly {
-  operationId: string;
-  method: string;
-  path: string;
-}[] = ROUTES): string {
+export function contractFingerprint(
+  routes: readonly { operationId: string; method: string; path: string }[] = ROUTES,
+): string {
   const manifest = [
     `contract ${CONTRACT_VERSION}`,
     ...routes.map((route) => `${route.operationId} ${route.method} ${route.path}`),

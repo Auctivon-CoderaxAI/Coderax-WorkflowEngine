@@ -29,23 +29,12 @@ the successful response; failures use the shared `Problem` body.
 
 | Surface | Version | Where |
 | --- | --- | --- |
-| HTTP contracts | `CONTRACT_VERSION = '1.3.0'`, served at `/v1` | `primitives.ts` |
+| HTTP contracts | `CONTRACT_VERSION = '1.1.0'`, served at `/v1` | `primitives.ts` |
 | Execution events | `EVENT_SCHEMA_VERSION = 1` | `events.ts` |
 | SDK | matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
 
 The version literal in the `/v1/health` response remains `1.0.0` so clients
 using the original v1 schema can still parse it.
-
-`GET /v1/handshake` reports the served version, the versions this build can
-still negotiate, the catalogue fingerprint and every operation that has a
-handler. A client sends `?contract=<version>`; a lower minor is accepted and
-answered with the highest advertised version at or below it, a higher minor is
-reported as `client_ahead`, and a foreign major as `unsupported_major`. When the
-client also sends `?fingerprint=`, a matching version string with a different
-catalogue is refused as `fingerprint_mismatch` instead of failing one 404 at a
-time. The fingerprint is `sha256` over `contract <version>` followed by each
-`operationId METHOD path`, so it is computed in portable JavaScript and the SDK
-can verify it in a browser.
 
 Rules:
 
@@ -74,12 +63,20 @@ Every event is an envelope plus a payload:
 }
 ```
 
-- `seq` is assigned only by the event bus and increases by one per task.
+- `seq` is allocated atomically on the task row, whose `runToken` fences it:
+  only the generation that currently owns the task can append, two replicas
+  cannot allocate the same number, and a superseded generation appends nothing.
+- The log is durable (one row per event, unique on `(taskId, seq)` and `eventId`)
+  and survives a restart. Retention is by age (`execution.eventRetentionMs`), so
+  an old cursor can outlive its events.
 - A consumer that has already seen an `eventId` must ignore it.
 - A consumer that receives `seq <= lastSeen` must ignore it and resync from
   `GET /v1/work/{taskId}/events?after=<lastSeen>`.
-- A bounded per-task buffer means an old cursor can be truncated; the replay
-  response says so, and the client must re-read task state.
+- The stream opens with an SSE comment frame, `: coderax-meta {"lastSeq":N,
+  "truncated":true|false}`. Comments are ignored by every SSE client, so the
+  deployed SDK keeps working; a client that reads it can tell that its cursor is
+  older than retention (or ahead of the log) and must re-read task state instead
+  of assuming it missed nothing.
 
 ## Browser operations
 

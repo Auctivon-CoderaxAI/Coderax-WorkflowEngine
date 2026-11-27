@@ -15,13 +15,13 @@ import {
  * The handshake is how a client learns what this build actually serves.
  *
  * It is not a wish list. `operations` is built from the route registry at
- * request time, so an operation that has no handler cannot appear here, and the
+ * request time, so an operation with no handler cannot appear here, and the
  * capability flags are derived from those operations rather than declared
  * separately. A client that asks for a newer minor than this build serves is
  * told it is incompatible instead of discovering it one 404 at a time.
  */
 
-export const RouteMethodSchema = z.enum(['GET', 'POST', 'PATCH']);
+export const RouteMethodSchema = z.enum(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']);
 export type RouteMethodSchema = z.infer<typeof RouteMethodSchema>;
 
 export const OperationDescriptor = z
@@ -38,8 +38,8 @@ export const OperationDescriptor = z
 export type OperationDescriptor = z.infer<typeof OperationDescriptor>;
 
 /**
- * Every flag is answered by the server's own route table. `false` here is a
- * statement that the operation is not published, never that it is "coming".
+ * Every flag is answered by the server's own route table. `false` here says the
+ * operation is not published; it never means "coming soon".
  */
 export const CapabilityFlags = z
   .object({
@@ -63,26 +63,20 @@ export const CapabilityFlags = z
     conversations: z.boolean(),
     taskList: z.boolean(),
     idempotentSubmission: z.boolean(),
-    browser: z.boolean(),
-    games: z.boolean(),
     /** True only when an external agent is configured and currently available. */
     externalAgents: z.boolean(),
-    /** A literal: there is no configuration that makes paid routing reachable. */
+    /** A literal: no configuration makes paid routing reachable. */
     paidModels: z.literal(false),
   })
   .strict();
 export type CapabilityFlags = z.infer<typeof CapabilityFlags>;
 
-/**
- * Each limit is a value this build enforces, not a default a client may assume.
- * They come from the same configuration the router and the stores read.
- */
 export const CapabilityLimits = z
   .object({
     maxBodyBytes: z.number().int().positive(),
     eventBufferSize: z.number().int().positive(),
     maxConcurrentTasks: z.number().int().positive(),
-    maxConcurrentScheduledRuns: z.number().int().positive(),
+    scheduleMinIntervalMs: z.number().int().positive(),
     artifactMaxBytes: z.number().int().positive(),
     memoryMaxValueLength: z.number().int().positive(),
   })
