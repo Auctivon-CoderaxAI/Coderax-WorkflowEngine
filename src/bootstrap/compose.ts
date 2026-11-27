@@ -14,6 +14,7 @@ import { createRouterCatalog, type ProviderQuota } from '../models/catalog.js';
 import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js';
 import { createGeminiProvider } from '../models/providers/gemini.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
+import { createRouterEmbeddings } from '../models/embedding.js';
 import { createModelRouter, type ModelRouter } from '../models/router.js';
 import {
   createProviderPolicyRegistry,
@@ -27,7 +28,7 @@ import type {
   ProviderSettings,
   RegisteredProvider,
 } from '../models/types.js';
-import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
+import { createKnowledgeStore } from '../knowledge/store.js';
 import { createBuiltinTools } from '../tools/builtin.js';
 import { createToolRuntime } from '../tools/runtime.js';
 import { attachMcpServers } from '../mcp/client.js';
@@ -554,20 +555,39 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ...plugins.servers.filter((server) => approved.has(server.name)),
   ].filter((server) => server.transport !== 'stdio' || config.mcp.allowStdio);
   const mcp = await attachMcpServers(mcpServers);
-  const embeddingBase = env.CODERAX_INFERENCE_BASE_URL;
-  const embeddingKey = env.CODERAX_INFERENCE_KEY;
-  const embeddings =
-    config.knowledge.embeddingVerifiedFree &&
-    config.knowledge.embeddingModel &&
-    embeddingBase &&
-    embeddingKey
-      ? createOpenAiEmbeddingProvider({
-          baseURL: embeddingBase,
-          apiKey: embeddingKey,
-          model: config.knowledge.embeddingModel,
-          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-        })
-      : null;
+  // Semantic retrieval is a hosted inference operation, so it is built from the
+  // router and nothing else. An endpoint, a key and a boolean proved none of what
+  // matters: that the model is free, that the account cannot be charged, that the
+  // `embeddings` operation is authorized, or that the daily budget covers it.
+  const embeddings = (() => {
+    const named = config.knowledge.embeddingModel;
+    if (named === undefined) return null;
+    const matches = modelRouter
+      .list()
+      .models.filter((model) => model.ref.modelId === named)
+      .map((model) => model.ref);
+    const ref = matches[0];
+    if (ref === undefined || matches.length !== 1) {
+      throw new StartupError([
+        matches.length === 0
+          ? `knowledge.embeddingModel names ${named}, which is not in the verified catalogue.`
+          : `knowledge.embeddingModel names ${named}, which more than one provider serves.`,
+        'Semantic retrieval is refused; lexical retrieval is unaffected.',
+      ]);
+    }
+    const authorized = modelRouter.resolve(ref, 'cloud', { operation: 'embeddings' });
+    if (!authorized.ok) {
+      throw new StartupError([
+        `knowledge.embeddingModel ${named} is not an authorized zero-cost embedding route: ${authorized.detail}`,
+        'Semantic retrieval needs a verified zero-cost model and an owner grant for the embeddings operation. Lexical retrieval stays available without it.',
+      ]);
+    }
+    return createRouterEmbeddings({
+      router: modelRouter,
+      ownerId: config.auth.ownerId,
+      model: ref,
+    });
+  })();
   const knowledge = createKnowledgeStore({
     clock,
     ids,

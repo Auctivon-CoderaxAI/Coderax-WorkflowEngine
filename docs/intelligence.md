@@ -171,12 +171,17 @@ than auto-approved; a chat turn with no task is likewise denied.
 
 `src/knowledge/store.ts` chunks documents (paragraph-aware, 1200 characters with
 150-character overlap, 500 chunks maximum) and partitions them by owner and data
-mode. When `knowledge.embeddingModel` is set, `knowledge.embeddingVerifiedFree`
-is explicitly recorded and a zero-cost HTTPS inference endpoint is configured,
-chunks and queries are embedded through an OpenAI-compatible
-`/embeddings` endpoint and ranked by cosine similarity. Without embeddings,
-ranking is lexical (TF-IDF with a phrase bonus) and the response says
-`embedding: "lexical"` so a caller cannot mistake it for vector search.
+mode. When `knowledge.embeddingModel` is set, chunks and queries are embedded
+through the router's `embeddings` operation and ranked by cosine similarity.
+The model name is a preference, not an authorization: startup refuses unless the
+model is in the verified zero-cost catalogue and its provider carries an owner
+grant for `embeddings`, and every batch is reserved against the daily budget and
+policy-revalidated immediately before dispatch. Retrieval holds a router and no
+endpoint of its own, so there is no path from document text to a provider that
+skips cost verification, the operation grant or the ledger. Without a routable
+embedding model, ranking is lexical (TF-IDF with a phrase bonus) and the response
+says `embedding: "lexical"` so a caller cannot mistake it for vector search.
+Private-mode documents are never embedded by a hosted provider.
 
 `POST /v1/knowledge`, `GET /v1/knowledge` and `GET /v1/knowledge/search` are
 owner-only. Retrieval for a run uses the run's data mode.

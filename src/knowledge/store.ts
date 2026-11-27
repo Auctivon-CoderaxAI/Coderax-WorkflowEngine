@@ -20,7 +20,11 @@ import type { Clock, IdGenerator } from '../support/clock.js';
 export type EmbeddingProvider = {
   id: string;
   cloudOnly?: boolean;
-  embed: (texts: string[]) => Promise<number[][]>;
+  /**
+   * The mode travels with the batch so the governed implementation authorizes
+   * the exact operation for that mode; the store never decides eligibility.
+   */
+  embed: (texts: string[], mode: DataMode) => Promise<number[][]>;
 };
 
 export type KnowledgeStore = {
@@ -130,7 +134,7 @@ export function createKnowledgeStore(input: {
       let vectors: number[][] | null = null;
       if (input.embeddings && !(mode === 'private' && input.embeddings.cloudOnly)) {
         try {
-          vectors = await input.embeddings.embed(pieces);
+          vectors = await input.embeddings.embed(pieces, mode);
           if (vectors.length !== pieces.length) vectors = null;
         } catch {
           // Retrieval still works lexically; the result says so.
@@ -168,7 +172,7 @@ export function createKnowledgeStore(input: {
       let queryVector: number[] | null = null;
       if (input.embeddings && !(mode === 'private' && input.embeddings.cloudOnly)) {
         try {
-          const embedded = await input.embeddings.embed([query]);
+          const embedded = await input.embeddings.embed([query], mode);
           queryVector = embedded[0] ?? null;
         } catch {
           queryVector = null;
@@ -237,63 +241,3 @@ export function createKnowledgeStore(input: {
   };
 }
 
-/**
- * An OpenAI-compatible embeddings endpoint. The key is supplied by name from the
- * caller and never logged or embedded in a URL.
- */
-export function createOpenAiEmbeddingProvider(input: {
-  baseURL: string;
-  apiKey: string;
-  model: string;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}): EmbeddingProvider {
-  let endpoint: URL;
-  try {
-    endpoint = new URL(input.baseURL);
-  } catch {
-    throw new Error('Invalid embedding endpoint.');
-  }
-  const loopback = endpoint.hostname === 'localhost' || endpoint.hostname === '[::1]' ||
-    /^127(?:\.\d{1,3}){3}$/.test(endpoint.hostname);
-  if (endpoint.protocol !== 'https:' && !(loopback && endpoint.protocol === 'http:')) {
-    throw new Error('Remote embedding endpoints require HTTPS.');
-  }
-  endpoint.pathname = endpoint.pathname.replace(/\/+$/, '') + '/embeddings';
-  const fetchImpl = input.fetchImpl ?? fetch;
-  const timeoutMs = input.timeoutMs ?? 20_000;
-  return {
-    id: 'openai-compatible',
-    cloudOnly: true,
-    embed: async (texts) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchImpl(endpoint.href, {
-          method: 'POST',
-          redirect: 'error',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${input.apiKey}`,
-          },
-          body: JSON.stringify({ model: input.model, input: texts }),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(`embeddings responded with HTTP ${response.status}`);
-        const body = (await response.json()) as {
-          data?: Array<{ embedding?: unknown }>;
-        };
-        const rows = body.data ?? [];
-        if (rows.length !== texts.length) throw new Error('embeddings response was incomplete');
-        return rows.map((row) => {
-          if (!Array.isArray(row.embedding) || row.embedding.some((value) => typeof value !== 'number')) {
-            throw new Error('embeddings response was not numeric');
-          }
-          return row.embedding as number[];
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-    },
-  };
-}

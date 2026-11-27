@@ -26,6 +26,7 @@ export const PROCESSING_OPERATIONS = [
   'multi_agent',
   'memory',
   'rag',
+  'embeddings',
   'document',
   'multimodal',
   'mcp',

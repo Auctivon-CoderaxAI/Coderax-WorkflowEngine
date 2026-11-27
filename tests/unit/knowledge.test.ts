@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chunkText, createOpenAiEmbeddingProvider, createKnowledgeStore, tokenize } from '../../src/knowledge/store.js';
+import { chunkText, createKnowledgeStore, tokenize } from '../../src/knowledge/store.js';
+import { createOpenAiProvider } from '../../src/models/providers/openai.js';
 import { createClock, createIdGenerator } from '../../src/support/clock.js';
 
 const clock = createClock();
@@ -90,19 +91,26 @@ test('private ingestion and retrieval stay lexical with a cloud embedding provid
   assert.equal(calls, 0);
 });
 
-test('embedding transport rejects plaintext remote endpoints before dispatch', async () => {
+test('the embeddings transport rejects plaintext remote endpoints before dispatch', async () => {
   const sent: string[] = [];
-  const create = (baseURL: string) => createOpenAiEmbeddingProvider({
-    baseURL, apiKey: 'fixture', model: 'fixture', fetchImpl: async url => {
-      sent.push(String(url));
+  const create = (baseURL: string) => createOpenAiProvider({
+    id: 'fixture',
+    baseURL,
+    apiKey: 'fixture',
+    fetchImpl: async (input: Parameters<typeof fetch>[0]) => {
+      sent.push(String(input));
       return Response.json({ data: [{ embedding: [1] }] });
     },
   });
+  const signal = new AbortController().signal;
+  const model = { providerId: 'fixture', modelId: 'fixture' };
   for (const host of ['remote.example', 'localhost.example', '127.0.0.1.example']) {
     assert.throws(() => create('http://' + host), /HTTPS/);
   }
   for (const url of ['https://remote.example/v1', 'http://127.0.0.1', 'http://[::1]']) {
-    await create(url).embed(['test']);
+    const adapter = create(url);
+    assert.ok(adapter.embed, 'the OpenAI-compatible adapter serves embeddings');
+    await adapter.embed({ model, texts: ['test'], signal });
   }
   assert.deepEqual(sent, ['https://remote.example/v1/embeddings', 'http://127.0.0.1/embeddings',
     'http://[::1]/embeddings']);
