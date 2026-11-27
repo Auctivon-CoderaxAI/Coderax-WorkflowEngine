@@ -610,7 +610,7 @@ test('a replica delivers a marked task when its original queue handoff was lost'
     const rule = await api.createSchedule({ name: 'Recovery', objective: 'Check status', timing: { kind: 'event', event: 'recover' } });
     const { scheduler, lease, tasks } = started.app.dependencies;
     const enqueue = scheduler.enqueue;
-    scheduler.enqueue = () => {};
+    scheduler.enqueue = () => true;
     const receipt = await api.triggerSchedule(rule.scheduleId);
     scheduler.enqueue = enqueue;
     assert.ok(receipt.taskId);

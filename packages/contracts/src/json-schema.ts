@@ -112,8 +112,24 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       if (values.length === 1) return { const: values[0] };
       return { enum: values };
     }
-    case 'enum':
-      return { type: 'string', enum: Object.values(d.entries ?? {}) };
+    case 'enum': {
+      // A numeric enum's `entries` carry reverse-mapped names; the runtime
+      // value set is what a client must be allowed to send.
+      const runtime = (schema as unknown as { _zod?: { values?: Set<unknown> } })._zod?.values;
+      const values = runtime ? [...runtime] : Object.values(d.entries ?? {});
+      if (
+        values.length === 0 ||
+        values.some(
+          (value) =>
+            typeof value !== 'string' &&
+            (typeof value !== 'number' || !Number.isFinite(value)),
+        )
+      ) {
+        throw new Error('toJsonSchema does not support these enum values');
+      }
+      const types = [...new Set(values.map((value) => typeof value))];
+      return { type: types.length === 1 ? types[0] : types, enum: values };
+    }
     case 'array': {
       const item = d.element ? toJsonSchema(d.element) : {};
       const out: JsonSchema = { type: 'array', items: item };
@@ -127,11 +143,16 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       }
       return out;
     }
-    case 'record':
+    case 'record': {
+      const key = d.keyType;
+      if (!key || def(key).type !== 'string' || checksOf(key).length > 0) {
+        throw new Error('toJsonSchema supports only unconstrained string record keys');
+      }
       return {
         type: 'object',
         additionalProperties: d.valueType ? toJsonSchema(d.valueType) : true,
       };
+    }
     case 'optional': {
       return d.innerType ? toJsonSchema(d.innerType) : {};
     }
