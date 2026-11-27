@@ -94,6 +94,9 @@ function stringBounds(schema: z.ZodTypeAny): JsonSchema {
     if (check.check === 'string_format' && check.format === 'datetime') {
       out.format = 'date-time';
     }
+    if (check.check === 'string_format' && check.format === 'url') {
+      out.format = 'uri';
+    }
   }
   return out;
 }
@@ -132,7 +135,12 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
     }
     case 'array': {
       const item = definition.element ? toJsonSchema(definition.element) : {};
-      return { type: 'array', items: item };
+      const out: JsonSchema = { type: 'array', items: item };
+      for (const check of checks(schema)) {
+        if (check.check === 'min_length' && typeof check.minimum === 'number') out.minItems = check.minimum;
+        if (check.check === 'max_length' && typeof check.maximum === 'number') out.maxItems = check.maximum;
+      }
+      return out;
     }
     case 'record': {
       const key = definition.keyType;
@@ -153,6 +161,7 @@ export function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
       return inner;
     }
     case 'default':
+    case 'prefault':
       // Defaults are applied by the server but are not part of the published
       // shape; this keeps the generated document identical across zod majors.
       return definition.innerType ? toJsonSchema(definition.innerType) : {};

@@ -7,7 +7,10 @@ const root = path.resolve(import.meta.dirname, '..', '..', '..');
 const workflows = path.join(root, '.github', 'workflows');
 
 test('there is one authoritative verification workflow', () => {
-  assert.deepEqual(readdirSync(workflows).filter((file) => file.endsWith('.yml')), [
+  // Security scanning lives in its own workflows; verification must not be duplicated.
+  assert.deepEqual(readdirSync(workflows).filter((file) => file.endsWith('.yml')).sort(), [
+    'codeql.yml',
+    'secret-scan.yml',
     'verify.yml',
   ]);
 });

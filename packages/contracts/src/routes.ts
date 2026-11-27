@@ -3,7 +3,12 @@ import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
-import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
+import {
+  NotificationResponse,
+  PermissionDecisionRequest,
+  PermissionList,
+  PermissionRequest,
+} from './permissions.js';
 import {
   CancelRequest,
   ChatReply,
@@ -19,7 +24,34 @@ import {
   WorkSubmitRequest,
 } from './tasks.js';
 import { z as zod } from 'zod';
-import { ConversationId, TaskId } from './primitives.js';
+import { BrowserArtifactId, BrowserSessionId, ConversationId, ScheduleId, TaskId } from './primitives.js';
+import {
+  BrowserAction,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserAuthorizationRequest,
+  BrowserCapabilities,
+  BrowserCloseRequest,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionCreateRequest,
+  BrowserSessionList,
+  BrowserTakeoverRequest,
+  BrowserTakeoverResult,
+} from './browser.js';
+import {
+  Schedule,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleDispatch,
+  ScheduleEventRequest,
+  ScheduleEventResult,
+  ScheduleExecutionList,
+  ScheduleList,
+  ScheduleTriggerRequest,
+  ScheduleUpcoming,
+  ScheduleUpdateRequest,
+} from './schedules.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -30,7 +62,7 @@ import { ConversationId, TaskId } from './primitives.js';
  * the SDK cannot drift apart.
  */
 
-export type RouteMethod = 'GET' | 'POST';
+export type RouteMethod = 'GET' | 'POST' | 'PATCH';
 
 export type RouteAuth = 'owner' | 'public';
 
@@ -52,6 +84,15 @@ export type RouteSpec = {
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
+const BrowserSessionParams = zod.object({ sessionId: BrowserSessionId }).strict();
+const BrowserArtifactParams = zod.object({ artifactId: BrowserArtifactId }).strict();
+const ScheduleParams = zod.object({ scheduleId: ScheduleId }).strict();
+const ExecutionHistoryQuery = zod
+  .object({ limit: zod.coerce.number().int().positive().max(500).optional() })
+  .strict();
+const UpcomingQuery = zod
+  .object({ limit: zod.coerce.number().int().positive().max(20).optional() })
+  .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
@@ -217,13 +258,270 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Permission list', schema: PermissionList },
   },
   {
+    operationId: 'browserCapabilities',
+    method: 'GET',
+    path: '/v1/browser/capabilities',
+    summary: 'Truthful cloud browser availability; unverified when not attested.',
+    tags: ['browser'],
+    auth: 'owner',
+    response: { status: 200, description: 'Browser capabilities', schema: BrowserCapabilities },
+  },
+  {
+    operationId: 'listBrowserSessions',
+    method: 'GET',
+    path: '/v1/browser/sessions',
+    summary: 'Owner-scoped cloud browser sessions and their current state.',
+    tags: ['browser'],
+    auth: 'owner',
+    response: { status: 200, description: 'Browser session list', schema: BrowserSessionList },
+  },
+  {
+    operationId: 'createBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions',
+    summary: 'Create an isolated cloud browser session with an origin allowlist.',
+    tags: ['browser'],
+    auth: 'owner',
+    body: BrowserSessionCreateRequest,
+    response: { status: 201, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'getBrowserSession',
+    method: 'GET',
+    path: '/v1/browser/sessions/{sessionId}',
+    summary: 'One cloud browser session, including tabs and expiry.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'browserAction',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/actions',
+    summary: 'Perform one authorized navigation, inspection, capture or input action.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserAction,
+    response: { status: 200, description: 'Browser action result', schema: BrowserActionResult },
+  },
+  {
+    operationId: 'pauseBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/pause',
+    summary: 'Pause a session while keeping its provider state and tabs.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'resumeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/resume',
+    summary: 'Resume a paused session with its tabs and current page intact.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'takeoverBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/takeover',
+    summary: 'Hand the live session to the owner, or return control to the agent.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserTakeoverRequest,
+    response: { status: 200, description: 'Owner takeover result', schema: BrowserTakeoverResult },
+  },
+  {
+    operationId: 'closeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/close',
+    summary: 'Cancel a session and release its cloud browser.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserCloseRequest,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'authorizeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/authorize',
+    summary: 'Request a single-use owner approval for one sensitive browser action.',
+    tags: ['browser', 'permissions'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserAuthorizationRequest,
+    response: { status: 201, description: 'Permission request', schema: PermissionRequest },
+  },
+  {
+    operationId: 'decideBrowserAuthorization',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/authorize/decision',
+    summary: 'Approve or deny one browser permission request.',
+    tags: ['browser', 'permissions'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: PermissionDecisionRequest,
+    response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'listBrowserReceipts',
+    method: 'GET',
+    path: '/v1/browser/sessions/{sessionId}/receipts',
+    summary: 'Bounded execution-receipt history for a browser session.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser receipt list', schema: BrowserReceiptList },
+  },
+  {
+    operationId: 'getBrowserArtifact',
+    method: 'GET',
+    path: '/v1/browser/artifacts/{artifactId}',
+    summary: 'Retrieve captured screenshot or transferred file bytes.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserArtifactParams,
+    response: { status: 200, description: 'Browser artifact content', schema: BrowserArtifactContent },
+  },
+  {
     operationId: 'listNotifications',
     method: 'GET',
     path: '/v1/notifications',
     summary: 'Durable completion notifications, including unread count.',
     tags: ['notifications'],
     auth: 'owner',
-    response: { status: 200, description: 'Notification list', schema: NotificationList },
+    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
+    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
+  },
+  {
+    operationId: 'createSchedule',
+    method: 'POST',
+    path: '/v1/schedules',
+    summary: 'Create a durable, owner-controlled schedule executed by the engine.',
+    tags: ['schedules'],
+    auth: 'owner',
+    body: ScheduleCreateRequest,
+    response: { status: 201, description: 'Created schedule', schema: Schedule },
+  },
+  {
+    operationId: 'listSchedules',
+    method: 'GET',
+    path: '/v1/schedules',
+    summary: 'List this owner\'s schedules with their next run and state.',
+    tags: ['schedules'],
+    auth: 'owner',
+    response: { status: 200, description: 'Schedule list', schema: ScheduleList },
+  },
+  {
+    operationId: 'markNotificationsRead',
+    method: 'POST',
+    path: '/v1/notifications/read',
+    summary: 'Mark every completion notification and schedule notice for this owner as read.',
+    tags: ['notifications'],
+    auth: 'owner',
+    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
+    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
+  },
+  {
+    operationId: 'dispatchScheduleEvent',
+    method: 'POST',
+    path: '/v1/schedule-events',
+    summary: 'Fire a named event; each matching event-triggered schedule runs at most once.',
+    tags: ['schedules'],
+    auth: 'owner',
+    body: ScheduleEventRequest,
+    response: { status: 202, description: 'Dispatched occurrences', schema: ScheduleEventResult },
+  },
+  {
+    operationId: 'getSchedule',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'One schedule with its authoritative state and next run.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Schedule', schema: Schedule },
+  },
+  {
+    operationId: 'getScheduleUpcoming',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}/upcoming',
+    summary: 'Preview the next occurrences without creating a receipt or a task.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    query: UpcomingQuery,
+    response: { status: 200, description: 'Upcoming occurrences', schema: ScheduleUpcoming },
+  },
+  {
+    operationId: 'updateSchedule',
+    method: 'PATCH',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'Edit timing, condition, retry or limits; the execution identity cannot be widened.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleUpdateRequest,
+    response: { status: 200, description: 'Updated schedule', schema: Schedule },
+  },
+  {
+    operationId: 'pauseSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/pause',
+    summary: 'Pause future occurrences; a run already in flight is not stopped.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Pause outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'resumeSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/resume',
+    summary: 'Resume a paused schedule from the next occurrence; missed runs are not stormed.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Resume outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'cancelSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/cancel',
+    summary: 'Cancel a schedule permanently and cancel its current Work task.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Cancellation outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'triggerSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/trigger',
+    summary: 'Run one occurrence now, deduplicated by the supplied idempotency key.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleTriggerRequest,
+    response: { status: 202, description: 'Dispatched occurrence', schema: ScheduleDispatch },
+  },
+  {
+    operationId: 'listScheduleExecutions',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}/executions',
+    summary: 'Durable execution receipts for one schedule, newest first.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    query: ExecutionHistoryQuery,
+    response: { status: 200, description: 'Execution history', schema: ScheduleExecutionList },
   },
 ]);
 

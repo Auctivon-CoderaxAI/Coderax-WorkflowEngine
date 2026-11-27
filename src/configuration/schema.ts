@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
+import {
+  CONTRACT_VERSION,
+  EngineId,
+  ModelRef,
+  type BrowserLimits,
+} from '@coderax/contracts';
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -37,6 +42,14 @@ export const NativeConfig = z
   .object({
     enabled: z.boolean().default(true),
     maxSteps: z.number().int().min(1).max(64).default(12),
+    /** Independent steps a complex plan may run at once. */
+    maxParallelSteps: z.number().int().min(1).max(8).default(3),
+    /** Revised plans allowed after a step or verification failure. */
+    maxReplans: z.number().int().min(0).max(5).default(2),
+    /** Attempts per step, including the first; corrections stay on this model. */
+    maxStepAttempts: z.number().int().min(1).max(3).default(2),
+    /** Hard bound on model calls and file reads for one run. */
+    maxIterations: z.number().int().min(1).max(128).default(32),
   })
   .strict();
 
@@ -101,6 +114,61 @@ export const ExecutionConfig = z
   })
   .strict();
 
+export const BrowserRemoteConfig = z
+  .object({
+    /** An HTTPS endpoint that implements the versioned browser protocol. */
+    baseURL: z.string().url().optional(),
+    /** Name of the variable holding the provider token, never the token. */
+    tokenEnv: z.string().trim().min(1).default('CODERAX_BROWSER_TOKEN'),
+    timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
+    /**
+     * The owner's attestation that this endpoint is authorized, zero-cost and
+     * cloud-hosted. Without it the adapter stays fail-closed and reports
+     * `unverified`; it cannot be set on the owner's behalf.
+     */
+    zeroCostAttested: z.boolean().default(false),
+  })
+  .strict();
+
+/**
+ * Cloud browser integration. The default is disabled with no provider, which is
+ * the only truthful state until an authorized zero-cost endpoint has been
+ * verified. No field can enable paid infrastructure.
+ */
+export const BrowserConfig = z
+  .object({
+    enabled: z.boolean().default(false),
+    provider: z.enum(['none', 'http']).default('none'),
+    allowPaid: z.literal(false).default(false),
+    sessionTtlMs: z.number().int().min(60_000).max(3_600_000).default(900_000),
+    maxSessionsPerOwner: z.number().int().min(1).max(16).default(3),
+    maxScreenshotBytes: z.number().int().min(1_024).max(4_194_304).default(2_097_152),
+    /** Bounded by the request body limit so an upload cannot be truncated. */
+    maxUploadBytes: z.number().int().min(1_024).max(524_288).default(524_288),
+    remote: BrowserRemoteConfig.prefault({}),
+  })
+  .strict();
+
+export const SchedulesConfig = z
+  .object({
+    /** The loop is process-owned; disabling it leaves stored schedules dormant. */
+    enabled: z.boolean().default(true),
+    tickMs: z.number().int().min(50).max(60_000).default(5_000),
+    /** Schedules and receipts examined per pass; bounds one tick's work. */
+    batchSize: z.number().int().min(1).max(200).default(50),
+    /** Engine-wide ceiling on concurrently dispatched scheduled runs. */
+    maxConcurrentRuns: z.number().int().min(1).max(16).default(2),
+    /** Lateness beyond this is a missed occurrence, never a fired backlog. */
+    missedGraceMs: z.number().int().min(1_000).max(86_400_000).default(300_000),
+    /** A receipt with no task younger than this may still be dispatching. */
+    dispatchTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000),
+    /** Consecutive failures that pause a schedule to stop a runaway loop. */
+    pauseAfterFailures: z.number().int().min(1).max(100).default(5),
+    /** Execution receipts returned by the history operation by default. */
+    historyLimit: z.number().int().min(1).max(500).default(100),
+  })
+  .strict();
+
 export const PersistenceConfig = z
   .object({
     /**
@@ -133,6 +201,8 @@ export const EngineConfigSchema = z
     engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
     execution: ExecutionConfig.prefault({}),
+    browsers: BrowserConfig.prefault({}),
+    schedules: SchedulesConfig.prefault({}),
     persistence: PersistenceConfig.prefault({}),
   })
   .strict();
@@ -141,3 +211,15 @@ export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
 export type PersistenceSettings = z.infer<typeof PersistenceConfig>;
+export type BrowserSettings = z.infer<typeof BrowserConfig>;
+export type BrowserRemoteSettings = z.infer<typeof BrowserRemoteConfig>;
+
+/** Derived once so the provider and the API report the same enforced limits. */
+export function browserLimits(browsers: BrowserSettings): BrowserLimits {
+  return {
+    maxSessionTtlSeconds: Math.floor(browsers.sessionTtlMs / 1000),
+    maxSessionsPerOwner: browsers.maxSessionsPerOwner,
+    maxScreenshotBytes: browsers.maxScreenshotBytes,
+    maxUploadBytes: browsers.maxUploadBytes,
+  };
+}

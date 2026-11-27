@@ -4,29 +4,49 @@ import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 type Document = Record<string, unknown>;
 type Index = {
   keys: Record<string, 1 | -1>;
-  options?: { unique?: boolean; name?: string };
+  options?: { unique?: boolean; name?: string; partialFilterExpression?: MongoFilter };
 };
+
+/**
+ * Comparison operators follow MongoDB's type bracketing: a range comparison
+ * matches only when both sides are Dates or both are strings. ISO-8601 UTC
+ * strings therefore compare chronologically, and a null field never matches a
+ * string range.
+ */
+function compare(left: unknown, right: unknown): number | null {
+  if (left instanceof Date && right instanceof Date) return left.getTime() - right.getTime();
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  if (typeof left === 'string' && typeof right === 'string') {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  return null;
+}
 
 function matches(document: Document, filter: MongoFilter): boolean {
   return Object.entries(filter).every(([field, condition]) => {
     const value = document[field];
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
-      if ('$lte' in operators) {
-        const bound = operators.$lte as Date;
-        if (!(value instanceof Date) || value.getTime() > bound.getTime()) return false;
-      }
-      if ('$gt' in operators) {
-        const bound = operators.$gt as Date;
-        if (!(value instanceof Date) || value.getTime() <= bound.getTime()) return false;
-      }
-      if ('$in' in operators) {
-        const list = operators.$in as unknown[];
-        if (!list.includes(value)) return false;
-      }
-      if ('$nin' in operators) {
-        const list = operators.$nin as unknown[];
-        if (list.includes(value)) return false;
+      for (const [operator, operand] of Object.entries(operators)) {
+        if (operator === '$lte' || operator === '$lt' || operator === '$gte' || operator === '$gt') {
+          const order = compare(value, operand);
+          if (order === null) return false;
+          if (operator === '$lte' && order > 0) return false;
+          if (operator === '$lt' && order >= 0) return false;
+          if (operator === '$gte' && order < 0) return false;
+          if (operator === '$gt' && order <= 0) return false;
+        } else if (operator === '$exists') {
+          if (Object.hasOwn(document, field) !== operand) return false;
+        } else if (operator === '$in') {
+          if (!(operand as unknown[]).includes(value)) return false;
+        } else if (operator === '$nin') {
+          if ((operand as unknown[]).includes(value)) return false;
+        } else if (operator === '$ne') {
+          if (value === operand) return false;
+        } else {
+          // An operator the fake does not model must fail loudly, not match.
+          return false;
+        }
       }
       return true;
     }
@@ -66,9 +86,11 @@ export function createFakeCollection(): FakeCollection {
   function assertUnique(candidate: Document, skip: number): void {
     for (const index of indexes) {
       if (!index.options?.unique) continue;
+      const partial = index.options.partialFilterExpression;
+      if (partial && !matches(candidate, partial)) continue;
       const key = indexValue(candidate, index.keys);
       const clash = documents.some(
-        (document, position) => position !== skip && indexValue(document, index.keys) === key,
+        (document, position) => position !== skip && (!partial || matches(document, partial)) && indexValue(document, index.keys) === key,
       );
       if (clash) throw duplicateKey();
     }
@@ -121,7 +143,9 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      documents[index] = { ...documents[index], ...update.$set };
+      const next = { ...documents[index], ...update.$set };
+      assertUnique(next, index);
+      documents[index] = next;
       return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {

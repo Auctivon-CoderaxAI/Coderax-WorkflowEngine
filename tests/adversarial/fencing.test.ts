@@ -30,12 +30,14 @@ test('two replicas cannot both reissue the same generation', async () => {
       token: 'token-a',
       now: '2026-11-26T00:00:01.000Z',
       leaseExpiresAt: '2026-11-26T00:00:31.000Z',
+      from: ['interrupted'],
     }),
     second.reissue({
       taskId: task.taskId,
       token: 'token-b',
       now: '2026-11-26T00:00:01.000Z',
       leaseExpiresAt: '2026-11-26T00:00:31.000Z',
+      from: ['interrupted'],
     }),
   ]);
   assert.equal([a.applied, b.applied].filter(Boolean).length, 1);
@@ -156,6 +158,7 @@ test('a cancellation that races the start is honored, not ignored', async () => 
   const adapter: AgentAdapter = {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities: {
       streaming: true,
       tools: false,
@@ -203,6 +206,6 @@ test('a cancellation that races the start is honored, not ignored', async () => 
     },
     report: () => undefined,
   });
-  assert.equal(observedAbort, true);
+  assert.equal(observedAbort, false, 'an already-cancelled run must not reach the adapter');
   assert.deepEqual(result, { outcome: { kind: 'cancelled' }, ownershipLost: false });
 });

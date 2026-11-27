@@ -90,7 +90,9 @@ test('a cancelled task settles as cancelled and is not left running', async () =
 });
 
 test('a failed task can be retried on the same agent with a new generation', async () => {
-  const started = await startTestApp({ gateway: failingGateway(1) });
+  // Two attempts exhaust the bounded per-step correction budget (default 2),
+  // so the first generation fails and the retry generation can succeed.
+  const started = await startTestApp({ gateway: failingGateway(2) });
   const api = client(started.url);
   try {
     const accepted = await api.submitWork({

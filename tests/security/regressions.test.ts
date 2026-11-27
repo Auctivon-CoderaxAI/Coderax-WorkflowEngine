@@ -241,6 +241,7 @@ regression('F6', 'cancellation is bounded and a late report never reaches the bu
   const adapter: AgentAdapter = {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities: {
       streaming: true,
       tools: false,

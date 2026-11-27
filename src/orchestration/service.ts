@@ -1,6 +1,19 @@
+import { scheduledConversationId } from '../scheduling/identity.js';
 import type {
   AgentId,
   AgentList,
+  BrowserAction,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserAuthorizationRequest,
+  BrowserCapabilities,
+  BrowserCloseRequest,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionCreateRequest,
+  BrowserSessionList,
+  BrowserTakeoverRequest,
+  BrowserTakeoverResult,
   BudgetState,
   ChatReply,
   ChatRequest,
@@ -12,17 +25,32 @@ import type {
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
+  PermissionRequest,
+  Schedule,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleDispatch,
+  ScheduleEventRequest,
+  ScheduleEventResult,
+  ScheduleExecution,
+  ScheduleExecutionList,
+  ScheduleList,
+  ScheduleTriggerRequest,
+  ScheduleUpcoming,
+  ScheduleUpdateRequest,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
+  Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import { isTerminalState, modelKey } from '@coderax/contracts';
+import { isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { TaskRecord } from '../domain.js';
+import type { ScheduleExecutionRecord, ScheduleRecord, TaskEvidence, TaskPatch, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome } from '../execution/runner.js';
@@ -37,12 +65,18 @@ import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
+import { createScheduleEngine } from '../scheduling/engine.js';
+import type { SchedulePort, ScheduleTickReport } from '../scheduling/engine.js';
+import { nextOccurrence, previewOccurrences } from '../scheduling/calendar.js';
+import { scheduleSideEffectRefusal } from '../scheduling/policy.js';
 import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
+import type { BrowserService } from './browser.js';
+import { resolveReasoningMode } from '../agents/native/reason.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -58,11 +92,14 @@ export type ApplicationServiceDeps = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  schedules: ScheduleRepository;
+  scheduleNotices: ScheduleNoticeStore;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  browser: BrowserService;
 };
 
 export type EventStream = {
@@ -76,6 +113,57 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  browserCapabilities: () => Promise<BrowserCapabilities>;
+  browserSessions: (principal: Principal) => Promise<BrowserSessionList>;
+  browserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  createBrowserSession: (
+    principal: Principal,
+    request: BrowserSessionCreateRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  browserAction: (
+    principal: Principal,
+    sessionId: string,
+    action: BrowserAction,
+  ) => Promise<ServiceResult<BrowserActionResult>>;
+  pauseBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  resumeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  takeoverBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ) => Promise<ServiceResult<BrowserTakeoverResult>>;
+  closeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserCloseRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  authorizeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ) => Promise<ServiceResult<PermissionRequest>>;
+  decideBrowserAuthorization: (
+    principal: Principal,
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ) => Promise<ServiceResult<PermissionList>>;
+  browserReceipts: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserReceiptList>>;
+  browserArtifact: (
+    principal: Principal,
+    artifactId: string,
+  ) => Promise<ServiceResult<BrowserArtifactContent>>;
   submitWork: (
     principal: Principal,
     request: WorkSubmitRequest,
@@ -109,13 +197,60 @@ export type ApplicationService = {
     taskId: string,
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
-  notifications: (principal: Principal) => Promise<NotificationList>;
+  notifications: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
   events: (
     principal: Principal,
     taskId: string,
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
   budget: (principal: Principal) => BudgetState;
+  schedules: (principal: Principal) => Promise<ScheduleList>;
+  schedule: (principal: Principal, scheduleId: string) => Promise<ServiceResult<Schedule>>;
+  createSchedule: (
+    principal: Principal,
+    request: ScheduleCreateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  pauseSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  resumeSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  cancelSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  triggerSchedule: (
+    principal: Principal,
+    scheduleId: string,
+    request: ScheduleTriggerRequest,
+  ) => Promise<ServiceResult<ScheduleDispatch>>;
+  scheduleExecutions: (
+    principal: Principal,
+    scheduleId: string,
+    limit?: number,
+  ) => Promise<ServiceResult<ScheduleExecutionList>>;
+  scheduleEvent: (
+    principal: Principal,
+    request: ScheduleEventRequest,
+  ) => Promise<ServiceResult<ScheduleEventResult>>;
+  updateSchedule: (
+    principal: Principal,
+    scheduleId: string,
+    request: ScheduleUpdateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  scheduleUpcoming: (
+    principal: Principal,
+    scheduleId: string,
+    limit?: number,
+  ) => Promise<ServiceResult<ScheduleUpcoming>>;
+  markNotificationsRead: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
+  /** The background loop that discharges schedules without a client connected. */
+  startSchedules: () => void;
+  stopSchedules: () => Promise<void>;
+  tickSchedules: () => Promise<ScheduleTickReport>;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
   /** Stop admitting new execution work before the listener is closed. */
@@ -201,16 +336,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       updatedAt: task.updatedAt,
       ...(task.leaseExpiresAt ? { leaseExpiresAt: task.leaseExpiresAt } : {}),
       cancelRequested: task.cancelRequested,
+      ...(task.reasoning ? { reasoning: task.reasoning } : {}),
       steps: task.steps.map((step) => ({
         id: step.id,
         title: step.title,
         state: step.state,
+        ...(step.dependsOn ? { dependsOn: [...step.dependsOn] } : {}),
+        ...(step.attempts !== undefined ? { attempts: step.attempts } : {}),
       })),
       ...(task.result
         ? {
             result: {
               ...(task.result.summary ? { summary: task.result.summary } : {}),
               artifacts: task.result.artifacts,
+              ...(task.result.verification
+                ? {
+                    verification: {
+                      passed: task.result.verification.passed,
+                      reason: redactText(task.result.verification.reason, [], 1000),
+                      evidence: task.result.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
           }
         : {}),
@@ -253,6 +402,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
   }
 
+  /** Usage is cumulative across a suspend/resume boundary, never reset by it. */
+  function mergeUsage(previous: Usage | null, next: Usage | undefined): Usage | null {
+    if (!previous && !next) return null;
+    const inputTokens = (previous?.inputTokens ?? 0) + (next?.inputTokens ?? 0);
+    const outputTokens = (previous?.outputTokens ?? 0) + (next?.outputTokens ?? 0);
+    return {
+      ...(inputTokens > 0 ? { inputTokens } : {}),
+      ...(outputTokens > 0 ? { outputTokens } : {}),
+    };
+  }
+
   async function releaseLease(task: TaskRecord, token: string): Promise<void> {
     await deps.lease
       .release({ key: workRunKey(scopeOf(task)), token })
@@ -269,12 +429,87 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     token: string,
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
+    steps?: TaskRecord['steps'],
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       return;
     }
     const now = deps.clock.iso();
     const failureDetail = outcome.kind === 'failed' ? redactText(outcome.detail, [], 1000) : undefined;
+    const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
+    const mergedUsage = mergeUsage(task.usage, generationUsage);
+    let partialSaved = false;
+
+    // Escalation is a suspended state, not a failure: the plan, its checkpoint
+    // and any partial text stay durable so an approved resume continues exactly
+    // where authorization stopped. No completion notification is emitted because
+    // nothing completed.
+    if (outcome.kind === 'failed' && outcome.code === 'approval_required') {
+      // Save partial text before another generation can start.
+      const partial = checkpoint?.text ?? '';
+      if (partial.length > 0) {
+        partialSaved = await deps.conversations
+          .appendMessage({
+            messageId: deps.ids.messageId(),
+            conversationId: task.conversationId,
+            role: 'assistant',
+            text: partial,
+            createdAt: now,
+            unfinished: true,
+            agent: task.agent,
+          })
+          .then(() => true, () => false);
+      }
+      // Persist the suspension under the old fence before releasing ownership.
+      // A restart between these operations can resume from the saved checkpoint
+      // once the old lease expires.
+      const applied = await deps.tasks.updateFenced({
+        taskId: task.taskId,
+        token,
+        guard: 'not_cancel_requested',
+        patch: {
+          state: 'awaiting_approval',
+          updatedAt: now,
+          leaseExpiresAt: null,
+          failure: {
+            code: outcome.code,
+            detail: failureDetail,
+            retryable: false,
+          },
+          ...(checkpoint ? { checkpoint } : {}),
+          ...(steps ? { steps } : {}),
+          ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+          ...(mergedUsage ? { usage: mergedUsage } : {}),
+        },
+      });
+      if (!applied.applied && applied.reason === 'guard_rejected') {
+        // The cancellation flag won the task write after the runner stopped.
+        outcome = { kind: 'cancelled' };
+      } else {
+        try {
+          if (applied.applied) {
+            // Suspension settles this generation's usage even though the task is not
+            // terminal. The resumed generation is charged separately, so the daily
+            // ledger matches the cumulative usage the owner sees.
+            if (generationUsage) {
+              deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+            }
+            deps.audit.record({
+              actor: task.ownerId,
+              action: 'work.awaiting_approval',
+              taskId: task.taskId,
+              conversationId: task.conversationId,
+              outcome: 'accepted',
+              detail: outcome.code,
+            });
+          }
+        } finally {
+          await releaseLease(task, token);
+        }
+        return;
+      }
+    }
+
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -283,6 +518,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             result: {
               summary: outcome.summary.slice(0, 20_000),
               artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+              ...(outcome.verification
+                ? {
+                    verification: {
+                      passed: outcome.verification.passed,
+                      reason: redactText(outcome.verification.reason, [], 1000),
+                      evidence: outcome.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           }
@@ -299,10 +545,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               },
             };
 
+    const statePatch = {
+      ...patch,
+      ...(checkpoint ? { checkpoint } : {}),
+      ...(steps ? { steps } : {}),
+      ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+      ...(mergedUsage ? { usage: mergedUsage } : {}),
+    };
     const applied = await deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
-      patch: checkpoint ? { ...patch, checkpoint } : patch,
+      patch: statePatch,
     });
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
@@ -312,6 +565,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
 
     const settled = applied.task;
+    // Charge the usage produced by this generation, not the merged task total:
+    // the previous generation was already charged when it settled.
+    if (generationUsage) {
+      deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+    }
     try {
       if (outcome.kind === 'completed') {
         publish(settled, 'task.completed', {
@@ -323,12 +581,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         publish(settled, 'task.cancelled', {});
       } else {
         publish(settled, 'task.failed', {
-          code: outcome.code, detail: outcome.detail, retryable: outcome.retryable,
+          code: outcome.code, detail: failureDetail, retryable: outcome.retryable,
         });
       }
 
       const text = checkpoint?.text ?? '';
-      if (text.length > 0) {
+      if (text.length > 0 && !partialSaved) {
         await deps.conversations.appendMessage({
           messageId: deps.ids.messageId(),
           conversationId: task.conversationId,
@@ -351,6 +609,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     } finally {
       await releaseLease(task, token);
     }
+  }
+
+  // Earlier tasks have no explicit marker. Their accounting write or persisted
+  // execution steps are evidence of admission; an interrupted claim alone is not.
+  async function canRunScheduled(task: TaskRecord): Promise<boolean> {
+    const admission = task.scheduleAdmission;
+    if (!admission) {
+      if (!/^task_sched_[0-9a-f]{40}$/.test(task.taskId)) return true;
+      // Older scheduled retry tasks had no schedule pointer. Their conversation
+      // still identifies the schedule; never reissue an unproven interrupted run.
+      const schedules = await deps.schedules.listByOwner(task.ownerId);
+      const legacy = schedules.find(record => scheduledConversationId(record.scheduleId) === task.conversationId);
+      return !!legacy && legacy.state !== 'cancelled' && task.steps.length > 0;
+    }
+    const schedule = await deps.schedules.get(admission.scheduleId);
+    if (!schedule || schedule.state === 'cancelled') return false;
+    return admission.complete ?? (schedule.lastExecutionId === admission.executionId || task.steps.length > 0);
   }
 
   async function rejectUnscheduledRun(task: TaskRecord, token: string): Promise<ServiceResult<never>> {
@@ -377,7 +652,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       return;
     }
-    if (lease.cancelRequested) {
+    if (lease.token !== token) return;
+    if (task.cancelRequested || lease.cancelRequested) {
       await settle(task, token, { kind: 'cancelled' });
       return;
     }
@@ -425,6 +701,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       token,
       patch: {
         state: 'running',
+        ...(task.handoffPending && { handoffPending: false }),
         updatedAt: deps.clock.iso(),
         leaseExpiresAt: lease.expiresAt.toISOString(),
         model: model.value.ref,
@@ -438,21 +715,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
-    // Report events are synchronous to the adapter but their persistence writes
-    // are asynchronous. Keep them visible to shutdown so a Mongo client is never
-    // closed while a fenced checkpoint write is still in flight.
-    const pendingWrites = new Set<Promise<void>>();
-    const trackWrite = (operation: Promise<unknown>): void => {
-      const tracked = operation.then(
-        () => undefined,
-        () => undefined,
-      ).finally(() => {
-        pendingWrites.delete(tracked);
-      });
-      pendingWrites.add(tracked);
-    };
+    const evidence: TaskEvidence[] = [...(started.task.checkpoint.evidence ?? [])];
+    let plan: TaskPlan | null = started.task.checkpoint.plan ?? null;
+    let iterations = started.task.checkpoint.iterations ?? 0;
     let text = '';
     let visible = text;
+    // Report patches are snapshots of mutable local arrays. Serialize them in
+    // issue order so a delayed plan.ready cannot overwrite a later completed
+    // checkpoint on a replica that applies writes out of order.
+    let writeChain: Promise<void> = Promise.resolve();
+    const persist = (patch: TaskPatch): void => {
+      const snapshot = structuredClone(patch);
+      writeChain = writeChain
+        .then(async () => {
+          await deps.tasks.updateFenced({ taskId, token, patch: snapshot });
+        })
+        .catch(() => undefined);
+    };
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
       else if (next !== visible) publish(started.task, 'text.delta', { text: next.slice(visible.length) });
@@ -461,36 +740,103 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const report = (event: AgentReportEvent): void => {
       if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
+
+      if (event.type === 'budget') {
+        iterations = event.iterations;
+        return;
+      }
+
+      /**
+       * A plan is persisted before its first step starts, so the owner can see
+       * the dependency graph and a resume executes the plan that was shown, not
+       * a different one produced by a second model call.
+       */
+      if (event.type === 'plan.ready') {
+        plan = event.plan;
+        const previous = new Map(steps.map((step) => [step.id, step]));
+        const next: TaskStep[] = event.plan.steps.map((step) => {
+          const existing = previous.get(step.id);
+          const state = existing?.state ?? (completed.includes(step.id) ? 'completed' : 'queued');
+          return {
+            id: step.id,
+            title: step.title,
+            state,
+            dependsOn: [...step.dependsOn],
+            ...(existing?.attempts !== undefined ? { attempts: existing.attempts } : {}),
+          };
+        });
+        for (const step of steps) {
+          if (step.state === 'completed' && !next.some((entry) => entry.id === step.id)) {
+            next.unshift(step);
+          }
+        }
+        steps.length = 0;
+        steps.push(...next);
+        persist({
+          steps,
+          reasoning: event.plan.mode,
+          checkpoint: {
+            completedSteps: [...completed],
+            text: visible,
+            plan: event.plan,
+            evidence,
+            iterations,
+          },
+          updatedAt: deps.clock.iso(),
+        });
+        return;
+      }
+
       if (event.type === 'step.started') {
+        const planned = plan?.steps.find((step) => step.id === event.stepId);
         const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'running';
-        else steps.push({ id: event.stepId, title: event.title, state: 'running' });
+        if (existing) {
+          existing.state = 'running';
+          if (planned) existing.dependsOn = [...planned.dependsOn];
+        } else {
+          steps.push({
+            id: event.stepId,
+            title: event.title,
+            state: 'running',
+            ...(planned ? { dependsOn: [...planned.dependsOn] } : {}),
+          });
+        }
         publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        trackWrite(
-          deps.tasks.updateFenced({
-            taskId,
-            token,
-            patch: { steps, updatedAt: deps.clock.iso() },
-          }),
-        );
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'step.completed') {
         const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'completed';
-        completed.push(event.stepId);
+        if (existing) {
+          existing.state = 'completed';
+          if (event.attempts !== undefined) existing.attempts = event.attempts;
+        }
+        if (!completed.includes(event.stepId)) completed.push(event.stepId);
+        if (event.evidence) {
+          // Evidence is persisted, so it is scrubbed before it reaches the
+          // checkpoint: the transcript path already redacts, and a durable
+          // record must not become the one place a credential survives.
+          const safeEvidence: TaskEvidence = {
+            ...event.evidence,
+            citation: redactText(event.evidence.citation, [], 500),
+            output: redactContent(event.evidence.output).slice(0, 20_000),
+          };
+          const index = evidence.findIndex((entry) => entry.stepId === event.stepId);
+          if (index === -1) evidence.push(safeEvidence);
+          else evidence[index] = safeEvidence;
+        }
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        trackWrite(
-          deps.tasks.updateFenced({
-            taskId,
-            token,
-            patch: {
-              steps,
-              checkpoint: { completedSteps: [...completed], text: visible },
-              updatedAt: deps.clock.iso(),
-            },
-          }),
-        );
+        persist({
+          steps,
+          checkpoint: { completedSteps: [...completed], text: visible, plan, evidence, iterations },
+          updatedAt: deps.clock.iso(),
+        });
+        return;
+      }
+      if (event.type === 'step.failed') {
+        const existing = steps.find((step) => step.id === event.stepId);
+        if (existing) existing.state = 'failed';
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'text.delta' || event.type === 'text.replace') {
@@ -541,12 +887,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const history = await historyFor(task.conversationId, task.objective);
     const result = await deps.runner.run({
       scope: scopeOf(started.task),
+      ...((task.scheduleAdmission || task.taskId.startsWith('task_sched_')) && { cancellationRequested: async () => !(await canRunScheduled(task)) }),
       token,
       adapter: adapter.value as AgentAdapter,
       request: {
         ownerId: task.ownerId,
         tenantId: task.tenantId,
         conversationId: task.conversationId,
+        taskId: task.taskId,
         objective: task.objective,
         history,
         model: model.value.ref,
@@ -555,14 +903,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         maxSteps: deps.config.engines.native.maxSteps,
         budget: task.budget,
         signal: controller.signal,
+        reasoning: task.reasoning ?? 'auto',
+        completedSteps: [...started.task.checkpoint.completedSteps],
+        plan: started.task.checkpoint.plan ?? null,
+        evidence: [...(started.task.checkpoint.evidence ?? [])],
+        iterationsUsed: started.task.checkpoint.iterations ?? 0,
       },
       report,
     });
-    // A report can have started a checkpoint write while the adapter was
-    // returning. Drain those writes before the terminal settle or shutdown.
-    await Promise.allSettled([...pendingWrites]);
     if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
+    await writeChain.catch(() => undefined);
 
     if (result.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer
@@ -574,7 +925,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outcome = result.outcome.kind === 'completed'
       ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
       : result.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    await settle(
+      started.task,
+      token,
+      outcome,
+      {
+        completedSteps: completed,
+        text: safeText,
+        plan,
+        evidence,
+        iterations,
+      },
+      steps,
+    );
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
@@ -615,6 +978,47 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
+  async function cancelSuspended(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const applied = await deps.tasks.updateFenced({
+      taskId: task.taskId,
+      token: task.runToken ?? '',
+      patch: {
+        state: 'cancelled',
+        updatedAt: deps.clock.iso(),
+        cancelRequested: true,
+      },
+    });
+    if (applied.applied) {
+      publish(applied.task, 'task.cancelled', {});
+      await notifyTerminal(applied.task, 'cancelled');
+      deps.audit.record({
+        actor: task.ownerId,
+        action: 'work.cancelled',
+        taskId: task.taskId,
+        conversationId: task.conversationId,
+        outcome: 'cancelled',
+      });
+      return ok({
+        taskId: task.taskId,
+        state: 'cancelled',
+        generation: task.generation,
+        outcome: 'accepted',
+      });
+    }
+    return lostCancellation(task);
+  }
+
+  async function lostCancellation(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const current = await deps.tasks.get(task.taskId);
+    const cancelled = current?.runToken === task.runToken && current?.state === 'cancelled';
+    return ok({
+      taskId: task.taskId,
+      state: current?.state ?? task.state,
+      generation: current?.generation ?? task.generation,
+      outcome: cancelled ? 'accepted' : 'superseded',
+    });
+  }
+
   function trackAdmission<Args extends unknown[], Reply>(
     admit: (...args: Args) => Promise<ServiceResult<Reply>>,
   ): (...args: Args) => Promise<ServiceResult<Reply>> {
@@ -631,140 +1035,476 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
   }
 
+
+
+  type SubmitOptions = { scheduleAdmission?: TaskRecord['scheduleAdmission']; eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
+
+  /**
+   * The one Work acceptance path, shared by a client request and a scheduled
+   * occurrence.
+   *
+   * A scheduled caller supplies a deterministic task id. If that task already
+   * exists the occurrence ran before, and the function refuses before reserving
+   * budget or claiming a lease. That is the idempotency boundary the schedule
+   * engine relies on, and it reuses the task repository's unique index instead of
+   * maintaining a second execution ledger.
+   */
+  async function acceptTask(
+    principal: Principal,
+    request: WorkSubmitRequest,
+    options: SubmitOptions = {},
+  ): Promise<ServiceResult<TaskAccepted>> {
+    if (options.taskId) {
+      const existing = await deps.tasks.get(options.taskId);
+      if (existing) {
+        return fail('conflict', 'That occurrence already has a Work task.');
+      }
+    }
+
+    const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
+    const adapter = deps.agents.resolve(agentId);
+    if (!adapter.ok) return adapter;
+
+    const model = deps.models.resolve(request.model, request.mode);
+    if (!model.ok) return model;
+
+    const reasoning = resolveReasoningMode({ requested: request.reasoning, objective: request.objective });
+    const reserve = () => deps.budget.reserve(principal.ownerId, deps.clock.now()).allowed;
+    if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
+      return fail(
+        'budget_exhausted',
+        'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
+      );
+    }
+
+    const now = deps.clock.iso();
+    const conversationId =
+      options.conversationId ?? request.conversationId ?? deps.ids.conversationId();
+    await deps.conversations.ensure({
+      conversationId,
+      ownerId: principal.ownerId,
+      tenantId: null,
+      title: request.objective.slice(0, 120),
+      mode: request.mode,
+      isWork: true,
+      agent: agentId,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const appendObjective = () => deps.conversations.appendMessage({
+      messageId: options.taskId ? `msg_${options.taskId}` : deps.ids.messageId(),
+      conversationId,
+      role: 'user',
+      text: request.objective,
+      createdAt: now,
+    });
+
+    if (!options.taskId) await appendObjective();
+
+    const task: TaskRecord = {
+      ...(options.scheduleAdmission ? { scheduleAdmission: options.scheduleAdmission, handoffPending: true } : {}),
+      taskId: options.taskId ?? deps.ids.taskId(),
+      ownerId: principal.ownerId,
+      tenantId: null,
+      conversationId,
+      agent: agentId,
+      engine: adapter.value.engine,
+      mode: request.mode,
+      objective: request.objective,
+      model: model.value.ref,
+      state: 'queued',
+      generation: 1,
+      runToken: null,
+      reasoning,
+      steps: [],
+      checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
+      createdAt: now,
+      updatedAt: now,
+      leaseExpiresAt: null,
+      cancelRequested: false,
+      requireApproval: request.requireApproval,
+      budget: request.budget ?? null,
+      usage: null,
+      result: null,
+      failure: null,
+    };
+
+    // Claim first, then create. The lease is the cross-replica guard for "one
+    // live run per conversation", and the created task carries the unique token
+    // that authorizes its terminal write from the first instant.
+    const token = deps.ids.runToken();
+    const claimedAt = deps.clock.now();
+    const key = workRunKey({
+      ownerId: task.ownerId,
+      tenantId: task.tenantId,
+      conversationId,
+    });
+    const claimed = await deps.lease.claim({
+      key,
+      owner: task.ownerId,
+      token,
+      now: claimedAt,
+      expiresAt: new Date(claimedAt.getTime() + deps.config.execution.leaseTtlMs),
+    });
+    if (!claimed) {
+      return fail('busy', 'This conversation already has a live Work run.');
+    }
+
+    if (options.taskId) {
+      // A lost append acknowledgement can be retried with the same message ID.
+      // No task exists or budget is reserved until its objective is durable.
+      try {
+        if (!(await appendObjective())) {
+          const messages = await deps.conversations.messages(conversationId);
+          if (!messages.some(message => message.messageId === `msg_${options.taskId}`)) {
+            throw new Error('The scheduled objective was not persisted.');
+          }
+        }
+      } catch (error) {
+        await deps.lease.release({ key, token });
+        throw error;
+      }
+    }
+    const created = await deps.tasks.create({
+      ...task,
+      runToken: token,
+      leaseExpiresAt: new Date(
+        claimedAt.getTime() + deps.config.execution.leaseTtlMs,
+      ).toISOString(),
+    });
+    if (!created.ok) {
+      await deps.lease.release({ key, token }).catch(() => false);
+      return created.reason === 'conversation_busy'
+        ? fail('busy', 'This conversation already has an active Work task.')
+        : fail('conflict', 'That task identity is already in use.');
+    }
+
+    if (options.taskId) {
+      // The unique task insert elects the only writer of admission effects.
+      // The task is now visible to cancellation, but cannot execute until enqueue.
+      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      if (!reservation.allowed) {
+        await settle(created.task, token, { kind: 'failed', code: 'budget_exhausted', detail: 'The daily request budget is exhausted.', retryable: false });
+        return fail('budget_exhausted', 'The daily request budget is exhausted.');
+      }
+      let admitted: boolean;
+      try {
+        admitted = !options.eligible || await options.eligible();
+      } catch (error) {
+        reservation.release();
+        await settle(created.task, token, { kind: 'cancelled' });
+        throw error;
+      }
+      if (!admitted) {
+        reservation.release();
+        await settle(created.task, token, { kind: 'cancelled' });
+        return fail('validation_failed', 'That occurrence is no longer eligible.');
+      }
+      if (options.scheduleAdmission) {
+        let marked;
+        try {
+          marked = await deps.tasks.updateFenced({
+            taskId: task.taskId, token,
+            patch: { scheduleAdmission: { ...options.scheduleAdmission, complete: true } },
+          });
+        } catch (error) {
+          // An acknowledgement can be lost after the write committed. Only the
+          // original owner may finish this delivery or roll back its reservation.
+          const durable = await deps.tasks.get(task.taskId);
+          if (!durable?.scheduleAdmission?.complete && durable?.runToken === token) {
+            await settle(created.task, token, { kind: 'cancelled' });
+            const cancelled = await deps.tasks.get(task.taskId);
+            if (cancelled?.runToken === token && cancelled.state === 'cancelled') reservation.release();
+            throw error;
+          }
+          if (durable?.runToken !== token || durable.state !== 'queued') throw error;
+          marked = { applied: true };
+        }
+        if (!marked.applied) {
+          const durable = await deps.tasks.get(task.taskId);
+          if (durable && durable.runToken !== token) return fail('conflict', 'Another generation owns this handoff.');
+          reservation.release();
+          return fail('validation_failed', 'Scheduled Work lost ownership before enqueue.');
+        }
+      }
+    }
+
+    publish(created.task, 'task.queued');
+    deps.audit.record({
+      actor: principal.ownerId,
+      action: 'work.accepted',
+      taskId: task.taskId,
+      conversationId,
+      outcome: 'accepted',
+      detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
+    });
+
+    if (!deps.scheduler.enqueue(() => execute(task.taskId, token))) {
+      return rejectUnscheduledRun(created.task, token);
+    }
+
+    return ok({
+      taskId: task.taskId,
+      conversationId,
+      state: 'queued',
+      generation: 1,
+      eventsPath: `/v1/work/${task.taskId}/events`,
+    });
+  }
+
+  const schedulePort: SchedulePort = {
+    dispatch: async ({ schedule, scheduleVersion, taskId, conversationId, trigger, selectedTimingRevision, occurrenceKey, executionId, accept }) => {
+      // A dispatch can race an owner edit, pause, cancellation or an event-rule
+      // change. The occurrence was selected from an exact revision, timing rule
+      // and occurrence key; a newer schedule must be re-evaluated, never
+      // submitted with the stale plan it was admitted under.
+      const current = await deps.schedules.get(schedule.scheduleId);
+      if (!current) {
+        return { ok: false, reason: 'refused', detail: 'That schedule no longer exists.' };
+      }
+      if (current.state === 'cancelled') {
+        return { ok: false, reason: 'refused', detail: 'That schedule is cancelled.' };
+      }
+      const eligible = (record: ScheduleRecord | null) => !!record && record.state !== 'cancelled' &&
+        (trigger === 'manual' || trigger === 'retry' ||
+          (record.state === 'active' && (record.timingRevision ?? 0) === selectedTimingRevision &&
+            (trigger !== 'schedule' || record.nextRunAt === occurrenceKey)));
+      if (!eligible(current)) return { ok: false, reason: 'refused', detail: 'That occurrence is no longer eligible.' };
+      if (current.version !== scheduleVersion) {
+        return {
+          ok: false,
+          reason: 'refused',
+          detail: 'The schedule changed while this occurrence was being prepared.',
+        };
+      }
+      const adapter = deps.agents.resolve(current.agent);
+      if (!adapter.ok) {
+        return { ok: false, reason: 'refused', detail: adapter.detail };
+      }
+      if (scheduleSideEffectRefusal(adapter.value.sideEffects)) {
+        // Defense in depth: a schedule created before this guard existed must
+        // not start an ungated run after an upgrade.
+        return {
+          ok: false,
+          reason: 'refused',
+          detail: 'This agent is not gateable by owner approval and cannot run from a schedule.',
+        };
+      }
+      const accepted = await acceptTask(
+        { ownerId: current.ownerId, isOwner: true },
+        {
+          objective: current.objective,
+          agent: current.agent,
+          ...(current.model ? { model: current.model } : {}),
+          mode: current.mode,
+          ...(current.limits.budget ? { budget: current.limits.budget } : {}),
+          // A schedule never widens autonomy: every side effect still needs a
+          // scoped owner decision from the permission store.
+          requireApproval: true,
+          conversationId,
+        },
+        { taskId, conversationId, scheduleAdmission: { scheduleId: current.scheduleId, executionId, complete: false }, eligible: () => accept(eligible) },
+      );
+      if (accepted.ok) return { ok: true };
+      if (accepted.code === 'busy') {
+        return { ok: false, reason: 'busy', detail: accepted.detail };
+      }
+      if (accepted.code === 'budget_exhausted') {
+        return { ok: false, reason: 'budget', detail: accepted.detail };
+      }
+      if (accepted.code === 'conflict') {
+        return { ok: false, reason: 'duplicate', detail: accepted.detail };
+      }
+      return { ok: false, reason: 'refused', detail: accepted.detail };
+    },
+
+    recoverHandoff: async (receipt, admit) => {
+      if (!receipt.taskId) return;
+      const task = await deps.tasks.get(receipt.taskId);
+      const admission = task?.scheduleAdmission;
+      if (!task?.handoffPending || !admission || admission.executionId !== receipt.executionId ||
+          (task.state !== 'queued' && task.state !== 'interrupted')) return;
+      const key = workRunKey(scopeOf(task));
+      const now = deps.clock.now();
+      const expiresAt = new Date(now.getTime() + deps.config.execution.leaseTtlMs);
+      const token = deps.ids.runToken();
+      if (!await deps.lease.claim({ key, owner: task.ownerId, token, now, expiresAt })) return;
+      const claim = await deps.schedules.getExecution(receipt.executionId);
+      if (!claim || (claim.state !== 'claimed' && claim.state !== 'dispatched') ||
+          claim.taskId !== task.taskId || claim.claimGeneration !== receipt.claimGeneration) {
+        await releaseLease(task, token);
+        return;
+      }
+      const owned = await deps.tasks.takeHandoff(task.taskId, task.generation, token, expiresAt.toISOString());
+      if (!owned) { await releaseLease(task, token); return; }
+      const current = await deps.schedules.get(receipt.scheduleId);
+      // admissionStarted proves the insert won and reserved its request. A stop
+      // before that point has no durable acceptance to deliver.
+      const admitted = owned.scheduleAdmission?.complete || (claim.admissionStarted &&
+        (current?.lastExecutionId === receipt.executionId || await admit()));
+      if (!admitted || owned.cancelRequested || !current || current.state === 'cancelled') {
+        await settle(owned, token, { kind: 'cancelled' });
+        return;
+      }
+      const marked = await deps.tasks.updateFenced({ taskId: task.taskId, token,
+        patch: { scheduleAdmission: { ...admission, complete: true } } });
+      if (marked.applied) deps.scheduler.enqueue(() => execute(task.taskId, token));
+    },
+    claimScheduledRetry: (taskId, generation) => deps.tasks.claimScheduledRetry(taskId, generation),
+    taskSnapshot: async (taskId) => {
+      const task = await deps.tasks.get(taskId);
+      if (!task) return null;
+      const reconciled = await reconcile(task);
+      return {
+        ...(task.scheduleAdmission && { admissionPending:
+          !(task.scheduleAdmission.complete ??
+            ((await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId === task.scheduleAdmission.executionId || task.steps.length > 0)) }),
+        generation: reconciled.generation,
+        state: reconciled.state,
+        summary: reconciled.result?.summary ?? null,
+        failure: reconciled.failure
+          ? {
+              code: reconciled.failure.code,
+              retryable: reconciled.failure.retryable !== false,
+            }
+          : null,
+      };
+    },
+  };
+
+  const scheduleEngine = createScheduleEngine({
+    store: deps.schedules,
+    notices: deps.scheduleNotices,
+    port: schedulePort,
+    settings: deps.config.schedules,
+    clock: deps.clock,
+    ids: deps.ids,
+  });
+
+  function toSchedule(record: ScheduleRecord): Schedule {
+    return {
+      scheduleId: record.scheduleId,
+      name: record.name,
+      objective: record.objective,
+      agent: record.agent,
+      mode: record.mode,
+      model: record.model,
+      timing: record.timing,
+      condition: record.condition,
+      retry: record.retry,
+      priority: record.priority,
+      limits: record.limits,
+      requireApproval: true,
+      missedRunPolicy: record.missedRunPolicy,
+      state: record.state,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      nextRunAt: record.nextRunAt,
+      lastRunAt: record.lastRunAt,
+      lastExecutionId: record.lastExecutionId,
+      runsTotal: record.runsTotal,
+      consecutiveFailures: record.consecutiveFailures,
+      version: record.version,
+      pausedAt: record.pausedAt,
+      cancelledAt: record.cancelledAt,
+      cancelReason: record.cancelReason,
+    };
+  }
+
+  function toExecution(record: ScheduleExecutionRecord): ScheduleExecution {
+    return {
+      executionId: record.executionId,
+      scheduleId: record.scheduleId,
+      occurrenceKey: record.occurrenceKey,
+      trigger: record.trigger,
+      scheduledFor: record.scheduledFor,
+      state: record.state,
+      attempt: record.attempt,
+      maxAttempts: record.maxAttempts,
+      taskId: record.taskId,
+      conversationId: record.conversationId,
+      priority: record.priority,
+      detail: record.detail,
+      nextAttemptAt: record.nextAttemptAt,
+      condition: record.condition,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      finishedAt: record.finishedAt,
+    };
+  }
+
+  async function ownedSchedule(
+    scheduleId: string,
+    principal: Principal,
+  ): Promise<ServiceResult<ScheduleRecord>> {
+    const record = await deps.schedules.get(scheduleId);
+    if (!record || record.ownerId !== principal.ownerId) {
+      return fail('not_found', 'That schedule does not exist for this owner.');
+    }
+    return ok(record);
+  }
+
+  function control(
+    record: ScheduleRecord,
+    outcome: ScheduleControlResult['outcome'],
+  ): ScheduleControlResult {
+    return { scheduleId: record.scheduleId, state: record.state, outcome };
+  }
+
   const service: ApplicationService = {
     health: () => deps.health.report(),
     readiness: () => deps.health.readiness(),
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
-    submitWork: trackAdmission<[Principal, WorkSubmitRequest], TaskAccepted>(async (principal, request) => {
-      const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
-      const adapter = deps.agents.resolve(agentId);
-      if (!adapter.ok) return adapter;
+    browserCapabilities: () => deps.browser.capabilities(),
+    browserSessions: (principal) => deps.browser.list(principal.ownerId),
+    browserSession: (principal, sessionId) =>
+      deps.browser.get(principal.ownerId, sessionId),
+    createBrowserSession: (principal, request) =>
+      deps.browser.create(principal.ownerId, request),
+    browserAction: (principal, sessionId, action) =>
+      deps.browser.act(principal.ownerId, sessionId, action),
+    pauseBrowserSession: (principal, sessionId) =>
+      deps.browser.pause(principal.ownerId, sessionId),
+    resumeBrowserSession: (principal, sessionId) =>
+      deps.browser.resume(principal.ownerId, sessionId),
+    takeoverBrowserSession: (principal, sessionId, request) =>
+      deps.browser.takeover(principal.ownerId, sessionId, request),
+    closeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.close(principal.ownerId, sessionId, request),
+    authorizeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.authorize(principal.ownerId, sessionId, request),
+    decideBrowserAuthorization: (principal, sessionId, request) =>
+      deps.browser.decide(principal.ownerId, sessionId, request),
+    browserReceipts: (principal, sessionId) =>
+      deps.browser.receipts(principal.ownerId, sessionId),
+    browserArtifact: (principal, artifactId) =>
+      deps.browser.artifact(principal.ownerId, artifactId),
 
-      const model = deps.models.resolve(request.model, request.mode);
-      if (!model.ok) return model;
+    submitWork: trackAdmission<[Principal, WorkSubmitRequest], TaskAccepted>(
+      (principal, request) => acceptTask(principal, request),
+    ),
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
-      if (!reservation.allowed) {
-        return fail(
-          'budget_exhausted',
-          'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
-        );
-      }
-
-      const now = deps.clock.iso();
-      const conversationId = request.conversationId ?? deps.ids.conversationId();
-      await deps.conversations.ensure({
-        conversationId,
-        ownerId: principal.ownerId,
-        tenantId: null,
-        title: request.objective.slice(0, 120),
-        mode: request.mode,
-        isWork: true,
-        agent: agentId,
-        createdAt: now,
-        updatedAt: now,
-      });
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId,
-        role: 'user',
-        text: request.objective,
-        createdAt: now,
-      });
-
-      const task: TaskRecord = {
-        taskId: deps.ids.taskId(),
-        ownerId: principal.ownerId,
-        tenantId: null,
-        conversationId,
-        agent: agentId,
-        engine: adapter.value.engine,
-        mode: request.mode,
-        objective: request.objective,
-        model: model.value.ref,
-        state: 'queued',
-        generation: 1,
-        runToken: null,
-        steps: [],
-        checkpoint: { completedSteps: [], text: '' },
-        createdAt: now,
-        updatedAt: now,
-        leaseExpiresAt: null,
-        cancelRequested: false,
-        requireApproval: request.requireApproval,
-        budget: request.budget ?? null,
-        usage: null,
-        result: null,
-        failure: null,
-      };
-
-      // Claim first, then create. The lease is the cross-replica guard for "one
-      // live run per conversation", and the created task carries the unique
-      // token that authorizes its terminal write from the first instant.
-      const token = deps.ids.runToken();
-      const claimedAt = deps.clock.now();
-      const key = workRunKey({
-        ownerId: task.ownerId,
-        tenantId: task.tenantId,
-        conversationId,
-      });
-      const claimed = await deps.lease.claim({
-        key,
-        owner: task.ownerId,
-        token,
-        now: claimedAt,
-        expiresAt: new Date(claimedAt.getTime() + deps.config.execution.leaseTtlMs),
-      });
-      if (!claimed) {
-        return fail('busy', 'This conversation already has a live Work run.');
-      }
-
-      const created = await deps.tasks.create({
-        ...task,
-        runToken: token,
-        leaseExpiresAt: new Date(
-          claimedAt.getTime() + deps.config.execution.leaseTtlMs,
-        ).toISOString(),
-      });
-      if (!created.ok) {
-        await deps.lease.release({ key, token }).catch(() => false);
-        return fail(
-          'busy',
-          created.reason === 'conversation_busy'
-            ? 'This conversation already has an active Work task.'
-            : 'That task identity is already in use.',
-        );
-      }
-
-      publish(created.task, 'task.queued');
-      if (!deps.scheduler.enqueue(() => execute(task.taskId, token))) {
-        return rejectUnscheduledRun(created.task, token);
-      }
-      deps.audit.record({
-        actor: principal.ownerId,
-        action: 'work.accepted',
-        taskId: task.taskId,
-        conversationId,
-        outcome: 'accepted',
-        detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
-      });
-
-      return ok({
-        taskId: task.taskId,
-        conversationId,
-        state: 'queued',
-        generation: 1,
-        eventsPath: `/v1/work/${task.taskId}/events`,
-      });
-    }),
 
     task: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      const reconciled = await reconcile(found.value);
-      return ok(toStatus(reconciled));
+      const task = await reconcile(found.value);
+      if (task.state === 'awaiting_approval') {
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
+        // A durable suspension is ready to expose only after its run no longer
+        // holds the lease. An owner who sees it can immediately claim a resume.
+        if (lease?.live && lease.token === task.runToken) {
+          return ok(toStatus({
+            ...task,
+            state: 'running',
+            failure: null,
+            leaseExpiresAt: lease.expiresAt.toISOString(),
+          }));
+        }
+      }
+      return ok(toStatus(task));
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -780,20 +1520,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
+      // Once suspended, the task can be cancelled even without a live lease.
+      if (task.state === 'awaiting_approval') return cancelSuspended(task);
+
       const outcome = await deps.lease.cancel({
         key: workRunKey(scopeOf(task)),
         now: deps.clock.now(),
       });
       if (outcome === 'none') {
+        const current = await deps.tasks.get(taskId);
+        if (current?.runToken === task.runToken && current?.state === 'awaiting_approval') {
+          return cancelSuspended(current);
+        }
         return fail('not_found', 'No live run exists for that task.');
       }
 
       if (outcome === 'requested') {
-        await deps.tasks.updateFenced({
+        const applied = await deps.tasks.updateFenced({
           taskId: task.taskId,
           token: task.runToken ?? '',
+          guard: 'not_awaiting_approval',
           patch: { cancelRequested: true, updatedAt: deps.clock.iso() },
         });
+        if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+        if (!applied.applied) return lostCancellation(task);
         controllers.get(task.taskId)?.abort();
         return ok({
           taskId: task.taskId,
@@ -806,6 +1556,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const applied = await deps.tasks.updateFenced({
         taskId: task.taskId,
         token: task.runToken ?? '',
+        guard: 'not_awaiting_approval',
         patch: {
           state: 'interrupted',
           updatedAt: deps.clock.iso(),
@@ -817,14 +1568,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           },
         },
       });
-      if (!applied.applied) {
-        return ok({
-          taskId: task.taskId,
-          state: (await deps.tasks.get(task.taskId))?.state ?? task.state,
-          generation: task.generation,
-          outcome: 'superseded',
-        });
-      }
+      if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+      if (!applied.applied) return lostCancellation(task);
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
@@ -857,6 +1602,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'already_terminal',
         });
       }
+      if (!(await canRunScheduled(task))) {
+        return fail('conflict', 'Scheduled Work was not admitted or its schedule was cancelled.');
+      }
       const token = deps.ids.runToken();
       const now = deps.clock.now();
       const claimed = await deps.lease.claim({
@@ -873,8 +1621,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        // A concurrent cancel may land between the read above and this write.
+        // Only the two suspending states may be revived; a cancelled task stays
+        // cancelled.
+        from: ['interrupted', 'awaiting_approval'],
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be resumed.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
@@ -908,35 +1663,53 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'already_terminal',
         });
       }
+      if (!(await canRunScheduled(task))) {
+        return fail('conflict', 'Scheduled Work was not admitted or its schedule was cancelled.');
+      }
       const token = deps.ids.runToken();
       const now = deps.clock.now();
-      const claimed = await deps.lease.claim({
-        key: workRunKey(scopeOf(task)),
-        owner: task.ownerId,
-        token,
-        now,
-        expiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs),
-      });
-      if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
-
-      const applied = await deps.tasks.reissue({
-        taskId,
-        token,
-        now: deps.clock.iso(),
-        leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
-      });
-      if (!applied.applied) return fail('conflict', 'That task cannot be retried.');
-      publish(applied.task, 'task.queued', {});
-      publish(applied.task, 'text.replace', { text: '' });
-      if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
-        return rejectUnscheduledRun(applied.task, token);
+      if (task.failure?.code === 'budget_exhausted') {
+        return fail('budget_exhausted', 'This task was refused before admission; submit a new request.');
       }
-      return ok({
-        taskId,
-        state: 'queued',
-        generation: applied.task.generation,
-        outcome: 'accepted',
-      });
+      const reservation = deps.budget.reserve(principal.ownerId, now);
+      if (!reservation.allowed) return fail('budget_exhausted', 'The daily request budget is exhausted.');
+      let accepted = false;
+      try {
+        const claimed = await deps.lease.claim({
+          key: workRunKey(scopeOf(task)),
+          owner: task.ownerId,
+          token,
+          now,
+          expiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs),
+        });
+        if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
+
+        const applied = await deps.tasks.reissue({
+          taskId,
+          token,
+          now: deps.clock.iso(),
+          leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+          from: ['failed', 'interrupted'],
+        });
+        if (!applied.applied) {
+          await releaseLease(task, token);
+          return fail('conflict', 'That task cannot be retried.');
+        }
+        publish(applied.task, 'task.queued', {});
+        publish(applied.task, 'text.replace', { text: '' });
+        if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+          return rejectUnscheduledRun(applied.task, token);
+        }
+        accepted = true;
+        return ok({
+          taskId,
+          state: 'queued',
+          generation: applied.task.generation,
+          outcome: 'accepted',
+        });
+      } finally {
+        if (!accepted) reservation.release();
+      }
     }),
 
     chat: trackAdmission<[Principal, ChatRequest], ChatReply>(async (principal, request) => {
@@ -990,6 +1763,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           maxSteps: 1,
           budget: null,
           signal: controller.signal,
+          reasoning: 'fast',
+          completedSteps: [],
+          plan: null,
         },
         () => undefined,
       );
@@ -1052,7 +1828,32 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    notifications: (principal) => deps.notifications.list(principal.ownerId),
+    notifications: async (principal, includeSchedules = true) => {
+      if (!includeSchedules) return deps.notifications.list(principal.ownerId);
+      const [work, schedule] = await Promise.all([
+        deps.notifications.list(principal.ownerId),
+        deps.scheduleNotices.list(principal.ownerId, deps.config.schedules.historyLimit),
+      ]);
+      // One owner-facing list and one unread count. A schedule can fail before a
+      // Work task exists, so its notices are a second record kind, not a second
+      // notification endpoint.
+      return {
+        notifications: work.notifications,
+        schedules: schedule.notifications,
+        unread: work.unread + schedule.unread,
+      };
+    },
+
+    markNotificationsRead: async (principal, includeSchedules = true) => {
+      const work = await deps.notifications.list(principal.ownerId);
+      for (const notification of work.notifications) {
+        if (!notification.read) {
+          await deps.notifications.markRead(principal.ownerId, notification.taskId);
+        }
+      }
+      if (includeSchedules) await deps.scheduleNotices.markAllRead(principal.ownerId);
+      return service.notifications(principal, includeSchedules);
+    },
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
@@ -1082,6 +1883,356 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       };
     },
 
+    schedules: async (principal) => ({
+      schedules: (await deps.schedules.listByOwner(principal.ownerId)).map(toSchedule),
+    }),
+
+    schedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      return ok(toSchedule(found.value));
+    },
+
+    createSchedule: async (principal, request) => {
+      const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
+      const adapter = deps.agents.resolve(agentId);
+      if (!adapter.ok) return adapter;
+      const sideEffectRefusal = scheduleSideEffectRefusal(adapter.value.sideEffects);
+      if (sideEffectRefusal) {
+        // Nobody is watching a scheduled occurrence. An adapter this engine
+        // cannot gate per action would let a recurrence act without a scoped
+        // owner decision, so scheduling refuses it instead of pretending the
+        // task-level approval flag protects it.
+        return fail('validation_failed', sideEffectRefusal);
+      }
+      const model = deps.models.resolve(request.model, request.mode);
+      if (!model.ok) return model;
+
+      const now = deps.clock.now();
+      if (
+        request.timing.kind === 'once' &&
+        new Date(request.timing.at).getTime() <= now.getTime()
+      ) {
+        return fail('validation_failed', 'A one-time schedule must be in the future.');
+      }
+      const first = nextOccurrence(request.timing, now, now);
+      if (request.timing.kind !== 'event' && !first) {
+        return fail('validation_failed', 'No occurrence could be computed for that timing rule.');
+      }
+
+      const nowIso = now.toISOString();
+      const record: ScheduleRecord = {
+        scheduleId: deps.ids.scheduleId(),
+        ownerId: principal.ownerId,
+        name: request.name,
+        objective: request.objective,
+        agent: agentId,
+        model: model.value.ref,
+        mode: request.mode,
+        timing: request.timing,
+        condition: request.condition,
+        retry: request.retry,
+        priority: request.priority,
+        limits: request.limits,
+        requireApproval: true,
+        missedRunPolicy: request.missedRunPolicy,
+        state: request.enabled ? 'active' : 'paused',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        nextRunAt: request.enabled && first ? first.toISOString() : null,
+        lastRunAt: null,
+        lastExecutionId: null,
+        runsTotal: 0,
+        consecutiveFailures: 0,
+        version: 0,
+        pausedAt: request.enabled ? null : nowIso,
+        cancelledAt: null,
+        cancelReason: null,
+      };
+      const created = await deps.schedules.create(record);
+      if (!created.ok) {
+        return fail('conflict', 'That schedule identity is already in use.');
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.created',
+        outcome: 'accepted',
+        detail: `schedule=${record.scheduleId} priority=${record.priority}`,
+      });
+      return ok(toSchedule(created.schedule));
+    },
+
+    pauseSchedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      if (record.state === 'cancelled' || record.state === 'exhausted') {
+        return ok(control(record, 'already_terminal'));
+      }
+      if (record.state === 'paused') return ok(control(record, 'unchanged'));
+      const applied = await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          timingRevision: record.version + 1,
+          state: 'paused',
+          nextRunAt: null,
+          pausedAt: deps.clock.iso(),
+          updatedAt: deps.clock.iso(),
+        },
+      });
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.paused',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(control(applied.schedule ?? record, applied.applied ? 'accepted' : 'unchanged'));
+    },
+
+    resumeSchedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      if (record.state === 'cancelled' || record.state === 'exhausted') {
+        return ok(control(record, 'already_terminal'));
+      }
+      if (record.state === 'active') return ok(control(record, 'unchanged'));
+
+      const now = deps.clock.now();
+      const next = nextOccurrence(record.timing, now, new Date(record.createdAt));
+      if (record.timing.kind !== 'event' && !next) {
+        return fail(
+          'validation_failed',
+          'That schedule has no future occurrence; create a new one instead of resuming it.',
+        );
+      }
+      const applied = await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          timingRevision: record.version + 1,
+          state: 'active',
+          nextRunAt: next ? next.toISOString() : null,
+          pausedAt: null,
+          updatedAt: deps.clock.iso(),
+        },
+      });
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.resumed',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(control(applied.schedule ?? record, applied.applied ? 'accepted' : 'unchanged'));
+    },
+
+    cancelSchedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      const alreadyCancelled = record.state === 'cancelled';
+
+      const now = deps.clock.iso();
+      const applied = alreadyCancelled ? { applied: true, schedule: record } : await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          state: 'cancelled',
+          nextRunAt: null,
+          cancelledAt: now,
+          cancelReason: 'The owner cancelled the schedule.',
+          updatedAt: now,
+        },
+      });
+      if (!applied.applied) {
+        // A concurrent tick changed the record. Never acknowledge a
+        // cancellation that did not commit: report the current state so the
+        // client can retry against the new version.
+        const latest = await deps.schedules.get(scheduleId);
+        if (!latest) return fail('not_found', 'That schedule no longer exists.');
+        if (latest.state === 'cancelled') return service.cancelSchedule(principal, scheduleId);
+        return fail('conflict', 'The schedule changed while it was being cancelled; retry.');
+      }
+      const cancelled = applied.schedule ?? record;
+
+      // A live run is stopped through the durable lease, not by writing its task
+      // record here: only the generation that holds the token may settle it.
+      const executions = await deps.schedules.listPending(scheduleId);
+      for (const execution of executions) {
+        if (isTerminalExecution(execution.state)) continue;
+        if (execution.state === 'retry_wait' || execution.state === 'claimed') {
+          // A claimed receipt may already have a live task: dispatch writes the
+          // receipt first and the task second. Cancel the task through the
+          // durable lease before terminalizing the receipt, otherwise a run the
+          // owner cancelled keeps executing with no receipt to reconcile.
+          if (execution.taskId) {
+            await service.cancelTask(principal, execution.taskId, 'The schedule was cancelled.');
+          }
+          await deps.schedules.updateExecution({
+            executionId: execution.executionId,
+            from: ['retry_wait', 'claimed'],
+            patch: {
+              state: 'cancelled',
+              detail: 'The schedule was cancelled.',
+              updatedAt: now,
+              finishedAt: now,
+            },
+          });
+          continue;
+        }
+        if (execution.state === 'dispatched' && execution.taskId) {
+          await service.cancelTask(principal, execution.taskId, 'The schedule was cancelled.');
+        }
+      }
+
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.cancelled',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(control(cancelled, alreadyCancelled ? 'already_terminal' : 'accepted'));
+    },
+
+    triggerSchedule: async (principal, scheduleId, request) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      if (found.value.state === 'cancelled') {
+        return fail('conflict', 'That schedule is cancelled.');
+      }
+      const key = request.idempotencyKey ?? deps.ids.executionId();
+      const dispatch = await scheduleEngine.trigger({
+        schedule: found.value,
+        occurrenceKey: `manual:${key}`,
+        trigger: 'manual',
+      });
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.triggered',
+        outcome: dispatch.state === 'refused' ? 'refused' : 'accepted',
+        detail: `schedule=${scheduleId} execution=${dispatch.executionId}`,
+      });
+      return ok(dispatch);
+    },
+
+    scheduleExecutions: async (principal, scheduleId, limit) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const bounded = Math.min(
+        Math.max(1, limit ?? deps.config.schedules.historyLimit),
+        500,
+      );
+      const records = await deps.schedules.listExecutions(scheduleId, bounded);
+      return ok({ executions: records.map(toExecution) });
+    },
+
+    scheduleEvent: async (principal, request) => {
+      const active = await deps.schedules.listActive();
+      const matching = active.filter(
+        (record) =>
+          record.ownerId === principal.ownerId &&
+          record.timing.kind === 'event' &&
+          record.timing.event === request.event,
+      );
+      const dispatched: ScheduleDispatch[] = [];
+      for (const record of matching) {
+        dispatched.push(
+          await scheduleEngine.trigger({
+            schedule: record,
+            occurrenceKey: `event:${request.event}:${request.idempotencyKey}`,
+            trigger: 'event',
+          }),
+        );
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.event',
+        outcome: 'accepted',
+        detail: `event=${request.event} schedules=${dispatched.length}`,
+      });
+      return ok({ event: request.event, dispatched });
+    },
+
+    updateSchedule: async (principal, scheduleId, request) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      if (record.state === 'cancelled' || record.state === 'exhausted') {
+        return fail('conflict', 'A terminal schedule cannot be edited.');
+      }
+
+      const now = deps.clock.now();
+      const timing = request.timing ?? record.timing;
+      if (timing.kind === 'once' && new Date(timing.at).getTime() <= now.getTime()) {
+        return fail('validation_failed', 'A one-time schedule must be in the future.');
+      }
+
+      const enabled = request.enabled ?? record.state === 'active';
+      const timingChanged = request.timing !== undefined;
+      const enabledChanged = enabled !== (record.state === 'active');
+      let nextRunAt = record.nextRunAt;
+      if (!enabled) {
+        nextRunAt = null;
+      } else if (timingChanged || enabledChanged || nextRunAt === null) {
+        const next = nextOccurrence(timing, now, new Date(record.createdAt));
+        if (timing.kind !== 'event' && !next) {
+          return fail(
+            'validation_failed',
+            'That timing rule has no future occurrence; the schedule was not changed.',
+          );
+        }
+        nextRunAt = next ? next.toISOString() : null;
+      }
+
+      const nowIso = now.toISOString();
+      const applied = await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          name: request.name ?? record.name,
+          timing,
+          ...(timingChanged || enabledChanged ? { timingRevision: record.version + 1 } : {}),
+          condition: request.condition ?? record.condition,
+          retry: request.retry ?? record.retry,
+          priority: request.priority ?? record.priority,
+          limits: request.limits ? { ...record.limits, ...request.limits } : record.limits,
+          missedRunPolicy: request.missedRunPolicy ?? record.missedRunPolicy,
+          state: enabled ? 'active' : 'paused',
+          nextRunAt,
+          pausedAt: enabled ? null : (record.pausedAt ?? nowIso),
+          updatedAt: nowIso,
+        },
+      });
+      if (!applied.applied || !applied.schedule) {
+        return fail('conflict', 'The schedule changed while this edit was applied; retry.');
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.updated',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(toSchedule(applied.schedule));
+    },
+
+    scheduleUpcoming: async (principal, scheduleId, limit) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      if (found.value.state === 'cancelled' || found.value.state === 'exhausted') {
+        return ok({ scheduleId, occurrences: [] });
+      }
+      const bounded = Math.min(Math.max(1, limit ?? 5), 20);
+      return ok({
+        scheduleId,
+        occurrences: previewOccurrences(found.value, deps.clock.now(), bounded),
+      });
+    },
+
+    startSchedules: () => scheduleEngine.start(),
+    stopSchedules: () => scheduleEngine.stop(),
+    tickSchedules: () => scheduleEngine.tick(),
+
     recoverInterrupted: async () => {
       const unsettled = await deps.tasks.listUnsettled();
       let interrupted = 0;
@@ -1103,11 +2254,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     shutdown: () => {
       if (shutdownPromise) return shutdownPromise;
       shuttingDown = true;
-      deps.scheduler.stop();
-      for (const controller of controllers.values()) controller.abort();
-      controllers.clear();
-      shutdownPromise = Promise.all([deps.scheduler.idle(), Promise.allSettled(admissions)])
-        .then(() => undefined);
+      shutdownPromise = (async () => {
+        await scheduleEngine.stop();
+        deps.scheduler.stop();
+        for (const controller of controllers.values()) controller.abort();
+        controllers.clear();
+        await Promise.all([deps.scheduler.idle(), Promise.allSettled(admissions)]);
+        // Release cloud browsers rather than letting them run until their TTL.
+        await deps.browser.shutdown();
+      })();
       return shutdownPromise;
     },
   };

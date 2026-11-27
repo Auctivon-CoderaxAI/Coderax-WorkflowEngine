@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { CONTRACT_VERSION } from '@coderax/contracts';
 
 const root = path.resolve(import.meta.dirname, '..', '..', '..');
 
@@ -36,7 +37,7 @@ for (const workspace of ['contracts', 'sdk']) {
     const pkg = manifest(workspace);
     assert.equal(pkg.private, true, 'a private repository must not publish an accidental package');
     assert.deepEqual(pkg.files, ['dist']);
-    assert.equal(pkg.version, '1.0.0');
+    assert.equal(pkg.version, CONTRACT_VERSION, 'package versions track the contract version');
     assert.equal(pkg.type, 'module');
     assert.equal(pkg.main, './dist/index.js');
     assert.equal(pkg.types, './dist/index.d.ts');

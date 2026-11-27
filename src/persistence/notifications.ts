@@ -35,6 +35,8 @@ export function createNotificationStore(): NotificationStore {
           createdAt: entry.createdAt,
           read: entry.read,
         })),
+        // Schedule notices are merged by the service, which owns both stores.
+        schedules: [],
         unread: owned.filter((entry) => !entry.read).length,
       };
     },

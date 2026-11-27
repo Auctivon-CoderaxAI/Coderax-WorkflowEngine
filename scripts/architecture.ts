@@ -457,7 +457,16 @@ export function checkArchitecture(repository: Repository): Finding[] {
           candidate.path === file.path &&
           new RegExp(`export\\s+(?:async\\s+)?function\\s+${factory}\\b`).test(candidate.text),
       );
-      if (declaration || file.path === 'src/bootstrap/compose.ts') continue;
+      if (
+        declaration ||
+        file.path === 'src/bootstrap/compose.ts' ||
+        (factory === 'createScheduleEngine' && file.path === 'src/orchestration/service.ts')
+      ) {
+        // The schedule engine is orchestration-owned: its port closes over the
+        // service's own admission and execution paths, so it is constructed
+        // where that port exists rather than in the composition root.
+        continue;
+      }
       findings.push({
         rule: 'single_construction_root',
         path: file.path,

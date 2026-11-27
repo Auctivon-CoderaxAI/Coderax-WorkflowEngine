@@ -13,6 +13,16 @@ import type { ServiceFailure } from '../support/result.js';
  * reaches a repository, an adapter or a provider directly.
  */
 
+/** The router validates a query string but hands handlers the raw values. */
+function queryNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
 function fromFailure(failure: ServiceFailure, requestId: string) {
   return problemResult(failure.code, failure.detail, requestId, failure.retryable);
 }
@@ -205,9 +215,213 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
-  registry.register('listNotifications', async (context) => ({
+  registry.register('browserCapabilities', async () => ({
     kind: 'json',
     status: 200,
-    body: await service.notifications(context.principal),
+    body: await service.browserCapabilities(),
   }));
+
+  registry.register('listBrowserSessions', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.browserSessions(context.principal),
+  }));
+
+  registry.register('createBrowserSession', async (context) => {
+    const result = await service.createBrowserSession(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('getBrowserSession', async (context) => {
+    const result = await service.browserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('browserAction', async (context) => {
+    const result = await service.browserAction(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('pauseBrowserSession', async (context) => {
+    const result = await service.pauseBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('resumeBrowserSession', async (context) => {
+    const result = await service.resumeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('takeoverBrowserSession', async (context) => {
+    const result = await service.takeoverBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('closeBrowserSession', async (context) => {
+    const result = await service.closeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      (context.body ?? {}) as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('authorizeBrowserSession', async (context) => {
+    const result = await service.authorizeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('decideBrowserAuthorization', async (context) => {
+    const result = await service.decideBrowserAuthorization(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listBrowserReceipts', async (context) => {
+    const result = await service.browserReceipts(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getBrowserArtifact', async (context) => {
+    const result = await service.browserArtifact(
+      context.principal,
+      context.params.artifactId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listNotifications', async (context) => {
+    const include = context.query.includeSchedules === 'true';
+    const list = await service.notifications(context.principal, include);
+    return { kind: 'json', status: 200, body: include ? list : { notifications: list.notifications, unread: list.unread } };
+  });
+
+  registry.register('markNotificationsRead', async (context) => {
+    const include = context.query.includeSchedules === 'true';
+    const list = await service.markNotificationsRead(context.principal, include);
+    return { kind: 'json', status: 200, body: include ? list : { notifications: list.notifications, unread: list.unread } };
+  });
+
+  registry.register('createSchedule', async (context) => {
+    const result = await service.createSchedule(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('listSchedules', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.schedules(context.principal),
+  }));
+
+  registry.register('dispatchScheduleEvent', async (context) => {
+    const result = await service.scheduleEvent(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('getSchedule', async (context) => {
+    const result = await service.schedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('updateSchedule', async (context) => {
+    const result = await service.updateSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getScheduleUpcoming', async (context) => {
+    const limit = queryNumber(context.query.limit);
+    const result = await service.scheduleUpcoming(
+      context.principal,
+      context.params.scheduleId ?? '',
+      limit,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('pauseSchedule', async (context) => {
+    const result = await service.pauseSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('resumeSchedule', async (context) => {
+    const result = await service.resumeSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('cancelSchedule', async (context) => {
+    const result = await service.cancelSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('triggerSchedule', async (context) => {
+    const body = (context.body ?? {}) as { idempotencyKey?: string };
+    const result = await service.triggerSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+      body,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('listScheduleExecutions', async (context) => {
+    const limit = queryNumber(context.query.limit);
+    const result = await service.scheduleExecutions(
+      context.principal,
+      context.params.scheduleId ?? '',
+      limit,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
 }
