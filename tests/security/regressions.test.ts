@@ -276,6 +276,8 @@ regression('F6', 'cancellation is bounded and a late report never reaches the bu
       ownerId: 'owner',
       tenantId: null,
       conversationId: 'conv',
+      workload: 'work',
+      game: null,
       objective: 'bounded cancellation',
       model: { providerId: 'free', modelId: 'coderax-small' },
       mode: 'cloud',

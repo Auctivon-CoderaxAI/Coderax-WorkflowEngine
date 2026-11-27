@@ -186,6 +186,10 @@ export function createNativeAgent(input: {
         };
       }
 
+      // The guard above proves the model is resolved; capture it so nested
+      // closures keep the narrowed type instead of re-reading a nullable field.
+      const model = request.model;
+
       const cancelled = (): AgentRunOutcome => ({
         ok: false,
         code: 'cancelled',
@@ -375,7 +379,7 @@ export function createNativeAgent(input: {
             history: request.history ?? [],
             evidence: [...evidence.values()],
             workspaceRoot: request.workspaceRoot,
-            model: request.model,
+            model,
             signal,
             ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
             ...(feedback ? { feedback } : {}),

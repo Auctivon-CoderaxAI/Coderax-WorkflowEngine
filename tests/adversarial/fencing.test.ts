@@ -196,6 +196,8 @@ test('a cancellation that races the start is honored, not ignored', async () => 
       ownerId: 'owner',
       tenantId: null,
       conversationId: 'conv',
+      workload: 'work',
+      game: null,
       objective: 'race',
       model: { providerId: 'free', modelId: 'coderax-small' },
       mode: 'cloud',
