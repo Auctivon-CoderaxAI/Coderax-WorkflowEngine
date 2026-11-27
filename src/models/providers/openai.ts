@@ -66,6 +66,28 @@ export function createOpenAiProvider(input: {
       const body = await readJson(response, input.id);
       return parseCompletion(input.id, body);
     },
+    embed: async (request) => {
+      let response: Response;
+      try {
+        response = await fetchImpl(`${base}/embeddings`, {
+          method: 'POST',
+          // A redirect must never forward document text or the key elsewhere.
+          redirect: 'error',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            ...authHeaders,
+          },
+          body: JSON.stringify({ model: request.model.modelId, input: request.texts }),
+          signal: request.signal,
+        });
+      } catch (error) {
+        throw toProviderError(input.id, error, request.signal);
+      }
+      if (!response.ok) throw await providerErrorFromResponse({ response, provider: input.id });
+      const body = await readJson(response, input.id);
+      return parseEmbeddings(input.id, body, request.texts.length);
+    },
     stream: async function* (request): AsyncGenerator<ProviderStreamEvent> {
       const response = await call(fetchImpl, base, authHeaders, input.id, request, true);
       yield* parseStream(input.id, response, request.signal);
@@ -223,6 +245,39 @@ function firstPositive(...values: unknown[]): number | undefined {
     if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value);
   }
   return undefined;
+}
+
+/**
+ * An embeddings body is either a complete numeric batch or an invalid response.
+ * A short batch, a string component or a non-finite number is refused rather than
+ * padded, so a partial vector can never be stored as if it were an embedding.
+ */
+export function parseEmbeddings(
+  provider: string,
+  body: unknown,
+  expected: number,
+): number[][] {
+  const rows = (body as { data?: unknown }).data;
+  if (!Array.isArray(rows) || rows.length !== expected) {
+    throw new ProviderError(
+      'invalid',
+      `${provider} returned an embeddings batch that did not match the request.`,
+      { retryable: false },
+    );
+  }
+  return rows.map((row) => {
+    const embedding = (row as { embedding?: unknown }).embedding;
+    if (
+      !Array.isArray(embedding) ||
+      embedding.length === 0 ||
+      embedding.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+    ) {
+      throw new ProviderError('invalid', `${provider} returned a non-numeric embedding.`, {
+        retryable: false,
+      });
+    }
+    return embedding as number[];
+  });
 }
 
 async function readJson(response: Response, provider: string): Promise<unknown> {

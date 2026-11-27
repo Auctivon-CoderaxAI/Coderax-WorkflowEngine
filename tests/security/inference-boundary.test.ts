@@ -52,18 +52,19 @@ function offenders(pattern: RegExp, allowed: (path: string) => boolean): string[
 const isAdapter = (path: string): boolean => path.startsWith('models/providers/');
 
 /**
- * Egress that is not inference. The external-agent transport, the MCP client and
- * the embedding client each reach an endpoint the owner configured separately,
- * under their own scope and origin checks; none of them can select or call an
- * inference model, so none can bypass the router, its policy or its budget. They
- * are named here rather than pattern-matched, so a new egress path still fails
- * this guard until someone justifies it.
+ * Egress that is not inference. The external-agent transport and the MCP client
+ * each reach an endpoint the owner configured separately, under their own scope
+ * and origin checks; neither can select or call an inference model, so neither
+ * can bypass the router, its policy or its budget. They are named here rather
+ * than pattern-matched, so a new egress path still fails this guard until
+ * someone justifies it.
+ *
+ * Embeddings are deliberately absent. Retrieval used to hold its own client and
+ * was allowed here on the reasoning that it "cannot select a model"; it could
+ * still transmit document text with no cost verdict, no operation grant and no
+ * reservation. It now reaches a provider only through the router.
  */
-const nonInferenceTransport = new Set([
-  'agents/adapters/opencode.ts',
-  'knowledge/store.ts',
-  'mcp/client.ts',
-]);
+const nonInferenceTransport = new Set(['agents/adapters/opencode.ts', 'mcp/client.ts']);
 
 const mayEgress = (path: string): boolean => isAdapter(path) || nonInferenceTransport.has(path);
 
@@ -130,6 +131,20 @@ test('provider endpoints are declared only by the adapters and their registratio
     [],
     'an endpoint literal elsewhere is an unregistered egress',
   );
+});
+
+test('embeddings reach a provider only through the router', () => {
+  // Only an adapter may name the embeddings route. A second client is how
+  // document text escaped cost verification, the operation grant and the ledger.
+  const embeddingsEndpoint = /\/embeddings\b/;
+  assert.deepEqual(
+    offenders(embeddingsEndpoint, isAdapter),
+    [],
+    'an embeddings client outside src/models/providers bypasses cost, policy and budget',
+  );
+
+  const store = codeOf(join(sourceRoot, 'knowledge', 'store.ts'));
+  assert.doesNotMatch(store, /\bapiKey\b|\bbaseURL\b|\bauthorization\b/);
 });
 
 test('paid routing cannot be switched on in source', () => {

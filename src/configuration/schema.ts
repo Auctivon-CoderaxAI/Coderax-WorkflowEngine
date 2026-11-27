@@ -275,14 +275,15 @@ export const KnowledgeConfig = z
   .object({
     enabled: z.boolean().default(true),
     maxDocuments: z.number().int().min(1).max(10_000).default(500),
-    /** Set together with an inference endpoint to enable semantic retrieval. */
-    embeddingModel: z.string().min(1).max(160).optional(),
     /**
-     * Semantic retrieval spends the embedding provider's quota. It is enabled
-     * only when the owner has recorded an explicit zero-cost verdict; otherwise
-     * lexical retrieval stays in place.
+     * Names the model semantic retrieval asks the router for. It is a preference,
+     * not an authorization: the model must be in the verified zero-cost catalogue,
+     * its provider must carry an owner grant for the `embeddings` operation, and
+     * the daily budget must cover the batch, or startup refuses. A model name and
+     * an API key prove none of those, so there is no boolean that can stand in
+     * for them.
      */
-    embeddingVerifiedFree: z.boolean().default(false),
+    embeddingModel: z.string().min(1).max(160).optional(),
   })
   .strict();
 

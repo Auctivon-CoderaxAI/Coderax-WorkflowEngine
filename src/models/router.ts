@@ -18,8 +18,10 @@ import { createProviderLimiter, type ProviderLimiter } from './rate.js';
 import type {
   BenchmarkScore,
   DiscoveredModel,
+  EmbeddingRequest,
   FreeTierAttestation,
   GatewayCompletion,
+  GatewayEmbedding,
   GatewayRequest,
   GatewayStreamEvent,
   ModelGateway,
@@ -1355,10 +1357,162 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
     );
   }
 
+  /**
+   * Embeddings, governed exactly like a completion: one resolved model, policy
+   * revalidated at dispatch, a durable reservation settled on success and charged
+   * when the outcome is ambiguous. A provider without the adapter capability is
+   * never asked, and a missing grant fails before anything leaves the process.
+   */
+  async function executeEmbed(request: EmbeddingRequest): Promise<GatewayEmbedding> {
+    if (request.texts.length === 0) {
+      throw new ModelRoutingError(
+        'validation_failed',
+        'An embeddings request needs at least one text.',
+        false,
+      );
+    }
+    const signal = request.signal ?? new AbortController().signal;
+    const estimated = estimateTokens(request.texts);
+    const planned = plan({
+      mode: request.mode,
+      operation: 'embeddings',
+      routing: 'auto',
+      estimatedInputTokens: estimated,
+      allowFallback: request.allowFallback === true,
+      ...(request.requested === undefined ? {} : { requested: request.requested }),
+    });
+    if (!planned.ok) {
+      throw new ModelRoutingError(planned.code, planned.detail, planned.retryable);
+    }
+    const executed = planned.value.fallbackAllowed
+      ? planned.value.candidates.slice(0, 1 + maxFallbacks)
+      : planned.value.candidates.slice(0, 1);
+    const attempts: ModelRef[] = [];
+    let lastFailure: ProviderError | null = null;
+
+    for (const candidate of executed) {
+      if (signal.aborted) {
+        throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
+      }
+      const runtime = models.get(modelKey(candidate.model.ref));
+      if (!runtime) continue;
+      const provider = providers.get(runtime.state.ref.providerId);
+      if (!provider || provider.adapter.embed === undefined) continue;
+      const at = now();
+      if (!modelAvailability(runtime, at).available) continue;
+      // The operation is not inferable from `chat`: an embedding transmits the
+      // document itself, so it needs its own grant and is rechecked here again.
+      const permission = policy.evaluate({
+        providerId: runtime.state.ref.providerId,
+        operation: 'embeddings',
+        mode: request.mode,
+        at,
+      });
+      if (!permission.allowed) continue;
+
+      const reserved = await budget.reserve({
+        ownerId: request.ownerId,
+        at,
+        inputTokens: estimated,
+        outputTokens: 0,
+        ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+      });
+      if (!reserved.allowed) {
+        throw new ModelRoutingError('budget_exhausted', reserved.detail, false);
+      }
+      const runtimeAdmission = runtime.circuit.allow(at);
+      if (!runtimeAdmission) {
+        await budget.release(reserved.reservation.id);
+        continue;
+      }
+      const providerAdmission = provider.circuit.allow(at);
+      if (!providerAdmission) {
+        await budget.release(reserved.reservation.id);
+        runtime.circuit.abandon(runtimeAdmission);
+        continue;
+      }
+      const acquired = provider.limiter.acquire({ tokens: estimated, now: at });
+      if (!acquired.allowed) {
+        await budget.release(reserved.reservation.id);
+        runtime.circuit.abandon(runtimeAdmission);
+        provider.circuit.abandon(providerAdmission);
+        lastFailure = new ProviderError(
+          'rate_limit',
+          `The local provider ${acquired.reason} ceiling is already in use.`,
+          { retryAfterMs: acquired.retryAfterMs, retryable: true },
+        );
+        continue;
+      }
+
+      attempts.push(runtime.state.ref);
+      const started = performance.now();
+      const scoped = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(provider.settings.requestTimeoutMs),
+      ]);
+      try {
+        const vectors = await provider.adapter.embed({
+          model: runtime.state.ref,
+          texts: request.texts,
+          signal: scoped,
+        });
+        if (vectors.length !== request.texts.length) {
+          throw new ProviderError(
+            'invalid',
+            'The embeddings response did not match the batch it was sent.',
+            { retryable: false },
+          );
+        }
+        const latencyMs = Math.max(0, performance.now() - started);
+        acquired.release();
+        await budget.settle(reserved.reservation.id, { inputTokens: estimated, outputTokens: 0 });
+        recordSuccess(runtime, provider, latencyMs, runtimeAdmission, providerAdmission);
+        return {
+          vectors,
+          model: runtime.state.ref,
+          attempts,
+          usage: { inputTokens: estimated, outputTokens: 0 },
+          latencyMs,
+        };
+      } catch (error) {
+        acquired.release();
+        // The batch may have reached the provider before it failed; charge it.
+        await budget.release(reserved.reservation.id, { dispatched: true });
+        const providerError =
+          error instanceof ProviderError
+            ? error
+            : new ProviderError('network', 'The inference provider could not be reached.', {
+                retryable: true,
+              });
+        if (providerError.kind === 'cancelled' || signal.aborted) {
+          runtime.circuit.abandon(runtimeAdmission);
+          provider.circuit.abandon(providerAdmission);
+          throw new ModelRoutingError('cancelled', 'The run was cancelled.', false);
+        }
+        recordFailure(
+          { error: providerError, provider, runtime },
+          now(),
+          runtimeAdmission,
+          providerAdmission,
+        );
+        lastFailure = providerError;
+      }
+    }
+
+    throw new ModelRoutingError(
+      'engine_unavailable',
+      lastFailure === null
+        ? 'No verified zero-cost candidate serves embeddings for this operation and mode.'
+        : `No verified zero-cost candidate completed the embedding request: ${sanitizeDetail(lastFailure.message)}`,
+      lastFailure?.retryable ?? false,
+    );
+  }
+
   return {
     id: 'coderax-model-router',
     list,
     route,
+    embed: executeEmbed,
     resolve,
     plan,
     refresh,

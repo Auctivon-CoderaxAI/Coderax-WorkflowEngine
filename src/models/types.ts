@@ -232,12 +232,49 @@ export class ProviderError extends Error {
  * everything above this boundary — cost verification, ranking, budgets,
  * circuits, fallback and health — is provider-independent.
  */
+export type ProviderEmbeddingRequest = {
+  /** Resolved and authorized by the router; the adapter selects nothing. */
+  model: ModelRef;
+  texts: string[];
+  signal: AbortSignal;
+};
+
 export type ProviderAdapter = {
   id: string;
   kind: 'openai' | 'gemini';
   discover: (signal?: AbortSignal) => Promise<DiscoveredModel[]>;
   complete: (request: ProviderCompletionRequest) => Promise<ProviderCompletion>;
   stream?: (request: ProviderCompletionRequest) => AsyncIterable<ProviderStreamEvent>;
+  /**
+   * Batch embeddings, when this provider serves them. Its presence is the only
+   * capability signal: nothing infers embedding support from a model name, and a
+   * provider without it is never asked to embed.
+   */
+  embed?: (request: ProviderEmbeddingRequest) => Promise<number[][]>;
+};
+
+/**
+ * A retrieval embedding request. It carries an owner, a data mode and the exact
+ * operation, because an embedding transmits document text just as a completion
+ * does and is authorized the same way.
+ */
+export type EmbeddingRequest = {
+  ownerId: string;
+  mode: DataMode;
+  texts: string[];
+  signal?: AbortSignal;
+  taskId?: string;
+  /** A named model is pinned; an automatic route may consider other candidates. */
+  requested?: ModelRef;
+  allowFallback?: boolean;
+};
+
+export type GatewayEmbedding = {
+  vectors: number[][];
+  model: ModelRef;
+  attempts: ModelRef[];
+  usage: Usage;
+  latencyMs: number;
 };
 
 export type ProviderSettings = {
@@ -302,6 +339,11 @@ export type ModelGateway = {
   supportsNativeTools?: boolean;
   complete: (request: GatewayRequest) => Promise<GatewayCompletion>;
   stream?: (request: GatewayRequest) => AsyncIterable<GatewayStreamEvent>;
+  /**
+   * Governed embeddings. A retrieval surface uses this and never a provider
+   * client of its own, so cost, policy, budget and fallback stay single-sourced.
+   */
+  embed?: (request: EmbeddingRequest) => Promise<GatewayEmbedding>;
 };
 
 export type CircuitState = 'closed' | 'open' | 'half_open';
