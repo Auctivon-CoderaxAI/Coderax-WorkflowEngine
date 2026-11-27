@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import type { ExecutionEvent } from '@coderax/contracts';
 import { createEventBus, type SeqAuthority } from '../../src/events/bus.js';
 import {
@@ -35,6 +35,10 @@ import { startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const maybeMongo = await startRealMongo();
 requireRealMongo(maybeMongo);
+
+after(async () => {
+  await maybeMongo?.stop();
+});
 
 const skip =
   maybeMongo === null
@@ -237,7 +241,6 @@ test(
     } finally {
       await primary.close().catch(() => undefined);
       await replica.close().catch(() => undefined);
-      await real.stop();
     }
   },
 );
@@ -333,7 +336,272 @@ test(
       }
     } finally {
       for (const connection of connections) await connection.close().catch(() => undefined);
-      await real.stop();
+    }
+  },
+);
+
+test(
+  'a second replica tails a run while its owner is still working',
+  { skip },
+  async () => {
+    const real = maybeMongo as RealMongo;
+    const name = databaseName('events_live');
+    const connect = createMongoConnector();
+    const owner = await connect({ uri: real.uri, database: name });
+    const replica = await connect({ uri: real.uri, database: name });
+
+    try {
+      const ownerTasks = createMongoTaskRepository(owner.collection('tasks'));
+      const replicaTasks = createMongoTaskRepository(replica.collection('tasks'));
+      await ensureEventIndexes(owner.collection('events'), { retentionSeconds: 3_600 });
+      const writer = bus({ seq: ownerTasks, collection: owner.collection('events') });
+      const reader = bus({ seq: replicaTasks, collection: replica.collection('events') });
+      const draft = {
+        taskId: 'task_live',
+        runToken: 'run-1',
+        agent: 'coderax' as const,
+        generation: 1,
+      };
+
+      const created = await ownerTasks.create(
+        taskRecord({ taskId: 'task_live', runToken: 'run-1', conversationId: 'conv_live' }),
+      );
+      assert.equal(created.ok, true);
+      const running = await ownerTasks.updateFenced({
+        taskId: 'task_live',
+        token: 'run-1',
+        patch: { state: 'running' },
+      });
+      assert.equal(running.applied, true);
+      assert.equal((await writer.events.publish({ ...draft, type: 'task.started' }))?.seq, 1);
+
+      // The replica attaches at the head it already has and follows the run from
+      // there, the way an SSE client reconnecting mid-run does.
+      const seen: Array<{ seq: number; type: string }> = [];
+      const unsubscribe = reader.events.subscribe('task_live', 1, (event) => {
+        seen.push({ seq: event.seq, type: event.type });
+      });
+      try {
+        await writer.events.publish({ ...draft, type: 'text.delta', payload: { text: 'one ' } });
+        await writer.events.publish({ ...draft, type: 'text.delta', payload: { text: 'two' } });
+        await waitFor(async () => (seen.length >= 2 ? true : null), 5_000);
+
+        // The run is still `running`: what the replica received is a live tail of
+        // an unfinished run, not a replay of a settled task.
+        assert.equal((await replicaTasks.get('task_live'))?.state, 'running');
+        assert.deepEqual(
+          seen.map((entry) => entry.seq),
+          [2, 3],
+        );
+
+        await writer.events.publish({ ...draft, type: 'task.completed', payload: {} });
+        await waitFor(
+          async () => (seen.some((entry) => entry.type === 'task.completed') ? true : null),
+          5_000,
+        );
+        assert.deepEqual(
+          seen.map((entry) => entry.seq),
+          [2, 3, 4],
+        );
+      } finally {
+        unsubscribe();
+      }
+
+      // Once the owner has settled, the replica's replay is the same log it was
+      // tailing, so a client can switch from tailing to replaying without a gap.
+      const settled = await reader.events.replay('task_live', 0);
+      assert.deepEqual(
+        settled.events.map((event) => event.seq),
+        [1, 2, 3, 4],
+      );
+      assert.equal(settled.lastSeq, 4);
+      assert.equal(settled.truncated, false);
+    } finally {
+      await owner.close().catch(() => undefined);
+      await replica.close().catch(() => undefined);
+    }
+  },
+);
+
+test(
+  'a stale generation is refused on both replicas',
+  { skip },
+  async () => {
+    const real = maybeMongo as RealMongo;
+    const name = databaseName('events_stale');
+    const connect = createMongoConnector();
+    const first = await connect({ uri: real.uri, database: name });
+    const second = await connect({ uri: real.uri, database: name });
+
+    try {
+      const firstTasks = createMongoTaskRepository(first.collection('tasks'));
+      const secondTasks = createMongoTaskRepository(second.collection('tasks'));
+      await ensureEventIndexes(first.collection('events'), { retentionSeconds: 3_600 });
+      const firstBus = bus({ seq: firstTasks, collection: first.collection('events') });
+      const secondBus = bus({ seq: secondTasks, collection: second.collection('events') });
+      const stale = { taskId: 'task_stale', runToken: 'run-1', agent: 'coderax' as const, generation: 1 };
+
+      const created = await firstTasks.create(
+        taskRecord({ taskId: 'task_stale', runToken: 'run-1', conversationId: 'conv_stale' }),
+      );
+      assert.equal(created.ok, true);
+      assert.equal((await firstBus.events.publish({ ...stale, type: 'task.queued' }))?.seq, 1);
+
+      // Generation 2 takes the fence, through the other replica.
+      await secondTasks.updateFenced({
+        taskId: 'task_stale',
+        token: 'run-1',
+        patch: { state: 'failed' },
+      });
+      const now = new Date();
+      const issued = await secondTasks.reissue({
+        taskId: 'task_stale',
+        token: 'run-2',
+        now: now.toISOString(),
+        leaseExpiresAt: new Date(now.getTime() + 60_000).toISOString(),
+        from: ['failed'],
+      });
+      assert.equal(issued.applied, true);
+
+      const head = await firstBus.events.lastSeq('task_stale');
+      // Both replicas refuse the superseded token, and a refusal consumes no
+      // sequence and stores nothing.
+      assert.equal(
+        await firstBus.events.publish({ ...stale, type: 'task.completed', payload: {} }),
+        null,
+      );
+      assert.equal(
+        await secondBus.events.publish({ ...stale, type: 'task.completed', payload: {} }),
+        null,
+      );
+      assert.equal(await firstBus.events.lastSeq('task_stale'), head);
+      assert.equal((await firstTasks.get('task_stale'))?.eventSeq, head);
+      assert.equal((await firstBus.events.replay('task_stale', 0)).events.length, 1);
+
+      // The generation that holds the fence writes from either replica.
+      const fromSecond = await secondBus.events.publish({
+        taskId: 'task_stale',
+        runToken: 'run-2',
+        agent: 'coderax',
+        generation: 2,
+        type: 'task.started',
+      });
+      assert.equal(fromSecond?.seq, head + 1);
+      const fromFirst = await firstBus.events.publish({
+        taskId: 'task_stale',
+        runToken: 'run-2',
+        agent: 'coderax',
+        generation: 2,
+        type: 'text.delta',
+        payload: { text: 'resumed' },
+      });
+      assert.equal(fromFirst?.seq, head + 2);
+
+      // ...and the stale token still cannot write after the new one has.
+      assert.equal(
+        await secondBus.events.publish({ ...stale, type: 'text.delta', payload: { text: 'late' } }),
+        null,
+      );
+
+      const final = await secondBus.events.replay('task_stale', 0);
+      assert.deepEqual(
+        final.events.map((event) => event.seq),
+        [1, 2, 3],
+      );
+      // The refused terminal writes never reached the log from either replica.
+      assert.equal(
+        final.events.some((event) => event.type === 'task.completed'),
+        false,
+      );
+      assert.deepEqual(
+        final.events.map((event) => event.generation),
+        [1, 2, 2],
+      );
+    } finally {
+      await first.close().catch(() => undefined);
+      await second.close().catch(() => undefined);
+    }
+  },
+);
+
+test(
+  'retention removes expired rows and an old cursor is reported as truncated',
+  { skip },
+  async () => {
+    const real = maybeMongo as RealMongo;
+    const name = databaseName('events_retention');
+    const connect = createMongoConnector();
+    const database = await connect({ uri: real.uri, database: name });
+
+    try {
+      const collection = database.collection('events_retained');
+      // Keep new rows within the window for the entire polling budget. The rows
+      // stamped an hour ago remain expired when the server's TTL monitor runs.
+      await ensureEventIndexes(collection, { retentionSeconds: 300 });
+      let stamp = Date.now() - 3_600_000;
+      const tasks = createMongoTaskRepository(database.collection('tasks_retained'));
+      const created = await tasks.create(
+        taskRecord({ taskId: 'task_ttl', runToken: 'run-1', conversationId: 'conv_ttl' }),
+      );
+      assert.equal(created.ok, true);
+      const store = createMongoEventStore({
+        collection,
+        pageSize: 50,
+        now: () => new Date(stamp),
+      });
+      const events = createEventBus({
+        store,
+        seq: tasks,
+        pollMs: 10,
+        eventId: () => randomUUID(),
+        iso: () => new Date().toISOString(),
+      });
+      const draft = { taskId: 'task_ttl', runToken: 'run-1', agent: 'coderax' as const, generation: 1 };
+
+      for (const type of ['task.queued', 'task.started', 'text.delta'] as const) {
+        await events.publish({ ...draft, type, payload: { text: 'expired' } });
+      }
+
+      // The rest of the run is written now, so it is inside the window and must
+      // survive the same sweep that removes the three old rows.
+      stamp = Date.now();
+      await events.publish({ ...draft, type: 'text.delta', payload: { text: 'retained' } });
+      await events.publish({ ...draft, type: 'task.completed', payload: {} });
+      assert.equal(await events.lastSeq('task_ttl'), 5);
+
+      const remaining = async (): Promise<number> =>
+        (await collection.find({ taskId: 'task_ttl' }).toArray()).length;
+      const deadline = Date.now() + 180_000;
+      let rows = await remaining();
+      while (rows > 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        rows = await remaining();
+      }
+      assert.equal(
+        rows,
+        2,
+        `the TTL monitor did not expire the old rows within 180s (${rows} rows remained)`,
+      );
+
+      // A cursor at the start lost events: it is told so instead of silently
+      // skipping them, and it receives the surviving tail.
+      const old = await events.replay('task_ttl', 0);
+      assert.equal(old.truncated, true);
+      assert.deepEqual(
+        old.events.map((event) => event.seq),
+        [4, 5],
+      );
+      assert.equal(old.lastSeq, 5);
+
+      // A cursor that still lands inside the window is not a truncation.
+      const inside = await events.replay('task_ttl', 3);
+      assert.equal(inside.truncated, false);
+      assert.deepEqual(
+        inside.events.map((event) => event.seq),
+        [4, 5],
+      );
+    } finally {
+      await database.close().catch(() => undefined);
     }
   },
 );
