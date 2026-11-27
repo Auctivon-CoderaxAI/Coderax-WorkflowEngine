@@ -1,54 +1,41 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { budgetKey, createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
+import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 
-const NOW = new Date('2026-11-26T10:00:00.000Z');
+const at = new Date('2026-11-26T10:00:00.000Z');
+const limits = { maxRequestsPerDay: 2, maxTokensPerDay: 10 };
 
-test('the memory window admits one request and release returns it exactly once', async () => {
-  const ledger = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 10 });
-  assert.equal(await ledger.available('owner', NOW), true);
-
-  const first = await ledger.reserve('owner', NOW);
-  assert.equal(first.allowed, true);
-  assert.equal(first.requests, 1);
-
-  const second = await ledger.reserve('owner', NOW);
-  assert.equal(second.allowed, false);
-  assert.equal(second.requests, 1);
-
-  await first.release();
-  await first.release();
-  assert.equal((await ledger.snapshot('owner', NOW)).requests, 0);
-  assert.equal(await ledger.available('owner', NOW), true);
-  assert.equal((await ledger.reserve('owner', NOW)).allowed, true);
-});
-
-test('consumed usage closes the token ceiling and the UTC day is separate', async () => {
-  const ledger = createBudgetLedger({ maxRequestsPerDay: 10, maxTokensPerDay: 10 });
-  assert.equal((await ledger.reserve('owner', NOW)).allowed, true);
-  await ledger.consume('owner', { inputTokens: 6, outputTokens: 4 }, NOW);
-
-  assert.deepEqual(await ledger.snapshot('owner', NOW), {
-    requests: 1,
-    inputTokens: 6,
-    outputTokens: 4,
-  });
-  assert.equal(await ledger.available('owner', NOW), false);
-  assert.equal((await ledger.reserve('owner', NOW)).allowed, false);
-
-  const tomorrow = new Date(NOW.getTime() + 24 * 60 * 60 * 1000);
-  assert.equal(await ledger.available('owner', tomorrow), true);
-});
-
-test('release is idempotent per reservation id even through two ledgers', async () => {
+test('shared memory window reserves tokens and releases idempotently across ledgers', async () => {
   const store = createMemoryBudgetStore();
-  const first = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 10, store });
-  const second = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 10, store });
+  const a = createBudgetLedger({ ...limits, store });
+  const b = createBudgetLedger({ ...limits, store });
+  const reserve = (ledger: typeof a, inputTokens = 6) =>
+    ledger.reserve({ ownerId: 'owner', at, inputTokens, outputTokens: 4 });
+  const outcomes = await Promise.all([reserve(a), reserve(b)]);
+  assert.equal(outcomes.filter((x) => x.allowed).length, 1);
+  const winner = outcomes.find((x) => x.allowed);
+  assert.ok(winner?.allowed);
+  assert.equal(await b.available('owner', at), false);
+  await Promise.all([a.release(winner.reservation.id), b.release(winner.reservation.id)]);
+  assert.equal(await b.available('owner', at), true);
+  const next = await reserve(b);
+  assert.ok(next.allowed);
+  await Promise.all([
+    a.settle(next.reservation.id, { inputTokens: 6, outputTokens: 4 }),
+    b.settle(next.reservation.id, { inputTokens: 6, outputTokens: 4 }),
+  ]);
+  assert.deepEqual(await a.snapshot('owner', at), { requests: 1, inputTokens: 6, outputTokens: 4 });
+  assert.equal(await b.available('owner', at), false);
+  assert.equal(await b.available('owner', new Date(at.getTime() + 86400000)), true);
+});
 
-  const held = await first.reserve('owner', NOW);
-  assert.equal(held.allowed, true);
-  const key = budgetKey('owner', NOW);
-  assert.equal(await store.release({ key, reservationId: held.id }), true);
-  assert.equal(await store.release({ key, reservationId: held.id }), false);
-  assert.equal((await second.snapshot('owner', NOW)).requests, 0);
+test('dispatched reservation consumes one request and cannot be refunded by replay', async () => {
+  const store = createMemoryBudgetStore();
+  const a = createBudgetLedger({ ...limits, store });
+  const b = createBudgetLedger({ ...limits, store });
+  const held = await a.reserve({ ownerId: 'owner', at, inputTokens: 1, outputTokens: 1 });
+  assert.ok(held.allowed);
+  await b.release(held.reservation.id, { dispatched: true });
+  await a.release(held.reservation.id);
+  assert.deepEqual(await a.snapshot('owner', at), { requests: 1, inputTokens: 0, outputTokens: 0 });
 });

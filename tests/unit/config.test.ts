@@ -267,3 +267,15 @@ test('a short owner token is refused instead of accepted as authentication', () 
     ws.cleanup();
   }
 });
+
+test('default artifact retention cannot exceed the maximum; zero keeps indefinitely', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    const issues = (days: number) => validateInvariants({
+      ...config, artifacts: { ...config.artifacts, defaultRetentionDays: days, maxRetentionDays: 1 },
+    });
+    assert.ok(issues(2).some(issue => issue.includes('defaultRetentionDays')));
+    assert.deepEqual(issues(0), []);
+  } finally { ws.cleanup(); }
+});

@@ -23,6 +23,13 @@ type Manifest = {
   peerDependencies?: Record<string, string>;
 };
 
+/**
+ * A dev-only package that downloads an ephemeral mongod binary on install. It is
+ * never imported by `src` and ships in no runtime artifact, so it is the one
+ * reviewed exception to the script-free rule.
+ */
+const INSTALL_SCRIPT_DEV_ONLY = new Set(['mongodb-memory-server']);
+
 const ALLOWED_DIRECT = new Set([
   '@coderax/contracts',
   '@coderax/sdk',
@@ -38,6 +45,9 @@ const ALLOWED_DIRECT = new Set([
   'pptxgenjs',
   // Local Chromium for the browser acceptance harness; no paid service.
   'playwright',
+  // Test-only: starts an ephemeral local mongod so the durability lanes run
+  // instead of skipping when no CI database URI is present.
+  'mongodb-memory-server',
   // SHA-256 for the published contract fingerprint; audited, pure JS.
   '@noble/hashes',
 ]);
@@ -57,6 +67,7 @@ test('the lockfile records only verified, script-free https resolutions', () => 
     assert.match(entry.integrity, /^sha(?:1|256|512)-/);
     assert.ok(entry.resolved, `${name} has no resolved source`);
     assert.match(entry.resolved as string, /^https:\/\//, `${name} uses a non-https source`);
+    if (INSTALL_SCRIPT_DEV_ONLY.has(name.replace(/^node_modules\//, ''))) continue;
     assert.equal(entry.hasInstallScript, undefined, `${name} requires an install script`);
   }
 });

@@ -355,3 +355,21 @@ test('identical content is stored once and is idempotent', async () => {
   });
   assert.equal(collections.blobs.documents.length, 1);
 });
+
+test('a retried prune finishes a claimed delete without spending the count twice', async () => {
+  const { collections } = setup();
+  const repository = createMongoArtifactRepository(collections);
+  const key = { ownerId: OWNER_ID, mode: 'cloud' as const, artifactId: 'art_test' };
+  await repository.create({ artifact: artifactRecord(), version: versionRecord() });
+  assert.ok((await repository.appendVersion({
+    artifact: artifactRecord({ version: 2, versions: 2 }), expectedVersion: 1, version: versionRecord({ version: 2 }),
+  })).ok);
+  const remove = collections.versions.deleteOne;
+  collections.versions.deleteOne = async () => { throw new Error('database unavailable'); };
+  await assert.rejects(repository.removeVersion({ ...key, version: 1 }));
+  collections.versions.deleteOne = remove;
+  const winners = await Promise.all([1, 2].map(() => repository.removeVersion({ ...key, version: 1 })));
+  assert.equal(winners.filter(Boolean).length, 1);
+  assert.equal((await repository.get(key))?.versions, 1);
+  assert.deepEqual((await repository.versions(key)).map(row => row.version), [2]);
+});

@@ -1,192 +1,159 @@
 import { randomUUID } from 'node:crypto';
 import type { Usage } from '@coderax/contracts';
 
-/**
- * The zero-cost ceiling is durable, not a process variable.
- *
- * A request reserves one request slot before the provider is called. The
- * reservation is written to a store that may be shared by every replica of this
- * deployment, so two concurrent callers cannot both observe "one request left"
- * and both spend it. Usage is charged to the same UTC-day window afterwards, and
- * a refused or never-dispatched attempt returns its slot exactly once.
- *
- * Tokens are charged from the provider's reported usage. This ledger does not
- * reserve a token allowance up front, because the caller does not know the
- * completion size; a router that does know can add a reservation later without
- * changing the window format.
- */
-
-export type BudgetSnapshot = {
-  requests: number;
+export type BudgetReservation = {
+  id: string;
+  ownerId: string;
   inputTokens: number;
   outputTokens: number;
 };
 
-/** One owner's UTC day. `committed` is the token total both ceilings compare. */
-export type BudgetWindow = BudgetSnapshot & { committed: number };
+export type BudgetSnapshot = { requests: number; inputTokens: number; outputTokens: number };
 
-export type ReserveOutcome = {
-  allowed: boolean;
-  /** The request count after this attempt, whichever way it was decided. */
-  requests: number;
-  /** Opaque reservation id; settlement and release are idempotent by this id. */
-  id: string;
-  /** Returns this attempt's request slot once. Safe to call more than once. */
-  release: () => Promise<void>;
+export type ReserveOutcome =
+  | { allowed: true; reservation: BudgetReservation; requests: number }
+  | { allowed: false; reason: 'requests' | 'tokens'; detail: string; requests: number };
+
+/** A UTC-day window; held reservations count against both admission ceilings. */
+export type BudgetWindow = BudgetSnapshot & {
+  reservedRequests: number;
+  reservedInput: number;
+  reservedOutput: number;
+  reservations: Record<string, BudgetReservation>;
 };
 
-/**
- * The durable half of the ledger. Reserve and release are atomic per window and
- * idempotent per reservation id; consume is an atomic increment.
- */
 export type BudgetWindowStore = {
-  reserve: (input: {
-    key: string;
-    reservationId: string;
-    maxRequests: number;
-    maxTokens: number;
-  }) => Promise<{ allowed: boolean; window: BudgetWindow }>;
-  /** Returns one request slot once; a replay returns false and changes nothing. */
-  release: (input: { key: string; reservationId: string }) => Promise<boolean>;
-  consume: (input: { key: string; inputTokens: number; outputTokens: number }) => Promise<void>;
   read: (key: string) => Promise<BudgetWindow>;
+  /** Atomic read-modify-write; the callback is pure and may be replayed. */
+  update: <T>(key: string, change: (window: BudgetWindow) => T) => Promise<T>;
 };
 
-export type BudgetLedger = {
-  available: (ownerId: string, at: Date) => Promise<boolean>;
-  reserve: (ownerId: string, at: Date) => Promise<ReserveOutcome>;
-  consume: (ownerId: string, usage: Usage, at: Date) => Promise<void>;
-  snapshot: (ownerId: string, at: Date) => Promise<BudgetSnapshot>;
-};
-
-const EMPTY: BudgetWindow = {
-  requests: 0,
-  inputTokens: 0,
-  outputTokens: 0,
-  committed: 0,
-};
+export function emptyBudgetWindow(): BudgetWindow {
+  return { requests: 0, inputTokens: 0, outputTokens: 0, reservedRequests: 0,
+    reservedInput: 0, reservedOutput: 0, reservations: {} };
+}
 
 export function budgetKey(ownerId: string, at: Date): string {
   return `${ownerId}:${at.toISOString().slice(0, 10)}`;
 }
 
-/** Used by a single process and by the fast tests; same semantics as Mongo. */
 export function createMemoryBudgetStore(): BudgetWindowStore {
-  type Row = BudgetWindow & { released: Set<string> };
-  const windows = new Map<string, Row>();
-
-  function row(key: string): Row {
-    const existing = windows.get(key);
-    if (existing) return existing;
-    const created: Row = { ...EMPTY, released: new Set<string>() };
-    windows.set(key, created);
-    return created;
-  }
-
-  function view(state: Row): BudgetWindow {
-    return {
-      requests: state.requests,
-      inputTokens: state.inputTokens,
-      outputTokens: state.outputTokens,
-      committed: state.committed,
-    };
-  }
-
+  const windows = new Map<string, BudgetWindow>();
   return {
-    reserve: async ({ key, maxRequests, maxTokens }) => {
-      const state = row(key);
-      // One synchronous section: the ceiling check and the increment cannot
-      // interleave inside a process, and the store makes the same guarantee
-      // across processes.
-      if (state.requests + 1 > maxRequests || state.committed >= maxTokens) {
-        return { allowed: false, window: view(state) };
-      }
-      state.requests += 1;
-      return { allowed: true, window: view(state) };
+    read: async (key) => structuredClone(windows.get(key) ?? emptyBudgetWindow()),
+    update: async (key, change) => {
+      const window = structuredClone(windows.get(key) ?? emptyBudgetWindow());
+      const result = change(window);
+      windows.set(key, window);
+      return result;
     },
-
-    release: async ({ key, reservationId }) => {
-      const state = row(key);
-      if (state.released.has(reservationId)) return false;
-      state.released.add(reservationId);
-      state.requests = Math.max(0, state.requests - 1);
-      return true;
-    },
-
-    consume: async ({ key, inputTokens, outputTokens }) => {
-      const state = row(key);
-      const input = Math.max(0, Math.ceil(inputTokens));
-      const output = Math.max(0, Math.ceil(outputTokens));
-      state.inputTokens += input;
-      state.outputTokens += output;
-      state.committed += input + output;
-    },
-
-    read: async (key) => view(row(key)),
   };
 }
 
-/** A ledger over one durable window store; safe to construct per process. */
+export type BudgetLedger = {
+  available: (ownerId: string, at: Date) => Promise<boolean>;
+  reserve: (input: { ownerId: string; at: Date; inputTokens: number; outputTokens: number }) => Promise<ReserveOutcome>;
+  settle: (reservationId: string, usage: Usage) => Promise<void>;
+  release: (reservationId: string, options?: { dispatched?: boolean }) => Promise<void>;
+  charge: (ownerId: string, usage: Usage, at: Date) => Promise<void>;
+  recordUsage: (ownerId: string, usage: Usage, at: Date) => Promise<void>;
+  snapshot: (ownerId: string, at: Date) => Promise<BudgetSnapshot>;
+};
+
+export type BudgetHold =
+  | { allowed: true; reservationId: string; commit: () => Promise<void>; release: () => Promise<void> }
+  | { allowed: false; reason: 'requests' | 'tokens'; detail: string };
+
+export async function holdBudget(ledger: BudgetLedger, ownerId: string, at: Date): Promise<BudgetHold> {
+  const outcome = await ledger.reserve({ ownerId, at, inputTokens: 0, outputTokens: 0 });
+  if (!outcome.allowed) return outcome;
+  const id = outcome.reservation.id;
+  return { allowed: true, reservationId: id,
+    commit: () => ledger.release(id, { dispatched: true }),
+    release: () => ledger.release(id) };
+}
+
+function usedTokens(window: BudgetWindow): number {
+  return window.inputTokens + window.outputTokens + window.reservedInput + window.reservedOutput;
+}
+
+function tokens(value: number): number {
+  if (!Number.isFinite(value)) throw new Error('Invalid budget token amount');
+  return Math.max(0, Math.ceil(value));
+}
+
+function keyOf(id: string): string | null {
+  const parts = id.split('~');
+  if (parts.length !== 3 || parts[0] !== 'budget' || !parts[1]) return null;
+  return Buffer.from(parts[1], 'base64url').toString('utf8');
+}
+
 export function createBudgetLedger(input: {
   maxRequestsPerDay: number;
   maxTokensPerDay: number;
   store?: BudgetWindowStore;
 }): BudgetLedger {
   const store = input.store ?? createMemoryBudgetStore();
-
+  async function finish(id: string, usage: Usage | undefined, dispatched: boolean): Promise<void> {
+    const key = keyOf(id);
+    if (key === null) return;
+    await store.update(key, (window) => {
+      const held = window.reservations[id];
+      if (!held) return;
+      delete window.reservations[id];
+      window.reservedRequests -= 1;
+      window.reservedInput -= held.inputTokens;
+      window.reservedOutput -= held.outputTokens;
+      if (dispatched) window.requests += 1;
+      if (usage !== undefined) {
+        window.inputTokens += tokens(usage.inputTokens ?? held.inputTokens);
+        window.outputTokens += tokens(usage.outputTokens ?? held.outputTokens);
+      }
+    });
+  }
+  function record(window: BudgetWindow, usage: Usage): void {
+    window.inputTokens += tokens(usage.inputTokens ?? 0);
+    window.outputTokens += tokens(usage.outputTokens ?? 0);
+  }
   return {
     available: async (ownerId, at) => {
       const window = await store.read(budgetKey(ownerId, at));
-      return window.requests < input.maxRequestsPerDay && window.committed < input.maxTokensPerDay;
+      return window.requests + window.reservedRequests < input.maxRequestsPerDay
+        && usedTokens(window) < input.maxTokensPerDay;
     },
-
-    reserve: async (ownerId, at) => {
+    reserve: async ({ ownerId, at, inputTokens, outputTokens }) => {
       const key = budgetKey(ownerId, at);
-      const reservationId = `budget_${randomUUID()}`;
-      const result = await store.reserve({
-        key,
-        reservationId,
-        maxRequests: input.maxRequestsPerDay,
-        maxTokens: input.maxTokensPerDay,
-      });
-      if (!result.allowed) {
-        return {
-          allowed: false,
-          requests: result.window.requests,
-          id: reservationId,
-          release: async () => undefined,
-        };
-      }
-      let held = true;
-      return {
-        allowed: true,
-        requests: result.window.requests,
-        id: reservationId,
-        release: async () => {
-          if (!held) return;
-          held = false;
-          await store.release({ key, reservationId });
-        },
+      const reservation: BudgetReservation = {
+        id: `budget~${Buffer.from(key).toString('base64url')}~${randomUUID()}`,
+        ownerId, inputTokens: tokens(inputTokens), outputTokens: tokens(outputTokens),
       };
-    },
-
-    consume: async (ownerId, usage, at) => {
-      const inTokens = Math.max(0, Math.ceil(usage.inputTokens ?? 0));
-      const outTokens = Math.max(0, Math.ceil(usage.outputTokens ?? 0));
-      await store.consume({
-        key: budgetKey(ownerId, at),
-        inputTokens: inTokens,
-        outputTokens: outTokens,
+      return store.update<ReserveOutcome>(key, (window) => {
+        const requests = window.requests + window.reservedRequests;
+        if (requests >= input.maxRequestsPerDay) return { allowed: false, reason: 'requests',
+          detail: 'The daily zero-cost request budget is exhausted.', requests };
+        if (usedTokens(window) >= input.maxTokensPerDay ||
+            usedTokens(window) + reservation.inputTokens + reservation.outputTokens > input.maxTokensPerDay) {
+          return { allowed: false, reason: 'tokens',
+            detail: 'The daily zero-cost token budget cannot cover this request.', requests };
+        }
+        window.reservedRequests += 1;
+        window.reservedInput += reservation.inputTokens;
+        window.reservedOutput += reservation.outputTokens;
+        window.reservations[reservation.id] = reservation;
+        return { allowed: true, reservation, requests: requests + 1 };
       });
     },
-
+    settle: (id, usage) => finish(id, usage, true),
+    release: (id, options) => finish(id, undefined, options?.dispatched === true),
+    charge: async (ownerId, usage, at) => {
+      await store.update(budgetKey(ownerId, at), (window) => { window.requests += 1; record(window, usage); });
+    },
+    recordUsage: async (ownerId, usage, at) => {
+      await store.update(budgetKey(ownerId, at), (window) => record(window, usage));
+    },
     snapshot: async (ownerId, at) => {
-      const window = await store.read(budgetKey(ownerId, at));
-      return {
-        requests: window.requests,
-        inputTokens: window.inputTokens,
-        outputTokens: window.outputTokens,
-      };
+      const { requests, inputTokens, outputTokens } = await store.read(budgetKey(ownerId, at));
+      return { requests, inputTokens, outputTokens };
     },
   };
 }

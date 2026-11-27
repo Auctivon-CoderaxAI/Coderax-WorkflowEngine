@@ -43,8 +43,7 @@ import {
 } from '../persistence/capacity.js';
 import type { CapacityStore } from '../persistence/capacity.js';
 import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/budgets.js';
-import { createMemoryBudgetStore } from '../models/budget.js';
-import type { BudgetWindowStore } from '../models/budget.js';
+import { createMemoryBudgetStore, type BudgetWindowStore } from '../models/budget.js';
 import {
   createMongoArtifactRepository,
   createMongoBlobStore,
@@ -82,7 +81,6 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
-  /** The durable daily request and token window shared by every replica. */
   budget: BudgetWindowStore;
   close: () => Promise<void>;
 };
@@ -153,12 +151,12 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       permissions: createPermissionStore({ clock, ids: input.ids }),
       notifications: createNotificationStore(),
-      schedules: createScheduleRepository(),
-      scheduleNotices: createScheduleNoticeStore(),
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
       budget: createMemoryBudgetStore(),
+      schedules: createScheduleRepository(),
+      scheduleNotices: createScheduleNoticeStore(),
       close: NO_CLOSE,
     };
   }
@@ -193,6 +191,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   try {
     await ensureWorkRunIndexes(workRuns);
+    await ensureBudgetIndexes(budgetWindows);
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
@@ -211,7 +210,6 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     });
-    await ensureBudgetIndexes(budgetWindows);
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([

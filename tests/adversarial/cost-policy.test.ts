@@ -64,10 +64,12 @@ test('an unavailable free model is not advertised as usable', () => {
 test('the token budget fails closed before the next request is sent', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 10 });
   const now = new Date('2026-11-26T00:00:00.000Z');
-  assert.equal((await ledger.reserve('owner', now)).allowed, true);
-  await ledger.consume('owner', { inputTokens: 6, outputTokens: 4 }, now);
-  assert.equal((await ledger.reserve('owner', now)).allowed, false);
-  assert.equal((await ledger.reserve('another-owner', now)).allowed, true);
+  const held = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 6, outputTokens: 4 });
+  assert.equal(held.allowed, true);
+  if (!held.allowed) assert.fail('expected reservation');
+  await ledger.settle(held.reservation.id, { inputTokens: 6, outputTokens: 4 });
+  assert.equal((await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 0, outputTokens: 0 })).allowed, false);
+  assert.equal((await ledger.reserve({ ownerId: 'another-owner', at: now, inputTokens: 0, outputTokens: 0 })).allowed, true);
 });
 
 test('configuration cannot enable paid routing', () => {
@@ -199,7 +201,9 @@ test('no source path can switch paid routing on', () => {
       if (statSync(absolute).isDirectory()) walk(absolute);
       else if (entry.endsWith('.ts')) {
         const text = readFileSync(absolute, 'utf8');
-        if (/allowPaid\s*:\s*true/.test(text) || /costClass\s*:\s*['"]paid['"]/.test(text)) {
+        // The verifier labels unverified models paid precisely to refuse them.
+        const isVerifier = absolute === path.join(root, 'src', 'models', 'verify.ts');
+        if (/allowPaid\s*:\s*true/.test(text) || (!isVerifier && /costClass\s*:\s*['"]paid['"]/.test(text))) {
           offenders.push(path.relative(root, absolute));
         }
       }

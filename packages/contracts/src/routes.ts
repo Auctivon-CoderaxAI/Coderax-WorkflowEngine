@@ -91,8 +91,6 @@ import {
   ArtifactDescriptor,
   ArtifactDescriptorList,
   ArtifactExport,
-  ArtifactGenerationRequest,
-  ArtifactGenerationResult,
   ArtifactKind,
   ArtifactManifestQuery,
   ArtifactModeRequest,
@@ -104,6 +102,7 @@ import {
   ArtifactVersionList,
   ArtifactVersionRequest,
 } from './artifacts.js';
+import { Deliverable, DeliverableRequest } from './deliverables.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -831,19 +830,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Project artifact manifest', schema: ArtifactProjectManifest },
   },
   {
-    operationId: 'generateArtifact',
+    operationId: 'generateDeliverable',
     method: 'POST',
-    path: '/v1/artifacts/generate',
-    summary: 'Generate a document, spreadsheet, presentation or source tree and persist it durably.',
+    path: '/v1/deliverables',
+    summary:
+      'Generate, verify and durably persist a document, workbook, deck, analysis or software project.',
     tags: ['artifacts'],
     auth: 'owner',
-    body: ArtifactGenerationRequest,
+    body: DeliverableRequest,
     maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
-    response: {
-      status: 201,
-      description: 'Generated project manifest and verification checks',
-      schema: ArtifactGenerationResult,
-    },
+    response: { status: 201, description: 'Created deliverable', schema: Deliverable },
   },
   {
     operationId: 'uploadArtifact',

@@ -70,6 +70,8 @@ function matches(document: Document, filter: MongoFilter): boolean {
           if (operator === '$lt' && order >= 0) return false;
           if (operator === '$gte' && order < 0) return false;
           if (operator === '$gt' && order <= 0) return false;
+        } else if (operator === '$type') {
+          if (operand === 'string' && typeof value !== 'string') return false;
         } else if (operator === '$exists') {
           if ((value !== undefined) !== (operand === true)) return false;
         } else if (operator === '$type') {
@@ -77,7 +79,7 @@ function matches(document: Document, filter: MongoFilter): boolean {
         } else if (operator === '$in') {
           if (!(operand as unknown[]).includes(value)) return false;
         } else if (operator === '$nin') {
-          if ((operand as unknown[]).includes(value)) return false;
+          if ((Array.isArray(value) ? value : [value]).some(item => (operand as unknown[]).includes(item))) return false;
         } else if (operator === '$ne') {
           if (value === operand) return false;
         } else {
@@ -96,6 +98,7 @@ function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
   return JSON.stringify(Object.keys(keys).map((field) => document[field] ?? null));
 }
 
+/** `$inc`, `$push` and `$pull` are how quota counters and blob leases move. */
 function applyUpdate(document: Document, update: MongoUpdate): Document {
   const next = { ...document, ...(update.$set ?? {}) };
   for (const [field, amount] of Object.entries(update.$inc ?? {})) {
@@ -249,6 +252,17 @@ export function createFakeCollection(): FakeCollection {
       documents.push(...kept);
       return { deletedCount };
     },
+    countDocuments: async filter => documents.filter(row => matches(row, filter)).length,
+    aggregate: pipeline => ({
+      toArray: async () => {
+        const [match, group] = pipeline;
+        if (!match?.$match || JSON.stringify(group) !== JSON.stringify({ $group: { _id: null, bytes: { $sum: '$bytes' } } })) {
+          throw new Error('Unsupported aggregate pipeline');
+        }
+        const rows = documents.filter(row => matches(row, match.$match as MongoFilter));
+        return [{ bytes: rows.reduce((sum, row) => sum + Number(row.bytes), 0) }];
+      },
+    }),
     find: cursor,
   };
 }
