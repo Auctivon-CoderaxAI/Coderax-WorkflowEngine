@@ -453,12 +453,13 @@ test('capability rows keep browser evidence, AI-assisted routing and cloud-brows
       (row) => row.id === 'native.game-studio.ai-assisted',
     );
     assert.ok(assisted);
-    // The test app wires a gateway, so routing exists; participation is still
-    // not claimed as verified.
+    // The test app wires a gateway, so a route exists; that alone must not move
+    // the row out of blocked.
     assert.equal(assisted.modelAssisted, true);
-    assert.equal(assisted.status, 'degraded');
+    assert.equal(assisted.status, 'blocked');
     assert.equal(assisted.available, false);
-    assert.match(assisted.blockedBy ?? '', /executed model-assisted build/);
+    assert.match(assisted.blockedBy ?? '', /executed and verified model-assisted build/);
+    assert.match(assisted.blockedBy ?? '', /configured route or a test narrative/);
     assert.ok(assisted.evidence.some((entry) => entry.includes('src/games/assistant.ts')));
 
     const browserAgent = report.capabilities.find(
@@ -491,6 +492,7 @@ test('an AI-assisted narrative is recorded by the project but does not make the 
     });
     assert.equal(created.ok, true);
     if (!created.ok) return;
+    // Narrative provenance is recorded on the project design...
     assert.equal(created.value.design?.modelAssisted, true);
     assert.equal(created.value.design?.logline, 'A lamplighter relights the town one beacon at a time.');
     assert.deepEqual(created.value.design?.pillars, ['light', 'quiet']);
@@ -508,9 +510,12 @@ test('an AI-assisted narrative is recorded by the project but does not make the 
       (row) => row.id === 'native.game-studio.ai-assisted',
     );
     assert.ok(assisted);
+    // ...but a test-double narrative on a test app is not an executed
+    // zero-cost model build, so it cannot make the capability claim.
     assert.equal(assisted.modelAssisted, true);
-    assert.equal(assisted.status, 'degraded');
+    assert.equal(assisted.status, 'blocked');
     assert.equal(assisted.available, false);
+    assert.match(assisted.blockedBy ?? '', /a test narrative is not evidence/);
   } finally {
     await started.close();
   }
@@ -547,6 +552,7 @@ test('without a model route the AI-assisted row is blocked by its prerequisite',
     assert.equal(assisted.status, 'blocked');
     assert.equal(assisted.available, false);
     assert.match(assisted.blockedBy ?? '', /zero-cost model credential/);
+    assert.match(assisted.blockedBy ?? '', /one executed model-assisted build/);
 
     const browser = report.capabilities.find((row) => row.id === 'native.game-studio.browser');
     assert.ok(browser);

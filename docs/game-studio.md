@@ -22,7 +22,7 @@ frame.
 | --- | --- | --- |
 | `native.game-studio` | operational | Generation, verification and export execute in the engine |
 | `native.game-studio.browser` | degraded | Two reference builds passed real Chromium acceptance; not a per-build browser guarantee |
-| `native.game-studio.ai-assisted` | **blocked** | No executed model-assisted build; a configured route alone is not participation |
+| `native.game-studio.ai-assisted` | **blocked** | No executed model-assisted build; a configured route or test narrative alone is not participation |
 | `native.gaming-agent` | operational | Sessions run in the engine's in-process V8 context (`isolation: in-process-v8-context`) |
 | `native.gaming-agent.browser` | **blocked** | The browser acceptance controller is test code, not an integrated cloud-browser agent runtime |
 | `native.gaming-agent.external` | **blocked** | No verified zero-cost cloud browser and no independently verified DeploymentPlatformAI workload/browser interface |
@@ -130,7 +130,16 @@ These are separate claims and the capability report keeps them separate:
   with a schema check and deterministic fallback. No zero-cost model credential
   is configured in this deployment, and no model-assisted build was executed, so
   no model participation is claimed. A route being available in a catalogue is
-  not evidence that a model wrote anything.
+  not evidence that a model wrote anything, and a narrative produced by a test
+  double is not an executed build. The capability row therefore stays `blocked`
+  whether or not a route is configured; only an executed and verified
+  model-assisted build could change it.
+- **Provenance is recorded, not inferred.** A model narrative is recorded as
+  `GameDesignPlan.modelAssisted` with its logline and pillars on the project,
+  and an iteration that uses no model records `modelAssisted: false`. The flag
+  changes the plan only: source, levels, audio and the build manifest are
+  byte-identical to deterministic generation for the same spec, which
+  `tests/unit/games.test.ts` asserts.
 - **Browser-verified playability is evidence for two reference builds.** The
   platformer and puzzle were rendered, controlled and completed in a real
   Chromium browser; the other six genres are covered by the deterministic

@@ -38,7 +38,7 @@ are clients of the same versioned API.
 | Coderax Native agent | Implemented | `src/agents/native` |
 | Native Game Studio | Implemented | `src/games/studio.ts`: NL specs, design plans, original source, 8 genres, 12 composable mechanics, seeded levels, browser-boot verification, build history/restore, export, `docs/evidence/game-studio/` |
 | Native Game Studio — real-browser acceptance | Verified for two reference builds | desktop/mobile Chromium rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart and audio; `docs/evidence/browser/` |
-| Native Game Studio — AI-assisted generation | **Blocked** | no verified model participation or zero-cost model credential; deterministic generation remains operational |
+| Native Game Studio — AI-assisted generation | **Blocked** | no executed, verified model-assisted build; a configured route or test narrative is not proof; deterministic generation remains operational |
 | Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`: durable Work task with `kind: game`, observed state/frames, bounded controls, pause/resume, takeover, cancellation, memory, measured completion |
 | Native Gaming Agent — cloud browser | **Blocked** | no verified zero-cost browser session/observation interface; the browser acceptance controller is test code, not the agent |
 | Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
