@@ -3,6 +3,8 @@ export * from './errors.js';
 export * from './capabilities.js';
 export * from './models.js';
 export * from './health.js';
+export * from './handshake.js';
+export * from './fingerprint.js';
 export * from './tasks.js';
 export * from './schedules.js';
 export * from './artifacts.js';

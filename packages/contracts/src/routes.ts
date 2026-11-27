@@ -23,6 +23,7 @@ import {
   SaveGameSpecRequest,
 } from './games.js';
 import { HealthReport, ReadinessReport } from './health.js';
+import { CapabilityHandshake, HandshakeQuery } from './handshake.js';
 import { ModelList } from './models.js';
 import {
   NotificationResponse,
@@ -943,7 +944,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     body: ArtifactModeRequest,
     response: { status: 200, description: 'Delete result', schema: ArtifactDeleteResult },
   },
-
+  {
+    operationId: 'getHandshake',
+    method: 'GET',
+    path: '/v1/handshake',
+    summary: 'Served contract identity, capability truth and version negotiation.',
+    tags: ['contract'],
+    auth: 'public',
+    query: HandshakeQuery,
+    response: { status: 200, description: 'Capability handshake', schema: CapabilityHandshake },
+  },
 ]);
 
 export const ROUTE_INDEX: ReadonlyMap<string, RouteSpec> = new Map(
