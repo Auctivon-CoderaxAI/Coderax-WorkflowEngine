@@ -46,7 +46,7 @@ Status vocabulary:
 | 30 | Automatic model fallback within one engine | `opencode/fallback.ts` | none | Missing |
 | 31 | FreeBuff SDK loading, loopback restriction, context floor | `freebuff/adapter.ts` | injected transport only | Missing (review F3) |
 | 32 | OpenHands adapter | `openhands/adapter.ts` (always `not_configured`) | not present | Changed — outside the three-agent model (review F10) |
-| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | new deterministic planner + gateway (`src/agents/native`) | Changed — not the same agent; see #34 |
+| 33 | Coderax Native agent | LibreChat agent stack in `packages/api/src/agents` | independent reasoning loop: model-assisted decomposition, dependency-aware parallel scheduling, bounded replanning, evidence verification and approval suspension (`src/agents/native`) | Changed — not the same agent; see #34 |
 | 34 | Native tools / MCP / skills / subagents / RAG / code execution | present in Coderax | absent; `tools: false` | Missing |
 | 35 | Secret redaction of provider text | `cloud/redact.ts` | `src/observability/redact.ts` | Preserved |
 | 36 | Private/cloud mode denial for providers | `cloud/mode.ts` | workspace + memory partitioning only | Simplified |
@@ -102,7 +102,7 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at the pushed head: 102/102 tests, OpenAPI drift clean.
+- `npm run verify` at the pushed head: 133/133 tests, OpenAPI drift clean.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a

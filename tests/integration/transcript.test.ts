@@ -20,6 +20,15 @@ function recordingGateway(): {
     prompts: [] as string[],
     complete: async (request: ModelCompletionRequest) => {
       gateway.prompts.push(request.prompt);
+      const turn = `${request.system}\n${request.prompt}`;
+      if (turn.includes('CODERAX_VERIFY_V1')) {
+        const cited = [...turn.matchAll(/EVIDENCE ([A-Za-z0-9._-]+):/g)]
+          .map((match) => match[1])
+          .filter((id): id is string => typeof id === 'string');
+        return {
+          text: JSON.stringify({ passed: true, reason: 'evidence covers the objective', cited }),
+        };
+      }
       return { text: `answer-${gateway.prompts.length}` };
     },
   };
@@ -55,7 +64,7 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
     });
 
     const firstTurnPrompts = gateway.prompts.length;
-    assert.equal(firstTurnPrompts, 3);
+    assert.equal(firstTurnPrompts, 2);
     // The first turn has nothing to remember.
     assert.ok(gateway.prompts.every((prompt) => !prompt.includes('Earlier in this conversation:')));
 
@@ -74,15 +83,14 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
     });
 
     const followUpPrompts = gateway.prompts.slice(firstTurnPrompts);
-    assert.equal(followUpPrompts.length, 3);
-    for (const prompt of followUpPrompts) {
-      assert.ok(prompt.includes('Earlier in this conversation:'));
-      // The stored user turn and the stored assistant answer, in order.
-      assert.ok(prompt.includes('Owner: First objective'));
-      assert.ok(prompt.includes('Assistant: answer-1'));
-      // The current objective is the objective, not a repeated history turn.
-      assert.equal(prompt.split('Follow-up objective').length - 1, 1);
-    }
+    assert.equal(followUpPrompts.length, 2);
+    // Only the reasoning step needs conversational context; verification is
+    // assessed from collected evidence, not from the transcript.
+    const followUpStep = followUpPrompts[0] ?? '';
+    assert.ok(followUpStep.includes('Earlier in this conversation:'));
+    assert.ok(followUpStep.includes('Owner: First objective'));
+    assert.ok(followUpStep.includes('Assistant: answer-1'));
+    assert.equal(followUpStep.split('Follow-up objective').length - 1, 1);
 
     const conversation = await started.app.service.conversation(principal, conversationId);
     assert.equal(conversation.ok, true);
