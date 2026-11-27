@@ -7,6 +7,8 @@ import type { MongoConnector, MongoDatabase } from '../src/persistence/mongo-con
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
+import type { ProviderPolicy } from '../src/models/policy.js';
+import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
 
 export const OWNER_TOKEN = 'test-owner-token-0123456789abcdef';
 export const OWNER_ID = 'owner-test';
@@ -29,6 +31,29 @@ export function createWorkspaces(): TestWorkspace {
     privateRoot,
     cloudRoot,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+export function testProviderPolicy(
+  providerId = 'free',
+  overrides: Partial<ProviderPolicy> = {},
+): ProviderPolicy {
+  return {
+    providerId,
+    retention: 'transient',
+    training: 'prohibited',
+    location: 'owner-region',
+    credentials: 'deployment-managed',
+    modes: ['cloud', 'private'],
+    grants: PROCESSING_OPERATIONS.map((operation) => ({
+      operation,
+      mode: 'cloud' as const,
+      location: 'owner-region' as const,
+    })),
+    evidenceUrl: 'https://provider.example/terms',
+    verifiedAt: '2026-01-01T00:00:00.000Z',
+    expiresAt: null,
+    ...overrides,
   };
 }
 
