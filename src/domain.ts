@@ -161,6 +161,20 @@ export type ArtifactVersionRecord = {
 };
 
 /**
+ * One firing of a schedule, kept so the owner can read what the engine did
+ * without reconstructing it from task history.
+ */
+export type ScheduleExecutionRecord = {
+  at: IsoDateTime;
+  outcome: 'submitted' | 'skipped';
+  /** The slot the schedule moved to after this firing. */
+  nextRunAt: IsoDateTime;
+  taskId: string | null;
+  /** Stable refusal code for a skipped firing. */
+  code: string | null;
+};
+
+/**
  * A durable schedule. It holds no lease and owns no run: a firing submits Work
  * and the ordinary execution invariants take over from there.
  */
@@ -176,10 +190,14 @@ export type ScheduleRecord = {
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
   nextRunAt: IsoDateTime | null;
+  /** Start instant requested while paused; consumed by the next resume. */
+  pendingStartAt: IsoDateTime | null;
   lastRunAt: IsoDateTime | null;
   lastTaskId: string | null;
   runs: number;
   skipped: number;
+  /** Newest first, bounded by the store. */
+  executions: ScheduleExecutionRecord[];
 };
 
 export type NotificationRecord = {

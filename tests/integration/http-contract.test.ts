@@ -69,7 +69,7 @@ test('contract negotiation and the capability handshake agree with the server', 
     assert.match(rejected.problems.join('; '), /fingerprint_mismatch/);
     assert.equal(checkCompatibility({ handshake: { ...exact, contractFingerprint: 'different' } }).compatible, false);
 
-    const ahead = await client.handshake({ contract: '1.3.0' });
+    const ahead = await client.handshake({ contract: '1.4.0' });
     assert.equal(ahead.compatible, false);
     assert.equal(ahead.negotiation, 'client_ahead');
     assert.equal(ahead.negotiatedContractVersion, CONTRACT_VERSION);

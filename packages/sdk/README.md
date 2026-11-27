@@ -19,13 +19,13 @@ path. It is not published to a registry, so installing it spends nothing and
 resolves no mutable tag.
 
 ```bash
-npm install /path/to/Coderax-WorkflowEngine/packages/sdk/artifacts/coderax-sdk-1.2.0.tgz
+npm install /path/to/Coderax-WorkflowEngine/packages/sdk/artifacts/coderax-sdk-1.3.0.tgz
 ```
 
 Verify the artifact before installing:
 
 ```bash
-sha256sum packages/sdk/artifacts/coderax-sdk-1.2.0.tgz
+sha256sum packages/sdk/artifacts/coderax-sdk-1.3.0.tgz
 ```
 
 The digest must equal `sha256` in [`sdk-artifact.json`](./sdk-artifact.json). That
@@ -52,7 +52,7 @@ const client = new CoderaxClient({
 });
 
 const report = checkCompatibility({
-  handshake: await client.handshake({ contract: '1.2.0' }),
+  handshake: await client.handshake({ contract: '1.3.0' }),
 });
 if (!report.compatible) throw new Error(report.problems.join('\n'));
 ```

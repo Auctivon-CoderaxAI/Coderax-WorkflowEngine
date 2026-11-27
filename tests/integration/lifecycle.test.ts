@@ -108,7 +108,7 @@ test('an interrupted run resumes over HTTP from its checkpoint', async () => {
   }
 });
 
-test('schedules create, list, pause, resume, fire and delete over HTTP', async () => {
+test('schedules expose read, update, pause, resume, executions and cancel over HTTP', async () => {
   const started = await startTestApp();
   const client = clientFor(started.url);
   const deps = started.app.dependencies;
@@ -124,40 +124,70 @@ test('schedules create, list, pause, resume, fire and delete over HTTP', async (
     const listed = await client.schedules();
     assert.ok(listed.schedules.some((entry) => entry.scheduleId === schedule.scheduleId));
 
-    const paused = await client.controlSchedule(schedule.scheduleId, 'pause');
+    const fetched = await client.schedule(schedule.scheduleId);
+    assert.equal(fetched.scheduleId, schedule.scheduleId);
+    assert.equal(fetched.objective, 'recurring harness task');
+
+    // An update edits the definition and restarts the cadence from now.
+    const updated = await client.updateSchedule(schedule.scheduleId, {
+      objective: 'updated harness task',
+      intervalMs: 120_000,
+    });
+    assert.equal(updated.objective, 'updated harness task');
+    assert.equal(updated.intervalMs, 120_000);
+    assert.ok(updated.nextRunAt);
+    assert.ok(schedule.nextRunAt && updated.nextRunAt > schedule.nextRunAt);
+
+    // An empty edit is refused, not reported as an accepted no-op.
+    await assert.rejects(
+      () => client.updateSchedule(schedule.scheduleId, {}),
+      (error: unknown) => (error as { code?: string }).code === 'validation_failed',
+    );
+
+    const paused = await client.pauseSchedule(schedule.scheduleId);
     assert.equal(paused.enabled, false);
+    assert.equal(paused.outcome, 'accepted');
     assert.equal(paused.nextRunAt, undefined);
 
-    const resumed = await client.controlSchedule(schedule.scheduleId, 'resume');
+    const pausedAgain = await client.pauseSchedule(schedule.scheduleId);
+    assert.equal(pausedAgain.outcome, 'unchanged');
+
+    const resumed = await client.resumeSchedule(schedule.scheduleId);
     assert.equal(resumed.enabled, true);
+    assert.equal(resumed.outcome, 'accepted');
     assert.ok(resumed.nextRunAt);
 
     // Move time past the interval: the engine's own ticker submits ordinary Work.
-    deps.clock.now = () => new Date(Date.now() + 61_000);
+    deps.clock.now = () => new Date(Date.now() + 121_000);
     const [tick, overlap] = await Promise.all([started.app.service.tickSchedules(), started.app.service.tickSchedules()]);
     assert.deepEqual(overlap, { started: 0, skipped: 0 });
     assert.equal(tick.started, 1);
 
-    const afterTick = (await client.schedules()).schedules.find(
-      (entry) => entry.scheduleId === schedule.scheduleId,
-    );
-    assert.equal(afterTick?.runs, 1);
-    const taskId = afterTick?.lastTaskId;
-    assert.ok(taskId, 'a firing must record the task it submitted');
+    const executions = await client.scheduleExecutions(schedule.scheduleId);
+    assert.equal(executions.executions.length, 1);
+    const firing = executions.executions[0];
+    assert.equal(firing?.outcome, 'submitted');
+    assert.ok(firing?.taskId, 'a firing must record the task it submitted');
+    const taskId = firing.taskId;
+
     const completed = await waitFor(async () => {
       const status = await client.task(taskId);
       return status.state === 'completed' ? status : null;
     });
     assert.ok(completed.result?.summary);
 
+    const afterTick = await client.schedule(schedule.scheduleId);
+    assert.equal(afterTick.runs, 1);
+    assert.equal(afterTick.lastTaskId, taskId);
+
     // The slot advanced, so a second tick cannot submit the same firing twice.
     assert.equal((await started.app.service.tickSchedules()).started, 0);
 
-    assert.deepEqual(await client.deleteSchedule(schedule.scheduleId), {
+    assert.deepEqual(await client.cancelSchedule(schedule.scheduleId), {
       scheduleId: schedule.scheduleId,
-      outcome: 'deleted',
+      outcome: 'canceled',
     });
-    assert.equal((await client.deleteSchedule(schedule.scheduleId)).outcome, 'not_found');
+    assert.equal((await client.cancelSchedule(schedule.scheduleId)).outcome, 'not_found');
     assert.deepEqual((await client.schedules()).schedules, []);
   } finally {
     await started.close();

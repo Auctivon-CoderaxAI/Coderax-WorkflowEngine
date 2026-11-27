@@ -39,6 +39,31 @@ export const ScheduleCreateRequest = z
 export type ScheduleCreateRequest = z.infer<typeof ScheduleCreateRequest>;
 export type ScheduleCreateRequestInput = z.input<typeof ScheduleCreateRequest>;
 
+/**
+ * A schedule's definition is editable; its state is not.
+ *
+ * `pause` and `resume` own the enabled flag, so an update cannot flip it and
+ * there is exactly one verb for each state change. An empty body is refused
+ * rather than reported as an accepted no-op.
+ */
+export const ScheduleUpdateRequest = z
+  .object({
+    objective: z.string().min(1).max(200_000).optional(),
+    agent: AgentId.optional(),
+    mode: DataMode.optional(),
+    intervalMs: z
+      .number()
+      .int()
+      .min(SCHEDULE_MIN_INTERVAL_MS)
+      .max(SCHEDULE_MAX_INTERVAL_MS)
+      .optional(),
+    /** Restart the cadence at this instant. Ignored in the past; defaults to now + interval. */
+    startAt: IsoDateTime.optional(),
+  })
+  .strict();
+export type ScheduleUpdateRequest = z.infer<typeof ScheduleUpdateRequest>;
+export type ScheduleUpdateRequestInput = z.input<typeof ScheduleUpdateRequest>;
+
 export const Schedule = z
   .object({
     scheduleId: ScheduleId,
@@ -64,11 +89,30 @@ export type Schedule = z.infer<typeof Schedule>;
 export const ScheduleList = z.object({ schedules: z.array(Schedule) }).strict();
 export type ScheduleList = z.infer<typeof ScheduleList>;
 
-export const ScheduleAction = z.enum(['pause', 'resume']);
-export type ScheduleAction = z.infer<typeof ScheduleAction>;
+/**
+ * One firing of a schedule. `skipped` is a decision, not a failure: the
+ * conversation was busy, the schedule was paused or deleted mid-tick, or Work
+ * refused the submission. `code` carries the stable refusal reason.
+ */
+export const ScheduleExecution = z
+  .object({
+    at: IsoDateTime,
+    outcome: z.enum(['submitted', 'skipped']),
+    /** The slot the schedule moved to after this firing. */
+    nextRunAt: IsoDateTime,
+    taskId: TaskId.optional(),
+    code: z.string().min(1).max(64).optional(),
+  })
+  .strict();
+export type ScheduleExecution = z.infer<typeof ScheduleExecution>;
 
-export const ScheduleControlRequest = z.object({ action: ScheduleAction }).strict();
-export type ScheduleControlRequest = z.infer<typeof ScheduleControlRequest>;
+export const ScheduleExecutionList = z
+  .object({
+    scheduleId: ScheduleId,
+    executions: z.array(ScheduleExecution),
+  })
+  .strict();
+export type ScheduleExecutionList = z.infer<typeof ScheduleExecutionList>;
 
 export const ScheduleControlResult = z
   .object({
@@ -81,6 +125,19 @@ export const ScheduleControlResult = z
   })
   .strict();
 export type ScheduleControlResult = z.infer<typeof ScheduleControlResult>;
+
+/**
+ * Cancellation is permanent: the schedule stops firing and its record is
+ * dropped. A run it already submitted keeps running under normal execution
+ * rules, because cancelling a schedule is not cancelling Work.
+ */
+export const ScheduleCancellation = z
+  .object({
+    scheduleId: ScheduleId,
+    outcome: z.enum(['canceled', 'not_found']),
+  })
+  .strict();
+export type ScheduleCancellation = z.infer<typeof ScheduleCancellation>;
 
 export const ScheduleRemoval = z
   .object({

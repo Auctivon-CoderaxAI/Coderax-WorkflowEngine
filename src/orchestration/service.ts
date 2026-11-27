@@ -23,11 +23,14 @@ import type {
   PermissionDecisionRequest,
   PermissionList,
   Schedule,
-  ScheduleAction,
+  ScheduleCancellation,
   ScheduleControlResult,
   ScheduleCreateRequest,
+  ScheduleExecution,
+  ScheduleExecutionList,
   ScheduleList,
   ScheduleRemoval,
+  ScheduleUpdateRequest,
   TaskAccepted,
   TaskControlResult,
   TaskList,
@@ -44,7 +47,7 @@ import {
 } from '@coderax/contracts';
 import type { EngineFailureCode, ModelDescriptor, ProblemCode } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { ScheduleRecord, TaskRecord } from '../domain.js';
+import type { ScheduleExecutionRecord, ScheduleRecord, TaskRecord } from '../domain.js';
 import { MemoryValueTooLargeError } from '../memory/errors.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
@@ -203,11 +206,29 @@ export type ApplicationService = {
     principal: Principal,
     request: ScheduleCreateRequest,
   ) => Promise<ServiceResult<Schedule>>;
-  controlSchedule: (
+  schedule: (principal: Principal, scheduleId: string) => Promise<ServiceResult<Schedule>>;
+  updateSchedule: (
     principal: Principal,
     scheduleId: string,
-    action: ScheduleAction,
+    request: ScheduleUpdateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  pauseSchedule: (
+    principal: Principal,
+    scheduleId: string,
   ) => Promise<ServiceResult<ScheduleControlResult>>;
+  resumeSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  cancelSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleCancellation>>;
+  scheduleExecutions: (
+    principal: Principal,
+    scheduleId: string,
+    limit: number,
+  ) => Promise<ServiceResult<ScheduleExecutionList>>;
   removeSchedule: (
     principal: Principal,
     scheduleId: string,
@@ -282,6 +303,16 @@ function toSchedule(record: ScheduleRecord): Schedule {
     ...(record.lastTaskId ? { lastTaskId: record.lastTaskId } : {}),
     runs: record.runs,
     skipped: record.skipped,
+  };
+}
+
+function toScheduleExecution(record: ScheduleExecutionRecord): ScheduleExecution {
+  return {
+    at: record.at,
+    outcome: record.outcome,
+    nextRunAt: record.nextRunAt,
+    ...(record.taskId ? { taskId: record.taskId } : {}),
+    ...(record.code ? { code: record.code } : {}),
   };
 }
 
@@ -1044,7 +1075,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       } else {
         // Busy or refused: move to the next slot instead of hammering the
         // conversation every tick.
-        deps.schedules.markSkipped({ scheduleId: schedule.scheduleId, at, nextRunAt });
+        deps.schedules.markSkipped({
+          scheduleId: schedule.scheduleId,
+          at,
+          nextRunAt,
+          code: submitted.code,
+        });
         deps.audit.record({
           actor: schedule.ownerId,
           action: 'schedule.skipped',
@@ -1055,6 +1091,35 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     }
     return { started, skipped };
+  }
+
+  /**
+   * Pause and resume share one state change: the verb is explicit, the
+   * decision (and the slot movement) belongs to the store. Repeating a verb is
+   * reported as `unchanged` and does not move `nextRunAt`.
+   */
+  async function setScheduleEnabled(
+    principal: Principal,
+    scheduleId: string,
+    enabled: boolean,
+  ): Promise<ServiceResult<ScheduleControlResult>> {
+    const existing = deps.schedules.get(principal.ownerId, scheduleId);
+    if (!existing) return fail('not_found', 'That schedule does not exist for this owner.');
+    const changed = existing.enabled !== enabled;
+    const record = deps.schedules.setEnabled({ ownerId: principal.ownerId, scheduleId, enabled });
+    if (!record) return fail('not_found', 'That schedule does not exist for this owner.');
+    deps.audit.record({
+      actor: principal.ownerId,
+      action: enabled ? 'schedule.resumed' : 'schedule.paused',
+      outcome: changed ? 'accepted' : 'refused',
+    });
+    return ok({
+      scheduleId: record.scheduleId,
+      enabled: record.enabled,
+      ...(record.nextRunAt ? { nextRunAt: record.nextRunAt } : {}),
+      runs: record.runs,
+      outcome: changed ? 'accepted' : 'unchanged',
+    });
   }
 
   const service: ApplicationService = {
@@ -1651,21 +1716,70 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return ok(toSchedule(record));
     },
 
-    controlSchedule: async (principal, scheduleId, action) => {
-      const enabled = action === 'resume';
-      const record = deps.schedules.setEnabled({
+    schedule: async (principal, scheduleId) => {
+      const record = deps.schedules.get(principal.ownerId, scheduleId);
+      if (!record) return fail('not_found', 'That schedule does not exist for this owner.');
+      return ok(toSchedule(record));
+    },
+
+    updateSchedule: async (principal, scheduleId, request) => {
+      const existing = deps.schedules.get(principal.ownerId, scheduleId);
+      if (!existing) return fail('not_found', 'That schedule does not exist for this owner.');
+      if (Object.keys(request).length === 0) {
+        return fail('validation_failed', 'An update must change at least one field.');
+      }
+      // A schedule that can never run is refused at edit time, not discovered
+      // at the next firing when no client is watching.
+      if (request.agent !== undefined) {
+        const adapter = deps.agents.resolve(request.agent);
+        if (!adapter.ok) return adapter;
+      }
+      if (request.agent !== undefined || request.mode !== undefined) {
+        const model = deps.models.resolve(null, request.mode ?? existing.mode);
+        if (!model.ok) return model;
+      }
+      const record = deps.schedules.update({
         ownerId: principal.ownerId,
         scheduleId,
-        enabled,
+        patch: {
+          ...(request.objective !== undefined ? { objective: request.objective } : {}),
+          ...(request.agent !== undefined ? { agent: request.agent } : {}),
+          ...(request.mode !== undefined ? { mode: request.mode } : {}),
+          ...(request.intervalMs !== undefined ? { intervalMs: request.intervalMs } : {}),
+          ...(request.startAt !== undefined ? { startAt: request.startAt } : {}),
+        },
       });
       if (!record) return fail('not_found', 'That schedule does not exist for this owner.');
-      return ok({
-        scheduleId: record.scheduleId,
-        enabled: record.enabled,
-        ...(record.nextRunAt ? { nextRunAt: record.nextRunAt } : {}),
-        runs: record.runs,
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.updated',
         outcome: 'accepted',
+        detail: `intervalMs=${record.intervalMs}`,
       });
+      return ok(toSchedule(record));
+    },
+
+    pauseSchedule: (principal, scheduleId) => setScheduleEnabled(principal, scheduleId, false),
+    resumeSchedule: (principal, scheduleId) => setScheduleEnabled(principal, scheduleId, true),
+
+    cancelSchedule: async (principal, scheduleId) => {
+      const canceled = deps.schedules.remove(principal.ownerId, scheduleId);
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.canceled',
+        outcome: canceled ? 'accepted' : 'refused',
+      });
+      return ok({ scheduleId, outcome: canceled ? 'canceled' : 'not_found' });
+    },
+
+    scheduleExecutions: async (principal, scheduleId, limit) => {
+      const executions = deps.schedules.executions({
+        ownerId: principal.ownerId,
+        scheduleId,
+        limit,
+      });
+      if (!executions) return fail('not_found', 'That schedule does not exist for this owner.');
+      return ok({ scheduleId, executions: executions.map(toScheduleExecution) });
     },
 
     removeSchedule: async (principal, scheduleId) => {

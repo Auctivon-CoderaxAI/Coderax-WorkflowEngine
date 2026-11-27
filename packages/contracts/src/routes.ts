@@ -30,11 +30,13 @@ import {
 } from './primitives.js';
 import {
   Schedule,
-  ScheduleControlRequest,
+  ScheduleCancellation,
   ScheduleControlResult,
   ScheduleCreateRequest,
+  ScheduleExecutionList,
   ScheduleList,
   ScheduleRemoval,
+  ScheduleUpdateRequest,
 } from './schedules.js';
 import {
   CancelRequest,
@@ -101,6 +103,9 @@ const ConversationParams = z.object({ conversationId: ConversationId }).strict()
 const ScheduleParams = z.object({ scheduleId: ScheduleId }).strict();
 const TaskArtifactParams = z.object({ taskId: TaskId, artifactId: ArtifactId }).strict();
 const ArtifactParams = z.object({ artifactId: ArtifactId }).strict();
+const ScheduleExecutionQuery = z
+  .object({ limit: z.coerce.number().int().min(1).max(100).optional() })
+  .strict();
 
 const ArtifactListQuery = z
   .object({
@@ -518,15 +523,66 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 201, description: 'Schedule', schema: Schedule },
   },
   {
-    operationId: 'controlSchedule',
-    method: 'POST',
+    operationId: 'getSchedule',
+    method: 'GET',
     path: '/v1/schedules/{scheduleId}',
-    summary: 'Pause or resume one schedule.',
+    summary: 'One schedule, including its next firing and counters.',
     tags: ['schedules'],
     auth: 'owner',
     params: ScheduleParams,
-    body: ScheduleControlRequest,
+    response: { status: 200, description: 'Schedule', schema: Schedule },
+  },
+  {
+    operationId: 'updateSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/update',
+    summary: 'Edit a schedule definition. State changes use pause and resume.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleUpdateRequest,
+    response: { status: 200, description: 'Updated schedule', schema: Schedule },
+  },
+  {
+    operationId: 'pauseSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/pause',
+    summary: 'Stop future firings; a run already submitted keeps running.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
     response: { status: 200, description: 'Schedule control outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'resumeSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/resume',
+    summary: 'Restart the cadence from now; missed slots are not backfilled.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Schedule control outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'cancelSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/cancel',
+    summary: 'Cancel a schedule permanently. A run already started keeps running.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Schedule cancellation outcome', schema: ScheduleCancellation },
+  },
+  {
+    operationId: 'listScheduleExecutions',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}/executions',
+    summary: 'Recent firings of one schedule, newest first.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    query: ScheduleExecutionQuery,
+    response: { status: 200, description: 'Schedule executions', schema: ScheduleExecutionList },
   },
   {
     operationId: 'deleteSchedule',

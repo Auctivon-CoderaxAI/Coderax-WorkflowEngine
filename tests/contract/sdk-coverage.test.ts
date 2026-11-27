@@ -54,6 +54,6 @@ test('the SDK reports the contract version it was built against', () => {
   assert.equal(SDK_VERSION, sdkMetadata().version);
   assert.equal(SDK_CONTRACT_VERSION, CONTRACT_VERSION);
   assert.equal(sdkMetadata().contractVersion, CONTRACT_VERSION);
-  assert.deepEqual(sdkMetadata().supportedContractVersions, ['1.0.0', '1.1.0', CONTRACT_VERSION]);
+  assert.deepEqual(sdkMetadata().supportedContractVersions, ['1.0.0', '1.1.0', '1.2.0', CONTRACT_VERSION]);
   assert.equal(typeof CoderaxClient.metadata.version, 'string');
 });

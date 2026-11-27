@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "name": "@coderax/sdk",
-  "version": "1.2.0",
-  "contractVersion": "1.2.0",
+  "version": "1.3.0",
+  "contractVersion": "1.3.0",
   "eventSchemaVersion": 1,
   "chatStreamVersion": 1,
-  "path": "artifacts/coderax-sdk-1.2.0.tgz",
-  "sha256": "223ce865ae0ccea8caf6246e35e1e3e0f486bbca3930e02ccaf6fe1f7a187a8c",
-  "bytes": 40144,
+  "path": "artifacts/coderax-sdk-1.3.0.tgz",
+  "sha256": "fed11f58fba9774f35d9cbb73a31db12cd5e40b0c08580c50ccbd30243dbd631",
+  "bytes": 41357,
   "reproducible": true,
   "files": [
     {
@@ -22,22 +22,22 @@
     },
     {
       "path": "package/dist/index.d.ts",
-      "sha256": "e596497bd701cbbf5756110f20e75406bb95c7ac9c7344353a37aeed0c2f0c7a",
-      "bytes": 8432
+      "sha256": "6c59b9265065e73247d64e5c85465a43b734f9a13264b6df342eb4e8c59cc2ab",
+      "bytes": 8911
     },
     {
       "path": "package/dist/index.js",
-      "sha256": "3940b412086aabbd89a34eff16074245847bdf92b798f9fcad4c3d1209dadc1e",
-      "bytes": 20947
+      "sha256": "7369ead963a75feb36f47243eb521bb09c2997068cecb4e513aeb51586afc832",
+      "bytes": 22289
     },
     {
       "path": "package/dist/version.d.ts",
-      "sha256": "a0bc751ab2d1e1a6285ad21000d989da5f134fe875a101f2b4ea8b2837c728e1",
+      "sha256": "6c23c2cc0f98b587cdb69d308e4895ab13ae50c788332fc6771ac42bf252e847",
       "bytes": 1146
     },
     {
       "path": "package/dist/version.js",
-      "sha256": "6a41877d98968b60a1ce8462889f26164c111c5701c1cb33dca95eeccf224dc9",
+      "sha256": "9e4af796768ec4f0d19570772263dc7106c8b3643b38ce03af6e2c6086f7337a",
       "bytes": 1385
     },
     {
@@ -92,7 +92,7 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/handshake.d.ts",
-      "sha256": "3aff07661f433c2fddd4c82f80f0227296e9d4eb285815f58de4326ff95bba2f",
+      "sha256": "084d1cad07ea4a9b645aa7eae0b7c7139a11471e84dce60cd5fa9de96927b90d",
       "bytes": 14222
     },
     {
@@ -162,13 +162,13 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/primitives.d.ts",
-      "sha256": "0ddcbf70b7f77de656af29459a6fa6466ea0863c7c94795e524ae5d99839b03a",
-      "bytes": 5558
+      "sha256": "46f70f82352e83ee42aac117355d3dae704577d5a39654ffe510702f58fc6793",
+      "bytes": 5914
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/primitives.js",
-      "sha256": "03aef586f938d4a91d79836d88f6cff4b597d4d885ebccd037295651032f4c4e",
-      "bytes": 5196
+      "sha256": "d1de9d35e23ab0c219e5455d5a89c4b7b4c1bc0d05eeb9f9a4b3d0479a8adf3a",
+      "bytes": 5552
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/routes.d.ts",
@@ -177,18 +177,18 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/routes.js",
-      "sha256": "6b6f2e77c54727a7cd8599ccd2ced31c3528e5747e6260c430f22521e4d36528",
-      "bytes": 17710
+      "sha256": "a5a45d4fae912291a86eebd1e2eedb5a4267869eb5bc71ae827e35cc360916ed",
+      "bytes": 19883
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/schedules.d.ts",
-      "sha256": "50141883c39e73be4da789948055ddad1006e988bdcb9a0c253fad3e06a50dcb",
-      "bytes": 7864
+      "sha256": "3eca13f7358d41e2691eb1b7614b22fa9a568c50828e08629a839a6c605cf3e7",
+      "bytes": 11566
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/schedules.js",
-      "sha256": "9adc180d8e86eea9d6fcbb9b7aedae0366351fbca6838202d6ea2e23b72e750b",
-      "bytes": 2783
+      "sha256": "64143ed0425b7453c99da8ea68988051cea15e57ab37324be935e5abcfc4c244",
+      "bytes": 4427
     },
     {
       "path": "package/node_modules/@coderax/contracts/dist/tasks.d.ts",
@@ -202,14 +202,14 @@
     },
     {
       "path": "package/node_modules/@coderax/contracts/package.json",
-      "sha256": "58f5362ad4f8dcbfb77530f7f1c4e1b3e84837c7ffb10914a5e61795350f7580",
+      "sha256": "3284894ffc4de1ce77d4be10606567207cd59ef625f5711a0b4107b64313fc54",
       "bytes": 419
     },
     {
       "path": "package/package.json",
-      "sha256": "416517d8e69bded68e0e985a76bd5ea99928088accf7bcfe75a7b8431a17b70a",
+      "sha256": "2f65dc6506dff4d63d82771dc2dc2b33bbd707a399a499e6a49a3cd219b73262",
       "bytes": 892
     }
   ],
-  "install": "npm install packages/sdk/artifacts/coderax-sdk-1.2.0.tgz"
+  "install": "npm install packages/sdk/artifacts/coderax-sdk-1.3.0.tgz"
 }

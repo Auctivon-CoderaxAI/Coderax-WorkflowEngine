@@ -26,7 +26,9 @@ import {
   ReadinessReport,
   ROUTE_INDEX,
   Schedule,
+  ScheduleCancellation,
   ScheduleControlResult,
+  ScheduleExecutionList,
   ScheduleList,
   ScheduleRemoval,
   TaskAccepted,
@@ -44,8 +46,8 @@ import type {
   MemoryDeleteRequestInput,
   MemoryWriteRequestInput,
   PermissionDecisionRequest,
-  ScheduleAction,
   ScheduleCreateRequestInput,
+  ScheduleUpdateRequestInput,
   TaskArtifactUploadRequestInput,
   TaskListQuery,
   WorkSubmitRequestInput,
@@ -157,7 +159,12 @@ export const SDK_OPERATION_COVERAGE: Readonly<Record<string, string>> = Object.f
   markNotificationRead: 'markNotificationRead',
   listSchedules: 'schedules',
   createSchedule: 'createSchedule',
-  controlSchedule: 'controlSchedule',
+  getSchedule: 'schedule',
+  updateSchedule: 'updateSchedule',
+  pauseSchedule: 'pauseSchedule',
+  resumeSchedule: 'resumeSchedule',
+  cancelSchedule: 'cancelSchedule',
+  listScheduleExecutions: 'scheduleExecutions',
   deleteSchedule: 'deleteSchedule',
 });
 
@@ -671,11 +678,53 @@ export class CoderaxClient {
     });
   }
 
-  controlSchedule(scheduleId: string, action: ScheduleAction): Promise<ScheduleControlResult> {
+  schedule(scheduleId: string): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+    });
+  }
+
+  updateSchedule(
+    scheduleId: string,
+    request: ScheduleUpdateRequestInput,
+  ): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/update`,
+      body: this.encodeBody('updateSchedule', request),
+    });
+  }
+
+  pauseSchedule(scheduleId: string): Promise<ScheduleControlResult> {
     return this.request<ScheduleControlResult>(ScheduleControlResult, {
       method: 'POST',
-      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
-      body: this.encodeBody('controlSchedule', { action }),
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/pause`,
+    });
+  }
+
+  resumeSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/resume`,
+    });
+  }
+
+  cancelSchedule(scheduleId: string): Promise<ScheduleCancellation> {
+    return this.request<ScheduleCancellation>(ScheduleCancellation, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+    });
+  }
+
+  scheduleExecutions(
+    scheduleId: string,
+    options: { limit?: number } = {},
+  ): Promise<ScheduleExecutionList> {
+    return this.request<ScheduleExecutionList>(ScheduleExecutionList, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/executions`,
+      query: options.limit === undefined ? undefined : { limit: options.limit },
     });
   }
 
@@ -743,8 +792,8 @@ export type {
   MemoryDeleteRequestInput as MemoryDeleteRequest,
   MemoryWriteRequestInput as MemoryWriteRequest,
   PermissionDecisionRequest,
-  ScheduleAction,
   ScheduleCreateRequestInput as ScheduleCreateRequest,
+  ScheduleUpdateRequestInput as ScheduleUpdateRequest,
   TaskListQuery,
   WorkSubmitRequestInput as WorkSubmitRequest,
 };

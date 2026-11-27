@@ -14,7 +14,11 @@ test('the handshake names an advertised version, never the one it echoed back', 
   assert.equal(newer.compatible, true);
   assert.equal(newer.negotiatedContractVersion, '1.1.0');
 
-  const newestPatch = negotiateContract('1.2.9');
+  const olderPatch = negotiateContract('1.2.9');
+  assert.equal(olderPatch.compatible, true);
+  assert.equal(olderPatch.negotiatedContractVersion, '1.2.0');
+
+  const newestPatch = negotiateContract('1.3.9');
   assert.equal(newestPatch.compatible, true);
   assert.equal(newestPatch.negotiatedContractVersion, CONTRACT_VERSION);
 
@@ -32,7 +36,9 @@ test('a catalogue that shares the version string but not the wire is refused', (
   assert.equal(agreed.compatible, true);
   assert.equal(agreed.negotiation, 'exact');
 
-  assert.equal(negotiateContract('1.02.0', {
+  // A zero-padded patch still parses as the served version, so the fingerprint
+  // is what decides whether the wire agrees.
+  assert.equal(negotiateContract('1.03.0', {
     provided: 'different', expected: CONTRACT_FINGERPRINT,
   }).negotiation, 'fingerprint_mismatch');
 

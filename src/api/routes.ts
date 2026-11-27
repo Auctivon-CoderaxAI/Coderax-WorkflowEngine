@@ -1,9 +1,4 @@
-import type {
-  CapabilityFlags,
-  ChatStreamEvent,
-  DataMode,
-  ScheduleAction,
-} from '@coderax/contracts';
+import type { CapabilityFlags, ChatStreamEvent, DataMode } from '@coderax/contracts';
 import {
   API_PREFIX,
   CHAT_STREAM_VERSION,
@@ -527,12 +522,55 @@ export function registerRoutes(
     return { kind: 'json', status: 201, body: result.value };
   });
 
-  registry.register('controlSchedule', async (context) => {
-    const body = context.body as { action: ScheduleAction };
-    const result = await service.controlSchedule(
+  registry.register('getSchedule', async (context) => {
+    const result = await service.schedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('updateSchedule', async (context) => {
+    const result = await service.updateSchedule(
       context.principal,
       context.params.scheduleId ?? '',
-      body.action,
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('pauseSchedule', async (context) => {
+    const result = await service.pauseSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('resumeSchedule', async (context) => {
+    const result = await service.resumeSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('cancelSchedule', async (context) => {
+    const result = await service.cancelSchedule(
+      context.principal,
+      context.params.scheduleId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listScheduleExecutions', async (context) => {
+    const query = context.query as { limit?: number };
+    const result = await service.scheduleExecutions(
+      context.principal,
+      context.params.scheduleId ?? '',
+      query.limit ?? 50,
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };

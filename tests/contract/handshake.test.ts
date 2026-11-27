@@ -52,7 +52,7 @@ test('the handshake reports exactly the operations the registry serves', async (
     assert.equal(handshake.compatible, true);
     assert.equal(handshake.negotiation, 'exact');
     assert.equal(handshake.negotiatedContractVersion, CONTRACT_VERSION);
-    assert.deepEqual(handshake.supportedContractVersions, ['1.0.0', '1.1.0', CONTRACT_VERSION]);
+    assert.deepEqual(handshake.supportedContractVersions, ['1.0.0', '1.1.0', '1.2.0', CONTRACT_VERSION]);
     assert.equal(handshake.server.version, ENGINE_VERSION);
 
     // Exactly the catalogue: no documented operation without a handler, and no
