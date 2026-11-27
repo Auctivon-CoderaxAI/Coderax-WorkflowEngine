@@ -29,6 +29,8 @@ export type MongoUpdate = {
   /** Used by the blob read leases: the array and its count change together. */
   $push?: Record<string, unknown>;
   $pull?: Record<string, unknown>;
+  /** Monotonic update used by the event head; it never lowers a value. */
+  $max?: Record<string, unknown>;
 };
 
 /** A lazily executed query; the subset of the driver cursor these stores use. */

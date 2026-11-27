@@ -106,6 +106,8 @@ export const ExecutionConfig = z
     maxConcurrentTasks: z.number().int().min(1).max(64).default(4),
     /** Events retained per task for replay; older events require a new query. */
     eventBufferSize: z.number().int().min(16).max(100_000).default(2_000),
+    /** Events kept per task after it settles; older ones are pruned. */
+    eventRetain: z.number().int().min(16).max(100_000).default(5_000),
     /** A crashed run's row is readable for this long before a sweep reclaims it. */
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */

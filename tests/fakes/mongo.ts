@@ -89,6 +89,13 @@ function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
 
 function applyUpdate(document: Document, update: MongoUpdate): Document {
   const next = { ...document, ...(update.$set ?? {}) };
+  // `$max` only ever raises a field, which is what makes the event head a
+  // monotonic high-water mark rather than a last-writer-wins row.
+  for (const [field, value] of Object.entries(update.$max ?? {})) {
+    if (typeof value !== 'number') continue;
+    const current = typeof next[field] === 'number' ? (next[field] as number) : Number.NEGATIVE_INFINITY;
+    next[field] = Math.max(current, value);
+  }
   for (const [field, amount] of Object.entries(update.$inc ?? {})) {
     const current = typeof next[field] === 'number' ? (next[field] as number) : 0;
     next[field] = current + amount;
