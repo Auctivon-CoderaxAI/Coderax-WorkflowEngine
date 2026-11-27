@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ModelGateway } from '../../src/agents/native/types.js';
-import { OWNER_TOKEN, startTestApp } from '../helpers.js';
+import type { ProviderCompletionRequest } from '../../src/models/types.js';
+import { OWNER_TOKEN, fakeProvider, startTestApp } from '../helpers.js';
 
 /**
  * Live media boundary.
@@ -17,18 +17,22 @@ const PNG_1X1 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 test('a real PNG crosses the HTTP boundary and reaches the provider as an image part', async () => {
-  const requests: Array<{ prompt: string; images?: string[] }> = [];
-  const gateway: ModelGateway = {
-    id: 'recording',
-    complete: async (request) => {
-      requests.push({ prompt: request.prompt, images: request.images });
-      return { text: 'The image was received.' };
+  const requests: ProviderCompletionRequest[] = [];
+
+  const fixture = fakeProvider({
+    text: 'The image was received.',
+    vision: true,
+  });
+
+  const provider = {
+    ...fixture,
+    complete: async (request: ProviderCompletionRequest) => {
+      requests.push(request);
+      return fixture.complete(request);
     },
   };
-  const started = await startTestApp({
-    gateway,
-    config: { models: { vision: [{ providerId: 'free', modelId: 'coderax-small' }] } },
-  });
+
+  const started = await startTestApp({ provider });
   try {
     const accepted = await fetch(`${started.url}/v1/media`, {
       method: 'POST',
@@ -65,8 +69,13 @@ test('a real PNG crosses the HTTP boundary and reaches the provider as an image 
     const reply = (await turn.json()) as { text: string };
     assert.equal(reply.text, 'The image was received.');
     assert.equal(requests.length, 1);
-    assert.equal(requests[0]?.images?.length, 1);
-    assert.match(requests[0]?.images?.[0] ?? '', /^data:image\/png;base64,/);
+    const images = requests.flatMap((request) =>
+      (request.messages ?? []).flatMap((message) => message.images ?? []),
+    );
+
+    assert.equal(images.length, 1);
+    assert.match(images[0] ?? '', /^data:image\/png;base64,/);
+    assert.equal(images[0], `data:image/png;base64,${PNG_1X1}`);
   } finally {
     await started.close();
   }
