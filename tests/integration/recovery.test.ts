@@ -995,3 +995,93 @@ test('shutdown drains a submission paused before local registration', async () =
     await started.close();
   }
 });
+
+test('a cancellation on the replica that never wrote the stream keeps the interruption', async () => {
+  const database = createFakeDatabase();
+  const workspaceA = createWorkspaces();
+  const workspaceB = createWorkspaces();
+  const appA = await mongoApp({
+    database,
+    workspace: workspaceA,
+    execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500, cancelGraceMs: 150 },
+  });
+  const appB = await mongoApp({ database, workspace: workspaceB });
+  try {
+    const agent = appA.dependencies.agents.get('coderax');
+    assert.ok(agent);
+    let entered!: () => void;
+    const running = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    agent.run = async (_request, report) => {
+      report({ type: 'text.delta', text: 'partial result' });
+      entered();
+      return new Promise(() => {});
+    };
+
+    const submitted = await appA.service.submitWork(principal, {
+      objective: 'cancel this run from another replica',
+      mode: 'cloud',
+      requireApproval: true,
+    });
+    assert.ok(submitted.ok);
+    if (!submitted.ok) return;
+    await running;
+
+    // Sample the durable head: the owner's bus may still hold a coalesced
+    // delta, and the watermark has to be what the store actually committed.
+    await appA.dependencies.events.flush(submitted.value.taskId);
+    const owned = await appA.dependencies.events.read(submitted.value.taskId, 0);
+    const watermark = owned.events.at(-1)?.seq ?? 0;
+    assert.ok(watermark >= 2);
+
+    // The cancellation lands on the replica that never wrote this stream, and
+    // the owner's lease is already expired from its clock, so the run is retired
+    // as interrupted rather than flagged live.
+    appB.dependencies.clock.now = () => new Date(Date.now() + 60_000);
+    const cancelled = await appB.service.cancelTask(
+      principal,
+      submitted.value.taskId,
+      'The owner stopped heartbeating.',
+    );
+    assert.ok(cancelled.ok);
+    assert.equal(cancelled.value.outcome, 'accepted');
+    assert.equal(cancelled.value.state, 'interrupted');
+    assert.equal(cancelled.value.generation, 1);
+
+    // Read the collection itself: the event endpoint repairs a missing terminal
+    // event, so only the store shows what the cancel path wrote.
+    const stored = await collection(database, 'events')
+      .find({ taskId: submitted.value.taskId })
+      .sort({ seq: 1 })
+      .toArray();
+    assert.equal(stored.length, watermark + 1, 'the interruption is stored exactly once');
+    assert.equal(stored.at(-1)?.type, 'task.interrupted');
+    assert.equal(stored.at(-1)?.seq, watermark + 1);
+    assert.equal(stored.at(-1)?.generation, 1);
+
+    // The interrupted generation stays resumable, and its ending has to precede
+    // the generation that follows it.
+    const resumed = await appB.service.resumeTask(principal, submitted.value.taskId, 1);
+    assert.ok(resumed.ok);
+    assert.equal(resumed.value.generation, 2);
+    const completed = await waitFor(async () => {
+      const status = await appB.service.task(principal, submitted.value.taskId);
+      return status.ok && status.value.state === 'completed' ? status.value : null;
+    });
+    assert.equal(completed.generation, 2);
+    await appB.dependencies.scheduler.idle();
+
+    const full = await appB.dependencies.events.read(submitted.value.taskId, 0);
+    const first = full.events.filter((event) => event.generation === 1);
+    const second = full.events.filter((event) => event.generation === 2);
+    assert.equal(first.at(-1)?.type, 'task.interrupted');
+    assert.equal(second[0]?.type, 'task.queued');
+    assert.equal(second[0]?.seq, (first.at(-1)?.seq ?? 0) + 1);
+  } finally {
+    await appB.stop();
+    await appA.stop();
+    workspaceA.cleanup();
+    workspaceB.cleanup();
+  }
+});

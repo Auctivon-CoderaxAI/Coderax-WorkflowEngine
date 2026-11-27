@@ -1571,9 +1571,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'superseded',
         });
       }
+      // Continue the shared sequence: a replica that never wrote this stream
+      // would number the interruption from 1, lose it to the unique sequence
+      // index, and leave an interrupted task with no reason in its stream.
+      await deps.events
+        .hydrate(applied.task.taskId, applied.task.generation)
+        .catch(() => undefined);
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
+      await deps.events.flush(applied.task.taskId).catch(() => undefined);
       await notifyTerminal(applied.task, 'interrupted');
       return ok({
         taskId: task.taskId,
