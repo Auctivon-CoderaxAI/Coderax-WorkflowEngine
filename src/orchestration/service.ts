@@ -1281,6 +1281,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         budget: task.budget,
         signal: controller.signal,
       },
+    };
+    const supervised = await deps.supervisor.run({
+      identity,
+      adapter: adapter.value,
+      workspaceRoot: workspace.value.root,
+      scopes: WORK_SCOPES,
       report,
       launch: async (execution) => {
         const result = await deps.runner.run({

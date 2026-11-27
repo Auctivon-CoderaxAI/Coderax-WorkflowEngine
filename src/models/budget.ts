@@ -1,18 +1,36 @@
-import { randomUUID } from 'node:crypto';
 import type { Usage } from '@coderax/contracts';
-import { createMemoryQuotaStore, type QuotaStore } from './quota.js';
 
 /**
- * Zero-cost enforcement needs a hard ceiling, not a warning. The ledger
- * reserves before a request is sent, so an exhausted budget refuses the request
- * instead of discovering the overrun afterwards. Counters reset on the UTC day
- * boundary, which is what the provider's published free tier uses.
+ * The zero-cost budget is a reservation ledger, not a warning counter.
  *
- * The counters live in a `QuotaStore`. In mongo mode that store is shared and
- * durable, so every replica spends the same daily allowance and a process
- * restart does not mint a fresh budget. The memory store exists only for the
- * memory persistence driver.
+ * A request reserves one request slot and an estimated input+output token
+ * allowance before the provider is called. A skipped candidate is released; a
+ * completed call is settled with its actual usage. Tokens reserved but not yet
+ * settled count against the day, so concurrent callers cannot each see the same
+ * remaining allowance.
  */
+export type BudgetReservation = {
+  id: string;
+  ownerId: string;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type BudgetSnapshot = {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type ReserveOutcome =
+  | { allowed: true; reservation: BudgetReservation; requests: number }
+  | {
+      allowed: false;
+      reason: 'requests' | 'tokens';
+      detail: string;
+      requests: number;
+    };
+
 export type BudgetLedger = {
   available: (ownerId: string, at: Date) => boolean;
   reserve: (input: {
@@ -20,40 +38,87 @@ export type BudgetLedger = {
     at: Date;
     inputTokens: number;
     outputTokens: number;
-  }>;
+  }) => ReserveOutcome;
+  settle: (reservationId: string, usage: Usage) => void;
+  /**
+   * Release an unspent reservation. `dispatched` charges the request slot for an
+   * attempt that may already have reached the provider while returning its
+   * unused token allowance.
+   */
+  release: (reservationId: string, options?: { dispatched?: boolean }) => void;
+  /** Charge an external engine that did not go through the router. */
+  charge: (ownerId: string, usage: Usage, at: Date) => void;
+  snapshot: (ownerId: string, at: Date) => BudgetSnapshot;
 };
-
-export function dayKey(at: Date): string {
-  return at.toISOString().slice(0, 10);
-}
 
 export function createBudgetLedger(input: {
   maxRequestsPerDay: number;
   maxTokensPerDay: number;
-  /** Authoritative store; defaults to the single-process implementation. */
-  store?: QuotaStore;
 }): BudgetLedger {
-  const store = input.store ?? createMemoryQuotaStore();
+  type Day = {
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    reservedRequests: number;
+    reservedInput: number;
+    reservedOutput: number;
+  };
+  const days = new Map<string, Day>();
+  const reservations = new Map<string, { key: string; reservation: BudgetReservation }>();
+  let nextId = 0;
 
-  function view(state: Row): BudgetWindow {
-    return {
-      requests: state.requests,
-      inputTokens: state.inputTokens,
-      outputTokens: state.outputTokens,
-      reservedTokens: state.reservedTokens,
+  const dayKey = (ownerId: string, at: Date): string =>
+    `${ownerId}:${at.toISOString().slice(0, 10)}`;
+
+  function day(ownerId: string, at: Date): Day {
+    const key = dayKey(ownerId, at);
+    const existing = days.get(key);
+    if (existing) return existing;
+    const created: Day = {
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      reservedRequests: 0,
+      reservedInput: 0,
+      reservedOutput: 0,
     };
+    days.set(key, created);
+    return created;
+  }
+
+  function usedTokens(state: Day): number {
+    return state.inputTokens + state.outputTokens + state.reservedInput + state.reservedOutput;
   }
 
   return {
-    available: async (ownerId, at) => {
-      const state = await store.snapshot(ownerId, dayKey(at));
-      return (
-        state.requests < input.maxRequestsPerDay &&
-        state.inputTokens + state.outputTokens < input.maxTokensPerDay
-      );
+    available: (ownerId, at) => {
+      const state = day(ownerId, at);
+      if (state.requests + state.reservedRequests >= input.maxRequestsPerDay) return false;
+      return usedTokens(state) < input.maxTokensPerDay;
     },
-    reserve: (ownerId, at) =>
-      store.reserve({
+
+    reserve: ({ ownerId, at, inputTokens, outputTokens }) => {
+      const state = day(ownerId, at);
+      const inTokens = Math.max(0, Math.ceil(inputTokens));
+      const outTokens = Math.max(0, Math.ceil(outputTokens));
+      if (state.requests + state.reservedRequests >= input.maxRequestsPerDay) {
+        return {
+          allowed: false,
+          reason: 'requests',
+          detail: 'The daily zero-cost request budget is exhausted.',
+          requests: state.requests,
+        };
+      }
+      if (usedTokens(state) + inTokens + outTokens > input.maxTokensPerDay) {
+        return {
+          allowed: false,
+          reason: 'tokens',
+          detail: 'The daily zero-cost token budget cannot cover this request.',
+          requests: state.requests,
+        };
+      }
+      const reservation: BudgetReservation = {
+        id: `budget_${++nextId}`,
         ownerId,
         inputTokens: inTokens,
         outputTokens: outTokens,
