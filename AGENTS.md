@@ -56,7 +56,8 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
 `npm run verify` never rewrites a generated file: `openapi.json` is checked, not
 regenerated, so drift is a failure rather than a silent update. `npm run gate:audit`
 adds the network-bound dependency advisory check, which fails closed when metadata
-is unavailable; CI runs it as a separate required step.
+is unavailable. It runs locally only: no workflow invokes it, so it is not a
+required CI step.
 
 Paste the command and its actual result into the pull request's Testing section. A
 component passing its own unit tests is not sufficient: the UI-to-API-to-engine
