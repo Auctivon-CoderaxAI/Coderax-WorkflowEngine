@@ -5,15 +5,19 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-export const CONTRACT_VERSION = '1.2.0' as const;
+export const CONTRACT_VERSION = '1.3.0' as const;
 /** Majors the server can still speak; a new major needs a new `/vN` prefix. */
 export const CONTRACT_MAJOR = 1 as const;
 /**
  * `1.0.0` was the first published surface; `1.1.0` added the router, games and
  * browser routes. `1.2.0` adds the capability handshake, which is additive: it
- * publishes one new read-only operation and moves no existing path.
+ * publishes one new read-only operation and moves no existing path. `1.3.0`
+ * replaces the composite `controlSchedule` operation with explicit verbs (read,
+ * update, pause, resume, cancel, executions); that withdrawal is the single
+ * intentional removal inside this major and is only served now that no client
+ * built from this repository calls it.
  */
-export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0'] as const;
+export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
 /** Chat streaming frames are versioned separately from both HTTP and events. */
