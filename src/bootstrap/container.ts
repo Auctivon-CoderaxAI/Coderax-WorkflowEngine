@@ -8,14 +8,19 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
+import type { RunSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import type { BrowserService } from '../orchestration/browser.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { ArtifactGenerator } from '../artifacts/generate.js';
 import type { Router } from '../api/router.js';
 import type { GameStudio } from '../games/studio.js';
 import type { GameSessionService, GamingAgent } from '../games/session.js';
@@ -42,6 +47,10 @@ export type InfrastructureDependencies = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  schedules: ScheduleRepository;
+  scheduleNotices: ScheduleNoticeStore;
+  artifactService: ArtifactService;
+  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -50,6 +59,8 @@ export type InfrastructureDependencies = {
   studio: GameStudio;
   sessions: GameSessionService;
   gaming: GamingAgent;
+  browser: BrowserService;
+  supervisor: RunSupervisor;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -66,6 +77,10 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'memory',
   'permissions',
   'notifications',
+  'schedules',
+  'scheduleNotices',
+  'artifactService',
+  'artifactGenerator',
   'audit',
   'events',
   'runner',
@@ -74,6 +89,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'studio',
   'sessions',
   'gaming',
+  'browser',
+  'supervisor',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

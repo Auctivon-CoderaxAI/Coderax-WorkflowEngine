@@ -1,4 +1,4 @@
-import { TERMINAL_TASK_STATES, isTerminalState } from '@coderax/contracts';
+import { isTerminalState, TERMINAL_TASK_STATES } from '@coderax/contracts';
 import type {
   ConversationRecord,
   MemoryRecord,
@@ -6,8 +6,10 @@ import type {
   StoredMessage,
   TaskRecord,
 } from '../domain.js';
-import type { ConversationRepository } from './conversations.js';
+import type { ConversationBinding, ConversationRepository } from './conversations.js';
 import type { NotificationStore } from './notifications.js';
+import { sanitizeTaskPatch } from './tasks.js';
+import { redactContent } from '../observability/redact.js';
 import type { CreateTaskResult, FencedWriteResult, TaskRepository } from './tasks.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { Clock } from '../support/clock.js';
@@ -49,7 +51,10 @@ function toTask(document: Record<string, unknown>): TaskRecord {
   ) {
     throw new Error('A stored task row is malformed.');
   }
-  return strip(document) as unknown as TaskRecord;
+  const task = strip(document) as unknown as TaskRecord;
+  // A row written before the event log existed has no head yet; the first
+  // allocation creates it. Reading it as 0 keeps old rows usable.
+  return { ...task, eventSeq: typeof document.eventSeq === 'number' ? document.eventSeq : 0 };
 }
 
 function toConversation(document: Record<string, unknown>): ConversationRecord {
@@ -167,10 +172,15 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return document ? toTask(document) : null;
     },
 
-    updateFenced: async ({ taskId, token, patch }): Promise<FencedWriteResult> => {
+    updateFenced: async ({ taskId, token, patch, guard }): Promise<FencedWriteResult> => {
       const updated = await collection.findOneAndUpdate(
-        { taskId, runToken: token, state: { $nin: TERMINAL } },
-        { $set: { ...defined(patch), runToken: token } },
+        {
+          taskId,
+          runToken: token,
+          state: { $nin: guard === 'not_awaiting_approval' ? [...TERMINAL, 'awaiting_approval'] : TERMINAL },
+          ...(guard === 'not_cancel_requested' ? { cancelRequested: { $nin: [true] } } : {}),
+        },
+        { $set: { ...defined(sanitizeTaskPatch(patch)), runToken: token } },
         { returnDocument: 'after', includeResultMetadata: false },
       );
       if (updated) return { applied: true, task: toTask(updated) };
@@ -181,7 +191,7 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       if (!isAuthorizedGeneration(task.runToken, token)) {
         return { applied: false, reason: 'superseded' };
       }
-      return { applied: false, reason: 'terminal' };
+      return { applied: false, reason: guard && !isTerminalState(task.state) ? 'guard_rejected' : 'terminal' };
     },
 
     abandon: async ({ taskId, patch }) => {
@@ -193,17 +203,27 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       return updated !== null;
     },
 
-    reissue: async ({ taskId, token, now, leaseExpiresAt }): Promise<FencedWriteResult> => {
+    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
+      const updated = await collection.findOneAndUpdate(
+        { taskId, generation, state: { $in: ['queued', 'interrupted'] }, handoffPending: true },
+        { $set: { state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt } },
+        { returnDocument: 'after', includeResultMetadata: false });
+      return updated ? toTask(updated) : null;
+    },
+    claimScheduledRetry: async (taskId, generation) => !!await collection.findOneAndUpdate(
+      { taskId, state: 'failed', generation }, { $set: { scheduleRetryClaimed: true } },
+      { returnDocument: 'after', includeResultMetadata: false }),
+    reissue: async ({ taskId, token, now, leaseExpiresAt, from }): Promise<FencedWriteResult> => {
       const current = await collection.findOne({ taskId });
       if (!current) return { applied: false, reason: 'not_found' };
       const task = toTask(current);
-      if (!isTerminalState(task.state) && task.state !== 'awaiting_approval') {
+      if (!from.includes(task.state)) {
         return { applied: false, reason: 'superseded' };
       }
       // Generation and state are part of the filter: two replicas resuming the
       // same task cannot both issue a new generation.
       const updated = await collection.findOneAndUpdate(
-        { taskId, generation: task.generation, state: task.state, runToken: task.runToken },
+        { taskId, generation: task.generation, state: task.state, runToken: task.runToken, scheduleRetryClaimed: { $ne: true } },
         {
           $set: {
             state: 'queued',
@@ -221,6 +241,27 @@ export function createMongoTaskRepository(collection: MongoCollectionLike): Task
       );
       if (!updated) return { applied: false, reason: 'superseded' };
       return { applied: true, task: toTask(updated) };
+    },
+
+    allocateSeq: async ({ taskId, token }) => {
+      // The increment is atomic in the database and the fence is part of the
+      // filter: no read-then-compare window, and no way for a superseded
+      // generation to consume a sequence the new owner is about to use. The
+      // terminal-state check is deliberately absent so the owner can append the
+      // event that announces its own settlement.
+      const updated = await collection.findOneAndUpdate(
+        { taskId, runToken: token },
+        { $inc: { eventSeq: 1 } },
+        { returnDocument: 'after', includeResultMetadata: false },
+      );
+      const seq = updated?.eventSeq;
+      return typeof seq === 'number' ? seq : null;
+    },
+
+    adoptSeq: async ({ taskId, seq }) => {
+      // `$max` is monotone, so two replicas adopting the same replay converge on
+      // the higher head instead of fighting over the field.
+      await collection.updateOne({ taskId }, { $max: { eventSeq: seq } }, { upsert: false });
     },
 
     listByConversation: async (conversationId) => {
@@ -249,28 +290,25 @@ export function createMongoConversationRepository(input: {
 }): ConversationRepository {
   const { conversations, messages } = input;
 
-  function collision(): never {
-    throw new Error('conversation identity collision across owners');
+  function binding(found: ConversationRecord, record: ConversationRecord): ConversationBinding {
+    if (found.ownerId !== record.ownerId) return { ok: false, reason: 'owner' };
+    if (found.mode !== record.mode) return { ok: false, reason: 'mode' };
+    if (found.isWork !== record.isWork) return { ok: false, reason: 'surface' };
+    return { ok: true, record: found };
   }
 
-  async function ensure(record: ConversationRecord): Promise<ConversationRecord> {
+  async function ensure(record: ConversationRecord): Promise<ConversationBinding> {
     const existing = await conversations.findOne({ conversationId: record.conversationId });
-    if (existing) {
-      const found = toConversation(existing);
-      if (found.ownerId !== record.ownerId) collision();
-      return found;
-    }
+    if (existing) return binding(toConversation(existing), record);
     try {
       await conversations.insertOne({ ...record });
-      return { ...record };
+      return { ok: true, record: { ...record } };
     } catch (error) {
       if (!isDuplicateKey(error)) throw error;
       // Another replica created it between the read and the insert.
       const raced = await conversations.findOne({ conversationId: record.conversationId });
       if (!raced) throw error;
-      const found = toConversation(raced);
-      if (found.ownerId !== record.ownerId) collision();
-      return found;
+      return binding(toConversation(raced), record);
     }
   }
 
@@ -299,7 +337,7 @@ export function createMongoConversationRepository(input: {
       const existing = await conversations.findOne({ conversationId: message.conversationId });
       if (!existing) return false;
       try {
-        await messages.insertOne({ ...message });
+        await messages.insertOne({ ...message, text: redactContent(message.text) });
       } catch (error) {
         if (isDuplicateKey(error)) return false;
         throw error;
@@ -312,7 +350,9 @@ export function createMongoConversationRepository(input: {
       return true;
     },
 
-    messages: async (conversationId) => {
+    messages: async ({ ownerId, conversationId, mode }) => {
+      const record = await conversations.findOne({ conversationId, ownerId, mode });
+      if (!record) return null;
       const documents = await messages
         .find({ conversationId })
         .sort({ createdAt: 1 })
@@ -398,7 +438,14 @@ export function createMongoNotificationStore(collection: MongoCollectionLike): N
     record: async (notification) => {
       await collection.updateOne(
         { taskId: notification.taskId },
-        { $set: { ...notification } },
+        {
+          $set: {
+            ...notification,
+            ...(notification.summary !== undefined
+              ? { summary: redactContent(notification.summary) }
+              : {}),
+          },
+        },
         { upsert: true },
       );
     },
@@ -417,6 +464,7 @@ export function createMongoNotificationStore(collection: MongoCollectionLike): N
           createdAt: entry.createdAt,
           read: entry.read,
         })),
+        schedules: [],
         unread: owned.filter((entry) => !entry.read).length,
       };
     },

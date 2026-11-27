@@ -1,33 +1,28 @@
 {
-  "capturedAt": "2026-11-26T19:45:00.000Z",
-  "sourceHead": "desktop sections: working tree after ce271b9; 390px mobile: 585ae28e36295edb2d69c044af045863f20179fe (HUD-wrap fix)",
-  "documentDigests": {
-    "platformer.html": "sha256:12035bbd67d17df7efe71ae95d4d4e98a7f1ddc0f53d0193b7e46f637aef0ef4",
-    "puzzle.html": "sha256:e6a215cd0743fef95fc0d2a735ae03e3acb1bcc04abfca3c37115790bf8c9f9a"
-  },
-  "mobileRecapture": {
-    "capturedAt": "2026-11-26T21:57:35.000Z",
-    "sourceHead": "585ae28e36295edb2d69c044af045863f20179fe",
-    "previewUrl": "https://pv-4b463b58d51d-agent37-37fbb862-2d4b-44cb-9bca-1aa0d1c06097.freebuff.site/",
-    "viewport": "390x844",
-    "deviceScaleFactor": 1,
-    "ownerAuth": {
-      "anonymousStatus": 403,
-      "authenticatedStatus": 200
+  "capturedAt": "2026-11-26T23:34:13.807Z",
+  "sourceHead": "35d1883f22065851c31d29105b8ce13fcbf629c2",
+  "capture": {
+    "script": "scripts/browser-acceptance.mjs",
+    "command": "node scripts/browser-acceptance.mjs --base-url https://pv-4b463b58d51d-agent37-37fbb862-2d4b-44cb-9bca-1aa0d1c06097.freebuff.site",
+    "playwright": "1.65.1",
+    "browser": "Cloud Chromium via the Freebuff cloud browser panel",
+    "viewports": {
+      "desktop": "1280x800",
+      "mobile": "390x844"
     },
-    "documentDigests": {
-      "platformer.html": "sha256:5b4c5cfbef428f512f648d0d0621c24d51b3abbbad628dbd2d481fdea1d22f58",
-      "puzzle.html": "sha256:bb7ef97fa429efc7dfed170bacd64a0b8053b702289cedfe522d5cbe25a9bb16"
-    },
-    "method": "Playwright CDP Emulation.setDeviceMetricsOverride at 390x844 with deviceScaleFactor 1; the exact regenerated preview documents were loaded from the owner-authenticated preview origin; touchstart/touchend were dispatched on the shipped handlers; bitmap and CSS box were read from the live canvas after the HUD wrapped.",
-    "screenshots": [
-      "platformer-mobile.png",
-      "puzzle-mobile.png"
+    "phases": [
+      "desktop",
+      "mobile",
+      "timer"
     ]
+  },
+  "documentDigests": {
+    "platformer.html": "sha256:5b4c5cfbef428f512f648d0d0621c24d51b3abbbad628dbd2d481fdea1d22f58",
+    "puzzle.html": "sha256:bb7ef97fa429efc7dfed170bacd64a0b8053b702289cedfe522d5cbe25a9bb16"
   },
   "environment": {
     "browser": "Cloud Chromium via the Freebuff cloud browser panel",
-    "previewUrl": "https://pv-4b463b58d51d-agent37-37fbb862-2d4b-44cb-9bca-1aa0d1c06097.freebuff.site/",
+    "previewUrl": "https://pv-4b463b58d51d-agent37-37fbb862-2d4b-44cb-9bca-1aa0d1c06097.freebuff.site",
     "desktopViewport": "1280x800",
     "mobileViewport": "390x844",
     "ownerAuth": {
@@ -42,103 +37,218 @@
     "csp": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'",
     "hostInjectedScriptBlocked": "https://static.cloudflareinsights.com/beacon.min.js/... was blocked by the generated CSP",
     "pageErrors": [],
-    "consoleErrors": [
-      "favicon.ico 404",
-      "CSP blocked the preview-host-injected Cloudflare beacon"
-    ]
+    "consoleErrors": []
   },
+  "limitations": [
+    "Chromium only; Safari, Firefox and real iOS/Android were not tested.",
+    "Touch was exercised with Chrome DevTools Protocol touch events on the real handlers, not a physical touchscreen.",
+    "Audio synthesis was verified by a running AudioContext and an oscillator created on jump; audible output was not captured.",
+    "The browser controller is acceptance-test code, not the Native Gaming Agent runtime; it does not make the agent a cloud-browser player.",
+    "Performance metrics come from Chrome DevTools Protocol on one desktop VM sample; they are not a cross-device benchmark.",
+    "No hosted browser CI exists at zero cost, so this evidence is for the two reference builds at the recorded head.",
+    "The browser controller reads the generated hook and the collision geometry; it is a scripted player, not an independent intelligence.",
+    "The timer-expiry and restart check advanced Playwright's page clock by 121 s; the generated fixed-step loop still produced 7201 ticks. Run with --real-timer to repeat it in wall time."
+  ],
   "platformer": {
-    "canvas": { "width": 1280, "height": 682, "opaquePixels": 872960, "distinctColours": ">= 4" },
-    "keyboard": { "rightDeltaPx": 208, "jumpRisePx": 115, "moveSampleMs": 700 },
-    "pause": { "tickDelta": 0, "sampleMs": 500 },
-    "restart": { "statusBefore": "lost", "statusAfter": "playing", "tickAfter": 21, "xAfter": 40 },
-    "hud": { "health": 3, "healthRendered": "Health 3" },
+    "canvas": {
+      "width": 1280,
+      "height": 682,
+      "opaquePixels": 872960,
+      "distinctColours": 68
+    },
+    "keyboard": {
+      "rightDeltaPx": 217,
+      "sampleTicks": 50,
+      "jumpRisePx": 116.1
+    },
+    "mouse": {
+      "rightDeltaPx": 217,
+      "sampleTicks": 50
+    },
+    "pause": {
+      "tickDelta": 0,
+      "sampleMs": 500
+    },
+    "restart": {
+      "statusBefore": "lost",
+      "statusAfter": "playing",
+      "tickAfter": 40,
+      "xAfter": 40
+    },
+    "hud": {
+      "health": 3,
+      "healthRendered": "Health 3"
+    },
     "win": {
       "status": "won",
-      "score": 120,
-      "collected": 2,
+      "score": 140,
+      "collected": 4,
       "health": 2,
-      "timeLeft": 113.2,
-      "elapsedMs": 6301,
-      "jumps": 5,
+      "timeLeft": 110.8,
+      "elapsedMs": 6523,
+      "jumps": 6,
       "gapJumps": 3,
       "deaths": 0
     },
-    "progression": { "levelIndexBefore": 0, "levelIndexAfter": 1, "levelIdAfter": "level-2", "statusAfter": "playing", "screenshot": "docs/evidence/browser/platformer-level2.png" },
-    "failure": { "condition": "level timer expired", "status": "lost", "observedTick": 7201 },
-    "audio": { "audioContextState": "running", "oscillatorsOnJump": 1, "muteToggle": [false, true] },
+    "progression": {
+      "levelIndexBefore": 0,
+      "levelIndexAfter": 1,
+      "levelIdAfter": "level-2",
+      "statusAfter": "playing",
+      "screenshot": "docs/evidence/browser/platformer-level2.png"
+    },
+    "failure": {
+      "condition": "level timer expired",
+      "status": "lost",
+      "observedTick": 7201,
+      "method": "playwright-page-clock"
+    },
+    "audio": {
+      "audioContextState": "running",
+      "oscillatorsOnJump": 1,
+      "muteToggle": [
+        false,
+        true
+      ]
+    },
     "performance": {
       "sampleSeconds": 3,
-      "taskDurationSeconds": 0.307207,
-      "scriptDurationSeconds": 0.039422,
-      "jsHeapUsedBytes": 5188292,
-      "nodes": 634
+      "taskDurationSeconds": 0.270918,
+      "scriptDurationSeconds": 0.027726,
+      "jsHeapUsedBytes": 3546860,
+      "nodes": 1491,
+      "during": "level-2 gameplay input"
+    },
+    "layout": {
+      "viewport": [
+        1280,
+        800
+      ],
+      "deviceScaleFactor": 1,
+      "canvasCss": [
+        1280,
+        681.5
+      ],
+      "hudLines": 1,
+      "hudHeight": 31,
+      "horizontalOverflow": false
+    },
+    "console": {
+      "pageErrors": [],
+      "consoleErrors": [
+        "Loading the script 'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092' violates the following Content Security Policy directive: \"script-src 'unsafe-inline'\". Note that 'script-src-elem' was "
+      ]
     }
   },
   "puzzle": {
-    "canvas": { "width": 1280, "height": 682, "opaquePixels": 698368 },
+    "canvas": {
+      "width": 1280,
+      "height": 682,
+      "opaquePixels": 698368,
+      "distinctColours": 110
+    },
     "autonomousController": {
       "method": "in-browser BFS over measured collision geometry, replanning on stalls",
       "status": "won",
       "score": 140,
       "collected": 4,
-      "switches": [true],
+      "switches": [
+        true
+      ],
       "goalLocked": false,
       "collisions": 0,
-      "replans": 12,
-      "elapsedMs": 11960,
-      "tick": 3079
+      "replans": 11,
+      "elapsedMs": 15889,
+      "tick": 1077
     },
-    "progression": { "levelIndexBefore": 0, "levelIndexAfter": 1, "levelIdAfter": "level-2", "statusAfter": "playing" },
-    "mobile": {
-      "viewport": [390, 844],
+    "progression": {
+      "levelIndexBefore": 0,
+      "levelIndexAfter": 1,
+      "levelIdAfter": "level-2",
+      "statusAfter": "playing"
+    },
+    "layout": {
+      "viewport": [
+        1280,
+        800
+      ],
       "deviceScaleFactor": 1,
-      "canvas": [390, 652],
-      "canvasCss": [390, 651.5],
+      "canvasCss": [
+        1280,
+        681.5
+      ],
+      "hudLines": 1,
+      "hudHeight": 31,
+      "horizontalOverflow": false
+    },
+    "mobile": {
+      "viewport": [
+        390,
+        844
+      ],
+      "deviceScaleFactor": 1,
+      "canvas": [
+        390,
+        652
+      ],
+      "canvasCss": [
+        390,
+        651.5
+      ],
       "bitmapMatchesCss": true,
       "horizontalOverflow": false,
-      "touchButtons": ["left", "right", "up", "down"],
+      "touchButtons": [
+        "left",
+        "right",
+        "up",
+        "down"
+      ],
       "muteButton": true,
       "hud": {
         "lines": 1,
         "height": 31,
         "text": "Level 1/3  Score 0  Health 3  Collected 0"
       },
-      "touchRightDeltaPx": 112.7,
+      "touchRightDeltaPx": 125.7,
+      "touchSampleTicks": 29,
       "healthAfterTouch": 3,
       "status": "playing",
       "screenshot": "puzzle-mobile.png"
     }
   },
   "platformerMobile": {
-    "viewport": [390, 844],
+    "viewport": [
+      390,
+      844
+    ],
     "deviceScaleFactor": 1,
-    "canvas": [390, 698],
-    "canvasCss": [390, 698],
+    "canvas": [
+      390,
+      698
+    ],
+    "canvasCss": [
+      390,
+      698
+    ],
     "bitmapMatchesCss": true,
     "horizontalOverflow": false,
-    "touchButtons": ["left", "right", "jump"],
+    "touchButtons": [
+      "left",
+      "right",
+      "jump"
+    ],
     "muteButton": true,
     "hud": {
       "lines": 2,
       "height": 46,
       "text": "Level 1/3  Score 0  Health 3  Collected 0  Time 119"
     },
-    "touchRightDeltaPx": 112.7,
-    "touchJumpRisePx": 116.7,
+    "touchRightDeltaPx": 121.3,
+    "touchSampleTicks": 28,
+    "touchJumpRisePx": 115,
     "healthAfterTouch": 3,
     "deathsAfterTouch": 0,
     "status": "playing",
     "screenshot": "platformer-mobile.png"
-  },
-  "limitations": [
-    "Chromium only; Safari, Firefox and real iOS/Android were not tested.",
-    "Touch was exercised with dispatched touchstart/touchend events on the real handlers after mouse input was verified with real pointer events.",
-    "Audio synthesis was verified by a running AudioContext and an oscillator created on jump; audible output was not captured.",
-    "The browser controller is acceptance-test code, not the Native Gaming Agent runtime; it does not make the agent a cloud-browser player.",
-    "Performance metrics come from Chrome DevTools Protocol on one desktop VM sample; they are not a cross-device benchmark.",
-    "No hosted browser CI exists at zero cost, so this evidence is for the two reference builds at the recorded heads.",
-    "The 390px mobile figures were re-captured at 585ae28e36295edb2d69c044af045863f20179fe after the HUD-wrap fix; the desktop sections remain the earlier ce271b9 capture and were not re-run.",
-    "The mobile re-capture ran at deviceScaleFactor 1. The 2x device-pixel path is covered by the DOM harness (browser.boot), not this browser run."
-  ]
+  }
 }

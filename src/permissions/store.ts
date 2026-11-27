@@ -36,6 +36,16 @@ export type PermissionStore = {
     reason?: string;
   }) => Promise<ServiceResult<PermissionList>>;
   isApproved: (taskId: string, scope: PermissionScope, resource: string) => Promise<boolean>;
+  /**
+   * One request by id inside its owner and task scope. The browser integration
+   * uses this to bind an approval to a single exact resource and to consume it
+   * once; a caller that only checks `isApproved` could reuse a grant.
+   */
+  get: (
+    ownerId: string,
+    taskId: string,
+    requestId: string,
+  ) => Promise<PermissionRequest | null>;
   hasPending: (taskId: string) => Promise<boolean>;
 };
 
@@ -58,7 +68,7 @@ export function createPermissionStore(input: {
   return {
     request: async ({ ownerId, taskId, agent, scope, description, resource, ttlMs }) => {
       const now = input.clock.now();
-      const ttl = ttlMs ?? 15 * 60_000;
+      const ttl = ttlMs ?? input.defaultTtlMs ?? 15 * 60_000;
       const record = {
         requestId: input.ids.requestId(),
         taskId,
@@ -88,6 +98,12 @@ export function createPermissionStore(input: {
       record.decision = decision;
       record.decidedAt = now.toISOString();
       return ok(listFor(ownerId, taskId));
+    },
+    get: async (ownerId, taskId, requestId) => {
+      const record = requests.get(requestId);
+      if (!record || record.ownerId !== ownerId || record.taskId !== taskId) return null;
+      const { ownerId: _owner, ...contract } = record;
+      return contract;
     },
     isApproved: async (taskId, scope, resource) => {
       const now = input.clock.now();

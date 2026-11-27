@@ -36,6 +36,23 @@ test('a heartbeat that cannot sustain the lease is refused at startup', () => {
   }
 });
 
+test('shutdown has a bounded default and rejects an unusably short deadline', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    assert.equal(config.execution.shutdownGraceMs, 10_000);
+    assert.equal(
+      EngineConfigSchema.safeParse({
+        ...config,
+        execution: { ...config.execution, shutdownGraceMs: 1 },
+      }).success,
+      false,
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('paid routing cannot be configured at all', () => {
   const ws = workspace();
   try {
@@ -45,6 +62,66 @@ test('paid routing cannot be configured at all', () => {
       models: { route: [{ providerId: 'free', modelId: 'm' }], allowPaid: true },
     });
     assert.equal(parsed.success, false);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('paid browser infrastructure cannot be configured at all', () => {
+  const ws = workspace();
+  try {
+    const parsed = EngineConfigSchema.safeParse({
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+      models: { route: [{ providerId: 'free', modelId: 'm' }] },
+      browsers: { allowPaid: true },
+    });
+    assert.equal(parsed.success, false);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('an enabled browser provider must name an attested https endpoint', () => {
+  const ws = workspace();
+  try {
+    const base = {
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+      models: { route: [{ providerId: 'free', modelId: 'm' }] },
+    };
+    const incomplete = EngineConfigSchema.parse({
+      ...base,
+      browsers: { enabled: true, provider: 'http' },
+    });
+    const issues = validateInvariants(incomplete);
+    assert.ok(issues.some((issue) => issue.includes('browsers.remote.baseURL')));
+    assert.ok(issues.some((issue) => issue.includes('browsers.remote.zeroCostAttested')));
+
+    const insecure = EngineConfigSchema.parse({
+      ...base,
+      browsers: {
+        enabled: true,
+        provider: 'http',
+        remote: { baseURL: 'http://browser.example.test', zeroCostAttested: true },
+      },
+    });
+    assert.ok(
+      validateInvariants(insecure).some((issue) => issue.includes('must use https')),
+    );
+
+    const valid = EngineConfigSchema.parse({
+      ...base,
+      browsers: {
+        enabled: true,
+        provider: 'http',
+        remote: { baseURL: 'https://browser.example.test', zeroCostAttested: true },
+      },
+    });
+    assert.deepEqual(
+      validateInvariants(valid).filter((issue) => issue.startsWith('browsers.')),
+      [],
+    );
   } finally {
     ws.cleanup();
   }
@@ -97,6 +174,28 @@ test('duplicate zero-cost candidates are refused', () => {
       },
     });
     assert.ok(validateInvariants(config).some((issue) => issue.includes('more than once')));
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('removed retry settings are rejected visibly, not silently ignored', () => {
+  const ws = workspace();
+  try {
+    assert.throws(
+      () =>
+        EngineConfigSchema.parse({
+          auth: { ownerId: 'owner' },
+          workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+          models: { route: [{ providerId: 'free', modelId: 'm' }] },
+          execution: { maxAttempts: 3, retryDelayMs: 100 },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /execution|maxAttempts|retryDelayMs/i);
+        return true;
+      },
+    );
   } finally {
     ws.cleanup();
   }

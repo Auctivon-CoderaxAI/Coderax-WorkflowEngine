@@ -184,7 +184,7 @@ export const GameCheck = z
     title: z.string().min(1).max(200),
     passed: z.boolean(),
     detail: z.string().max(600),
-    measurements: z.record(GameMeasurement),
+    measurements: z.record(z.string(), GameMeasurement),
   })
   .strict();
 export type GameCheck = z.infer<typeof GameCheck>;

@@ -152,34 +152,39 @@ These are separate claims and the capability report keeps them separate:
 
 The exported `platformer.html` and `puzzle.html` were served from the
 owner-authenticated preview origin and exercised in cloud Chromium on
-2026-11-26:
+2026-11-26 at `35d1883f22065851c31d29105b8ce13fcbf629c2`:
 
 - **Rendering:** platformer 1280×682 / 872,960 opaque pixels; puzzle 1280×682 /
   698,368 opaque pixels, with no page errors.
-- **Controls:** keyboard right moved +208 px and jump rose 115 px; the on-screen
-  mouse button moved +208 px; at 390×844 mobile touch moved +112.7 px and touch
-  jump rose 116.7 px. The DOM boot harness now also presses the shipped on-screen
-  buttons so a broken touch mapping fails the default gate.
-- **Gameplay:** platformer won level 1 in 6.3 s (score 120, 2 pickups, health 2,
-  5 jumps, 3 gap clears) and advanced to level 2; puzzle won in 12.0 s (score
-  140, 4/4 pickups, switch on, goal unlocked, 0 collisions, 12 replans) and
-  advanced to level 2. Timer expiry produced `lost`; `R` restarted at tick 21.
+- **Controls:** keyboard right moved +217 px over 50 ticks and jump rose 116 px;
+  the on-screen mouse button moved +217 px; at 390×844 mobile touch moved
+  +121.3 px over 28 ticks and touch jump rose 115 px. The DOM boot harness also
+  presses the shipped on-screen buttons so a broken touch mapping fails the
+  default gate.
+- **Gameplay:** platformer won level 1 in 6.5 s (score 140, 4 pickups, health 2,
+  6 jumps, 3 gap clears) and advanced to level 2; puzzle won in 15.9 s (score
+  140, 4/4 pickups, switch on, goal unlocked, 0 collisions, 11 replans) and
+  advanced to level 2. Timer expiry produced `lost` at tick 7,201; `R` restarted
+  `playing` at x 40.
 - **Audio:** the AudioContext was running and a jump created one oscillator;
   mute toggled false/true. Audible output was not captured.
 - **Mobile:** at 390×844 the platformer canvas bitmap and CSS box were both
   390×698 after the HUD wrapped to two lines; the puzzle bitmap was 390×652
   against a 390×651.5 CSS box. Neither page had horizontal overflow and every
-  on-screen button was visible. These figures were re-captured at `585ae28` after
-  the HUD-wrap fix; the desktop figures are the earlier capture.
+  on-screen button was visible.
 - **Access:** a fresh anonymous browser context received **403**; the
   owner-authenticated browser received **200**. Authentication was not disabled.
-- **Cost:** 3 s of platformer play used 0.307 s task time, 0.039 s script time
-  and 5.2 MB JS heap on the cloud VM.
+- **Cost:** 3 s of level-2 platformer play used 0.271 s task time, 0.028 s script
+  time and 3.5 MB JS heap on the cloud VM.
 
-The measured report and five screenshots (desktop and 390×844 for both builds,
-plus platformer level 2 after the level-1 win) are in `docs/evidence/browser/`. This is Chromium-only evidence for the two
-reference builds; there is no zero-cost browser CI or Safari/Firefox device
-matrix.
+The capture is reproduced by `scripts/browser-acceptance.mjs`, which verifies
+the served document digests, writes `report.json` and the five screenshots, and
+drives the shipped controls. The timer path advances Playwright's page clock
+unless `--real-timer` is passed; the game's fixed-step loop still produced 7,201
+ticks. The measured report and five screenshots (desktop and 390×844 for both
+builds, plus platformer level 2 after the level-1 win) are in
+`docs/evidence/browser/`. This is Chromium-only evidence for the two reference
+builds; there is no zero-cost browser CI or Safari/Firefox device matrix.
 
 ## Gaming Agent sessions
 
@@ -241,8 +246,9 @@ A session provides:
 - The default gate's browser-boot check is a bounded DOM harness. It executes
   the exact inline document and now presses the shipped on-screen controls, but
   it does not enforce CSP or cover real devices. Real-browser acceptance is a
-  separate, manually captured Chromium run for two reference builds; Safari,
-  Firefox and physical mobile devices are not claimed.
+  separate Playwright run (`scripts/browser-acceptance.mjs`) for two reference
+  builds; it is not part of the default gate, and Safari, Firefox and physical
+  mobile devices are not claimed.
 - `first_person` and two-player builds are unsupported by design.
 - The studio ships original primitive-vector art driven by a generated palette
   and SVG theme; it does not fetch or copy third-party assets. Audio is
