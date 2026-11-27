@@ -61,15 +61,15 @@ test('an unavailable free model is not advertised as usable', () => {
   assert.equal(resolved.ok === false && resolved.code, 'model_missing');
 });
 
-test('the token budget fails closed before the next request is sent', () => {
+test('the token budget fails closed before the next request is sent', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 10 });
   const now = new Date('2026-11-26T00:00:00.000Z');
-  const held = ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 6, outputTokens: 4 });
+  const held = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 6, outputTokens: 4 });
   assert.equal(held.allowed, true);
   if (!held.allowed) assert.fail('expected reservation');
-  ledger.settle(held.reservation.id, { inputTokens: 6, outputTokens: 4 });
-  assert.equal(ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 0, outputTokens: 0 }).allowed, false);
-  assert.equal(ledger.reserve({ ownerId: 'another-owner', at: now, inputTokens: 0, outputTokens: 0 }).allowed, true);
+  await ledger.settle(held.reservation.id, { inputTokens: 6, outputTokens: 4 });
+  assert.equal((await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 0, outputTokens: 0 })).allowed, false);
+  assert.equal((await ledger.reserve({ ownerId: 'another-owner', at: now, inputTokens: 0, outputTokens: 0 })).allowed, true);
 });
 
 test('configuration cannot enable paid routing', () => {

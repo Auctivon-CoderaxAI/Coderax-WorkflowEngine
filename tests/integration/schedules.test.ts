@@ -96,7 +96,7 @@ test('a one-time schedule runs and notifies without any client polling', async (
     assert.ok(read.notifications.every((entry) => entry.read));
 
     // The scheduled run's inference is charged to the same daily ledger as Chat.
-    const budget = started.app.service.budget({ ownerId: OWNER_ID, isOwner: true });
+    const budget = await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true });
     assert.ok((budget.used.usage.inputTokens ?? 0) > 0);
     assert.ok((budget.used.usage.outputTokens ?? 0) > 0);
   } finally {
@@ -502,7 +502,7 @@ test('recovery winning a stalled submission charges and appends just once', asyn
     const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
     assert.ok(receipt);
     assert.equal((await conversations.messages({ ownerId: OWNER_ID, conversationId: receipt.conversationId, mode: 'cloud' }) ?? []).filter(m => m.role === 'user').length, 1);
-    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+    assert.equal((await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true })).used.requests, 1);
   } finally {
     await started.close();
   }
@@ -526,7 +526,7 @@ test('cap edit winning the accounting CAS prevents Work submission', async () =>
     scheduler.enqueue = () => assert.fail('cap edit should prevent enqueue');
     assert.equal((await api.triggerSchedule(rule.scheduleId)).state, 'refused');
     assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
-    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 0);
+    assert.equal((await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true })).used.requests, 0);
   } finally { await started.close(); }
 });
 
@@ -546,14 +546,14 @@ test('append acknowledgement loss leaves a recoverable claim without a task or c
     const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
     assert.ok(receipt?.taskId);
     assert.equal(await tasks.get(receipt.taskId), null);
-    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 0);
+    assert.equal((await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true })).used.requests, 0);
     await sleep(1100);
     await started.app.service.tickSchedules();
     await started.app.dependencies.scheduler.idle();
     assert.equal((await api.task(receipt.taskId)).state, 'completed');
     assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
     assert.equal((await conversations.messages({ ownerId: OWNER_ID, conversationId: receipt.conversationId, mode: 'cloud' }) ?? []).filter(m => m.role === 'user').length, 1);
-    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+    assert.equal((await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true })).used.requests, 1);
   } finally { await started.close(); }
 });
 
@@ -573,7 +573,7 @@ test('interrupted scheduled Work without completed admission cannot resume or re
       assert.equal(!result.ok && result.code, 'conflict');
     }
     assert.equal((await tasks.get(task.taskId))?.generation, task.generation);
-    assert.equal(started.app.service.budget(owner).used.requests, 0);
+    assert.equal((await started.app.service.budget(owner)).used.requests, 0);
   } finally { await started.close(); }
 });
 
@@ -598,7 +598,7 @@ for (const applied of [false, true]) {
       const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
       assert.ok(receipt?.taskId);
       assert.equal((await api.task(receipt.taskId)).state, applied ? 'completed' : 'cancelled');
-      assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, Number(applied));
+      assert.equal((await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true })).used.requests, Number(applied));
     } finally { await started.close(); }
   });
 }
@@ -622,7 +622,7 @@ test('a replica delivers a marked task when its original queue handoff was lost'
     await started.app.service.tickSchedules();
     assert.equal((await api.task(task.taskId)).state, 'completed');
     assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
-    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+    assert.equal((await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true })).used.requests, 1);
   } finally { await started.close(); }
 });
 
@@ -680,6 +680,6 @@ test('a replica finishes an accounted handoff before the old marker writer retur
     assert.equal((await api.task(task.taskId)).state, 'completed');
     assert.equal((await api.scheduleExecutions(rule.scheduleId)).executions[0]?.state, 'completed');
     assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
-    assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
+    assert.equal((await started.app.service.budget({ ownerId: OWNER_ID, isOwner: true })).used.requests, 1);
   } finally { resume(); await started.close(); }
 });

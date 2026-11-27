@@ -398,6 +398,6 @@ test('retry rejects a budget refusal and refunds a failed reissue', async () => 
     tasks.reissue = async () => ({ applied: false, reason: 'superseded' });
     const conflict = await service.retryTask(principal, failed.taskId, failed.generation);
     assert.equal(!conflict.ok && conflict.code, 'conflict');
-    assert.equal(service.budget(principal).used.requests, 0);
+    assert.equal((await service.budget(principal)).used.requests, 0);
   } finally { await started.close(); }
 });

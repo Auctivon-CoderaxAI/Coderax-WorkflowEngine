@@ -212,9 +212,23 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     allowPaid: false,
   });
 
+  const persistence = await buildPersistence({
+    config,
+    env,
+    clock,
+    ids,
+    ...(input.persistence ?? {}),
+  });
+  const lease = persistence.lease;
+  const tasks = persistence.tasks;
+  const conversations = persistence.conversations;
+  const memory = persistence.memory;
+  const permissions = persistence.permissions;
+  const permissionsGate = createPermissionGate({ permissions, clock });
   const budget = createBudgetLedger({
     maxRequestsPerDay: config.models.dailyRequestBudget,
     maxTokensPerDay: config.models.dailyTokenBudget,
+    store: persistence.budget,
   });
 
   const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
@@ -234,19 +248,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     maxPauseMs: config.games.maxPauseMs,
   });
 
-  const persistence = await buildPersistence({
-    config,
-    env,
-    clock,
-    ids,
-    ...(input.persistence ?? {}),
-  });
-  const lease = persistence.lease;
-  const tasks = persistence.tasks;
-  const conversations = persistence.conversations;
-  const memory = persistence.memory;
-  const permissions = persistence.permissions;
-  const permissionsGate = createPermissionGate({ permissions, clock });
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
     gateway,

@@ -288,7 +288,7 @@ export type ApplicationService = {
     taskId: string,
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
-  budget: (principal: Principal) => BudgetState;
+  budget: (principal: Principal) => Promise<BudgetState>;
   gameCapabilities: (principal: Principal) => GameCapabilityReport;
   listGames: (
     principal: Principal,
@@ -750,7 +750,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             // terminal. The resumed generation is charged separately, so the daily
             // ledger matches the cumulative usage the owner sees.
             if (generationUsage) {
-              deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
+              await deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
             }
             deps.audit.record({
               actor: task.ownerId,
@@ -847,7 +847,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // Charge the usage produced by this generation, not the merged task total:
     // the previous generation was already charged when it settled.
     if (generationUsage) {
-      deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
+      await deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
     }
     try {
       if (outcome.kind === 'completed') {
@@ -1662,13 +1662,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!bound.ok) return bound;
     const conversationId = bound.value.conversationId;
 
-    const reserve = () => {
-      const held = holdBudget(deps.budget, principal.ownerId, deps.clock.now());
+    const reserve = async () => {
+      const held = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!held.allowed) return false;
-      held.commit();
+      await held.commit();
       return true;
     };
-    if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
+    if (!(options.taskId ? await deps.budget.available(principal.ownerId, deps.clock.now()) : await reserve())) {
       return fail(
         'budget_exhausted',
         'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -1770,7 +1770,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (options.taskId) {
       // The unique task insert elects the only writer of admission effects.
       // The task is now visible to cancellation, but cannot execute until enqueue.
-      const reservation = holdBudget(deps.budget, principal.ownerId, deps.clock.now());
+      const reservation = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         await settle(created.task, token, { kind: 'failed', code: 'budget_exhausted', detail: 'The daily request budget is exhausted.', retryable: false });
         return fail('budget_exhausted', 'The daily request budget is exhausted.');
@@ -1779,12 +1779,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       try {
         admitted = !options.eligible || await options.eligible();
       } catch (error) {
-        reservation.release();
+        await reservation.release();
         await settle(created.task, token, { kind: 'cancelled' });
         throw error;
       }
       if (!admitted) {
-        reservation.release();
+        await reservation.release();
         await settle(created.task, token, { kind: 'cancelled' });
         return fail('validation_failed', 'That occurrence is no longer eligible.');
       }
@@ -1802,7 +1802,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           if (!durable?.scheduleAdmission?.complete && durable?.runToken === token) {
             await settle(created.task, token, { kind: 'cancelled' });
             const cancelled = await deps.tasks.get(task.taskId);
-            if (cancelled?.runToken === token && cancelled.state === 'cancelled') reservation.release();
+            if (cancelled?.runToken === token && cancelled.state === 'cancelled') await reservation.release();
             throw error;
           }
           if (durable?.runToken !== token || durable.state !== 'queued') throw error;
@@ -1811,14 +1811,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (!marked.applied) {
           const durable = await deps.tasks.get(task.taskId);
           if (durable && durable.runToken !== token) {
-            reservation.commit();
+            await reservation.commit();
             return fail('conflict', 'Another generation owns this handoff.');
           }
-          reservation.release();
+          await reservation.release();
           return fail('validation_failed', 'Scheduled Work lost ownership before enqueue.');
         }
       }
-      reservation.commit();
+      await reservation.commit();
     }
 
     await publish(created.task, 'task.queued');
@@ -2270,7 +2270,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (task.failure?.code === 'budget_exhausted') {
         return fail('budget_exhausted', 'This task was refused before admission; submit a new request.');
       }
-      const reservation = holdBudget(deps.budget, principal.ownerId, now);
+      const reservation = await holdBudget(deps.budget, principal.ownerId, now);
       if (!reservation.allowed) return fail('budget_exhausted', 'The daily request budget is exhausted.');
       let accepted = false;
       try {
@@ -2307,8 +2307,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'accepted',
         });
       } finally {
-        if (accepted) reservation.commit();
-        else reservation.release();
+        if (accepted) await reservation.commit();
+        else await reservation.release();
       }
     }),
 
@@ -2318,7 +2318,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const reservation = holdBudget(deps.budget, principal.ownerId, deps.clock.now());
+      const reservation = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
@@ -2392,7 +2392,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             outcome.retryable,
           );
         }
-        deps.budget.settle(reservation.reservationId, outcome.usage ?? {});
+        await deps.budget.settle(reservation.reservationId, outcome.usage ?? {});
         // Chat output is adapter text too: scrub it before storage and before it is
         // returned, so a provider echoing a credential cannot persist it.
         const reply = redactContent(outcome.summary);
@@ -2415,8 +2415,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           createdAt: deps.clock.iso(),
         });
       } finally {
-        if (dispatched) reservation.commit();
-        else reservation.release();
+        if (dispatched) await reservation.commit();
+        else await reservation.release();
       }
     }),
 
@@ -2492,8 +2492,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    budget: (principal) => {
-      const used = deps.budget.snapshot(principal.ownerId, deps.clock.now());
+    budget: async (principal) => {
+      const used = await deps.budget.snapshot(principal.ownerId, deps.clock.now());
       const budget = {
         maxRequests: deps.config.models.dailyRequestBudget,
         maxInputTokens: deps.config.models.dailyTokenBudget,

@@ -580,7 +580,7 @@ test('stopping on the model event releases an unused reservation', async () => {
 
   const completed = await engine.complete(request('streamed'));
   assert.equal(completed.text, 'ok:streamed');
-  assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
+  assert.equal((await ledger.snapshot('owner', new Date())).requests, 1);
 });
 
 test('stopping a stream early releases the provider slot, aborts upstream and settles', async () => {
@@ -613,7 +613,7 @@ test('stopping a stream early releases the provider slot, aborts upstream and se
   assert.equal(upstreamAborted, true);
   const completed = await engine.complete(request('streamed'));
   assert.equal(completed.text, 'ok:streamed');
-  assert.equal(ledger.snapshot('owner', new Date()).requests, 2);
+  assert.equal((await ledger.snapshot('owner', new Date())).requests, 2);
 });
 
 test('a stale closed admission cannot release a newer half-open probe', () => {
@@ -682,7 +682,7 @@ test('a token-refused candidate falls back to a smaller free cap without consumi
   const completed = await engine.complete({ ...request('big'), allowFallback: true });
   assert.deepEqual(completed.model, small.ref);
   assert.equal(provider.calls, 1);
-  assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
+  assert.equal((await ledger.snapshot('owner', new Date())).requests, 1);
 });
 
 test('readiness requires a candidate that fits the default route context', async () => {
@@ -713,7 +713,7 @@ test('a cancelled stream after output keeps the request charge', async () => {
     },
     (error: unknown) => error instanceof ModelRoutingError && error.code === 'cancelled',
   );
-  assert.equal(ledger.snapshot('owner', new Date()).requests, 1);
+  assert.equal((await ledger.snapshot('owner', new Date())).requests, 1);
 });
 
 test('a successful discovery does not close an open inference circuit', async () => {

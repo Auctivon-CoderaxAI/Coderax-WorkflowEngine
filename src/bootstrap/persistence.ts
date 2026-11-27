@@ -42,6 +42,8 @@ import {
   ensureCapacityIndexes,
 } from '../persistence/capacity.js';
 import type { CapacityStore } from '../persistence/capacity.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/budgets.js';
+import { createMemoryBudgetStore, type BudgetWindowStore } from '../models/budget.js';
 import {
   createMongoArtifactRepository,
   createMongoBlobStore,
@@ -79,6 +81,7 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
+  budget: BudgetWindowStore;
   close: () => Promise<void>;
 };
 
@@ -151,6 +154,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      budget: createMemoryBudgetStore(),
       schedules: createScheduleRepository(),
       scheduleNotices: createScheduleNoticeStore(),
       close: NO_CLOSE,
@@ -177,6 +181,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
+  const budgetWindows = database.collection(collectionName(config, 'budget_windows'));
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -186,6 +191,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   try {
     await ensureWorkRunIndexes(workRuns);
+    await ensureBudgetIndexes(budgetWindows);
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
@@ -247,6 +253,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
+    budget: createMongoBudgetStore(budgetWindows),
     close: database.close,
   };
 }

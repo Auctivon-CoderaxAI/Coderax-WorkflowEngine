@@ -28,7 +28,7 @@ export function createDesignAssistant(input: {
       if (!input.gateway) return null;
       const resolved = input.models.resolve(null, 'cloud');
       if (!resolved.ok) return null;
-      const reserved = input.budget.reserve({
+      const reserved = await input.budget.reserve({
         ownerId,
         at: input.clock.now(),
         inputTokens: 0,
@@ -52,7 +52,7 @@ export function createDesignAssistant(input: {
           signal: AbortSignal.timeout(input.timeoutMs ?? 20_000),
           maxOutputTokens: 320,
         });
-        input.budget.settle(reserved.reservation.id, completion.usage ?? {});
+        await input.budget.settle(reserved.reservation.id, completion.usage ?? {});
         const parsed = JSON.parse(completion.text.trim()) as {
           logline?: unknown;
           pillars?: unknown;
@@ -73,7 +73,7 @@ export function createDesignAssistant(input: {
           ...(pillars && pillars.length > 0 ? { pillars } : {}),
         };
       } catch {
-        input.budget.release(reserved.reservation.id, { dispatched: true });
+        await input.budget.release(reserved.reservation.id, { dispatched: true });
         return null;
       }
     },
