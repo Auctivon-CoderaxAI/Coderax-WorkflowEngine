@@ -1,0 +1,476 @@
+[
+  {
+    "id": "platformer",
+    "title": "Lamplighter",
+    "prompt": "A side-view platformer about a lamplighter relighting beacons across a quiet town before nightfall.",
+    "genre": "platformer",
+    "camera": "side_view",
+    "movement": "platformer",
+    "mechanics": [
+      "gravity",
+      "jump",
+      "enemies",
+      "hazards",
+      "collectibles",
+      "switches",
+      "timer"
+    ],
+    "levels": 3,
+    "buildDigest": "a019c98597cba12bcf2fdae4dd148027a31d97fdb0751e86e970507ea81e1177",
+    "verified": true,
+    "checks": [
+      {
+        "id": "code.parse",
+        "passed": true,
+        "detail": "All generated scripts compiled.",
+        "measurements": {
+          "files": 6
+        }
+      },
+      {
+        "id": "code.deterministic_source",
+        "passed": true,
+        "detail": "No ambient-authority, random or clock dependency was found in the generated rules.",
+        "measurements": {
+          "findings": 0
+        }
+      },
+      {
+        "id": "html.self_contained",
+        "passed": true,
+        "detail": "The preview inlines every script and carries a CSP that permits them.",
+        "measurements": {
+          "external": false,
+          "externalScripts": 0,
+          "inlineScripts": 6,
+          "relativeRef": false,
+          "csp": true,
+          "inlineAllowed": true
+        }
+      },
+      {
+        "id": "browser.boot",
+        "passed": true,
+        "detail": "The document booted 6 inline scripts, moved 17 units from an on-screen control, painted 11 frames and kept its bitmap aligned after the HUD wrapped.",
+        "measurements": {
+          "scripts": 6,
+          "frames": 11,
+          "distinctColors": 4,
+          "onScreenControlDelta": 17.33,
+          "onScreenJumpVy": -633,
+          "canvasBitmapTracksCss": true,
+          "canvasBitmap": "320x162",
+          "canvasCss": "320x162",
+          "hud": "Level 1/3  Score 0  Health 3  Collected 0  Time 120"
+        }
+      },
+      {
+        "id": "audio.procedural",
+        "passed": true,
+        "detail": "Cues are synthesized with the Web Audio API; no audio asset is fetched.",
+        "measurements": {
+          "audio": true,
+          "recorded": true,
+          "synthesized": true,
+          "externalAudio": false
+        }
+      },
+      {
+        "id": "assets.original",
+        "passed": true,
+        "detail": "The only assets are original generated SVG and palette colours.",
+        "measurements": {
+          "svg": true,
+          "licensed": true,
+          "thirdParty": false
+        }
+      },
+      {
+        "id": "runtime.isolated",
+        "passed": true,
+        "detail": "require=absent, process=absent, fetch=absent.",
+        "measurements": {}
+      },
+      {
+        "id": "levels.count",
+        "passed": true,
+        "detail": "3 level(s) generated for a spec of 3.",
+        "measurements": {
+          "generated": 3,
+          "requested": 3
+        }
+      },
+      {
+        "id": "controls.respond",
+        "passed": true,
+        "detail": "The player moved 173 units from 40.",
+        "measurements": {
+          "start": 40,
+          "end": 213
+        }
+      },
+      {
+        "id": "collision.solid",
+        "passed": true,
+        "detail": "The player was stopped at the wall.",
+        "measurements": {
+          "wallX": 120,
+          "playerX": 96
+        }
+      },
+      {
+        "id": "collision.ground",
+        "passed": true,
+        "detail": "onGround=true after 20 ticks at the spawn.",
+        "measurements": {
+          "onGround": true,
+          "y": 386
+        }
+      },
+      {
+        "id": "scoring.collect",
+        "passed": true,
+        "detail": "Score changed by 10; the pickup is worth 10.",
+        "measurements": {
+          "gained": 10,
+          "value": 10
+        }
+      },
+      {
+        "id": "mechanics.gravity",
+        "passed": true,
+        "detail": "Vertical velocity is 333 after ten ticks in the air.",
+        "measurements": {
+          "vy": 333
+        }
+      },
+      {
+        "id": "mechanics.jump",
+        "passed": true,
+        "detail": "jump event=true, vy=-667.",
+        "measurements": {
+          "jumped": true,
+          "vy": -667
+        }
+      },
+      {
+        "id": "mechanics.enemies",
+        "passed": true,
+        "detail": "The enemy was defeated.",
+        "measurements": {
+          "alive": false
+        }
+      },
+      {
+        "id": "mechanics.hazards",
+        "passed": true,
+        "detail": "The hazard produced a damage event.",
+        "measurements": {
+          "hit": true,
+          "health": 2
+        }
+      },
+      {
+        "id": "mechanics.switches",
+        "passed": true,
+        "detail": "Every switch was pressed and the exit unlocked.",
+        "measurements": {
+          "locked": false
+        }
+      },
+      {
+        "id": "mechanics.timer",
+        "passed": true,
+        "detail": "Time left moved from 120.0 to 119.8.",
+        "measurements": {
+          "before": 120,
+          "after": 119.8
+        }
+      },
+      {
+        "id": "levels.completable",
+        "passed": true,
+        "detail": "3/3 levels completed by the bot.",
+        "measurements": {
+          "completed": 3,
+          "total": 3,
+          "ticks": 1323
+        }
+      },
+      {
+        "id": "player.bounds",
+        "passed": true,
+        "detail": "The player stayed inside the world bounds.",
+        "measurements": {
+          "bounded": true
+        }
+      },
+      {
+        "id": "deterministic.replay",
+        "passed": true,
+        "detail": "Replay digest 11a7432de7280a7b matched.",
+        "measurements": {
+          "digest": "11a7432de7280a7b06d2fe430ee1f894"
+        }
+      },
+      {
+        "id": "render.draws",
+        "passed": true,
+        "detail": "4 distinct colours were painted.",
+        "measurements": {
+          "distinctColors": 4,
+          "width": 320,
+          "height": 180
+        }
+      }
+    ],
+    "levelResults": [
+      {
+        "levelId": "level-1",
+        "name": "First Steps",
+        "completed": true,
+        "ticks": 384,
+        "score": 120,
+        "deaths": 0,
+        "frames": 1
+      },
+      {
+        "levelId": "level-2",
+        "name": "Broken Ledges",
+        "completed": true,
+        "ticks": 436,
+        "score": 190,
+        "deaths": 0,
+        "frames": 1
+      },
+      {
+        "levelId": "level-3",
+        "name": "High Route",
+        "completed": true,
+        "ticks": 503,
+        "score": 190,
+        "deaths": 0,
+        "frames": 1
+      }
+    ],
+    "frames": [
+      "platformer-level1.png",
+      "platformer-level2.png",
+      "platformer-level3.png"
+    ],
+    "playable": "platformer.html"
+  },
+  {
+    "id": "puzzle",
+    "title": "Circuits",
+    "prompt": "A calm top-down puzzle about routing power through plant-like circuits without overloading them.",
+    "genre": "puzzle",
+    "camera": "top_down",
+    "movement": "top_down",
+    "mechanics": [
+      "collectibles",
+      "push_blocks",
+      "switches"
+    ],
+    "levels": 3,
+    "buildDigest": "92859a4446f5c1e222a063a1153419b3435e2442bcd13b23a8f1b86f6b3d81df",
+    "verified": true,
+    "checks": [
+      {
+        "id": "code.parse",
+        "passed": true,
+        "detail": "All generated scripts compiled.",
+        "measurements": {
+          "files": 6
+        }
+      },
+      {
+        "id": "code.deterministic_source",
+        "passed": true,
+        "detail": "No ambient-authority, random or clock dependency was found in the generated rules.",
+        "measurements": {
+          "findings": 0
+        }
+      },
+      {
+        "id": "html.self_contained",
+        "passed": true,
+        "detail": "The preview inlines every script and carries a CSP that permits them.",
+        "measurements": {
+          "external": false,
+          "externalScripts": 0,
+          "inlineScripts": 6,
+          "relativeRef": false,
+          "csp": true,
+          "inlineAllowed": true
+        }
+      },
+      {
+        "id": "browser.boot",
+        "passed": true,
+        "detail": "The document booted 6 inline scripts, moved 17 units from an on-screen control, painted 11 frames and kept its bitmap aligned after the HUD wrapped.",
+        "measurements": {
+          "scripts": 6,
+          "frames": 11,
+          "distinctColors": 5,
+          "onScreenControlDelta": 17.33,
+          "onScreenJumpVy": 0,
+          "canvasBitmapTracksCss": true,
+          "canvasBitmap": "320x162",
+          "canvasCss": "320x162",
+          "hud": "Level 1/3  Score 0  Health 3  Collected 0"
+        }
+      },
+      {
+        "id": "audio.procedural",
+        "passed": true,
+        "detail": "Cues are synthesized with the Web Audio API; no audio asset is fetched.",
+        "measurements": {
+          "audio": true,
+          "recorded": true,
+          "synthesized": true,
+          "externalAudio": false
+        }
+      },
+      {
+        "id": "assets.original",
+        "passed": true,
+        "detail": "The only assets are original generated SVG and palette colours.",
+        "measurements": {
+          "svg": true,
+          "licensed": true,
+          "thirdParty": false
+        }
+      },
+      {
+        "id": "runtime.isolated",
+        "passed": true,
+        "detail": "require=absent, process=absent, fetch=absent.",
+        "measurements": {}
+      },
+      {
+        "id": "levels.count",
+        "passed": true,
+        "detail": "3 level(s) generated for a spec of 3.",
+        "measurements": {
+          "generated": 3,
+          "requested": 3
+        }
+      },
+      {
+        "id": "controls.respond",
+        "passed": true,
+        "detail": "The player moved 173 units from 60.",
+        "measurements": {
+          "start": 60,
+          "end": 233
+        }
+      },
+      {
+        "id": "collision.solid",
+        "passed": true,
+        "detail": "The player was stopped at the wall.",
+        "measurements": {
+          "wallX": 140,
+          "playerX": 116
+        }
+      },
+      {
+        "id": "scoring.collect",
+        "passed": true,
+        "detail": "Score changed by 10; the pickup is worth 10.",
+        "measurements": {
+          "gained": 10,
+          "value": 10
+        }
+      },
+      {
+        "id": "mechanics.switches",
+        "passed": true,
+        "detail": "Every switch was pressed and the exit unlocked.",
+        "measurements": {
+          "locked": false
+        }
+      },
+      {
+        "id": "mechanics.push_blocks",
+        "passed": true,
+        "detail": "The block moved 22 units.",
+        "measurements": {
+          "moved": 22
+        }
+      },
+      {
+        "id": "levels.completable",
+        "passed": true,
+        "detail": "3/3 levels completed by the bot.",
+        "measurements": {
+          "completed": 3,
+          "total": 3,
+          "ticks": 1191
+        }
+      },
+      {
+        "id": "player.bounds",
+        "passed": true,
+        "detail": "The player stayed inside the world bounds.",
+        "measurements": {
+          "bounded": true
+        }
+      },
+      {
+        "id": "deterministic.replay",
+        "passed": true,
+        "detail": "Replay digest e92e727072dad62e matched.",
+        "measurements": {
+          "digest": "e92e727072dad62ed02edd794e30e2fa"
+        }
+      },
+      {
+        "id": "render.draws",
+        "passed": true,
+        "detail": "5 distinct colours were painted.",
+        "measurements": {
+          "distinctColors": 5,
+          "width": 320,
+          "height": 180
+        }
+      }
+    ],
+    "levelResults": [
+      {
+        "levelId": "level-1",
+        "name": "Open Floor",
+        "completed": true,
+        "ticks": 393,
+        "score": 100,
+        "deaths": 0,
+        "frames": 1
+      },
+      {
+        "levelId": "level-2",
+        "name": "Crossed Paths",
+        "completed": true,
+        "ticks": 395,
+        "score": 110,
+        "deaths": 0,
+        "frames": 1
+      },
+      {
+        "levelId": "level-3",
+        "name": "Tight Corners",
+        "completed": true,
+        "ticks": 403,
+        "score": 100,
+        "deaths": 0,
+        "frames": 1
+      }
+    ],
+    "frames": [
+      "puzzle-level1.png",
+      "puzzle-level2.png",
+      "puzzle-level3.png"
+    ],
+    "playable": "puzzle.html"
+  }
+]

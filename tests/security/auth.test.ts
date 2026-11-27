@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { V1_HEALTH_VERSION } from '@coderax/contracts';
 import { OWNER_TOKEN, startTestApp } from '../helpers.js';
 
 test('health is public, owner operations are not', async () => {
@@ -8,7 +9,7 @@ test('health is public, owner operations are not', async () => {
     const health = await fetch(`${started.url}/v1/health`);
     assert.equal(health.status, 200);
     const body = (await health.json()) as { contractVersion: string };
-    assert.equal(body.contractVersion, '1.1.0');
+    assert.equal(body.contractVersion, V1_HEALTH_VERSION);
 
     const anonymous = await fetch(`${started.url}/v1/agents`);
     assert.equal(anonymous.status, 401);
@@ -57,6 +58,25 @@ test('an unknown route is a typed not-found, not an HTML fallback', async () => 
     const body = (await response.json()) as { code: string };
     assert.equal(body.code, 'not_found');
     assert.equal(response.headers.get('content-type')?.startsWith('application/json'), true);
+  } finally {
+    await started.close();
+  }
+});
+
+test('an oversized request body is refused before parsing', async () => {
+  const started = await startTestApp();
+  try {
+    const response = await fetch(`${started.url}/v1/work`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${OWNER_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ objective: 'x'.repeat(1_048_577) }),
+    });
+    assert.equal(response.status, 413);
+    const body = (await response.json()) as { code: string };
+    assert.equal(body.code, 'payload_too_large');
   } finally {
     await started.close();
   }

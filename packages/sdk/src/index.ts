@@ -1,26 +1,91 @@
 import type { z } from 'zod';
 import {
   AgentList,
-  ChatFrame,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserCapabilities,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionList,
+  BrowserTakeoverResult,
+  ArtifactContent,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactProjectManifest,
+  ArtifactPruneResult,
+  ArtifactUploadResult,
+  ArtifactVersionList,
+  CapabilityHandshake,
   ChatReply,
   Conversation,
+  Deliverable,
   ConversationList,
   ExecutionEvent,
+  GameBuild,
+  GameBuildList,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
   HealthReport,
   MemoryList,
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
   ModelList,
+  ToolList,
   NotificationList,
   PermissionList,
+  PermissionRequest,
   Problem,
   ReadinessReport,
+  Schedule,
+  ScheduleControlResult,
+  ScheduleDispatch,
+  ScheduleEventResult,
+  ScheduleExecutionList,
+  ScheduleList,
+  ScheduleUpcoming,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
 } from '@coderax/contracts';
 import type {
+  BuildGameRequest,
+  BrowserAction,
+  BrowserActionInput,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateInput,
+  BrowserTakeoverRequest,
+  ArtifactKind,
+  ArtifactUploadInput,
+  ArtifactUploadRequest,
+  ArtifactVersionInput,
+  ArtifactVersionRequest,
   ChatRequest,
+  DeliverableRequestInput,
+  CreateGameRequest,
+  CreateGameSessionRequest,
   DataMode,
+  GameSessionControlRequest,
+  IterateGameRequest,
   PermissionDecisionRequest,
+  RestoreGameBuildRequest,
+  SaveGameSpecRequest,
+  ScheduleCreateInput,
+  ScheduleUpdateRequest,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 
@@ -70,8 +135,98 @@ export type CoderaxClientOptions = {
   timeoutMs?: number;
 };
 
+/**
+ * Every operation the SDK implements, keyed by the contract operation id.
+ *
+ * The route-completeness gate compares this map with the route catalogue: a new
+ * HTTP operation is not complete until a client can call it, and removing a
+ * client method without removing the route fails the same check. The map is
+ * also checked against the class at runtime so a renamed method cannot hide.
+ */
+export const SDK_OPERATIONS = Object.freeze({
+  getHealth: 'health',
+  getReadiness: 'readiness',
+  listAgents: 'agents',
+  listModels: 'models',
+  listTools: 'tools',
+  ingestKnowledge: 'ingestKnowledge',
+  listKnowledge: 'knowledge',
+  searchKnowledge: 'searchKnowledge',
+  submitChat: 'chat',
+  submitWork: 'submitWork',
+  getTask: 'task',
+  cancelTask: 'cancel',
+  resumeTask: 'resume',
+  retryTask: 'retry',
+  streamTaskEvents: 'events',
+  listConversations: 'conversations',
+  getConversation: 'conversation',
+  listMemory: 'memory',
+  listPermissions: 'permissions',
+  decidePermission: 'decidePermission',
+  listNotifications: 'notifications',
+  browserCapabilities: 'browserCapabilities',
+  listBrowserSessions: 'browserSessions',
+  getBrowserSession: 'browserSession',
+  createBrowserSession: 'createBrowserSession',
+  browserAction: 'browserAction',
+  pauseBrowserSession: 'pauseBrowserSession',
+  resumeBrowserSession: 'resumeBrowserSession',
+  takeoverBrowserSession: 'takeoverBrowserSession',
+  closeBrowserSession: 'closeBrowserSession',
+  authorizeBrowserSession: 'authorizeBrowserSession',
+  decideBrowserAuthorization: 'decideBrowserAuthorization',
+  listBrowserReceipts: 'browserReceipts',
+  getBrowserArtifact: 'browserArtifact',
+  listArtifacts: 'artifacts',
+  artifactProjectManifest: 'artifactManifest',
+  generateDeliverable: 'generateDeliverable',
+  uploadArtifact: 'uploadArtifact',
+  pruneArtifacts: 'pruneArtifacts',
+  getArtifact: 'artifact',
+  uploadArtifactVersion: 'uploadArtifactVersion',
+  restoreArtifactVersion: 'restoreArtifactVersion',
+  listArtifactVersions: 'artifactVersions',
+  downloadArtifact: 'downloadArtifact',
+  exportArtifact: 'exportArtifact',
+  deleteArtifact: 'deleteArtifact',
+  createSchedule: 'createSchedule',
+  listSchedules: 'schedules',
+  getSchedule: 'schedule',
+  pauseSchedule: 'pauseSchedule',
+  resumeSchedule: 'resumeSchedule',
+  cancelSchedule: 'cancelSchedule',
+  triggerSchedule: 'triggerSchedule',
+  listScheduleExecutions: 'scheduleExecutions',
+  dispatchScheduleEvent: 'scheduleEvent',
+  updateSchedule: 'updateSchedule',
+  getScheduleUpcoming: 'scheduleUpcoming',
+  markNotificationsRead: 'markNotificationsRead',
+  getHandshake: 'handshake',
+  getGameCapabilities: 'gameCapabilities',
+  listGames: 'games',
+  createGame: 'createGame',
+  getGame: 'game',
+  saveGameSpec: 'saveGameSpec',
+  buildGame: 'buildGame',
+  listGameBuilds: 'gameBuilds',
+  restoreGameBuild: 'restoreGameBuild',
+  iterateGame: 'iterateGame',
+  previewGame: 'gamePreview',
+  exportGame: 'exportGame',
+  createGameSession: 'createGameSession',
+  listGameSessions: 'gameSessions',
+  getGameSession: 'gameSession',
+  observeGameSession: 'observeGameSession',
+  controlGameSession: 'controlGameSession',
+  gameSessionLogs: 'gameSessionLogs',
+  gameSessionVerification: 'gameSessionVerification',
+} as const);
+
+export type SdkOperationId = keyof typeof SDK_OPERATIONS;
+
 type RequestInput = {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PATCH';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
@@ -203,6 +358,18 @@ export class CoderaxClient {
     return this.request<HealthReport>(HealthReport, { method: 'GET', path: '/v1/health' });
   }
 
+  /**
+   * The first call a client should make. It carries the served contract, the
+   * catalogue fingerprint and the operations this build actually publishes.
+   */
+  handshake(input: { contract?: string; fingerprint?: string } = {}): Promise<CapabilityHandshake> {
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+      query: { contract: input.contract, fingerprint: input.fingerprint },
+    });
+  }
+
   readiness(): Promise<ReadinessReport> {
     return this.request<ReadinessReport>(ReadinessReport, { method: 'GET', path: '/v1/ready' });
   }
@@ -215,42 +382,153 @@ export class CoderaxClient {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
   }
 
+  /** Registered tools with the scopes and approval policy each one requires. */
+  tools(): Promise<ToolList> {
+    return this.request<ToolList>(ToolList, { method: 'GET', path: '/v1/tools' });
+  }
+
+  ingestKnowledge(request: KnowledgeIngestRequest): Promise<KnowledgeIngestResult> {
+    return this.request<KnowledgeIngestResult>(KnowledgeIngestResult, {
+      method: 'POST',
+      path: '/v1/knowledge',
+      body: request,
+    });
+  }
+
+  knowledge(mode: DataMode = 'private'): Promise<KnowledgeList> {
+    return this.request<KnowledgeList>(KnowledgeList, {
+      method: 'GET',
+      path: '/v1/knowledge',
+      query: { mode },
+    });
+  }
+
+  searchKnowledge(
+    query: string,
+    options: { k?: number; mode?: DataMode } = {},
+  ): Promise<KnowledgeSearchResult> {
+    return this.request<KnowledgeSearchResult>(KnowledgeSearchResult, {
+      method: 'GET',
+      path: '/v1/knowledge/search',
+      query: { q: query, k: options.k, mode: options.mode },
+    });
+  }
+
+  browserCapabilities(): Promise<BrowserCapabilities> {
+    return this.request<BrowserCapabilities>(BrowserCapabilities, {
+      method: 'GET',
+      path: '/v1/browser/capabilities',
+    });
+  }
+
+  browserSessions(): Promise<BrowserSessionList> {
+    return this.request<BrowserSessionList>(BrowserSessionList, {
+      method: 'GET',
+      path: '/v1/browser/sessions',
+    });
+  }
+
+  browserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  createBrowserSession(request: BrowserSessionCreateInput): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: '/v1/browser/sessions',
+      body: request,
+    });
+  }
+
+  browserAction(sessionId: string, action: BrowserActionInput): Promise<BrowserActionResult> {
+    return this.request<BrowserActionResult>(BrowserActionResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/actions`,
+      body: action,
+    });
+  }
+
+  pauseBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/pause`,
+    });
+  }
+
+  resumeBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/resume`,
+    });
+  }
+
+  takeoverBrowserSession(
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ): Promise<BrowserTakeoverResult> {
+    return this.request<BrowserTakeoverResult>(BrowserTakeoverResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/takeover`,
+      body: request,
+    });
+  }
+
+  closeBrowserSession(
+    sessionId: string,
+    request: BrowserCloseRequest = {},
+  ): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/close`,
+      body: request,
+    });
+  }
+
+  authorizeBrowserSession(
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ): Promise<PermissionRequest> {
+    return this.request<PermissionRequest>(PermissionRequest, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize`,
+      body: request,
+    });
+  }
+
+  decideBrowserAuthorization(
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize/decision`,
+      body: request,
+    });
+  }
+
+  browserReceipts(sessionId: string): Promise<BrowserReceiptList> {
+    return this.request<BrowserReceiptList>(BrowserReceiptList, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/receipts`,
+    });
+  }
+
+  browserArtifact(artifactId: string): Promise<BrowserArtifactContent> {
+    return this.request<BrowserArtifactContent>(BrowserArtifactContent, {
+      method: 'GET',
+      path: `/v1/browser/artifacts/${encodeURIComponent(artifactId)}`,
+    });
+  }
+
   chat(request: ChatRequest): Promise<ChatReply> {
     return this.request<ChatReply>(ChatReply, {
       method: 'POST',
       path: '/v1/chat',
       body: request,
     });
-  }
-
-  /**
-   * The same Chat turn over the shared SSE transport. Each frame is validated
-   * against the published `ChatFrame` schema, so a deployment that streams a
-   * shape the contract does not describe fails here instead of in a renderer.
-   */
-  async *chatStream(
-    request: ChatRequest,
-    options: { signal?: AbortSignal } = {},
-  ): AsyncGenerator<ChatFrame> {
-    const path = '/v1/chat';
-    const response = await this.options.fetchImpl(joinUrl(this.options.baseUrl, path), {
-      method: 'POST',
-      headers: this.headers('text/event-stream'),
-      body: JSON.stringify(request),
-      redirect: 'error',
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
-    if (!response.ok || !response.body) {
-      await this.parse(ChatReply, response, path);
-      throw new CoderaxContractError('the chat stream had no body');
-    }
-    for await (const frame of parseSse(response.body)) {
-      const parsed = ChatFrame.safeParse(frame);
-      if (!parsed.success) {
-        throw new CoderaxContractError('a chat frame did not match the published schema');
-      }
-      yield parsed.data;
-    }
   }
 
   submitWork(request: WorkSubmitRequest): Promise<TaskAccepted> {
@@ -336,6 +614,382 @@ export class CoderaxClient {
     return this.request<NotificationList>(NotificationList, {
       method: 'GET',
       path: '/v1/notifications',
+      query: { includeSchedules: 'true' },
+    });
+  }
+
+  createSchedule(request: ScheduleCreateInput): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'POST',
+      path: '/v1/schedules',
+      body: request,
+    });
+  }
+
+  schedules(): Promise<ScheduleList> {
+    return this.request<ScheduleList>(ScheduleList, { method: 'GET', path: '/v1/schedules' });
+  }
+
+  schedule(scheduleId: string): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+    });
+  }
+
+  pauseSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/pause`,
+    });
+  }
+
+  resumeSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/resume`,
+    });
+  }
+
+  cancelSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+    });
+  }
+
+  triggerSchedule(
+    scheduleId: string,
+    request: ScheduleTriggerRequest = {},
+  ): Promise<ScheduleDispatch> {
+    return this.request<ScheduleDispatch>(ScheduleDispatch, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/trigger`,
+      body: request,
+    });
+  }
+
+  scheduleExecutions(scheduleId: string, limit?: number): Promise<ScheduleExecutionList> {
+    return this.request<ScheduleExecutionList>(ScheduleExecutionList, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/executions`,
+      query: { limit },
+    });
+  }
+
+  scheduleEvent(request: ScheduleEventRequest): Promise<ScheduleEventResult> {
+    return this.request<ScheduleEventResult>(ScheduleEventResult, {
+      method: 'POST',
+      path: '/v1/schedule-events',
+      body: request,
+    });
+  }
+
+  updateSchedule(scheduleId: string, request: ScheduleUpdateRequest): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
+      method: 'PATCH',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+      body: request,
+    });
+  }
+
+  scheduleUpcoming(scheduleId: string, limit?: number): Promise<ScheduleUpcoming> {
+    return this.request<ScheduleUpcoming>(ScheduleUpcoming, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/upcoming`,
+      query: { limit },
+    });
+  }
+
+  markNotificationsRead(): Promise<NotificationList> {
+    return this.request<NotificationList>(NotificationList, {
+      method: 'POST',
+      path: '/v1/notifications/read',
+      query: { includeSchedules: 'true' },
+    });
+  }
+
+  /** Durable artifacts in one data-mode partition, with the storage quota. */
+  artifacts(
+    query: {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<ArtifactDescriptorList> {
+    return this.request<ArtifactDescriptorList>(ArtifactDescriptorList, {
+      method: 'GET',
+      path: '/v1/artifacts',
+      query,
+    });
+  }
+
+  artifact(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactDescriptor> {
+    return this.request<ArtifactDescriptor>(ArtifactDescriptor, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+      query: { mode },
+    });
+  }
+
+  artifactVersions(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactVersionList> {
+    return this.request<ArtifactVersionList>(ArtifactVersionList, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      query: { mode },
+    });
+  }
+
+  artifactManifest(
+    projectId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactProjectManifest> {
+    return this.request<ArtifactProjectManifest>(ArtifactProjectManifest, {
+      method: 'GET',
+      path: '/v1/artifacts/manifest',
+      query: { projectId, mode },
+    });
+  }
+
+  /**
+   * Generates and durably persists a document, workbook, deck, analysis or
+   * software project. The response names stored artifacts, never workspace paths.
+   */
+  generateDeliverable(request: DeliverableRequestInput): Promise<Deliverable> {
+    return this.request<Deliverable>(Deliverable, {
+      method: 'POST',
+      path: '/v1/deliverables',
+      body: request,
+    });
+  }
+
+  uploadArtifact(request: ArtifactUploadInput): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: '/v1/artifacts',
+      body: request,
+    });
+  }
+
+  uploadArtifactVersion(
+    artifactId: string,
+    request: ArtifactVersionInput,
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      body: request,
+    });
+  }
+
+  restoreArtifactVersion(
+    artifactId: string,
+    request: { mode?: DataMode; version: number; expectedVersion: number },
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/restore`,
+      body: {
+        mode: request.mode ?? 'private',
+        version: request.version,
+        expectedVersion: request.expectedVersion,
+      },
+    });
+  }
+
+  downloadArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactContent> {
+    return this.request<ArtifactContent>(ArtifactContent, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  exportArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactExport> {
+    return this.request<ArtifactExport>(ArtifactExport, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  deleteArtifact(
+    artifactId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactDeleteResult> {
+    return this.request<ArtifactDeleteResult>(ArtifactDeleteResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/delete`,
+      body: { mode },
+    });
+  }
+
+  pruneArtifacts(mode: DataMode = 'private'): Promise<ArtifactPruneResult> {
+    return this.request<ArtifactPruneResult>(ArtifactPruneResult, {
+      method: 'POST',
+      path: '/v1/artifacts/prune',
+      body: { mode },
+    });
+  }
+
+  gameCapabilities(): Promise<GameCapabilityReport> {
+    return this.request<GameCapabilityReport>(GameCapabilityReport, {
+      method: 'GET',
+      path: '/v1/games/capabilities',
+    });
+  }
+
+  games(query: { cursor?: string; limit?: number } = {}): Promise<GameProjectList> {
+    return this.request<GameProjectList>(GameProjectList, {
+      method: 'GET',
+      path: '/v1/games',
+      query: { ...query },
+    });
+  }
+
+  createGame(request: CreateGameRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: '/v1/games',
+      body: request,
+    });
+  }
+
+  game(gameId: string): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}`,
+    });
+  }
+
+  saveGameSpec(gameId: string, request: SaveGameSpecRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/spec`,
+      body: request,
+    });
+  }
+
+  buildGame(gameId: string, request: BuildGameRequest = {}): Promise<GameBuild> {
+    return this.request<GameBuild>(GameBuild, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/build`,
+      body: request,
+    });
+  }
+
+  gameBuilds(gameId: string): Promise<GameBuildList> {
+    return this.request<GameBuildList>(GameBuildList, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds`,
+    });
+  }
+
+  restoreGameBuild(
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds/${encodeURIComponent(buildId)}/restore`,
+      body: request,
+    });
+  }
+
+  iterateGame(gameId: string, request: IterateGameRequest): Promise<GameIteration> {
+    return this.request<GameIteration>(GameIteration, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/iterate`,
+      body: request,
+    });
+  }
+
+  /** The playable preview is HTML, not JSON; it is checked to be the declared type. */
+  async gamePreview(gameId: string): Promise<string> {
+    const path = `/v1/games/${encodeURIComponent(gameId)}/preview`;
+    const response = await this.send({ method: 'GET', path });
+    if (!response.ok) {
+      await this.parse(GameProject, response, path);
+      throw new CoderaxContractError('the preview request failed without a problem document');
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/html')) {
+      throw new CoderaxContractError('the preview was not served as HTML');
+    }
+    return response.text();
+  }
+
+  exportGame(gameId: string): Promise<GameExport> {
+    return this.request<GameExport>(GameExport, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/export`,
+    });
+  }
+
+  createGameSession(
+    gameId: string,
+    request: CreateGameSessionRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/sessions`,
+      body: request,
+    });
+  }
+
+  gameSessions(): Promise<GameSessionList> {
+    return this.request<GameSessionList>(GameSessionList, {
+      method: 'GET',
+      path: '/v1/game-sessions',
+    });
+  }
+
+  gameSession(sessionId: string): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  observeGameSession(sessionId: string): Promise<GameObservation> {
+    return this.request<GameObservation>(GameObservation, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/observation`,
+    });
+  }
+
+  controlGameSession(
+    sessionId: string,
+    request: GameSessionControlRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/control`,
+      body: request,
+    });
+  }
+
+  gameSessionLogs(sessionId: string): Promise<GameSessionLogs> {
+    return this.request<GameSessionLogs>(GameSessionLogs, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/logs`,
+    });
+  }
+
+  gameSessionVerification(sessionId: string): Promise<GameSessionVerification> {
+    return this.request<GameSessionVerification>(GameSessionVerification, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/verification`,
     });
   }
 
@@ -368,4 +1022,24 @@ export class CoderaxClient {
   }
 }
 
-export type { ChatRequest, DataMode, PermissionDecisionRequest, WorkSubmitRequest };
+export type {
+  BrowserAction,
+  BrowserActionInput,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateInput,
+  BrowserTakeoverRequest,
+  ChatRequest,
+  DataMode,
+  PermissionDecisionRequest,
+  ScheduleCreateInput,
+  ScheduleUpdateRequest,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
+  ArtifactKind,
+  ArtifactUploadInput,
+  ArtifactUploadRequest,
+  ArtifactVersionInput,
+  ArtifactVersionRequest,
+  WorkSubmitRequest,
+};

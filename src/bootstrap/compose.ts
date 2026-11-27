@@ -1,46 +1,52 @@
+import path from 'node:path';
+import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
 import type { AgentIsolation, EngineCapabilities } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
 import { createOwnerAuth, AuthConfigurationError } from '../security/auth.js';
 import { createNativeAgent } from '../agents/native/agent.js';
-import { createNativePlanner } from '../agents/native/planner.js';
+import { createKnowledgeStore } from '../knowledge/store.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import { createBuiltinTools } from '../tools/builtin.js';
+import { createToolRuntime } from '../tools/runtime.js';
+import type { ToolRuntime } from '../tools/types.js';
+import { attachMcpServers } from '../tools/mcp.js';
+import { loadPlugins } from '../plugins/manifest.js';
+import { createApprovalGate } from '../permissions/approval.js';
+import { createOpenAiCompatibleGateway } from '../agents/native/gateway.js';
+import type { ModelGateway } from '../agents/native/types.js';
 import { createExternalAgentAdapter } from '../agents/adapters/external.js';
+import { createOpenCodeHttpTransport } from '../agents/adapters/opencode.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
+import { createBrowserService } from '../orchestration/browser.js';
+import { createBrowserStore } from '../browser/store.js';
+import type { BrowserProvider } from '../browser/types.js';
+import { buildBrowserProvider } from './browser.js';
+import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
 import { createBudgetLedger } from '../models/budget.js';
-import { createRouterCatalog, type ProviderQuota } from '../models/catalog.js';
 import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js';
-import { createGeminiProvider } from '../models/providers/gemini.js';
+import type { BenchmarkScore } from '../models/types.js';
+import { createModelRouter } from '../models/router.js';
+import { createProviderPolicyRegistry } from '../models/policy.js';
 import { createOpenAiProvider } from '../models/providers/openai.js';
-import { createRouterEmbeddings } from '../models/embedding.js';
-import { createModelRouter, type ModelRouter } from '../models/router.js';
-import {
-  createProviderPolicyRegistry,
-  type ProviderPolicy,
-  type ProviderPolicyRegistry,
-} from '../models/policy.js';
-import type {
-  BenchmarkScore,
-  FreeTierAttestation,
-  ProviderAdapter,
-  ProviderSettings,
-  RegisteredProvider,
-} from '../models/types.js';
-import { createKnowledgeStore } from '../knowledge/store.js';
-import { createBuiltinTools } from '../tools/builtin.js';
-import { createToolRuntime } from '../tools/runtime.js';
-import { attachMcpServers } from '../mcp/client.js';
-import { loadPlugins } from '../plugins/manifest.js';
+import { createGeminiProvider } from '../models/providers/gemini.js';
+import type { ProviderAdapter, RegisteredProvider } from '../models/types.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionStore } from '../permissions/store.js';
+import { createPermissionGate } from '../permissions/gate.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { createRunSupervisor } from '../execution/supervisor.js';
+import { validateRemoteEndpoint } from '../configuration/endpoint.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
+import { createArtifactService } from '../artifacts/service.js';
+import { createArtifactToolkit } from '../artifacts/toolkit.js';
+import { createDeliverableService } from '../artifacts/deliver.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
@@ -48,7 +54,6 @@ import { registerRoutes } from '../api/routes.js';
 import { createHttpServer } from '../api/server.js';
 import type { HttpServer } from '../api/server.js';
 import { validateWorkspaceRoots, workspaceRoots } from '../execution/workspace.js';
-import { createOpenCodeHttpTransport } from '../agents/adapters/opencode.js';
 import {
   createApplicationContainer,
   createDependencyContainer,
@@ -57,18 +62,26 @@ import {
 } from './container.js';
 import { buildPersistence } from './persistence.js';
 import { StartupError } from './startup-error.js';
+import { createArtifactStore } from '../artifacts/store.js';
+import { createGameStore } from '../games/store.js';
+import { createGameStudio } from '../games/studio.js';
+import { createDesignAssistant } from '../games/assistant.js';
+import { createGameSessions } from '../games/session.js';
 
 export { StartupError } from './startup-error.js';
+
+export class ShutdownTimeoutError extends Error {
+  constructor(deadlineMs: number) {
+    super(`Graceful shutdown exceeded ${deadlineMs}ms; persistence was left open`);
+    this.name = 'ShutdownTimeoutError';
+  }
+}
 
 export type Application = {
   dependencies: ApplicationDependencies;
   service: ApplicationService;
   router: Router;
   server: HttpServer;
-  /** The single router, exposed for the benchmark harness and health tests. */
-  modelRouter: ModelRouter;
-  /** The one provider policy registry; the benchmark must ask before spending. */
-  providerPolicy: ProviderPolicyRegistry;
   /** Which lease table the validated persistence setting selected. */
   persistence: { driver: 'memory' | 'mongo' };
   /** Everything is validated before this resolves. */
@@ -76,22 +89,14 @@ export type Application = {
   stop: () => Promise<void>;
 };
 
-/** Test injection: the real router still performs verification and routing. */
-export type InjectedProvider = {
-  adapter: ProviderAdapter;
-  settings?: Partial<ProviderSettings>;
-};
-
 export type ComposeInput = {
   config: EngineConfig;
   env?: NodeJS.ProcessEnv;
-  /** Provider adapters for fixtures and future adapters; never a routing shortcut. */
-  providers?: InjectedProvider[];
-  /** Benchmark scores for tests; production loads them from the configured file. */
-  benchmarks?: BenchmarkScore[];
-  /** Provider policy records for fixtures; production reads `models.policy`. */
-  policies?: readonly ProviderPolicy[];
+  /** Test and future-adapter injection; nothing here changes production defaults. */
+  gateway?: ModelGateway | null;
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
+  /** Test and future-provider injection; the default is configuration-driven. */
+  browserProvider?: BrowserProvider;
   fetchImpl?: typeof fetch;
   /**
    * Persistence injection for tests and for a host that owns its own driver. A
@@ -102,6 +107,8 @@ export type ComposeInput = {
     database?: MongoDatabase;
     connect?: MongoConnector;
   };
+  /** Measured benchmark scores for tests; production reads the configured file. */
+  benchmarks?: BenchmarkScore[];
 };
 
 const EXTERNAL_CAPABILITIES: EngineCapabilities = {
@@ -120,80 +127,100 @@ const EXTERNAL_ISOLATION: AgentIsolation = {
   conversations: 'none',
 };
 
-const PROVIDER_DEFAULTS: ProviderSettings = {
-  requestsPerMinute: 15,
-  tokensPerMinute: 100_000,
-  maxConcurrency: 2,
-  requestTimeoutMs: 60_000,
-  discoveryIntervalMs: 600_000,
-};
+function buildGateway(input: ComposeInput): ModelGateway | null {
+  if (input.gateway !== undefined) return input.gateway;
+  const env = input.env ?? process.env;
+  const baseURL = env.CODERAX_INFERENCE_BASE_URL;
+  const apiKey = env.CODERAX_INFERENCE_KEY;
+  if (!baseURL || !apiKey) return null;
+  // A key may only cross the network inside TLS. This is a startup gate: a
+  // deployment that would send its credential in plaintext does not start.
+  const endpoint = validateRemoteEndpoint({
+    url: baseURL,
+    name: 'CODERAX_INFERENCE_BASE_URL',
+    carriesCredential: true,
+  });
+  if (!endpoint.ok) throw new StartupError([endpoint.detail]);
+  return createOpenAiCompatibleGateway({
+    baseURL,
+    apiKey,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+}
 
 /**
- * Providers are configured by URL and credential-variable name. Standard
- * variables make a deployment work without a config entry, but a present key is
- * only authentication: the router still verifies that a model is free.
+ * Adapts a programmatic gateway to the provider port.
+ *
+ * The route is discovered locally and deliberately publishes no price: a
+ * caller-provided gateway is not evidence of a zero-cost tier, so the router
+ * still requires an operator attestation for each model it may use.
  */
-const ENV_PROVIDERS: ReadonlyArray<{
-  id: string;
-  kind: 'openai' | 'gemini';
-  baseURL: string;
-  keyEnvs: readonly string[];
-}> = Object.freeze([
-  {
-    id: 'openrouter',
+function gatewayProvider(input: {
+  gateway: ModelGateway;
+  config: EngineConfig;
+}): ProviderAdapter {
+  const route = input.config.models.route;
+  return {
+    id: route[0]?.providerId ?? 'gateway',
     kind: 'openai',
-    baseURL: 'https://openrouter.ai/api/v1',
-    keyEnvs: ['OPENROUTER_API_KEY', 'OPENROUTER_KEY'],
-  },
-  {
-    id: 'gemini',
-    kind: 'gemini',
-    baseURL: 'https://generativelanguage.googleapis.com/v1beta',
-    keyEnvs: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
-  },
-  {
-    id: 'groq',
-    kind: 'openai',
-    baseURL: 'https://api.groq.com/openai/v1',
-    keyEnvs: ['GROQ_API_KEY'],
-  },
-  {
-    id: 'cerebras',
-    kind: 'openai',
-    baseURL: 'https://api.cerebras.ai/v1',
-    keyEnvs: ['CEREBRAS_API_KEY'],
-  },
-]);
+    discover: async () =>
+      route.map((ref) => ({
+        ref,
+        label: `${ref.providerId} ${ref.modelId}`,
+        contextTokens: 32_768,
+        maxOutputTokens: 4_096,
+        capabilities: {
+          vision: false,
+          toolCalling: true,
+          reasoning: true,
+          streaming: false,
+        },
+        pricing: null,
+      })),
+    complete: async (request) => {
+      const completion = await input.gateway.complete({
+        model: request.model,
+        system: request.system,
+        prompt: request.prompt,
+        signal: request.signal,
+        ...(request.maxOutputTokens ? { maxOutputTokens: request.maxOutputTokens } : {}),
+      });
+      return {
+        text: completion.text,
+        toolCalls: [],
+        ...(completion.usage ? { usage: completion.usage } : {}),
+      };
+    },
+  };
+}
 
+/**
+ * Registers the configured providers and, when one was supplied, the
+ * programmatic gateway. A provider whose key variable is absent is not
+ * registered at all; it is never replaced by a paid endpoint.
+ */
 function buildProviders(input: {
   config: EngineConfig;
   env: NodeJS.ProcessEnv;
+  gateway: ModelGateway | null;
   fetchImpl?: typeof fetch;
-}): { registrations: RegisteredProvider[]; issues: string[] } {
-  const issues: string[] = [];
+}): RegisteredProvider[] {
   const registrations: RegisteredProvider[] = [];
-  const configured = new Set<string>();
   const discoveryIntervalMs = input.config.models.routing.discoveryIntervalMs;
+  const common = (id: string, baseURL: string, apiKey: string) => ({
+    id,
+    baseURL,
+    apiKey,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
 
   for (const provider of input.config.models.providers) {
-    configured.add(provider.id);
     const key = input.env[provider.apiKeyEnv];
-    if (!key) {
-      issues.push(
-        `models.providers ${provider.id} requires environment variable ${provider.apiKeyEnv}`,
-      );
-      continue;
-    }
-    const common = {
-      id: provider.id,
-      baseURL: provider.baseURL,
-      apiKey: key,
-      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-    };
+    if (!key) continue;
     const adapter =
       provider.kind === 'gemini'
-        ? createGeminiProvider(common)
-        : createOpenAiProvider(common);
+        ? createGeminiProvider(common(provider.id, provider.baseURL, key))
+        : createOpenAiProvider(common(provider.id, provider.baseURL, key));
     registrations.push({
       adapter,
       settings: {
@@ -206,87 +233,33 @@ function buildProviders(input: {
     });
   }
 
-  for (const provider of ENV_PROVIDERS) {
-    if (configured.has(provider.id)) continue;
-    const keyEnv = provider.keyEnvs.find((name) => Boolean(input.env[name]));
-    if (!keyEnv) continue;
-    const common = {
-      id: provider.id,
-      baseURL: provider.baseURL,
-      apiKey: input.env[keyEnv] ?? '',
-      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-    };
-    const adapter =
-      provider.kind === 'gemini'
-        ? createGeminiProvider(common)
-        : createOpenAiProvider(common);
+  if (input.gateway) {
     registrations.push({
-      adapter,
-      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
-    });
-    configured.add(provider.id);
-  }
-
-  const customBase = input.env.CODERAX_INFERENCE_BASE_URL;
-  const customKey = input.env.CODERAX_INFERENCE_KEY;
-  if (customBase && customKey && !configured.has('custom')) {
-    registrations.push({
-      adapter: createOpenAiProvider({
-        id: 'custom',
-        baseURL: customBase,
-        apiKey: customKey,
-        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-      }),
-      settings: { ...PROVIDER_DEFAULTS, discoveryIntervalMs },
+      adapter: gatewayProvider({ gateway: input.gateway, config: input.config }),
+      settings: {
+        requestsPerMinute: 20,
+        tokensPerMinute: 100_000,
+        maxConcurrency: 2,
+        requestTimeoutMs: 60_000,
+        discoveryIntervalMs,
+      },
     });
   }
-
-  return { registrations, issues };
+  return registrations;
 }
 
 /**
- * Bound the engine's own daily ceiling by the allowance it can actually evidence.
- *
- * A provider's free allowance is per account and shared by every model it serves,
- * so each provider contributes its most restrictive attested quota and the
- * providers sum. Without an attestation there is no published allowance to bound
- * against; the configured ceiling applies and cost is established from provider
- * pricing instead. The result can only lower a ceiling, never raise one.
+ * Benchmark scores are optional evidence, never a default. A malformed file
+ * stops startup instead of silently ranking on invented quality data.
  */
-function attestedDailyCeiling(
-  attestations: readonly FreeTierAttestation[],
-): { requests: number; tokens: number } | null {
-  if (attestations.length === 0) return null;
-  const perProvider = new Map<string, { requests: number; tokens: number }>();
-  for (const entry of attestations) {
-    const current = perProvider.get(entry.providerId);
-    perProvider.set(entry.providerId, {
-      requests: Math.min(current?.requests ?? Number.POSITIVE_INFINITY, entry.quota.requestsPerDay),
-      tokens: Math.min(current?.tokens ?? Number.POSITIVE_INFINITY, entry.quota.tokensPerDay),
-    });
-  }
-  let requests = 0;
-  let tokens = 0;
-  for (const quota of perProvider.values()) {
-    requests += quota.requests;
-    tokens += quota.tokens;
-  }
-  return requests > 0 && tokens > 0 ? { requests, tokens } : null;
-}
-
-function buildBenchmarks(input: {
-  config: EngineConfig;
-  injected?: BenchmarkScore[];
-}): BenchmarkScore[] {
-  if (input.injected) return input.injected;
-  const path = input.config.models.benchmarkResultsPath;
-  if (!path) return [];
+function loadBenchmarkInput(input: ComposeInput): BenchmarkScore[] {
+  if (input.benchmarks) return [...input.benchmarks];
+  const file = (input.env ?? process.env).CODERAX_BENCHMARK_SCORES_FILE;
+  if (!file) return [];
   try {
-    return loadBenchmarkScores(path);
+    return loadBenchmarkScores(file);
   } catch (error) {
-    if (error instanceof BenchmarkFileError) {
-      throw new StartupError([error.message]);
-    }
+    if (error instanceof BenchmarkFileError) throw new StartupError([error.message]);
     throw error;
   }
 }
@@ -294,15 +267,21 @@ function buildBenchmarks(input: {
 /**
  * The composition root.
  *
- * Order matters and is explicit: configuration, identity, model discovery,
- * agents, persistence, execution, then the service, the route table and the
- * transport. Startup fails closed — an invalid configuration, an unusable
- * workspace root, a missing provider credential, a missing dependency or an
- * incomplete route table stops the engine before it accepts a request.
+ * Order matters and is explicit: configuration, identity, agents, routing,
+ * persistence, execution, then the service, the route table and the transport.
+ * Startup fails closed — an invalid configuration, an unusable workspace root, a
+ * missing dependency or an incomplete route table stops the engine before it
+ * accepts a request, and says which check failed.
  */
 export async function composeApplication(input: ComposeInput): Promise<Application> {
   const env = input.env ?? process.env;
   const { config } = input;
+  // `loadConfig` validates this for the normal entry point. Programmatic
+  // callers must not be able to bypass the same fail-closed invariants.
+  const invariantIssues = validateInvariants(config);
+  if (invariantIssues.length > 0) {
+    throw new StartupError(invariantIssues);
+  }
   const clock = createClock();
   const ids = createIdGenerator();
 
@@ -316,184 +295,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     throw error;
   }
 
-  const persistence = await buildPersistence({
-    config,
-    env,
-    clock,
-    ...(input.persistence ?? {}),
-  });
-  const attested = attestedDailyCeiling(
-    config.models.attestations.map((entry) => ({
-      providerId: entry.providerId,
-      modelId: entry.modelId,
-      evidenceUrl: entry.evidenceUrl,
-      verifiedAt: entry.verifiedAt,
-      expiresAt: entry.expiresAt,
-      currency: entry.currency,
-      accountRef: entry.accountRef,
-      billing: entry.billing,
-      spendCapUsd: entry.spendCapUsd,
-      quota: entry.quota,
-    })),
-  );
-  const budget = createBudgetLedger({
-    store: persistence.budgets,
-    maxRequestsPerDay: Math.min(
-      config.models.dailyRequestBudget,
-      attested?.requests ?? Number.POSITIVE_INFINITY,
-    ),
-    maxTokensPerDay: Math.min(
-      config.models.dailyTokenBudget,
-      attested?.tokens ?? Number.POSITIVE_INFINITY,
-    ),
-    taskMaxRequests: Math.min(
-      config.models.taskRequestBudget,
-      attested?.requests ?? Number.POSITIVE_INFINITY,
-    ),
-    taskMaxTokens: Math.min(
-      config.models.taskTokenBudget,
-      attested?.tokens ?? Number.POSITIVE_INFINITY,
-    ),
-    reservationTtlMs: config.models.reservationTtlMs,
-  });
-
-  const providerBuild = input.providers
-    ? {
-        registrations: input.providers.map((entry) => ({
-          adapter: entry.adapter,
-          settings: {
-            ...PROVIDER_DEFAULTS,
-            ...entry.settings,
-            discoveryIntervalMs:
-              entry.settings?.discoveryIntervalMs ?? config.models.routing.discoveryIntervalMs,
-          },
-        })),
-        issues: [] as string[],
-      }
-    : buildProviders({ config, env, ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
-  if (providerBuild.issues.length > 0) {
-    throw new StartupError(providerBuild.issues);
-  }
-
-  const benchmarks = buildBenchmarks({
-    config,
-    ...(input.benchmarks === undefined ? {} : { injected: input.benchmarks }),
-  });
-  const attestations: FreeTierAttestation[] = config.models.attestations.map((entry) => ({
-    providerId: entry.providerId,
-    modelId: entry.modelId,
-    evidenceUrl: entry.evidenceUrl,
-    verifiedAt: entry.verifiedAt,
-    expiresAt: entry.expiresAt,
-    currency: entry.currency,
-    accountRef: entry.accountRef,
-    billing: entry.billing,
-    spendCapUsd: entry.spendCapUsd,
-    quota: entry.quota,
-  }));
-
-  const policy = createProviderPolicyRegistry(input.policies ?? config.models.policy);
-  // A configured provider without a policy record cannot route. Failing startup
-  // is louder than a deployment that silently has no authorized inference.
-  const unauthorized = providerBuild.registrations
-    .map((registration) => registration.adapter.id)
-    .filter((providerId) => policy.get(providerId) === null);
-  if (unauthorized.length > 0) {
-    throw new StartupError(
-      unauthorized.map(
-        (providerId) =>
-          `models.policy has no owner-approved record for provider ${providerId}; hosted inference is refused until one exists`,
-      ),
-    );
-  }
-
-  const modelRouter: ModelRouter = createModelRouter({
-    providers: providerBuild.registrations,
-    policy,
-    attestations,
-    benchmarks,
-    preferredRoute: config.models.route,
-    budget,
-    maxCandidates: config.models.routing.maxCandidates,
-    maxFallbacks: config.models.routing.maxFallbacks,
-    failureThreshold: config.models.routing.failureThreshold,
-    cooldownMs: config.models.routing.cooldownMs,
-    discoveryIntervalMs: config.models.routing.discoveryIntervalMs,
-    defaultMaxOutputTokens: config.models.routing.defaultMaxOutputTokens,
-    contextMarginTokens: config.models.routing.contextMarginTokens,
-    now: () => clock.now(),
-  });
-  await modelRouter.refresh();
-
-  // The catalogue is a projection of this router: one list, one resolve and one
-  // routing report, so no client can observe a second routing policy.
-  const quotas = new Map<string, ProviderQuota>();
-  for (const provider of config.models.providers) {
-    quotas.set(provider.id, {
-      requestsPerMinute: provider.requestsPerMinute,
-      requestsPerDay: config.models.dailyRequestBudget,
-      tokensPerDay: config.models.dailyTokenBudget,
-    });
-  }
-  for (const attestation of config.models.attestations) {
-    const current = quotas.get(attestation.providerId);
-    quotas.set(attestation.providerId, {
-      requestsPerMinute: current?.requestsPerMinute ?? PROVIDER_DEFAULTS.requestsPerMinute,
-      requestsPerDay: Math.min(
-        current?.requestsPerDay ?? Number.POSITIVE_INFINITY,
-        attestation.quota.requestsPerDay,
-      ),
-      tokensPerDay: Math.min(
-        current?.tokensPerDay ?? Number.POSITIVE_INFINITY,
-        attestation.quota.tokensPerDay,
-      ),
-    });
-  }
-  const models = createRouterCatalog({
-    router: modelRouter,
-    quotas,
-    usage: async () => {
-      const snapshot = await budget.snapshot(config.auth.ownerId, clock.now());
-      return {
-        requests: snapshot.requests,
-        tokens: snapshot.inputTokens + snapshot.outputTokens + snapshot.reservedTokens,
-      };
-    },
-  });
-
-  // Fail closed before accepting a request. A configured route, a valid API key
-  // and a reachable endpoint prove none of the three things that matter: that a
-  // model is free, that the account cannot be charged, or that the operation is
-  // authorized for this data mode.
-  if (config.engines.native.enabled && !modelRouter.hasVerifiedFreeRoute()) {
-    throw new StartupError([
-      'No configured model has verified zero-cost terms; Coderax Native cannot start without a verified free route.',
-      'Record models.attestations for an account with no payment method and a zero spending cap, or configure a provider whose published price list reports every component as exactly zero.',
-    ]);
-  }
-
-  const native = createNativeAgent({
-    enabled: config.engines.native.enabled,
-    gateway: providerBuild.registrations.length > 0 ? modelRouter : null,
-    planner: createNativePlanner(),
-    modelsAvailable: () => modelRouter.hasVerifiedFreeRoute(),
-    unavailableDetail:
-      providerBuild.registrations.length === 0
-        ? 'No inference provider is configured; add a provider credential or models.providers entry. A key alone would not make a model free.'
-        : 'No verified zero-cost model is currently routable.',
-    maxActionsPerRun: config.engines.native.maxActionsPerRun,
-    maxRunMs: config.engines.native.maxRunMs,
-  });
+  const gateway = buildGateway(input);
 
   const opencodePassword = config.engines.opencode.passwordEnv
     ? env[config.engines.opencode.passwordEnv]
     : undefined;
-  const opencodeModel = config.engines.opencode.model?.includes('/')
-    ? {
-        providerId: config.engines.opencode.model.split('/')[0] ?? '',
-        modelId: config.engines.opencode.model.split('/').slice(1).join('/'),
-      }
-    : undefined;
+  const opencodeModelParts = config.engines.opencode.model?.split('/') ?? [];
+  const opencodeModel =
+    opencodeModelParts.length > 1
+      ? {
+          providerId: opencodeModelParts[0] ?? '',
+          modelId: opencodeModelParts.slice(1).join('/'),
+        }
+      : undefined;
   const opencodeTransport =
     input.externals?.opencode ??
     (config.engines.opencode.baseURL
@@ -527,104 +341,201 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
-  const adapters: AgentAdapter[] = [native, opencode, freebuff];
-  const agents = createAgentRegistry({
-    adapters,
-    defaultAgent:
-      config.engines.default === 'opencode'
-        ? 'opencode'
-        : config.engines.default === 'freebuff'
-          ? 'freebuff'
-          : 'coderax',
+  // The reservation ledger is only as durable as its store, so persistence is
+  // built first. One task may claim at most half the owner's daily allowance,
+  // which stops a single runaway run from consuming the whole free budget.
+  const persistence = await buildPersistence({
+    config,
+    env,
+    clock,
+    ids,
+    ...(input.persistence ?? {}),
   });
+  const budget = createBudgetLedger({
+    store: persistence.budgets,
+    maxRequestsPerDay: config.models.dailyRequestBudget,
+    maxTokensPerDay: config.models.dailyTokenBudget,
+    taskMaxRequests: Math.max(1, Math.ceil(config.models.dailyRequestBudget / 2)),
+    taskMaxTokens: Math.max(1, Math.ceil(config.models.dailyTokenBudget / 2)),
+  });
+
+  // One model authority: the router owns discovery, zero-cost verification,
+  // policy, provider limits, fallback and the durable reservation ledger.
+  const providers = buildProviders({
+    config,
+    env,
+    gateway,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+  const benchmarks = loadBenchmarkInput(input);
+  const models = createModelRouter({
+    providers,
+    benchmarks,
+    attestations: config.models.attestations,
+    preferredRoute: config.models.route,
+    budget,
+    policy: createProviderPolicyRegistry(config.models.policy),
+    ...config.models.routing,
+    now: () => clock.now(),
+  });
+  models.start();
+  // Startup verifies the route before the engine accepts a request: a
+  // deployment with no verified free model fails closed at the first submit
+  // instead of discovering availability later.
+  await models.refresh();
+  // Native reaches a provider through the configured gateway, exactly as before;
+  // the router owns resolution, zero-cost verification and health. With no
+  // provider registered, no route resolves and the agent is honestly unavailable.
+  const agentGateway = gateway;
+
+  const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
+  const assistant = createDesignAssistant({ models, gateway: agentGateway, budget, clock });
+  const studio = createGameStudio({
+    store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
+    artifacts,
+    clock,
+    ids,
+    assistant,
+    maxProjects: config.games.maxProjectsPerOwner,
+  });
+  const gaming = createGameSessions({
+    artifacts,
+    clock,
+    ids,
+    maxPauseMs: config.games.maxPauseMs,
+  });
+
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids, ...(persistence.permissionCollection ? { collection: persistence.permissionCollection } : {}) });
-  const notifications = persistence.notifications;
+  const permissions = persistence.permissions;
+  const permissionsGate = createPermissionGate({ permissions, clock });
 
-  const plugins = await loadPlugins(
-    config.plugins.enabled ? config.plugins.directory ?? null : null,
-  );
-  const approved = new Set(config.mcp.approvedServers);
-  const mcpServers = [
-    ...config.mcp.servers,
-    // A plugin-contributed server executes only when the owner names it; a
-    // plugin cannot widen the MCP surface by being installed.
-    ...plugins.servers.filter((server) => approved.has(server.name)),
-  ].filter((server) => server.transport !== 'stdio' || config.mcp.allowStdio);
-  const mcp = await attachMcpServers(mcpServers);
-  // Semantic retrieval is a hosted inference operation, so it is built from the
-  // router and nothing else. An endpoint, a key and a boolean proved none of what
-  // matters: that the model is free, that the account cannot be charged, that the
-  // `embeddings` operation is authorized, or that the daily budget covers it.
-  const embeddings = (() => {
-    const named = config.knowledge.embeddingModel;
-    if (named === undefined) return null;
-    const matches = modelRouter
-      .list()
-      .models.filter((model) => model.ref.modelId === named)
-      .map((model) => model.ref);
-    const ref = matches[0];
-    if (ref === undefined || matches.length !== 1) {
-      throw new StartupError([
-        matches.length === 0
-          ? `knowledge.embeddingModel names ${named}, which is not in the verified catalogue.`
-          : `knowledge.embeddingModel names ${named}, which more than one provider serves.`,
-        'Semantic retrieval is refused; lexical retrieval is unaffected.',
-      ]);
-    }
-    const authorized = modelRouter.resolve(ref, 'cloud', { operation: 'embeddings' });
-    if (!authorized.ok) {
-      throw new StartupError([
-        `knowledge.embeddingModel ${named} is not an authorized zero-cost embedding route: ${authorized.detail}`,
-        'Semantic retrieval needs a verified zero-cost model and an owner grant for the embeddings operation. Lexical retrieval stays available without it.',
-      ]);
-    }
-    return createRouterEmbeddings({
-      router: modelRouter,
-      ownerId: config.auth.ownerId,
-      model: ref,
-    });
-  })();
-  const knowledge = createKnowledgeStore({
+  // Tools are data plus one function, and only the ones admitted by configuration
+  // are registered. MCP servers and plugin manifests contribute more tools through
+  // the same runtime, so one authorization path covers every source.
+  const knowledge: KnowledgeStore = createKnowledgeStore({
     clock,
     ids,
-    embeddings,
-    maxDocuments: config.knowledge.maxDocuments,
+    embeddings: null,
+    maxDocuments: config.tools.maxKnowledgeDocuments,
   });
-  const builtinTools = config.tools.enabled
-    ? createBuiltinTools({
-        shellEnabled: config.tools.shellEnabled,
-        allowedCommands: config.tools.allowedCommands,
-        networkEnabled: config.tools.networkEnabled,
-        allowedHosts: config.tools.allowedHosts,
-        allowInsecureLoopback: config.tools.allowInsecureLoopback,
-        maxOutputBytes: config.tools.maxOutputBytes,
-        commandTimeoutMs: config.tools.commandTimeoutMs,
-        maxSearchFiles: config.tools.maxSearchFiles,
-        memory,
-        knowledge: config.knowledge.enabled ? knowledge : null,
+  const plugins = await loadPlugins(config.tools.pluginDirectory);
+  const mcp = await attachMcpServers([...config.tools.mcp, ...plugins.servers]);
+  const tools: ToolRuntime | null = config.tools.enabled
+    ? createToolRuntime({
+        tools: [
+          ...createBuiltinTools({
+            shellEnabled: config.tools.shellEnabled,
+            allowedCommands: config.tools.allowedCommands,
+            networkEnabled: config.tools.networkEnabled,
+            allowedHosts: config.tools.allowedHosts,
+            allowInsecureLoopback: config.tools.allowInsecureLoopback,
+            maxOutputBytes: config.tools.maxOutputBytes,
+            commandTimeoutMs: config.tools.commandTimeoutMs,
+            maxSearchFiles: config.tools.maxSearchFiles,
+            memory,
+            knowledge,
+          }),
+          ...mcp.tools,
+        ],
+        catalogueMaxChars: config.tools.catalogueMaxChars,
       })
-    : [];
-  const tools = createToolRuntime({
-    tools: [...builtinTools, ...mcp.tools],
-    catalogueMaxChars: config.tools.catalogueMaxChars,
+    : null;
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway: agentGateway,
+    authorizer: permissionsGate,
+    tools,
+    approvals: ({ ownerId, taskId }) =>
+      createApprovalGate({ permissions, clock, ownerId, taskId, agent: 'coderax' }),
+    limits: {
+      maxSteps: config.engines.native.maxSteps,
+      maxParallelSteps: config.engines.native.maxParallelSteps,
+      maxReplans: config.engines.native.maxReplans,
+      maxStepAttempts: config.engines.native.maxStepAttempts,
+      maxIterations: config.engines.native.maxIterations,
+    },
   });
-
+  const adapters: AgentAdapter[] = [native, opencode, freebuff];
+  const agents = createAgentRegistry({
+    adapters,
+    defaultAgent: config.engines.default === 'opencode'
+      ? 'opencode'
+      : config.engines.default === 'freebuff'
+        ? 'freebuff'
+        : 'coderax',
+  });
+  const notifications = persistence.notifications;
+  const schedules = persistence.schedules;
+  const scheduleNotices = persistence.scheduleNotices;
   const audit = createAuditLog({ clock, ids });
+  const artifactService = createArtifactService({
+    artifacts: persistence.artifacts,
+    blobs: persistence.blobs,
+    capacity: persistence.capacity,
+    ownerId: config.auth.ownerId,
+    conversations,
+    tasks,
+    audit,
+    clock,
+    ids,
+    settings: config.artifacts,
+  });
+  const artifactRoots = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
+  if (!artifactRoots.ok) {
+    throw new StartupError([artifactRoots.detail]);
+  }
+  const deliverables = createDeliverableService({
+    toolkit: createArtifactToolkit(),
+    artifacts: artifactService,
+    audit,
+    clock,
+    ids,
+    roots: artifactRoots.value,
+  });
+  const browserProvider =
+    input.browserProvider ??
+    buildBrowserProvider({
+      config,
+      env,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    });
+  const browser = createBrowserService({
+    config,
+    clock,
+    ids,
+    permissions,
+    audit,
+    provider: browserProvider,
+    store: createBrowserStore(),
+  });
   const events = createEventBus({
-    bufferSize: config.execution.eventBufferSize,
+    store: persistence.events,
+    // The task row is the fenced sequence authority; the bus never numbers an
+    // event on its own, so a superseded generation cannot append one.
+    seq: tasks,
+    pollMs: config.execution.eventPollMs,
     eventId: ids.eventId,
     iso: clock.iso,
   });
+  const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({
     lease,
     clock,
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
+    // The composition root is where supervision exists in production. An
+    // adapter that ignored its abort may still be running; its capability and
+    // workspace are revoked here even if the service already moved on.
+    onAbandoned: async ({ token }) => {
+      await supervisor.abandon({
+        token,
+        reason: 'A cancelled adapter did not stop within the grace period.',
+      });
+    },
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -661,6 +572,34 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
+        name: 'artifacts',
+        required: persistence.driver === 'mongo',
+        check: async () => {
+          if (!persistence.blobs.durable) {
+            // Consistent with the persistence probe: a memory deployment is a
+            // known non-durable configuration, reported as ok-with-limitation
+            // rather than as a fault. What matters is that it is never silent.
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
+            };
+          }
+          try {
+            await persistence.blobs.check();
+            return {
+              status: 'ok' as const,
+              detail: 'Artifact metadata and content are stored durably in MongoDB.',
+            };
+          } catch {
+            return {
+              status: 'failed' as const,
+              detail: 'Artifact storage could not be read.',
+            };
+          }
+        },
+      },
+      {
         name: 'persistence',
         required: true,
         check: async () => ({
@@ -672,46 +611,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         }),
       },
       {
-        name: 'models',
-        required: false,
-        check: async () => {
-          const snapshot = modelRouter.health();
-          return snapshot.verifiedFree > 0
-            ? {
-                status: 'ok' as const,
-                detail: `${snapshot.verifiedFree} verified zero-cost model(s) are routable.`,
-              }
-            : {
-                status: 'failed' as const,
-                detail:
-                  'No verified zero-cost model is routable; paid endpoints are never used as a substitute.',
-              };
-        },
-      },
-      {
         name: 'engine',
         required: true,
         check: async () => {
           const available = agents
             .list()
-            .agents.filter((agent) => {
-              if (!agent.availability.available) return false;
-              // An external engine still needs a verified route: it answers with a
-              // model the router resolved, so a transport alone is not readiness.
-              if (agent.engine === 'native') return true;
-              return (['cloud', 'private'] as const).some(
-                (mode) =>
-                  policy.evaluate({
-                    providerId: agent.engine,
-                    operation: 'external_agent',
-                    mode,
-                    at: clock.now(),
-                  }).allowed &&
-                  (['chat', 'work'] as const).some(
-                    (operation) => models.resolve(null, mode, operation).ok,
-                  ),
-              );
-            });
+            .agents.filter((agent) => agent.availability.available);
           return available.length > 0
             ? {
                 status: 'ok' as const,
@@ -720,7 +625,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
             : {
                 status: 'failed' as const,
                 detail:
-                  'No agent is available: verify a zero-cost model route or configure an injected external transport.',
+                  'No agent is available: configure a zero-cost inference endpoint or an injected external transport.',
               };
         },
       },
@@ -731,18 +636,26 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
-      {
-        name: 'intelligence',
-        required: false,
-        check: async () => ({
-          status: 'ok' as const,
-          detail: `${tools.list().length} tool(s); ${
-            modelRouter.health().verifiedFree
-          } verified zero-cost model(s); ${mcp.names.length} MCP server(s)${
-            mcp.failures.length > 0 ? `; ${mcp.failures.length} unavailable` : ''
-          }.`,
-        }),
-      },
+      ...(config.browsers.enabled
+        ? [
+            {
+              // Optional: no verified browser provider is required to run Work.
+              // It is reported truthfully, and an unavailable one degrades rather
+              // than blocks the engine.
+              name: 'browser',
+              required: false,
+              check: async () => {
+                const capabilities = await browser.capabilities();
+                return capabilities.operational
+                  ? {
+                      status: 'ok' as const,
+                      detail: `Browser provider ${capabilities.provider} is operational.`,
+                    }
+                  : { status: 'degraded' as const, detail: capabilities.detail };
+              },
+            },
+          ]
+        : []),
     ],
   });
 
@@ -760,14 +673,22 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     memory,
     permissions,
     notifications,
+    artifactService,
+    deliverables,
+    schedules,
+    scheduleNotices,
     audit,
     events,
     runner,
     scheduler,
     health,
+    studio,
+    sessions: gaming.sessions,
+    gaming: gaming.agent,
+    browser,
+    supervisor,
     tools,
     knowledge,
-    modelRouter,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -776,16 +697,26 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
   const infrastructure: InfrastructureDependencies = container.dependencies;
 
-  // An external engine is a separate processing authority: it needs its own
-  // policy grant for the exact mode, exactly like a hosted provider does.
   const service = createApplicationService({
     ...infrastructure,
-    externalPolicy: (engine, mode) =>
-      policy.evaluate({ providerId: engine, operation: 'external_agent', mode, at: clock.now() }),
   });
 
   const registry = createRouteRegistry();
-  registerRoutes(registry, service);
+  registerRoutes(registry, service, {
+    server: { name: 'coderax-workflow-engine', version: '0.1.0', startedAt: clock.iso() },
+    limits: {
+      maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+      eventBufferSize: config.execution.eventBufferSize,
+      maxConcurrentTasks: config.execution.maxConcurrentTasks,
+      // The scheduler cannot fire a slot faster than its own tick, so that is
+      // the smallest interval the engine can actually honour.
+      scheduleMinIntervalMs: config.schedules.tickMs,
+      artifactMaxBytes: config.artifacts.maxBytesPerArtifact,
+      memoryMaxValueLength: 20_000,
+    },
+    externalAgents:
+      config.engines.opencode.enabled || config.engines.freebuff.enabled,
+  });
   const missingRoutes = registry.missing();
   if (missingRoutes.length > 0) {
     throw new StartupError(
@@ -827,29 +758,62 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     port: config.server.port,
   });
 
+  let stopPromise: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      service.beginShutdown();
+      models.stop();
+      // Stop accepting new HTTP work immediately; in-flight requests may finish
+      // while the service drains, but they cannot admit new execution.
+      const serverClosed = server.close();
+      await mcp.close().catch(() => undefined);
+      const drain = Promise.all([service.shutdown(), serverClosed]).then(() => persistence.close());
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          drain,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new ShutdownTimeoutError(config.execution.shutdownGraceMs)),
+              config.execution.shutdownGraceMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    })();
+    return stopPromise;
+  };
+
   return {
     dependencies: finalContainer.dependencies,
     service,
     router,
     server,
-    modelRouter: modelRouter,
-    providerPolicy: policy,
     persistence: { driver: persistence.driver },
     start: async () => {
+      // Rebuild quota availability from committed rows before the socket is
+      // open, so an early request cannot be admitted against stale capacity.
+      await service.artifacts.reconcile();
       const { url } = await server.listen();
-      modelRouter.start();
-      // Startup ownership verification: a task whose lease died with a previous
-      // process is retired now, so no client sees it as running forever.
-      await service.recoverInterrupted();
+      try {
+        await service.recoverInterrupted();
+        await service.artifacts.sweepExpiredArtifacts();
+        await deliverables.sweepStaging();
+        service.startSchedules();
+      } catch (error) {
+        try {
+          await stop();
+        } catch (stopError) {
+          if (!(stopError instanceof ShutdownTimeoutError)) await persistence.close();
+        }
+        throw error;
+      }
       return { url };
     },
-    stop: async () => {
-      modelRouter.stop();
-      await service.shutdown();
-      await mcp.close();
-      await server.close();
-      await persistence.close();
-    },
+    stop,
   };
 }
 

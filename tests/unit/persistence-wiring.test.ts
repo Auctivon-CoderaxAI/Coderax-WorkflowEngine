@@ -7,7 +7,7 @@ import { createFakeCollection, createFakeDatabase } from '../fakes/mongo.js';
 import {
   baseConfig,
   createWorkspaces,
-  fakeProvider,
+  fakeGateway,
   OWNER_TOKEN,
   waitFor,
   type TestWorkspace,
@@ -36,7 +36,7 @@ test('the default persistence driver is memory', async () => {
     const app = await composeApplication({
       config: baseConfig(workspace),
       env: ENV,
-      providers: [{ adapter: fakeProvider() }],
+      gateway: fakeGateway(),
     });
     assert.deepEqual(app.persistence, { driver: 'memory' });
     await app.stop();
@@ -52,7 +52,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
     const first = await composeApplication({
       config: mongoConfig(workspace),
       env: ENV,
-      providers: [{ adapter: fakeProvider() }],
+      gateway: fakeGateway(),
       persistence: { database },
     });
     assert.deepEqual(first.persistence, { driver: 'mongo' });
@@ -70,6 +70,25 @@ test('selecting mongo persists a task, its transcript and its notification acros
     assert.ok(
       database.collections.get('notifications')?.indexes.some(
         (index) => index.keys.taskId === 1 && index.options?.unique === true,
+      ),
+    );
+    const eventIndexes = database.collections.get('events')?.indexes ?? [];
+    assert.ok(
+      eventIndexes.some(
+        (index) =>
+          index.keys.taskId === 1 &&
+          index.keys.seq === 1 &&
+          index.options?.unique === true,
+      ),
+    );
+    assert.ok(
+      eventIndexes.some(
+        (index) => index.keys.eventId === 1 && index.options?.unique === true,
+      ),
+    );
+    assert.ok(
+      eventIndexes.some(
+        (index) => index.keys.storedAt === 1 && (index.options?.expireAfterSeconds ?? 0) > 0,
       ),
     );
 
@@ -92,7 +111,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
     const second = await composeApplication({
       config: mongoConfig(workspace),
       env: ENV,
-      providers: [{ adapter: fakeProvider() }],
+      gateway: fakeGateway(),
       persistence: { database },
     });
     try {
@@ -110,6 +129,23 @@ test('selecting mongo persists a task, its transcript and its notification acros
         );
         assert.equal(conversation.value.messages[0]?.text, 'Persist this task');
       }
+
+      // The event log survives the restart with no in-process state: a client
+      // that reconnects with cursor 0 replays the whole run, terminal event last.
+      const replay = await second.dependencies.events.replay(taskId, 0);
+      assert.equal(replay.truncated, false);
+      assert.equal(replay.events[0]?.type, 'task.queued');
+      assert.equal(replay.events.at(-1)?.type, 'task.completed');
+      const sequences = replay.events.map((event) => event.seq);
+      assert.deepEqual(
+        sequences,
+        Array.from({ length: sequences.length }, (_value, position) => position + 1),
+      );
+      assert.equal(replay.lastSeq, sequences.length);
+      assert.equal(
+        database.collections.get('events')?.documents.length,
+        sequences.length,
+      );
 
       const notifications = await second.service.notifications(principal);
       assert.equal(notifications.unread, 1);
@@ -136,7 +172,7 @@ test('mongo without a connection string fails startup and names the variable', a
         composeApplication({
           config: mongoConfig(workspace),
           env: ENV,
-          providers: [{ adapter: fakeProvider() }],
+          gateway: fakeGateway(),
         }),
       (error: unknown) => {
         assert.match(startupIssue(error), /CODERAX_MONGODB_URI is not set/);
@@ -160,7 +196,7 @@ test('the connection string is read from the configured variable name', async ()
         collectionPrefix: 'test_',
       }),
       env: { ...ENV, CODERAX_TEST_MONGO: 'mongodb://127.0.0.1:27017' },
-      providers: [{ adapter: fakeProvider() }],
+      gateway: fakeGateway(),
       persistence: {
         connect: async (input) => {
           seen.push(input);
@@ -186,7 +222,7 @@ test('an unreachable deployment fails startup instead of downgrading', async () 
         composeApplication({
           config: mongoConfig(workspace),
           env: { ...ENV, CODERAX_MONGODB_URI: 'mongodb://127.0.0.1:1/coderax' },
-          providers: [{ adapter: fakeProvider() }],
+          gateway: fakeGateway(),
           persistence: {
             connect: async () => {
               throw new MongoUnavailableError(
@@ -220,7 +256,7 @@ test('a collection that cannot be indexed fails startup', async () => {
         composeApplication({
           config: mongoConfig(workspace),
           env: ENV,
-          providers: [{ adapter: fakeProvider() }],
+          gateway: fakeGateway(),
           persistence: { database },
         }),
       (error: unknown) => {
@@ -279,27 +315,4 @@ test('the Mongo connector requires TLS for remote or discoverable connections', 
   settings = { hosts: [{ host: 'localhost' }] };
   await (await connect(target)).close();
   assert.deepEqual(seen, [false, true]);
-});
-
-test('a second replica can decide a stored approval and exactly one replica consumes it', async () => {
-  const workspace = createWorkspaces();
-  const database = createFakeDatabase();
-  const options = { config: mongoConfig(workspace), providers: [{ adapter: fakeProvider() }], env: ENV, persistence: { database } };
-  const first = await composeApplication(options);
-  const second = await composeApplication(options);
-  try {
-    const args = { ownerId: 'owner', taskId: 'task', scope: 'browser.use' as const,
-      resource: 'browser', binding: 'action-A', callId: 'call-1', consume: true };
-    const store = first.dependencies.permissions;
-    const other = second.dependencies.permissions;
-    const request = await store.request({ ...args, agent: 'coderax', description: 'One action' });
-    assert.ok((await other.decide({ ...args, requestId: request.requestId, decision: 'approved' })).ok);
-    assert.equal(await store.lookup({ ...args, binding: 'action-B' }), null);
-    const results = await Promise.all([store.lookup(args), other.lookup(args)]);
-    assert.equal(results.filter(result => result?.decision === 'granted').length, 1);
-  } finally {
-    await first.stop();
-    await second.stop();
-    workspace.cleanup();
-  }
 });

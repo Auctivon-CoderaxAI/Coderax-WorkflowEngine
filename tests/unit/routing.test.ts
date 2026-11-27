@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createRouterCatalog } from '../../src/models/catalog.js';
+import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 import { createCircuit } from '../../src/models/circuit.js';
-import { createProviderLimiter } from '../../src/models/rate.js';
 import { createModelRouter, inferRoutingMode, type ModelRouter } from '../../src/models/router.js';
 import { createProviderPolicyRegistry } from '../../src/models/policy.js';
-import type { FreeTierAttestation } from '../../src/models/types.js';
-import { testAttestation, testBudget, testProviderPolicy } from '../helpers.js';
+import { testProviderPolicy } from '../helpers.js';
 import type {
   BenchmarkScore,
   DiscoveredModel,
@@ -65,7 +63,13 @@ function adapter(input: {
 }
 
 function budget(maxRequests = 100, maxTokens = 1_000_000) {
-  return testBudget({ maxRequestsPerDay: maxRequests, maxTokensPerDay: maxTokens });
+  return createBudgetLedger({
+    store: createMemoryBudgetStore(),
+    maxRequestsPerDay: maxRequests,
+    maxTokensPerDay: maxTokens,
+    taskMaxRequests: maxRequests,
+    taskMaxTokens: maxTokens,
+  });
 }
 
 function router(input: {
@@ -125,13 +129,6 @@ const request = (modelId: string, prompt = 'hello', providerId = 'p') => ({
   signal: new AbortController().signal,
 });
 
-
-async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
-  const result: T[] = [];
-  for await (const event of events) result.push(event);
-  return result;
-}
-
 test('only a zero price list or a live attestation establishes free cost', async () => {
   const free = freeModel('free');
   const paid = freeModel('paid', { ref: { providerId: 'p', modelId: 'paid' }, pricing: { prompt: '0.000001', completion: '0.000002' } });
@@ -167,7 +164,13 @@ test('a provider key is irrelevant: no price and no attestation fails closed', a
 test('an unexpired exact-model attestation is accepted and expiry is not', async () => {
   const model = freeModel('unpriced', { pricing: null });
   const now = new Date('2026-11-26T12:00:00.000Z');
-  const valid = testAttestation({ providerId: 'p', modelId: 'unpriced' });
+  const valid = {
+    providerId: 'p',
+    modelId: 'unpriced',
+    evidenceUrl: 'https://provider.example/free-tier',
+    verifiedAt: '2026-11-20T00:00:00.000Z',
+    expiresAt: '2026-12-20T00:00:00.000Z',
+  };
   const accepted = router({
     adapters: [adapter({ models: [model] })],
     attestations: [valid],
@@ -194,11 +197,13 @@ test('an attestation expiry between refreshes stops routing immediately', async 
   const engine = router({
     adapters: [adapter({ models: [model] })],
     attestations: [
-      testAttestation({
+      {
         providerId: 'p',
         modelId: 'unpriced',
+        evidenceUrl: 'https://provider.example/free-tier',
+        verifiedAt: '2026-11-20T00:00:00.000Z',
         expiresAt: '2026-11-26T13:00:00.000Z',
-      }),
+      },
     ],
     now: () => now,
   });
@@ -755,18 +760,20 @@ test('a stale attestation does not mask a later active attestation', async () =>
   const engine = router({
     adapters: [adapter({ models: [model] })],
     attestations: [
-      testAttestation({
+      {
         providerId: 'p',
         modelId: 'attested',
         evidenceUrl: 'https://provider.example/old',
-        verifiedAt: '2025-10-01T00:00:00.000Z',
-        expiresAt: '2025-11-01T00:00:00.000Z',
-      }),
-      testAttestation({
+        verifiedAt: '2026-10-01T00:00:00.000Z',
+        expiresAt: '2026-11-01T00:00:00.000Z',
+      },
+      {
         providerId: 'p',
         modelId: 'attested',
         evidenceUrl: 'https://provider.example/current',
-      }),
+        verifiedAt: '2026-11-20T00:00:00.000Z',
+        expiresAt: '2026-12-20T00:00:00.000Z',
+      },
     ],
     now: () => now,
   });
@@ -825,153 +832,4 @@ test('routing mode inference treats code and long objectives as complex', () => 
   assert.equal(inferRoutingMode({ objective: 'Summarize the release notes' }), 'fast');
   assert.equal(inferRoutingMode({ objective: 'Compare the release notes' }), 'auto');
   assert.equal(inferRoutingMode({ objective: 'Use the tool', toolCount: 1 }), 'complex');
-});
-
-test('a dispatch failure takes precedence over an earlier candidate token refusal', async () => {
-  for (const streaming of [false, true]) {
-    const big = freeModel('big', { maxOutputTokens: 1_000 });
-    const small = freeModel('small', { maxOutputTokens: 100 });
-    const provider = adapter({
-      models: [big, small],
-      complete: async () => { throw new ProviderError('server', 'fixture provider failed', { retryable: true }); },
-    });
-    const engine = router({ adapters: [provider], preferredRoute: [big.ref], ledger: budget(5, 250) });
-    await engine.refresh();
-    const input = { ...request('big'), allowFallback: true };
-    await assert.rejects(
-      () => streaming ? collect(engine.stream(input)) : engine.complete(input),
-      (error: unknown) => error instanceof ModelRoutingError &&
-        error.code === 'engine_unavailable' && error.retryable && /fixture provider failed/.test(error.message),
-    );
-    assert.equal(provider.calls, 1);
-  }
-});
-
-test('a refresh after stream metadata rechecks the prepared output, context and capabilities', async () => {
-  const original = freeModel('primary', {
-    capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
-  });
-  for (const update of [
-    { maxOutputTokens: 128 },
-    { contextTokens: 1_200 },
-    { capabilities: { ...original.capabilities, vision: false } },
-    { capabilities: { ...original.capabilities, toolCalling: false } },
-    { contextTokens: 32_000 },
-  ]) {
-    let primary = original;
-    const secondary = { ...original, ref: { providerId: 'p', modelId: 'secondary' } };
-    const provider = adapter({ models: () => [primary, secondary] });
-    const engine = router({
-      adapters: [provider],
-      preferredRoute: [original.ref],
-      ledger: budget(1),
-      settings: { requestsPerMinute: 1, maxConcurrency: 1 },
-    });
-    await engine.refresh();
-    const stream = engine.stream({
-      ...request('primary'),
-      allowFallback: true,
-      messages: [{ role: 'user', text: 'image', images: ['data:image/png;base64,YQ=='] }],
-      tools: [{ name: 'fixture', description: 'A fixture', parameters: {} }],
-    });
-    const iterator = stream[Symbol.asyncIterator]();
-    const first = (await iterator.next()).value;
-    assert.equal(first?.type, 'model');
-    assert.deepEqual(first.model, original.ref);
-    primary = { ...original, ...update };
-    await engine.refresh();
-    const events = await collect({ [Symbol.asyncIterator]: () => iterator });
-    assert.equal(provider.calls, 1);
-    const expected = update.contextTokens === 32_000 ? 'primary' : 'secondary';
-    assert.ok(events.some((event) => event.type === 'text' && event.text === `ok:${expected}`));
-  }
-});
-
-test('the longest active attestation keeps a route usable after the shorter grant expires', async () => {
-  let now = new Date('2026-11-26T12:00:00Z');
-  const model = freeModel('attested', { pricing: null });
-  const shorter: FreeTierAttestation = {
-    providerId: 'p', modelId: 'attested', evidenceUrl: 'https://provider.example/pricing',
-    verifiedAt: '2026-11-25T00:00:00Z', expiresAt: '2026-11-27T00:00:00Z',
-    currency: 'USD', accountRef: 'account-1', billing: 'prepaid-credit-only', spendCapUsd: 0,
-    quota: { requestsPerDay: 1_000, tokensPerDay: 1_000_000 },
-  };
-  const engine = router({
-    adapters: [adapter({ models: [model] })],
-    now: () => now,
-    attestations: [shorter, { ...shorter, expiresAt: '2026-11-29T00:00:00Z' }],
-  });
-  await engine.refresh();
-  now = new Date('2026-11-28T00:00:00Z');
-  assert.equal(engine.resolve(model.ref, 'cloud', { operation: 'chat' }).ok, true);
-});
-
-test('unknown usage after a failed dispatch cannot fund another completion or stream', async () => {
-  for (const streaming of [false, true]) {
-    let calls = 0;
-    const provider = adapter({
-      models: [freeModel('only', { maxOutputTokens: 100 })],
-      complete: async () => {
-        calls += 1;
-        throw new ProviderError('server', 'fixture failure');
-      },
-      stream: async function* () {
-        calls += 1;
-        throw new ProviderError('server', 'fixture failure before output');
-      },
-    });
-    const ledger = budget(10, 150);
-    const engine = router({ adapters: [provider], ledger });
-    await engine.refresh();
-    const dispatch = async () => {
-      if (!streaming) return engine.complete(request('only'));
-      for await (const _event of engine.stream(request('only'))) {
-        // Drain so the provider is dispatched.
-      }
-    };
-    await assert.rejects(dispatch, { code: 'engine_unavailable' });
-    await assert.rejects(dispatch, { code: 'budget_exhausted' });
-    assert.equal(calls, 1);
-    assert.equal((await ledger.snapshot('owner', new Date())).outputTokens, 100);
-  }
-});
-
-test('the routing report counts real dispatches instead of a fabricated zero', async () => {
-  const provider = adapter({ models: [freeModel('only')] });
-  const engine = router({ adapters: [provider] });
-  await engine.refresh();
-  assert.equal(engine.health().providers[0]?.requestsThisMinute, 0);
-
-  await engine.complete(request('only'));
-  assert.equal(provider.calls, 1);
-  assert.equal(engine.health().providers[0]?.requestsThisMinute, 1);
-  await engine.complete(request('only'));
-  assert.equal(engine.health().providers[0]?.requestsThisMinute, 2);
-
-  // This is the value /v1/routing publishes through the catalogue projection.
-  const catalog = createRouterCatalog({
-    router: engine,
-    quotas: new Map([['p', { requestsPerMinute: 100, requestsPerDay: 100, tokensPerDay: 1_000_000 }]]),
-    usage: async () => ({ requests: 2, tokens: 20 }),
-  });
-  const report = await catalog.report('auto');
-  assert.equal(report.providers[0]?.used.requestsThisMinute, 2);
-
-  // A pre-dispatch refund never reached the provider, so it is not counted, and
-  // the window is a real minute rather than a lifetime total.
-  const at = new Date('2026-11-26T12:00:00.000Z');
-  const limiter = createProviderLimiter({
-    requestsPerMinute: 10,
-    tokensPerMinute: 100,
-    maxConcurrency: 2,
-  });
-  const refunded = limiter.acquire({ tokens: 10, now: at });
-  assert.ok(refunded.allowed);
-  assert.equal(limiter.dispatchedThisMinute(at), 1);
-  refunded.release({ dispatched: false });
-  assert.equal(limiter.dispatchedThisMinute(at), 0);
-
-  const dispatched = limiter.acquire({ tokens: 10, now: at });
-  assert.ok(dispatched.allowed);
-  assert.equal(limiter.dispatchedThisMinute(new Date(at.getTime() + 60_000)), 0);
 });

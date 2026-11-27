@@ -381,12 +381,12 @@ export async function connectMcpServer(config: McpServerConfig): Promise<McpConn
 
 /** A conservative validation schema derived from a server-provided inputSchema. */
 export function schemaFromJsonSchema(input: Record<string, unknown> | undefined): ZodTypeAny {
-  if (!input) return z.record(z.unknown());
+  if (!input) return z.record(z.string(), z.unknown());
   const properties =
     typeof input.properties === 'object' && input.properties !== null
       ? (input.properties as Record<string, unknown>)
       : null;
-  if (!properties) return z.record(z.unknown());
+  if (!properties) return z.record(z.string(), z.unknown());
   const required = Array.isArray(input.required)
     ? input.required.filter((entry): entry is string => typeof entry === 'string')
     : [];
@@ -449,29 +449,4 @@ export type McpAttachment = {
  * Connects every approved server. One unavailable server is reported and does
  * not stop the engine: it simply contributes no tools.
  */
-export async function attachMcpServers(configs: McpServerConfig[]): Promise<McpAttachment> {
-  const connections: McpConnection[] = [];
-  const failures: Array<{ name: string; detail: string }> = [];
-  const tools: Tool[] = [];
-
-  for (const config of configs) {
-    try {
-      const connection = await connectMcpServer(config);
-      connections.push(connection);
-      tools.push(...(await createMcpTools({ connection, ...(config.source ? { source: config.source } : {}) })));
-    } catch {
-      failures.push({ name: sanitizeName(config.name), detail: 'The MCP server could not be attached.' });
-    }
-  }
-
-  return {
-    tools,
-    names: connections.map((connection) => connection.name),
-    failures,
-    close: async () => {
-      await Promise.all(connections.map((connection) => connection.close().catch(() => undefined)));
-    },
-  };
-}
-
 export { parametersToJsonSchema };

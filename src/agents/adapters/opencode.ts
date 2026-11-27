@@ -125,7 +125,16 @@ export function createOpenCodeHttpTransport(input: {
         sessionId = session.id;
         report({ type: 'step.started', stepId: 'opencode-1', title: 'Execute with OpenCode' });
 
-        const model = input.model ?? { providerId: run.model.providerId, modelId: run.model.modelId };
+        const chosen = run.model ?? input.model ?? null;
+        if (!chosen) {
+          return {
+            ok: false,
+            code: 'not_configured',
+            detail: 'No verified zero-cost model was resolved for the OpenCode run.',
+            retryable: false,
+          };
+        }
+        const model = { providerId: chosen.providerId, modelId: chosen.modelId };
         const prompt = [
           `Objective:\n${run.objective}`,
           '',

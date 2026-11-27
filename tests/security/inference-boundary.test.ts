@@ -50,6 +50,8 @@ function offenders(pattern: RegExp, allowed: (path: string) => boolean): string[
 }
 
 const isAdapter = (path: string): boolean => path.startsWith('models/providers/');
+/** The single inference gateway main composes; providers are reached through it. */
+const isGateway = (path: string): boolean => path === 'agents/native/gateway.ts';
 
 /**
  * Egress that is not inference. The external-agent transport and the MCP client
@@ -64,9 +66,21 @@ const isAdapter = (path: string): boolean => path.startsWith('models/providers/'
  * still transmit document text with no cost verdict, no operation grant and no
  * reservation. It now reaches a provider only through the router.
  */
-const nonInferenceTransport = new Set(['agents/adapters/opencode.ts', 'mcp/client.ts']);
+const nonInferenceTransport = new Set([
+  'agents/adapters/opencode.ts',
+  'mcp/client.ts',
+  // Owner-scoped egress seams: an allowed tool, a browser fetch, a media
+  // provider, an artifact download and the guarded network primitive. None of
+  // them selects an inference model, so none bypasses router policy or budget.
+  'security/network.ts',
+]);
+const nonInferencePrefixes = ['tools/', 'browser/', 'media/', 'artifacts/'];
 
-const mayEgress = (path: string): boolean => isAdapter(path) || nonInferenceTransport.has(path);
+const mayEgress = (path: string): boolean =>
+  isAdapter(path) ||
+  isGateway(path) ||
+  nonInferenceTransport.has(path) ||
+  nonInferencePrefixes.some((prefix) => path.startsWith(prefix));
 
 /**
  * The one guarded outbound transport: scheme validation, DNS resolution, a
@@ -75,7 +89,11 @@ const mayEgress = (path: string): boolean => isAdapter(path) || nonInferenceTran
  * client, and it never selects a model.
  */
 const guardedTransport = 'security/network.ts';
-const mayOpenSocket = (path: string): boolean => isAdapter(path) || path === guardedTransport;
+const mayOpenSocket = (path: string): boolean =>
+  isAdapter(path) ||
+  isGateway(path) ||
+  path === guardedTransport ||
+  path === 'agents/adapters/opencode.ts';
 
 test('only a provider adapter performs network I/O', () => {
   // The adapter receives `fetchImpl` from the composition root; it is the only

@@ -84,7 +84,9 @@ export function createMongoBudgetStore(input: {
       {
         key,
         requests: { $lt: maxRequests },
-        committed: { $lte: maxTokens - tokens },
+        // `$lt` refuses a reached ceiling even for a zero-token reservation;
+        // `$lte` alone would admit one more request with no headroom.
+        committed: { $lt: maxTokens, $lte: maxTokens - tokens },
       },
       { $inc: { requests: 1, reservedTokens: tokens, committed: tokens } },
       { returnDocument: 'after', includeResultMetadata: false },

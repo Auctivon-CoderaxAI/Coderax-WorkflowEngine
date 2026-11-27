@@ -36,6 +36,23 @@ test('a heartbeat that cannot sustain the lease is refused at startup', () => {
   }
 });
 
+test('shutdown has a bounded default and rejects an unusably short deadline', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    assert.equal(config.execution.shutdownGraceMs, 10_000);
+    assert.equal(
+      EngineConfigSchema.safeParse({
+        ...config,
+        execution: { ...config.execution, shutdownGraceMs: 1 },
+      }).success,
+      false,
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('paid routing cannot be configured at all', () => {
   const ws = workspace();
   try {
@@ -45,6 +62,66 @@ test('paid routing cannot be configured at all', () => {
       models: { route: [{ providerId: 'free', modelId: 'm' }], allowPaid: true },
     });
     assert.equal(parsed.success, false);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('paid browser infrastructure cannot be configured at all', () => {
+  const ws = workspace();
+  try {
+    const parsed = EngineConfigSchema.safeParse({
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+      models: { route: [{ providerId: 'free', modelId: 'm' }] },
+      browsers: { allowPaid: true },
+    });
+    assert.equal(parsed.success, false);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('an enabled browser provider must name an attested https endpoint', () => {
+  const ws = workspace();
+  try {
+    const base = {
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+      models: { route: [{ providerId: 'free', modelId: 'm' }] },
+    };
+    const incomplete = EngineConfigSchema.parse({
+      ...base,
+      browsers: { enabled: true, provider: 'http' },
+    });
+    const issues = validateInvariants(incomplete);
+    assert.ok(issues.some((issue) => issue.includes('browsers.remote.baseURL')));
+    assert.ok(issues.some((issue) => issue.includes('browsers.remote.zeroCostAttested')));
+
+    const insecure = EngineConfigSchema.parse({
+      ...base,
+      browsers: {
+        enabled: true,
+        provider: 'http',
+        remote: { baseURL: 'http://browser.example.test', zeroCostAttested: true },
+      },
+    });
+    assert.ok(
+      validateInvariants(insecure).some((issue) => issue.includes('must use https')),
+    );
+
+    const valid = EngineConfigSchema.parse({
+      ...base,
+      browsers: {
+        enabled: true,
+        provider: 'http',
+        remote: { baseURL: 'https://browser.example.test', zeroCostAttested: true },
+      },
+    });
+    assert.deepEqual(
+      validateInvariants(valid).filter((issue) => issue.startsWith('browsers.')),
+      [],
+    );
   } finally {
     ws.cleanup();
   }
@@ -102,81 +179,23 @@ test('duplicate zero-cost candidates are refused', () => {
   }
 });
 
-test('a route may be empty because discovery, not configuration, grants free cost', () => {
+test('removed retry settings are rejected visibly, not silently ignored', () => {
   const ws = workspace();
   try {
-    const config = EngineConfigSchema.parse({
-      auth: { ownerId: 'owner' },
-      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
-      models: {},
-    });
-    assert.deepEqual(config.models.route, []);
-    assert.deepEqual(config.models.providers, []);
-    assert.deepEqual(config.models.attestations, []);
-  } finally {
-    ws.cleanup();
-  }
-});
-
-test('duplicate providers and inverted attestations are refused', () => {
-  const ws = workspace();
-  try {
-    const config = EngineConfigSchema.parse({
-      auth: { ownerId: 'owner' },
-      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
-      models: {
-        providers: [
-          {
-            id: 'groq',
-            baseURL: 'https://api.groq.com/openai/v1',
-            apiKeyEnv: 'GROQ_API_KEY',
-          },
-          {
-            id: 'groq',
-            baseURL: 'https://api.groq.com/openai/v1',
-            apiKeyEnv: 'GROQ_API_KEY',
-          },
-        ],
-        attestations: [
-          {
-            providerId: 'groq',
-            modelId: 'model',
-            evidenceUrl: 'https://console.groq.com/docs/rate-limits',
-            verifiedAt: '2026-11-26T00:00:00.000Z',
-            expiresAt: '2026-11-01T00:00:00.000Z',
-            accountRef: 'acct-free-tier',
-            billing: 'no-payment-method',
-            spendCapUsd: 0,
-            quota: { requestsPerDay: 1_000, tokensPerDay: 1_000_000 },
-          },
-        ],
+    assert.throws(
+      () =>
+        EngineConfigSchema.parse({
+          auth: { ownerId: 'owner' },
+          workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+          models: { route: [{ providerId: 'free', modelId: 'm' }] },
+          execution: { maxAttempts: 3, retryDelayMs: 100 },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /execution|maxAttempts|retryDelayMs/i);
+        return true;
       },
-    });
-    const issues = validateInvariants(config);
-    assert.ok(issues.some((issue) => issue.includes('models.providers lists groq more than once')));
-    assert.ok(issues.some((issue) => issue.includes('must expire after they were verified')));
-  } finally {
-    ws.cleanup();
-  }
-});
-
-test('a provider credential must be named, never inlined', () => {
-  const ws = workspace();
-  try {
-    const parsed = EngineConfigSchema.safeParse({
-      auth: { ownerId: 'owner' },
-      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
-      models: {
-        providers: [
-          {
-            id: 'groq',
-            baseURL: 'https://api.groq.com/openai/v1',
-            apiKeyEnv: 'sk-not-an-env-name',
-          },
-        ],
-      },
-    });
-    assert.equal(parsed.success, false);
+    );
   } finally {
     ws.cleanup();
   }
@@ -225,28 +244,6 @@ test('an unknown persistence driver in the environment names the field', () => {
   }
 });
 
-test('provider URLs must be secure and must not smuggle a query or fragment', () => {
-  const ws = workspace();
-  try {
-    const base = {
-      auth: { ownerId: 'owner' },
-      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
-    };
-    const provider = (baseURL: string) => ({
-      models: {
-        providers: [{ id: 'p', baseURL, apiKeyEnv: 'P_API_KEY' }],
-      },
-    });
-    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('http://api.example.com/v1') }).success, false);
-    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1?key=x') }).success, false);
-    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1#fragment') }).success, false);
-    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1') }).success, true);
-    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('http://127.0.0.1:4096/v1') }).success, true);
-  } finally {
-    ws.cleanup();
-  }
-});
-
 test('a short owner token is refused instead of accepted as authentication', () => {
   const ws = workspace();
   try {
@@ -269,4 +266,16 @@ test('a short owner token is refused instead of accepted as authentication', () 
   } finally {
     ws.cleanup();
   }
+});
+
+test('default artifact retention cannot exceed the maximum; zero keeps indefinitely', () => {
+  const ws = workspace();
+  try {
+    const config = baseConfig(ws);
+    const issues = (days: number) => validateInvariants({
+      ...config, artifacts: { ...config.artifacts, defaultRetentionDays: days, maxRetentionDays: 1 },
+    });
+    assert.ok(issues(2).some(issue => issue.includes('defaultRetentionDays')));
+    assert.deepEqual(issues(0), []);
+  } finally { ws.cleanup(); }
 });

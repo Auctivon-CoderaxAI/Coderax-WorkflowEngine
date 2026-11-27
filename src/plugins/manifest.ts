@@ -20,7 +20,7 @@ const ManifestServer = z.discriminatedUnion('transport', [
       name: z.string().min(1).max(60),
       transport: z.literal('http'),
       url: z.string().url(),
-      headersEnv: z.record(z.string().min(1).max(200)).optional(),
+      headersEnv: z.record(z.string(), z.string().min(1).max(200)).optional(),
     })
     .strict(),
   z

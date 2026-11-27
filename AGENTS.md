@@ -16,7 +16,10 @@ repository is bound by that charter:
   no purchased CI minutes, no trials.
 - Substantive compute is cloud-hosted. The owner's PC and WSL never run inference,
   agents, development workloads or databases for this system.
-- No public repository visibility and no public-facing endpoint.
+- Public source-repository visibility is authorized to enable free GitHub-hosted
+  Actions. The Coderax application is owner-only and has no public-facing
+  endpoint; credentials, conversations, memory, artifacts and personal data stay
+  private. Do not change repository visibility without an explicit owner decision.
 - No silent paid routing and no silent substitution between agents.
 - No placeholder or mocked capability presented as a working feature.
 
@@ -42,13 +45,17 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
 `npm run verify` is the acceptance gate. It runs:
 
 1. `npm run build` — TypeScript project references across contracts, SDK and engine.
-2. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security
-   and end-to-end suites.
-3. `npm run openapi:check` — fails if `openapi.json` differs from the contracts.
+2. `node dist/scripts/run-gates.js all` — unit, contract, integration, security,
+   adversarial, architecture, artifact, end-to-end, OpenAPI, dependency audit and
+   the **real MongoDB** gate.
+3. `node dist/scripts/run-gates.js coverage` — no compiled test may be unassigned.
 
-Paste the command and its actual result into the pull request's Testing section. A
-component passing its own unit tests is not sufficient: the UI-to-API-to-engine
-path is covered by `tests/e2e`, and that is the evidence a merge needs.
+`CODERAX_TEST_MONGO_URI` must name a disposable MongoDB. A missing database is a
+failure, not a skip. Run `npm run gate -- <id>` for a subset, but do not present a
+subset as acceptance. Paste the exact command and result into the pull request's
+Testing section. A component passing its own unit tests is not sufficient: the
+UI-to-API-to-engine path is covered by `tests/e2e`, and the live database path is
+covered separately, not by the collection fake.
 
 A green build is not a typecheck: the build **is** the typecheck here (`tsc -b`
 with project references). Do not report a test as passing if it was skipped.

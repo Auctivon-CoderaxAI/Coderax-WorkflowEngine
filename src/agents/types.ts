@@ -7,13 +7,16 @@ import type {
   EngineCapabilities,
   EngineFailureCode,
   EngineId,
-  KnowledgeSearchResult,
   ModelRef,
-  RoutingMode,
   Usage,
 } from '@coderax/contracts';
-import type { ProcessingOperation } from '../models/policy.js';
-import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
+import type { GameRunSpec, TaskWorkload } from '../domain.js';
+import type {
+  ReasoningMode,
+  TaskEvidence,
+  TaskPlan,
+  TaskVerification,
+} from '../domain.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -23,112 +26,63 @@ import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
  * runner or a path to private data.
  */
 
+/**
+ * One completed earlier turn. The engine builds these from the stored
+ * conversation, so an agent sees a follow-up in context without owning storage.
+ */
 export type AgentHistoryTurn = {
   role: 'user' | 'assistant';
   text: string;
-};
-
-export type PlannedStep = {
-  id: string;
-  title: string;
-  dependsOn?: string[];
-  successCriteria?: string;
-};
-
-/** One tool call the engine dispatched, recorded before and after the effect. */
-export type ExecutedToolAction = {
-  stepId: string;
-  digest: string;
-  tool: string;
-  callId: string;
-  /**
-   * `awaiting_approval` means the gate stopped the call before it could have an
-   * effect, so the approved replay may execute exactly this call once.
-   * `dispatched` means the engine started the call and does not know whether the
-   * effect landed; it must never be replayed automatically.
-   */
-  state: 'awaiting_approval' | 'dispatched' | 'completed';
-  ok: boolean;
-  output: string;
-};
-
-export type AgentExecutionState = {
-  /** Observations per step, so a resumed step keeps what it already learned. */
-  observations: Record<string, string[]>;
-  executed: ExecutedToolAction[];
-};
-
-export type StepResult = { id: string; title: string; text: string };
-
-export type AgentContext = {
-  taskId?: string | null;
-  tools?: { runtime: ToolRuntime; gate: ApprovalGate };
-  memory?: { list: () => Promise<string[]> };
-  knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
-  /** The exact action an owner decision applies to; kept until it is settled. */
-  pendingAction?: {
-    stepId: string;
-    json: string;
-    /** Execution slot bound to the approval; survives the suspension. */
-    callId?: string;
-    /** The exact decision the owner granted. */
-    requestId?: string;
-  } | null;
-  savePendingAction?: (action: {
-    stepId: string;
-    json: string;
-    callId?: string;
-    requestId?: string;
-  } | null) => Promise<boolean>;
-  /** Persists the whole plan (and its graph) before its first step runs. */
-  savePlan?: (steps: PlannedStep[]) => Promise<boolean>;
-  plannedSteps?: PlannedStep[];
-  completedSteps?: string[];
-  completedResults?: StepResult[];
-  priorText?: string;
-  /** Durable observations and dispatched actions restored on resume. */
-  executionState?: AgentExecutionState;
-  saveExecutionState?: (state: AgentExecutionState) => Promise<boolean>;
-  saveStepResult?: (result: StepResult) => Promise<boolean>;
-  /** True only when the selected model's evidence records native tool support. */
-  nativeTools?: boolean;
-  /** Hard ceilings; the composition root supplies them from configuration. */
-  maxActionsPerRun?: number;
-  maxRunMs?: number;
-  /** Owner approval policy for tool actions that need a decision. */
-  requireApproval?: boolean;
 };
 
 export type AgentRunRequest = {
   ownerId: string;
   tenantId: string | null;
   conversationId: string;
+  /** Absent for a synchronous Chat turn, which is not a durable task. */
+  taskId?: string;
+  /** `work` is the ordinary agent loop; `game` is a Native gaming-agent session. */
+  workload: TaskWorkload;
+  game: GameRunSpec | null;
   objective: string;
   /**
    * Earlier turns, oldest first. The current objective is not repeated here: it
    * is passed separately so an agent never answers the same message twice.
    */
   history?: AgentHistoryTurn[];
-  /** Already resolved by the model catalogue; never a raw provider override. */
-  model: ModelRef;
-  /** Automatic, Fast or Complex ranking, chosen by the engine from the task. */
-  routing: RoutingMode;
-  /** False pins the owner's explicit model; a route-chosen model may fall back. */
-  allowFallback: boolean;
+  /** Already resolved by the model catalogue; null for a deterministic game session. */
+  model: ModelRef | null;
   mode: DataMode;
-  /** The exact processing operation this run performs through the gateway. */
-  operation: ProcessingOperation;
   workspaceRoot: string;
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
-  context?: AgentContext;
+  /** `auto` lets the agent choose; a resumed task passes its resolved mode. */
+  reasoning?: 'auto' | 'fast' | 'complex';
+  /** Steps the durable checkpoint already completed; resume skips exactly these. */
+  completedSteps?: string[];
+  /** The persisted dependency-aware plan, reused on resume or retry. */
+  plan?: TaskPlan | null;
+  /** Evidence already produced by completed steps in an earlier generation. */
+  evidence?: TaskEvidence[];
+  /** Iterations already consumed by a suspended generation; a resume continues the same bound. */
+  iterationsUsed?: number;
 };
 
 export type AgentReportEvent =
-  | { type: 'step.started'; stepId: string; title: string }
-  | { type: 'step.completed'; stepId: string; title: string; output?: string }
-  | { type: 'step.blocked'; stepId: string; title: string; detail: string }
+  /** The planner produced or revised a dependency-aware plan; nothing ran yet. */
+  | { type: 'plan.ready'; plan: TaskPlan; iterations?: number }
+  | { type: 'budget'; iterations: number }
+  | { type: 'step.started'; stepId: string; title: string; iterations?: number }
+  | {
+      type: 'step.completed';
+      stepId: string;
+      title: string;
+      attempts?: number;
+      evidence?: TaskEvidence;
+      iterations?: number;
+    }
+  | { type: 'step.failed'; stepId: string; title: string; detail: string; iterations?: number }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
@@ -149,23 +103,34 @@ export type AgentRunOutcome =
       ok: true;
       summary: string;
       usage?: Usage;
-      /** The model that actually served the run, when routing replaced one. */
-      model?: ModelRef;
-      /** Model requests this run issued, for the durable per-task ledger. */
-      requests?: number;
+      verification?: TaskVerification;
+      artifacts?: Array<{
+        path: string;
+        bytes?: number;
+        digest?: string;
+      }>;
     }
   | {
       ok: false;
       code: EngineFailureCode;
       detail: string;
       retryable: boolean;
-      requests?: number;
+      usage?: Usage;
     };
+
+export type { ReasoningMode };
 
 export type AgentAdapter = {
   agent: AgentId;
   engine: EngineId;
   capabilities: EngineCapabilities;
+  /**
+   * How this adapter's side effects are authorized. `none` means it has no side
+   * effects at all; `gated` means every one goes through the permission store;
+   * `ungated` means it can act without a scoped owner decision. A durable
+   * schedule may only target `none` or `gated`, because nobody is watching it.
+   */
+  sideEffects: 'none' | 'gated' | 'ungated';
   isolation: AgentIsolation;
   availability: () => Availability;
   /**
@@ -173,10 +138,5 @@ export type AgentAdapter = {
    * admission; this may contact the agent. Omitted when no honest probe exists.
    */
   probe?: () => Promise<{ ok: boolean; detail: string }>;
-  run: (
-    request: AgentRunRequest,
-    report: AgentReport,
-    /** External adapters call this after probing and immediately before sending content. */
-    admitDispatch?: () => boolean,
-  ) => Promise<AgentRunOutcome>;
+  run: (request: AgentRunRequest, report: AgentReport) => Promise<AgentRunOutcome>;
 };

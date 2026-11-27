@@ -55,23 +55,6 @@ export type FreeTierAttestation = {
   evidenceUrl: string;
   verifiedAt: string;
   expiresAt: string;
-  /** Only a USD zero amount is comparable; another currency is not evidence. */
-  currency: 'USD';
-  /**
-   * The provider account the evidence was verified against. An attestation for a
-   * different account says nothing about the key this deployment uses.
-   */
-  accountRef: string;
-  /**
-   * Why the account cannot incur a charge. A free *allowance* on an account with
-   * a payment method is not a free tier: exceeding the allowance is billed, so
-   * only an account that cannot be charged is accepted.
-   */
-  billing: 'no-payment-method' | 'spend-cap' | 'prepaid-credit-only';
-  /** The hard spending cap recorded on the account. It must be exactly zero. */
-  spendCapUsd: number;
-  /** The published allowance, used to bound the engine's own daily ceiling. */
-  quota: { requestsPerDay: number; tokensPerDay: number };
 };
 
 export type CostVerdict = {
@@ -80,8 +63,6 @@ export type CostVerdict = {
   detail: string;
   /** Attestation expiry, when the claim is time-bounded. */
   expiresAt?: string;
-  /** The allowance the evidence established, when it published one. */
-  quota?: { requestsPerDay: number; tokensPerDay: number };
 };
 
 export type BenchmarkScore = {
@@ -232,49 +213,12 @@ export class ProviderError extends Error {
  * everything above this boundary — cost verification, ranking, budgets,
  * circuits, fallback and health — is provider-independent.
  */
-export type ProviderEmbeddingRequest = {
-  /** Resolved and authorized by the router; the adapter selects nothing. */
-  model: ModelRef;
-  texts: string[];
-  signal: AbortSignal;
-};
-
 export type ProviderAdapter = {
   id: string;
   kind: 'openai' | 'gemini';
   discover: (signal?: AbortSignal) => Promise<DiscoveredModel[]>;
   complete: (request: ProviderCompletionRequest) => Promise<ProviderCompletion>;
   stream?: (request: ProviderCompletionRequest) => AsyncIterable<ProviderStreamEvent>;
-  /**
-   * Batch embeddings, when this provider serves them. Its presence is the only
-   * capability signal: nothing infers embedding support from a model name, and a
-   * provider without it is never asked to embed.
-   */
-  embed?: (request: ProviderEmbeddingRequest) => Promise<number[][]>;
-};
-
-/**
- * A retrieval embedding request. It carries an owner, a data mode and the exact
- * operation, because an embedding transmits document text just as a completion
- * does and is authorized the same way.
- */
-export type EmbeddingRequest = {
-  ownerId: string;
-  mode: DataMode;
-  texts: string[];
-  signal?: AbortSignal;
-  taskId?: string;
-  /** A named model is pinned; an automatic route may consider other candidates. */
-  requested?: ModelRef;
-  allowFallback?: boolean;
-};
-
-export type GatewayEmbedding = {
-  vectors: number[][];
-  model: ModelRef;
-  attempts: ModelRef[];
-  usage: Usage;
-  latencyMs: number;
 };
 
 export type ProviderSettings = {
@@ -332,29 +276,14 @@ export type GatewayStreamEvent =
 
 export type ModelGateway = {
   id: string;
-  /**
-   * True when the transport can send native tool definitions. The agent still
-   * decides per run; the router only forwards `tools` when the caller set them.
-   */
-  supportsNativeTools?: boolean;
   complete: (request: GatewayRequest) => Promise<GatewayCompletion>;
   stream?: (request: GatewayRequest) => AsyncIterable<GatewayStreamEvent>;
-  /**
-   * Governed embeddings. A retrieval surface uses this and never a provider
-   * client of its own, so cost, policy, budget and fallback stay single-sourced.
-   */
-  embed?: (request: EmbeddingRequest) => Promise<GatewayEmbedding>;
 };
 
 export type CircuitState = 'closed' | 'open' | 'half_open';
 
 export type ModelHealth = {
   ref: ModelRef;
-  label: string;
-  costClass: Extract<CostClass, 'free' | 'paid'>;
-  contextTokens: number | null;
-  capabilities: ModelCapabilities;
-  availability: Availability;
   available: boolean;
   attempts: number;
   successes: number;
@@ -374,14 +303,6 @@ export type ProviderHealth = {
   verifiedFreeModels: number;
   quotaUntil: string | null;
   circuit: CircuitState;
-  /** Configured local ceiling, reported so a client sees the real limit. */
-  requestsPerMinute: number;
-  /**
-   * Requests this replica admitted for dispatch in the last minute. Counted by
-   * the limiter at admission and removed on a pre-dispatch refund, so it is a
-   * measured value rather than the configured ceiling or a placeholder.
-   */
-  requestsThisMinute: number;
 };
 
 export type RouterHealth = {

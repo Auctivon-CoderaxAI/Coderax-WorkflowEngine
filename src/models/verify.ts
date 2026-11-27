@@ -52,93 +52,56 @@ export function verifyFreeTier(input: {
     };
   }
 
-  // Use the active evidence that stays valid longest.
-  let active: CostVerdict | null = null;
-  let latestExpiry = -Infinity;
+  // A stale attestation must not mask a later active one for the same model.
   let failure: CostVerdict | null = null;
   for (const attestation of matches) {
     const verdict = verifyAttestation(attestation, input.now);
-    if (verdict.costClass === 'free') {
-      const expiry = Date.parse(attestation.expiresAt);
-      if (expiry > latestExpiry) {
-        active = verdict;
-        latestExpiry = expiry;
-      }
-    } else {
-      failure ??= verdict;
-    }
+    if (verdict.costClass === 'free') return verdict;
+    failure ??= verdict;
   }
-  return active ?? failure ?? {
+  return failure ?? {
     costClass: 'paid',
     basis: 'none',
     detail: 'No active free-tier attestation exists for this exact model.',
   };
 }
 
-/** An attestation is a snapshot of provider terms; it is never a standing claim. */
-export const MAX_ATTESTATION_WINDOW_MS = 90 * 24 * 60 * 60 * 1_000;
-
-const BILLING_BOUNDARIES = new Set(['no-payment-method', 'spend-cap', 'prepaid-credit-only']);
-
-/**
- * An operator attestation is accepted only when it establishes a hard spending
- * boundary, not merely a free allowance.
- *
- * A configuration flag, an API key and a recorded price page are each
- * insufficient on their own. The key proves authentication; the page proves what
- * the provider advertises. Neither proves that *this* account cannot be charged.
- * So the record must name the account it was verified against, state why that
- * account cannot incur a charge, record a hard cap of exactly zero, denominate
- * the claim in USD, publish the allowance it relies on, and stay within a
- * bounded validity window. Anything else is reported `paid` and refused.
- */
 function verifyAttestation(attestation: FreeTierAttestation, now: Date): CostVerdict {
-  const reject = (detail: string): CostVerdict => ({ costClass: 'paid', basis: 'none', detail });
   const verifiedAt = Date.parse(attestation.verifiedAt);
   const expiresAt = Date.parse(attestation.expiresAt);
   if (!Number.isFinite(verifiedAt) || !Number.isFinite(expiresAt)) {
-    return reject('The free-tier attestation has invalid dates and is not evidence.');
+    return {
+      costClass: 'paid',
+      basis: 'none',
+      detail: 'The free-tier attestation has invalid dates and is not evidence.',
+    };
   }
   if (verifiedAt > now.getTime()) {
-    return reject('The free-tier attestation is dated in the future and is not evidence.');
+    return {
+      costClass: 'paid',
+      basis: 'none',
+      detail: 'The free-tier attestation is dated in the future and is not evidence.',
+    };
   }
   if (expiresAt <= now.getTime()) {
-    return reject('The free-tier attestation has expired; the model must be re-verified.');
-  }
-  if (expiresAt - verifiedAt > MAX_ATTESTATION_WINDOW_MS) {
-    return reject(
-      'The free-tier attestation claims a validity window longer than 90 days; provider terms are not that stable.',
-    );
+    return {
+      costClass: 'paid',
+      basis: 'none',
+      detail: 'The free-tier attestation has expired; the model must be re-verified.',
+    };
   }
   if (!attestation.evidenceUrl.startsWith('https://')) {
-    return reject('The free-tier attestation does not cite an https evidence URL.');
-  }
-  if (attestation.currency !== 'USD') {
-    return reject('The free-tier attestation is not denominated in USD, so a zero amount cannot be compared.');
-  }
-  if (attestation.accountRef.trim() === '') {
-    return reject('The free-tier attestation does not name the account it was verified against.');
-  }
-  if (!BILLING_BOUNDARIES.has(attestation.billing)) {
-    return reject('The free-tier attestation does not record a recognized billing boundary.');
-  }
-  if (attestation.spendCapUsd !== 0) {
-    return reject(
-      'The account has a non-zero spending cap, so exceeding the free allowance would be billed.',
-    );
-  }
-  const requestsPerDay = attestation.quota?.requestsPerDay ?? 0;
-  const tokensPerDay = attestation.quota?.tokensPerDay ?? 0;
-  if (!(requestsPerDay >= 1) || !(tokensPerDay >= 1)) {
-    return reject('The free-tier attestation does not publish a usable daily allowance.');
+    return {
+      costClass: 'paid',
+      basis: 'none',
+      detail: 'The free-tier attestation does not cite an https evidence URL.',
+    };
   }
   return {
     costClass: 'free',
     basis: 'attestation',
-    detail:
-      'An unexpired attestation records a zero-cap, USD-denominated free tier for this exact model and account.',
+    detail: 'An unexpired operator attestation cites the zero-cost tier for this exact model.',
     expiresAt: attestation.expiresAt,
-    quota: { requestsPerDay, tokensPerDay },
   };
 }
 

@@ -58,8 +58,17 @@ export function buildTranscript(
   }
 
   const current = input.currentText?.trim();
+  // The stored copy of the current turn was scrubbed before persistence, so
+  // compare against the scrubbed form too; otherwise a pasted credential makes
+  // the current objective appear once as history and once as the objective.
+  const currentSafe = current ? redactContent(current) : undefined;
   const newest = turns.at(-1);
-  if (current && newest && newest.role === 'user' && newest.text === current) {
+  if (
+    current &&
+    newest &&
+    newest.role === 'user' &&
+    (newest.text === current || newest.text === currentSafe)
+  ) {
     turns.pop();
   }
 

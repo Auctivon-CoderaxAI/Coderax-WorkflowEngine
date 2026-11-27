@@ -1,0 +1,46 @@
+{
+  "capturedAt": "2026-11-26T20:05:00.000Z",
+  "server": {
+    "version": "MongoDB 8.0.4",
+    "uri": "mongodb://127.0.0.1:27018",
+    "deployment": "single-node standalone, loopback only, no authentication; test instance",
+    "database": "coderax_real_test",
+    "collectionPrefix": "real_",
+    "driver": "mongodb 6.12.0 installed workspace-local with --no-save; not added to the lockfile"
+  },
+  "phase1": {
+    "taskId": "task_c4721854-f5ec-453f-b165-df89b7fa60bc",
+    "conversationId": "conv_bfd00073-e333-4e56-b72a-9063bc281d86",
+    "taskState": "completed",
+    "leaseRace": {
+      "clients": 2,
+      "results": [true, false],
+      "winner": "token-a",
+      "assertion": "exactly one replica won the unique-key lease claim"
+    }
+  },
+  "restart": {
+    "oldPid": 16257,
+    "newPid": 16632,
+    "oldProcessStopped": true,
+    "sameDataDirectory": true,
+    "freshApplicationProcess": true,
+    "taskState": "completed",
+    "transcriptRoles": ["user", "assistant"],
+    "unreadNotifications": 1,
+    "notificationTaskId": "task_c4721854-f5ec-453f-b165-df89b7fa60bc"
+  },
+  "verified": [
+    "composeApplication selected persistence.driver=mongo and created the collection indexes",
+    "a completed Work task was written through the production service path",
+    "its user/assistant transcript was read back after MongoDB and the application restarted",
+    "its unread completion notification survived the restart",
+    "two separate Mongo clients racing one lease produced exactly one winner via the unique index"
+  ],
+  "notVerified": [
+    "The game project/build/artifact store is file-backed, not MongoDB-backed; game projects were tested across a fresh engine process, not across MongoDB replicas.",
+    "No multi-replica game-project edit/restore concurrency test exists because the authoritative durable artifact service is still an unmerged branch.",
+    "This was a standalone local server, not a replica set, Atlas cluster, TLS deployment or failover test.",
+    "The workspace-local driver and MongoDB binary are test-only and were not added to package.json or the lockfile."
+  ]
+}

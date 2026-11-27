@@ -26,7 +26,6 @@ export const PROCESSING_OPERATIONS = [
   'multi_agent',
   'memory',
   'rag',
-  'embeddings',
   'document',
   'multimodal',
   'mcp',
@@ -174,10 +173,10 @@ export function createProviderPolicyRegistry(
     if (expiresAt !== null && expiresAt <= input.at.getTime()) {
       return deny('authorization', 'The provider policy record has expired and must be re-verified.');
     }
-    const grants = policy.grants.filter(
+    const grant = policy.grants.find(
       (entry) => entry.operation === input.operation && entry.mode === input.mode,
     );
-    if (grants.length === 0) {
+    if (!grant) {
       return deny(
         'authorization',
         `No owner grant approves ${input.operation} processing in ${input.mode} mode.`,
@@ -186,7 +185,7 @@ export function createProviderPolicyRegistry(
     if (policy.location === 'unknown') {
       return deny('location', 'The provider does not declare where it processes data.');
     }
-    if (!grants.some((grant) => grant.location === policy.location)) {
+    if (grant.location !== policy.location) {
       return deny(
         'location',
         'The approved processing location does not match the recorded provider terms.',

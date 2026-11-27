@@ -1,4 +1,3 @@
-import type { MongoCollectionLike } from '../persistence/mongo.js';
 import type {
   PermissionList,
   PermissionRequest,
@@ -13,14 +12,14 @@ import { fail, ok } from '../support/result.js';
 /**
  * Permissions are asked for, never assumed.
  *
- * A request names one scope, one exact resource and one action binding (tool,
- * policy, data mode and validated arguments). A grant approves that action only,
- * so an agent cannot widen `workspace.read` into a broader path by asking once,
- * and a browser action cannot reuse an approval given for a different call.
+ * A request names one scope, one exact resource and, for a tool invocation, one
+ * action binding: a digest of the tool, its policy, the data mode and the
+ * validated arguments. A grant approves that action only, so an agent cannot
+ * widen `workspace.read` into a broader path by asking once, and a browser or
+ * shell action cannot reuse an approval given for a different call.
  *
- * Decisions live in the same persistence layer as the suspended task. In a
- * MongoDB deployment a request created on one replica is decidable on another,
- * and `consume` is a conditional update: exactly one execution can spend a grant.
+ * `consume` makes a grant single-use. The check and the claim happen in one
+ * operation, so two concurrent executions of the same call cannot both spend it.
  */
 export type PermissionStore = {
   request: (input: {
@@ -31,9 +30,9 @@ export type PermissionStore = {
     description: string;
     resource: string;
     /** The one execution slot this decision can authorize. */
-    callId: string;
+    callId?: string;
     /** Digest of the exact validated action the owner is approving. */
-    binding: string;
+    binding?: string;
     policy?: 'once' | 'always';
     ttlMs?: number;
   }) => Promise<PermissionRequest>;
@@ -45,6 +44,23 @@ export type PermissionStore = {
     decision: 'approved' | 'denied';
     reason?: string;
   }) => Promise<ServiceResult<PermissionList>>;
+  isApproved: (taskId: string, scope: PermissionScope, resource: string) => Promise<boolean>;
+  /**
+   * One request by id inside its owner and task scope. The browser integration
+   * uses this to bind an approval to a single exact resource and to consume it
+   * once; a caller that only checks `isApproved` could reuse a grant.
+   */
+  get: (
+    ownerId: string,
+    taskId: string,
+    requestId: string,
+  ) => Promise<PermissionRequest | null>;
+  hasPending: (taskId: string) => Promise<boolean>;
+  /**
+   * The durable lookup a tool runtime performs before executing. It matches the
+   * exact action binding, spends an approved grant when `consume` is set, and
+   * reports `null` when no decision exists so the caller can create a request.
+   */
   lookup: (input: {
     ownerId: string;
     taskId: string;
@@ -60,145 +76,145 @@ export type PermissionStore = {
   cancelTask: (ownerId: string, taskId: string) => Promise<void>;
 };
 
+type PermissionRecord = PermissionRequest & {
+  ownerId: string;
+  callId?: string;
+  binding?: string;
+  policy?: 'once' | 'always';
+  consumed?: boolean;
+};
+
 export function createPermissionStore(input: {
   clock: Clock;
   ids: IdGenerator;
-  collection?: MongoCollectionLike;
+  defaultTtlMs?: number;
 }): PermissionStore {
-  type Row = PermissionRequest & {
-    ownerId: string;
-    callId: string;
-    binding: string;
-    policy: 'once' | 'always';
-    consumed: boolean;
-    reason?: string;
-  };
-  const rows = new Map<string, Row>();
-  const collection = input.collection;
+  const requests = new Map<string, PermissionRecord>();
 
-  async function scoped(ownerId: string, taskId: string): Promise<Row[]> {
-    if (collection) {
-      return (await collection
-        .find({ ownerId, taskId })
-        .sort({ requestedAt: 1 })
-        .toArray()) as unknown as Row[];
-    }
-    return [...rows.values()].filter((row) => row.taskId === taskId && row.ownerId === ownerId);
-  }
-
-  function publicRow(row: Row): PermissionRequest {
-    const { ownerId, callId, binding, policy, consumed, reason, _id, validUntil, ...request } = row as Row & {
-      _id?: unknown;
-      validUntil?: Date;
+  function listFor(ownerId: string, taskId: string): PermissionList {
+    return {
+      requests: [...requests.values()]
+        .filter((entry) => entry.ownerId === ownerId && entry.taskId === taskId)
+        .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+        .map(({ ownerId: _owner, callId: _call, binding: _binding, policy: _policy, consumed: _used, ...rest }) => rest),
     };
-    void ownerId;
-    void callId;
-    void binding;
-    void policy;
-    void consumed;
-    void reason;
-    void _id;
-    void validUntil;
-    return request;
-  }
-
-  async function list(ownerId: string, taskId: string): Promise<PermissionList> {
-    return { requests: (await scoped(ownerId, taskId)).map(publicRow) };
-  }
-
-  async function update(
-    row: Row,
-    expected: PermissionRequest['decision'],
-    patch: Partial<Row>,
-  ): Promise<boolean> {
-    const now = input.clock.iso();
-    if (collection) {
-      const result = await collection.updateOne(
-        {
-          requestId: row.requestId,
-          taskId: row.taskId,
-          ownerId: row.ownerId,
-          validUntil: { $gt: new Date(now) },
-          decision: expected,
-          consumed: false,
-        },
-        { $set: patch },
-        { upsert: false },
-      );
-      return result.matchedCount === 1;
-    }
-    if (row.decision !== expected || row.consumed || row.expiresAt <= now) return false;
-    Object.assign(row, patch);
-    return true;
   }
 
   return {
-    request: async ({ ttlMs, binding = '', policy = 'once', ...fields }) => {
+    request: async ({ ownerId, taskId, agent, scope, description, resource, callId, binding, policy, ttlMs }) => {
       const now = input.clock.now();
-      const row: Row = {
-        ...fields,
-        binding,
-        policy,
-        consumed: false,
+      const ttl = ttlMs ?? input.defaultTtlMs ?? 15 * 60_000;
+      const record: PermissionRecord = {
         requestId: input.ids.requestId(),
+        taskId,
+        agent,
+        scope,
+        description,
+        resource,
         requestedAt: now.toISOString(),
-        expiresAt: new Date(now.getTime() + (ttlMs ?? 900_000)).toISOString(),
-        decision: 'pending',
+        expiresAt: new Date(now.getTime() + ttl).toISOString(),
+        decision: 'pending' as const,
+        ownerId,
+        ...(callId ? { callId } : {}),
+        ...(binding ? { binding } : {}),
+        ...(policy ? { policy } : {}),
+        consumed: false,
       };
-      if (collection) await collection.insertOne({ ...row, validUntil: new Date(row.expiresAt) });
-      else rows.set(row.requestId, row);
-      return publicRow(row);
+      requests.set(record.requestId, record);
+      const { ownerId: _owner, callId: _call, binding: _binding, policy: _policy, consumed: _used, ...contract } = record;
+      return contract;
     },
-
-    list,
-
+    list: async (ownerId, taskId) => listFor(ownerId, taskId),
     decide: async ({ ownerId, taskId, requestId, decision }) => {
-      const row = (await scoped(ownerId, taskId)).find((entry) => entry.requestId === requestId);
-      if (!row) return fail('not_found', 'That permission request does not exist for this task.');
-      if (!(await update(row, 'pending', { decision, decidedAt: input.clock.iso() }))) {
-        return fail('conflict', 'That request has expired or was already decided.');
+      const record = requests.get(requestId);
+      if (!record || record.ownerId !== ownerId || record.taskId !== taskId) {
+        return fail('not_found', 'That permission request does not exist for this task.');
       }
-      return ok(await list(ownerId, taskId));
+      const now = input.clock.now();
+      if (new Date(record.expiresAt).getTime() <= now.getTime()) {
+        return fail('conflict', 'That permission request has expired.');
+      }
+      record.decision = decision;
+      record.decidedAt = now.toISOString();
+      // A fresh decision is spendable again; an earlier consumption belonged to
+      // the previous answer and must not make the new grant unusable.
+      if (decision === 'approved') record.consumed = false;
+      return ok(listFor(ownerId, taskId));
     },
-
+    get: async (ownerId, taskId, requestId) => {
+      const record = requests.get(requestId);
+      if (!record || record.ownerId !== ownerId || record.taskId !== taskId) return null;
+      const { ownerId: _owner, callId: _call, binding: _binding, policy: _policy, consumed: _used, ...contract } = record;
+      return contract;
+    },
+    isApproved: async (taskId, scope, resource) => {
+      const now = input.clock.now();
+      for (const record of requests.values()) {
+        if (
+          record.taskId === taskId &&
+          record.scope === scope &&
+          record.resource === resource &&
+          record.decision === 'approved' &&
+          record.consumed !== true &&
+          new Date(record.expiresAt).getTime() > now.getTime()
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
+    hasPending: async (taskId) => {
+      for (const record of requests.values()) {
+        if (record.taskId === taskId && record.decision === 'pending') return true;
+      }
+      return false;
+    },
     lookup: async ({ ownerId, taskId, scope, resource, binding, callId, requestId, consume }) => {
-      // A multi-scope tool creates one row per scope under the same call id, so
-      // the lookup must select by scope and action as well as by identity.
-      const row = (await scoped(ownerId, taskId)).find(
-        (entry) =>
-          (requestId === undefined ? entry.callId === callId : entry.requestId === requestId) &&
-          entry.scope === scope &&
-          entry.resource === resource &&
-          entry.binding === binding,
+      const now = input.clock.now();
+      const candidates = [...requests.values()].filter(
+        (record) =>
+          record.ownerId === ownerId &&
+          record.taskId === taskId &&
+          record.scope === scope &&
+          record.resource === resource &&
+          (record.binding === undefined || record.binding === binding),
       );
-      // The identity, action binding, scope and resource must all match. A grant
-      // for one call can never authorize a different call that happens to touch
-      // the same path with the same arguments.
-      if (!row || row.expiresAt <= input.clock.iso()) return null;
-      if (row.consumed) {
-        // The decision was already spent. A replay must fail closed rather than
-        // ask for a fresh grant behind the owner's back.
-        return { decision: 'denied', requestId: row.requestId };
+      const named = requestId ? candidates.find((record) => record.requestId === requestId) : undefined;
+      if (named) {
+        if (new Date(named.expiresAt).getTime() <= now.getTime()) return null;
+        if (named.decision === 'denied') return { decision: 'denied', requestId: named.requestId };
+        if (named.decision === 'pending') return { decision: 'pending', requestId: named.requestId };
+        if (named.consumed === true) return null;
+        if (consume) named.consumed = true;
+        return { decision: 'granted', requestId: named.requestId };
       }
-      if (row.decision !== 'approved') return { decision: row.decision, requestId: row.requestId };
-      // One decision, one invocation. A conditional update is the arbiter when
-      // two replicas race to spend the same grant.
-      if (consume && !(await update(row, 'approved', { consumed: true }))) {
-        return { decision: 'denied', requestId: row.requestId };
+      const approved = candidates.find(
+        (record) =>
+          record.decision === 'approved' &&
+          record.consumed !== true &&
+          new Date(record.expiresAt).getTime() > now.getTime() &&
+          (record.callId === undefined || record.callId === callId || record.policy === 'once'),
+      );
+      if (approved) {
+        if (consume) approved.consumed = true;
+        return { decision: 'granted', requestId: approved.requestId };
       }
-      return { decision: 'granted', requestId: row.requestId };
+      const pending = candidates.find(
+        (record) =>
+          record.decision === 'pending' && new Date(record.expiresAt).getTime() > now.getTime(),
+      );
+      if (pending) return { decision: 'pending', requestId: pending.requestId };
+      const denied = candidates.find((record) => record.decision === 'denied');
+      if (denied) return { decision: 'denied', requestId: denied.requestId };
+      return null;
     },
-
     cancelTask: async (ownerId, taskId) => {
-      const open = (await scoped(ownerId, taskId)).filter(
-        (row) => row.decision === 'pending' && !row.consumed,
-      );
-      for (const row of open) {
-        await update(row, 'pending', {
-          decision: 'denied',
-          decidedAt: input.clock.iso(),
-          reason: 'The task was cancelled.',
-        }).catch(() => false);
+      const now = input.clock.now().toISOString();
+      for (const record of requests.values()) {
+        if (record.ownerId === ownerId && record.taskId === taskId && record.decision === 'pending') {
+          record.decision = 'denied';
+          record.decidedAt = now;
+        }
       }
     },
   };

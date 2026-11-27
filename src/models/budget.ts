@@ -127,6 +127,11 @@ export type BudgetLedger = {
    */
   release: (reservationId: string, options?: { dispatched?: boolean }) => Promise<void>;
   charge: (ownerId: string, usage: Usage, at: Date) => Promise<void>;
+  /**
+   * Record token usage for a run whose request slot was already charged at
+   * admission. It must not charge a second request.
+   */
+  recordUsage: (ownerId: string, usage: Usage, at: Date) => Promise<void>;
   snapshot: (ownerId: string, at: Date, taskId?: string | null) => Promise<BudgetSnapshot>;
 };
 
@@ -253,7 +258,59 @@ export function createBudgetLedger(input: {
       });
     },
 
+    recordUsage: async (ownerId, usage, at) => {
+      await input.store.charge({
+        key: budgetKey(ownerId, at),
+        requests: 0,
+        inputTokens: clampTokens(usage.inputTokens ?? 0),
+        outputTokens: clampTokens(usage.outputTokens ?? 0),
+        now: at,
+      });
+    },
+
     snapshot: async (ownerId, at) => input.store.read(budgetKey(ownerId, at)),
+  };
+}
+
+/**
+ * Admission hold for callers that only need a request slot. The router uses the
+ * full reservation API; orchestration admission has no token estimate yet, so it
+ * holds the slot and releases it if the run is refused before execution.
+ */
+export type BudgetHold =
+  | {
+      allowed: true;
+      reservationId: string;
+      /** Charge the slot for an attempt that was dispatched. */
+      commit: () => Promise<void>;
+      /** Return the slot because nothing was dispatched. */
+      release: () => Promise<void>;
+    }
+  | { allowed: false; reason: BudgetRefusalReason; detail: string };
+
+export async function holdBudget(
+  ledger: BudgetLedger,
+  ownerId: string,
+  at: Date,
+): Promise<BudgetHold> {
+  const outcome = await ledger.reserve({ ownerId, at, inputTokens: 0, outputTokens: 0 });
+  if (!outcome.allowed) {
+    return { allowed: false, reason: outcome.reason, detail: outcome.detail };
+  }
+  let held = true;
+  return {
+    allowed: true,
+    reservationId: outcome.reservation.id,
+    commit: async () => {
+      if (!held) return;
+      held = false;
+      await ledger.release(outcome.reservation.id, { dispatched: true });
+    },
+    release: async () => {
+      if (!held) return;
+      held = false;
+      await ledger.release(outcome.reservation.id);
+    },
   };
 }
 
@@ -345,6 +402,12 @@ export function createMemoryBudgetStore(): BudgetStore {
   ): { ok: true } | { ok: false; reason: BudgetRefusalReason } {
     const state = window(key);
     if (state.requests >= maxRequests) return { ok: false, reason: kind === 'task_requests' ? 'task_requests' : 'requests' };
+    // No headroom is not the same as enough room: once the ceiling is reached,
+    // even a zero-token reservation is refused because the request will spend
+    // tokens the ledger has already promised elsewhere.
+    if (committed(state) >= maxTokens) {
+      return { ok: false, reason: kind === 'task_tokens' ? 'task_tokens' : 'tokens' };
+    }
     if (committed(state) + tokens > maxTokens) return { ok: false, reason: kind === 'task_tokens' ? 'task_tokens' : 'tokens' };
     state.requests += 1;
     state.reservedTokens += tokens;

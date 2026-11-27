@@ -1,18 +1,14 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type {
-  FreeTierAttestation,
-  ProviderAdapter,
-  ProviderCompletionRequest,
-} from '../src/models/types.js';
-import { createBudgetLedger, createMemoryBudgetStore, type BudgetLedger } from '../src/models/budget.js';
-import { ProviderError } from '../src/models/types.js';
-import type { ProviderPolicy } from '../src/models/policy.js';
-import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
+import type { ModelGateway } from '../src/agents/native/types.js';
+import type { BrowserProvider } from '../src/browser/types.js';
+import type { MongoConnector, MongoDatabase } from '../src/persistence/mongo-connect.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
+import type { ProviderPolicy } from '../src/models/policy.js';
+import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
 
 export const OWNER_TOKEN = 'test-owner-token-0123456789abcdef';
 export const OWNER_ID = 'owner-test';
@@ -38,11 +34,6 @@ export function createWorkspaces(): TestWorkspace {
   };
 }
 
-/**
- * A policy that authorizes the fixture provider for every operation in cloud
- * mode only. Private mode stays denied unless a test grants it explicitly, so a
- * missing operation classification cannot pass by accident.
- */
 export function testProviderPolicy(
   providerId = 'free',
   overrides: Partial<ProviderPolicy> = {},
@@ -67,146 +58,193 @@ export function testProviderPolicy(
 }
 
 /**
- * A complete zero-cost attestation for fixtures. It carries every field the
- * verifier requires: a 30-day window, USD, an account reference, a billing
- * boundary that cannot produce a charge, a zero cap and a published allowance.
+ * The fixture's provider policy. A test-injected gateway is the owner's own
+ * endpoint: it stores nothing, trains on nothing and is reached with an
+ * owner-managed credential, which is exactly what a private grant requires.
+ * Unit-level policy tests still build their own records; this is the app fixture.
  */
-export function testAttestation(
-  overrides: Partial<FreeTierAttestation> = {},
-): FreeTierAttestation {
-  return {
-    providerId: 'free',
-    modelId: 'coderax-small',
-    evidenceUrl: 'https://provider.example/free-tier',
-    verifiedAt: '2026-11-20T00:00:00.000Z',
-    expiresAt: '2026-12-20T00:00:00.000Z',
-    currency: 'USD',
-    accountRef: 'acct-free-tier',
-    billing: 'no-payment-method',
-    spendCapUsd: 0,
-    quota: { requestsPerDay: 1_000, tokensPerDay: 1_000_000 },
-    ...overrides,
-  };
-}
-
-/** The ledger the engine uses, over the process-local store. */
-export function testBudget(input: {
-  maxRequestsPerDay?: number;
-  maxTokensPerDay?: number;
-  taskMaxRequests?: number;
-  taskMaxTokens?: number;
-} = {}): BudgetLedger {
-  return createBudgetLedger({
-    store: createMemoryBudgetStore(),
-    maxRequestsPerDay: input.maxRequestsPerDay ?? 100,
-    maxTokensPerDay: input.maxTokensPerDay ?? 1_000_000,
-    taskMaxRequests: input.taskMaxRequests ?? 100,
-    taskMaxTokens: input.taskMaxTokens ?? 1_000_000,
+export function testOwnerPolicy(providerId = 'free'): ProviderPolicy {
+  return testProviderPolicy(providerId, {
+    retention: 'none',
+    credentials: 'owner-managed',
+    grants: PROCESSING_OPERATIONS.flatMap((operation) => [
+      { operation, mode: 'cloud' as const, location: 'owner-region' as const },
+      { operation, mode: 'private' as const, location: 'owner-region' as const },
+    ]),
   });
 }
 
 export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, unknown>): EngineConfig {
+  const { models: modelOverrides, ...rest } = overrides ?? {};
   return EngineConfigSchema.parse({
     server: { host: '127.0.0.1', port: 0 },
     auth: { ownerId: OWNER_ID },
     workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
+    ...rest,
     models: {
       route: [{ providerId: 'free', modelId: 'coderax-small' }],
-      policy: [testProviderPolicy()],
+      // The router verifies zero cost and owner policy before it calls out. A
+      // fixture that injects a gateway declares the same evidence a deployment
+      // must: an unexpired attestation and an approved provider policy.
+      attestations: [
+        {
+          providerId: 'free',
+          modelId: 'coderax-small',
+          evidenceUrl: 'https://provider.example/free-tier',
+          verifiedAt: '2026-11-20T00:00:00.000Z',
+          expiresAt: '2027-02-01T00:00:00.000Z',
+        },
+      ],
+      policy: [testOwnerPolicy()],
+      ...((modelOverrides as Record<string, unknown> | undefined) ?? {}),
     },
     execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
-    ...(overrides ?? {}),
+  });
+}
+
+export type FakePlan = { steps: Array<Record<string, unknown>>; note?: string };
+
+export const DEFAULT_TEST_PLAN: FakePlan = {
+  steps: [
+    {
+      id: 'plan-1',
+      title: 'Analyze the objective',
+      kind: 'reason',
+      dependsOn: [],
+      acceptance: 'State the constraints that shape the result.',
+    },
+    {
+      id: 'plan-2',
+      title: 'Produce the requested result',
+      kind: 'reason',
+      dependsOn: ['plan-1'],
+      acceptance: 'Address the objective directly.',
+    },
+  ],
+};
+
+function citedFrom(prompt: string): string[] {
+  return [...prompt.matchAll(/EVIDENCE ([A-Za-z0-9._-]+):/g)]
+    .map((match) => match[1])
+    .filter((id): id is string => typeof id === 'string');
+}
+
+function verificationText(
+  prompt: string,
+  choice?: { passed: boolean; reason?: string; cited?: string[] },
+): string {
+  if (choice?.passed === false) {
+    return JSON.stringify({
+      passed: false,
+      reason: choice.reason ?? 'the evidence does not prove the objective',
+      cited: [],
+    });
+  }
+  return JSON.stringify({
+    passed: true,
+    reason: choice?.reason ?? 'evidence covers the objective',
+    cited: choice?.cited ?? citedFrom(prompt),
   });
 }
 
 /**
- * A deterministic provider fixture. It reports a zero price list, so the real
- * router verifies it like any other provider; the fixture never bypasses cost,
- * context, budget or fallback logic.
+ * A deterministic gateway for tests. It is a test double, not a provider: the
+ * production path is `createOpenAiCompatibleGateway`, exercised separately. It
+ * answers planning and verification turns with the structured JSON those turns
+ * require, so a test exercises the real parsers instead of bypassing them.
  */
-export function fakeProvider(input: {
+export function fakeGateway(input: {
   text?: string;
   beforeReturn?: () => Promise<void>;
-  modelId?: string;
-} = {}): ProviderAdapter & { calls: number } {
-  const provider = {
-    id: 'free',
-    kind: 'openai' as const,
+  plan?: FakePlan;
+  verification?: { passed: boolean; reason?: string; cited?: string[] };
+} = {}): ModelGateway & { calls: number } {
+  const gateway = {
+    id: 'test-gateway',
     calls: 0,
-    discover: async () => [
-      {
-        ref: { providerId: 'free', modelId: input.modelId ?? 'coderax-small' },
-        label: 'Free test model',
-        contextTokens: 32_768,
-        maxOutputTokens: 4_096,
-        capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
-        pricing: { prompt: '0', completion: '0', request: '0' },
-      },
-    ],
-    complete: async ({ signal }: ProviderCompletionRequest) => {
-      provider.calls += 1;
+    complete: async ({
+      system,
+      prompt,
+      signal,
+    }: {
+      system: string;
+      prompt: string;
+      signal: AbortSignal;
+    }) => {
+      gateway.calls += 1;
       if (input.beforeReturn) await input.beforeReturn();
-      if (signal.aborted) throw new ProviderError('cancelled', 'aborted', { retryable: false });
+      if (signal.aborted) throw new Error('aborted');
+      const turn = `${system}\n${prompt}`;
+      if (turn.includes('CODERAX_PLAN_V1')) {
+        return {
+          text: JSON.stringify(input.plan ?? DEFAULT_TEST_PLAN),
+          usage: { inputTokens: 11, outputTokens: 13 },
+        };
+      }
+      if (turn.includes('CODERAX_VERIFY_V1')) {
+        return {
+          text: verificationText(turn, input.verification),
+          usage: { inputTokens: 11, outputTokens: 13 },
+        };
+      }
       return {
         text: input.text ?? 'A verified result.',
-        toolCalls: [],
         usage: { inputTokens: 11, outputTokens: 13 },
       };
     },
   };
-  return provider;
+  return gateway;
 }
 
-export function failingProvider(failures: number): ProviderAdapter & { calls: number } {
-  const base = fakeProvider();
-  const provider = {
-    ...base,
-    complete: async () => {
-      provider.calls += 1;
-      if (provider.calls <= failures) {
-        throw new ProviderError('server', 'provider unavailable', { retryable: true });
+export function failingGateway(failures: number): ModelGateway & { calls: number } {
+  const gateway = {
+    id: 'failing-gateway',
+    calls: 0,
+    complete: async ({ system, prompt }: { system: string; prompt: string }) => {
+      gateway.calls += 1;
+      if (gateway.calls <= failures) throw new Error('provider unavailable');
+      const turn = `${system}\n${prompt}`;
+      if (turn.includes('CODERAX_PLAN_V1')) {
+        return { text: JSON.stringify(DEFAULT_TEST_PLAN), usage: { inputTokens: 3, outputTokens: 4 } };
       }
-      return { text: 'Recovered result.', toolCalls: [], usage: { inputTokens: 3, outputTokens: 4 } };
+      if (turn.includes('CODERAX_VERIFY_V1')) {
+        return { text: verificationText(turn), usage: { inputTokens: 3, outputTokens: 4 } };
+      }
+      return { text: 'Recovered result.', usage: { inputTokens: 3, outputTokens: 4 } };
     },
   };
-  return provider;
+  return gateway;
 }
 
-export function slowProvider(delayMs: number): ProviderAdapter & { calls: number } {
-  const provider = {
-    ...fakeProvider(),
+export function slowGateway(delayMs: number): ModelGateway & { calls: number } {
+  const gateway = {
+    id: 'slow-gateway',
     calls: 0,
-    complete: ({ signal }: ProviderCompletionRequest) =>
-      new Promise<{ text: string; toolCalls: never[]; usage: { inputTokens: number; outputTokens: number } }>(
-        (resolve, reject) => {
-          provider.calls += 1;
-          const timer = setTimeout(
-            () =>
-              resolve({
-                text: 'Slow result.',
-                toolCalls: [],
-                usage: { inputTokens: 2, outputTokens: 2 },
-              }),
-            delayMs,
-          );
-          timer.unref();
-          signal.addEventListener(
-            'abort',
-            () => {
-              clearTimeout(timer);
-              reject(new ProviderError('cancelled', 'aborted', { retryable: false }));
-            },
-            { once: true },
-          );
-        },
-      ),
+    complete: ({ signal }: { signal: AbortSignal }) =>
+      new Promise<{ text: string }>((resolve, reject) => {
+        gateway.calls += 1;
+        const timer = setTimeout(() => resolve({ text: 'Slow result.' }), delayMs);
+        timer.unref();
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            reject(new Error('aborted'));
+          },
+          { once: true },
+        );
+      }),
   };
-  return provider;
+  return gateway;
 }
 
 export async function startTestApp(options: {
-  provider?: ProviderAdapter;
+  gateway?: ModelGateway;
   config?: Record<string, unknown>;
+  browser?: BrowserProvider;
+  env?: NodeJS.ProcessEnv;
+  /** A shared database, so two app instances can prove they read the same rows. */
+  persistence?: { database?: MongoDatabase; connect?: MongoConnector };
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -217,8 +255,10 @@ export async function startTestApp(options: {
   const config = baseConfig(workspace, options.config);
   const app = await composeApplication({
     config,
-    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    providers: [{ adapter: options.provider ?? fakeProvider() }],
+    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, ...(options.env ?? {}) },
+    gateway: options.gateway ?? fakeGateway(),
+    ...(options.browser ? { browserProvider: options.browser } : {}),
+    ...(options.persistence ? { persistence: options.persistence } : {}),
   });
   const { url } = await app.start();
   return {
@@ -259,12 +299,13 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     mode: 'cloud',
     objective: 'Do the thing',
     model: { providerId: 'free', modelId: 'coderax-small' },
-    modelPinned: false,
     state: 'queued',
     generation: 1,
     runToken: null,
+    eventSeq: 0,
+    reasoning: null,
     steps: [],
-    checkpoint: { completedSteps: [], text: '' },
+    checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
     createdAt: now,
     updatedAt: now,
     leaseExpiresAt: null,

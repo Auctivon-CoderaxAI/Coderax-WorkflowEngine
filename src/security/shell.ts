@@ -81,15 +81,21 @@ export type CommandValidation =
 async function findExecutable(name: string): Promise<string | null> {
   if (name.includes('/') || name.includes('\\')) return null;
   const roots = (process.env.PATH ?? '').split(path.delimiter).filter((entry) => entry.length > 0);
+  // Windows resolves an executable through PATHEXT; a bare `node` is
+  // `node.exe` on disk. Only real binaries are considered: a `.cmd` or `.bat`
+  // shim would need a shell, which this validator never enables.
+  const suffixes = process.platform === 'win32' ? ['', '.exe'] : [''];
   for (const root of roots) {
-    const candidate = path.join(root, name);
-    try {
-      await access(candidate, constants.X_OK);
-      const info = await stat(candidate);
-      if (!info.isFile()) continue;
-      return candidate;
-    } catch {
-      continue;
+    for (const suffix of suffixes) {
+      const candidate = path.join(root, `${name}${suffix}`);
+      try {
+        await access(candidate, constants.X_OK);
+        const info = await stat(candidate);
+        if (!info.isFile()) continue;
+        return candidate;
+      } catch {
+        continue;
+      }
     }
   }
   return null;

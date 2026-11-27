@@ -5,11 +5,49 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-// API 1.2.0 is owned by the unified-contract PR. Until that lands, this branch
-// keeps the published 1.1.0 version rather than defining a competing 1.2.0.
-export const CONTRACT_VERSION = '1.1.0' as const;
+export const CONTRACT_VERSION = '1.3.0' as const;
+/** Majors the server can still speak; a new major needs a new `/vN` prefix. */
+export const CONTRACT_MAJOR = 1 as const;
+/**
+ * `1.0.0` was the first published surface; `1.1.0` added the router, games and
+ * browser routes. `1.2.0` adds the capability handshake, which is additive: it
+ * publishes one new read-only operation and moves no existing path. `1.3.0`
+ * replaces the composite `controlSchedule` operation with explicit verbs (read,
+ * update, pause, resume, cancel, executions); that withdrawal is the single
+ * intentional removal inside this major and is only served now that no client
+ * built from this repository calls it.
+ */
+export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
+/** Chat streaming frames are versioned separately from both HTTP and events. */
+export const CHAT_STREAM_VERSION = 1 as const;
+
+export type SemanticVersion = { major: number; minor: number; patch: number };
+
+export function parseSemanticVersion(value: string): SemanticVersion | null {
+  const match = /^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$/.exec(value.trim());
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+/**
+ * A client is compatible when it shares our major and does not ask for a newer
+ * minor than this build serves. An older minor is accepted because every change
+ * inside a major is additive.
+ */
+export function isContractVersionSupported(clientVersion: string): boolean {
+  const parsed = parseSemanticVersion(clientVersion);
+  if (!parsed) return false;
+  if (parsed.major !== CONTRACT_MAJOR) return false;
+  const current = parseSemanticVersion(CONTRACT_VERSION);
+  if (!current) return false;
+  return parsed.minor <= current.minor;
+}
 
 function identifier(label: string, max = 128) {
   return z.string().trim().min(1).max(max).describe(label);
@@ -29,6 +67,31 @@ export type TaskId = z.infer<typeof TaskId>;
 
 export const MessageId = identifier('message identifier');
 export type MessageId = z.infer<typeof MessageId>;
+
+export const BrowserSessionId = identifier('browser session identifier');
+export type BrowserSessionId = z.infer<typeof BrowserSessionId>;
+
+export const BrowserArtifactId = identifier('browser artifact identifier');
+export type BrowserArtifactId = z.infer<typeof BrowserArtifactId>;
+
+export const ScheduleId = identifier('schedule identifier');
+export type ScheduleId = z.infer<typeof ScheduleId>;
+
+export const ExecutionId = identifier('schedule execution identifier');
+export type ExecutionId = z.infer<typeof ExecutionId>;
+
+export const ArtifactId = identifier('artifact identifier');
+export type ArtifactId = z.infer<typeof ArtifactId>;
+
+export const ProjectId = identifier('project identifier');
+export type ProjectId = z.infer<typeof ProjectId>;
+
+/** Content addresses are lowercase hex so two clients cannot disagree on case. */
+export const Sha256 = z
+  .string()
+  .regex(/^[a-f0-9]{64}$/, 'sha256 must be 64 lowercase hexadecimal characters')
+  .describe('SHA-256 content hash');
+export type Sha256 = z.infer<typeof Sha256>;
 
 export const RequestId = identifier('request correlation identifier');
 export type RequestId = z.infer<typeof RequestId>;
@@ -73,9 +136,12 @@ export const EngineFailureCode = z.enum([
   'provider_error',
   'budget_exhausted',
   'paid_model_refused',
-  'model_missing',
-  'verification_failed',
+  /** The run is suspended until the owner decides a scoped permission request. */
   'approval_required',
+  /** The plan finished but its evidence did not verify the objective. */
+  'verification_failed',
+  /** The bounded autonomy budget was exhausted before the objective settled. */
+  'iteration_exhausted',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;
 

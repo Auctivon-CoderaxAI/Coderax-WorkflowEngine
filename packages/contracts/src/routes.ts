@@ -1,17 +1,43 @@
 import type { z } from 'zod';
 import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
+import {
+  BuildGameRequest,
+  CreateGameRequest,
+  CreateGameSessionRequest,
+  GameBuild,
+  GameBuildList,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionControlRequest,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
+  IterateGameRequest,
+  RestoreGameBuildRequest,
+  SaveGameSpecRequest,
+} from './games.js';
 import { HealthReport, ReadinessReport } from './health.js';
+import { CapabilityHandshake, HandshakeQuery } from './handshake.js';
 import { ModelList } from './models.js';
 import {
   KnowledgeIngestRequest,
   KnowledgeIngestResult,
   KnowledgeList,
   KnowledgeSearchResult,
-  RoutingReport,
   ToolList,
 } from './intelligence.js';
-import { NotificationList, PermissionDecisionRequest, PermissionList } from './permissions.js';
+import {
+  NotificationResponse,
+  PermissionDecisionRequest,
+  PermissionList,
+  PermissionRequest,
+} from './permissions.js';
 import {
   CancelRequest,
   ChatReply,
@@ -27,7 +53,63 @@ import {
   WorkSubmitRequest,
 } from './tasks.js';
 import { z as zod } from 'zod';
-import { ConversationId, TaskId } from './primitives.js';
+import {
+  ArtifactId,
+  BrowserArtifactId,
+  BrowserSessionId,
+  ConversationId,
+  DataMode,
+  ProjectId,
+  ScheduleId,
+  TaskId,
+} from './primitives.js';
+import {
+  BrowserAction,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserAuthorizationRequest,
+  BrowserCapabilities,
+  BrowserCloseRequest,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionCreateRequest,
+  BrowserSessionList,
+  BrowserTakeoverRequest,
+  BrowserTakeoverResult,
+} from './browser.js';
+import {
+  Schedule,
+  ScheduleControlResult,
+  ScheduleCreateRequest,
+  ScheduleDispatch,
+  ScheduleEventRequest,
+  ScheduleEventResult,
+  ScheduleExecutionList,
+  ScheduleList,
+  ScheduleTriggerRequest,
+  ScheduleUpcoming,
+  ScheduleUpdateRequest,
+} from './schedules.js';
+
+import {
+  ARTIFACT_BODY_LIMIT_BYTES,
+  ArtifactContent,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactKind,
+  ArtifactManifestQuery,
+  ArtifactModeRequest,
+  ArtifactProjectManifest,
+  ArtifactPruneResult,
+  ArtifactRestoreRequest,
+  ArtifactUploadRequest,
+  ArtifactUploadResult,
+  ArtifactVersionList,
+  ArtifactVersionRequest,
+} from './artifacts.js';
+import { Deliverable, DeliverableRequest } from './deliverables.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -38,7 +120,7 @@ import { ConversationId, TaskId } from './primitives.js';
  * the SDK cannot drift apart.
  */
 
-export type RouteMethod = 'GET' | 'POST';
+export type RouteMethod = 'GET' | 'POST' | 'PATCH';
 
 export type RouteAuth = 'owner' | 'public';
 
@@ -53,7 +135,13 @@ export type RouteSpec = {
   query?: z.ZodTypeAny;
   body?: z.ZodTypeAny;
   /** The success response; every operation can also answer with a Problem. */
-  response: { status: number; description: string; schema: z.ZodTypeAny };
+  response: {
+    status: number;
+    description: string;
+    schema: z.ZodTypeAny;
+    /** Set for a non-JSON success body such as a playable HTML preview. */
+    contentType?: string;
+  };
   /** Server-sent events rather than a single JSON body. */
   stream?: boolean;
   /**
@@ -61,10 +149,57 @@ export type RouteSpec = {
    * `Accept: text/event-stream`. Without this, `stream` means SSE only.
    */
   negotiated?: boolean;
+  /**
+   * Per-operation JSON body ceiling. Absent means the transport default. Only a
+   * route that carries encoded file content may raise it, so an ordinary write
+   * cannot be made to buffer an unbounded body.
+   */
+  maxBodyBytes?: number;
 };
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
+const GameParams = zod.object({ gameId: zod.string().trim().min(1).max(120) }).strict();
+const GameBuildParams = zod
+  .object({
+    gameId: zod.string().trim().min(1).max(120),
+    buildId: zod.string().trim().min(1).max(120),
+  })
+  .strict();
+const GameSessionParams = zod
+  .object({ sessionId: zod.string().trim().min(1).max(120) })
+  .strict();
+const BrowserSessionParams = zod.object({ sessionId: BrowserSessionId }).strict();
+const BrowserArtifactParams = zod.object({ artifactId: BrowserArtifactId }).strict();
+const ScheduleParams = zod.object({ scheduleId: ScheduleId }).strict();
+const ExecutionHistoryQuery = zod
+  .object({ limit: zod.coerce.number().int().positive().max(500).optional() })
+  .strict();
+const UpcomingQuery = zod
+  .object({ limit: zod.coerce.number().int().positive().max(20).optional() })
+  .strict();
+
+const ArtifactParams = zod.object({ artifactId: ArtifactId }).strict();
+
+const ArtifactListQuery = zod
+  .object({
+    mode: DataMode.optional(),
+    kind: ArtifactKind.optional(),
+    projectId: ProjectId.optional(),
+    conversationId: ConversationId.optional(),
+    taskId: TaskId.optional(),
+    limit: zod.coerce.number().int().min(1).max(500).optional(),
+  })
+  .strict();
+
+const ArtifactModeQuery = zod.object({ mode: DataMode.optional() }).strict();
+
+const ArtifactContentQuery = zod
+  .object({
+    mode: DataMode.optional(),
+    version: zod.coerce.number().int().positive().optional(),
+  })
+  .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
   {
@@ -111,18 +246,6 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['discovery'],
     auth: 'owner',
     response: { status: 200, description: 'Tool list', schema: ToolList },
-  },
-  {
-    operationId: 'getRouting',
-    method: 'GET',
-    path: '/v1/routing',
-    summary: 'Provider quotas, verified cost evidence and the ranked zero-cost route.',
-    tags: ['discovery'],
-    auth: 'owner',
-    query: zod
-      .object({ mode: zod.enum(['auto', 'fast', 'complex']).optional() })
-      .strict(),
-    response: { status: 200, description: 'Routing report', schema: RoutingReport },
   },
   {
     operationId: 'ingestKnowledge',
@@ -288,13 +411,602 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Permission list', schema: PermissionList },
   },
   {
+    operationId: 'getGameCapabilities',
+    method: 'GET',
+    path: '/v1/games/capabilities',
+    summary: 'Truthful status of Native Game Studio and Native Gaming Agent, with evidence.',
+    tags: ['games'],
+    auth: 'owner',
+    response: { status: 200, description: 'Game capability report', schema: GameCapabilityReport },
+  },
+  {
+    operationId: 'listGames',
+    method: 'GET',
+    path: '/v1/games',
+    summary: 'Owner-scoped, persistent game projects.',
+    tags: ['games'],
+    auth: 'owner',
+    query: zod
+      .object({ cursor: zod.string().max(200).optional(), limit: zod.coerce.number().int().min(1).max(100).optional() })
+      .strict(),
+    response: { status: 200, description: 'Game project list', schema: GameProjectList },
+  },
+  {
+    operationId: 'createGame',
+    method: 'POST',
+    path: '/v1/games',
+    summary: 'Create a game project from a natural-language specification.',
+    tags: ['games'],
+    auth: 'owner',
+    body: CreateGameRequest,
+    response: { status: 201, description: 'Created game project', schema: GameProject },
+  },
+  {
+    operationId: 'getGame',
+    method: 'GET',
+    path: '/v1/games/{gameId}',
+    summary: 'One game project with its latest build and design plan.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: { status: 200, description: 'Game project', schema: GameProject },
+  },
+  {
+    operationId: 'saveGameSpec',
+    method: 'POST',
+    path: '/v1/games/{gameId}/spec',
+    summary: 'Replace the design spec at an expected revision.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    body: SaveGameSpecRequest,
+    response: { status: 200, description: 'Updated game project', schema: GameProject },
+  },
+  {
+    operationId: 'buildGame',
+    method: 'POST',
+    path: '/v1/games/{gameId}/build',
+    summary: 'Generate original source, assets and levels, then verify playability.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    body: BuildGameRequest,
+    response: { status: 200, description: 'Verified or failed build with evidence', schema: GameBuild },
+  },
+  {
+    operationId: 'listGameBuilds',
+    method: 'GET',
+    path: '/v1/games/{gameId}/builds',
+    summary: 'Owner-scoped build history, newest first.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: { status: 200, description: 'Build history', schema: GameBuildList },
+  },
+  {
+    operationId: 'restoreGameBuild',
+    method: 'POST',
+    path: '/v1/games/{gameId}/builds/{buildId}/restore',
+    summary: 'Restore a verified historical build and the exact spec it was built from.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameBuildParams,
+    body: RestoreGameBuildRequest,
+    response: { status: 200, description: 'Restored game project', schema: GameProject },
+  },
+  {
+    operationId: 'iterateGame',
+    method: 'POST',
+    path: '/v1/games/{gameId}/iterate',
+    summary: 'Apply a natural-language edit, rebuild and re-verify.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    body: IterateGameRequest,
+    response: { status: 200, description: 'Iteration result', schema: GameIteration },
+  },
+  {
+    operationId: 'previewGame',
+    method: 'GET',
+    path: '/v1/games/{gameId}/preview',
+    summary: 'Playable HTML preview of the latest verified build.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: {
+      status: 200,
+      description: 'Playable HTML document',
+      schema: zod.string(),
+      contentType: 'text/html; charset=utf-8',
+    },
+  },
+  {
+    operationId: 'exportGame',
+    method: 'GET',
+    path: '/v1/games/{gameId}/export',
+    summary: 'Export the verified source as a deterministic ZIP archive.',
+    tags: ['games'],
+    auth: 'owner',
+    params: GameParams,
+    response: { status: 200, description: 'ZIP archive as base64', schema: GameExport },
+  },
+  {
+    operationId: 'createGameSession',
+    method: 'POST',
+    path: '/v1/games/{gameId}/sessions',
+    summary: 'Start an isolated gaming-agent session against a verified build.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameParams,
+    body: CreateGameSessionRequest,
+    response: { status: 201, description: 'Created game session', schema: GameSession },
+  },
+  {
+    operationId: 'listGameSessions',
+    method: 'GET',
+    path: '/v1/game-sessions',
+    summary: 'Owner-scoped gaming-agent sessions.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    response: { status: 200, description: 'Game session list', schema: GameSessionList },
+  },
+  {
+    operationId: 'getGameSession',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}',
+    summary: 'Session status, bounded progress, memory and recent logs.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Game session', schema: GameSession },
+  },
+  {
+    operationId: 'observeGameSession',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}/observation',
+    summary: 'Screen frame and inspected game state for the current tick.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Observation', schema: GameObservation },
+  },
+  {
+    operationId: 'controlGameSession',
+    method: 'POST',
+    path: '/v1/game-sessions/{sessionId}/control',
+    summary: 'Pause, resume, take over, release, cancel or send one bounded input.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    body: GameSessionControlRequest,
+    response: { status: 200, description: 'Updated game session', schema: GameSession },
+  },
+  {
+    operationId: 'gameSessionLogs',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}/logs',
+    summary: 'Bounded execution log and session memory.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Session logs', schema: GameSessionLogs },
+  },
+  {
+    operationId: 'gameSessionVerification',
+    method: 'GET',
+    path: '/v1/game-sessions/{sessionId}/verification',
+    summary: 'Measured objective completion evidence for a finished session.',
+    tags: ['gaming-agent'],
+    auth: 'owner',
+    params: GameSessionParams,
+    response: { status: 200, description: 'Session verification', schema: GameSessionVerification },
+  },
+  {
+    operationId: 'browserCapabilities',
+    method: 'GET',
+    path: '/v1/browser/capabilities',
+    summary: 'Truthful cloud browser availability; unverified when not attested.',
+    tags: ['browser'],
+    auth: 'owner',
+    response: { status: 200, description: 'Browser capabilities', schema: BrowserCapabilities },
+  },
+  {
+    operationId: 'listBrowserSessions',
+    method: 'GET',
+    path: '/v1/browser/sessions',
+    summary: 'Owner-scoped cloud browser sessions and their current state.',
+    tags: ['browser'],
+    auth: 'owner',
+    response: { status: 200, description: 'Browser session list', schema: BrowserSessionList },
+  },
+  {
+    operationId: 'createBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions',
+    summary: 'Create an isolated cloud browser session with an origin allowlist.',
+    tags: ['browser'],
+    auth: 'owner',
+    body: BrowserSessionCreateRequest,
+    response: { status: 201, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'getBrowserSession',
+    method: 'GET',
+    path: '/v1/browser/sessions/{sessionId}',
+    summary: 'One cloud browser session, including tabs and expiry.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'browserAction',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/actions',
+    summary: 'Perform one authorized navigation, inspection, capture or input action.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserAction,
+    response: { status: 200, description: 'Browser action result', schema: BrowserActionResult },
+  },
+  {
+    operationId: 'pauseBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/pause',
+    summary: 'Pause a session while keeping its provider state and tabs.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'resumeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/resume',
+    summary: 'Resume a paused session with its tabs and current page intact.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'takeoverBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/takeover',
+    summary: 'Hand the live session to the owner, or return control to the agent.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserTakeoverRequest,
+    response: { status: 200, description: 'Owner takeover result', schema: BrowserTakeoverResult },
+  },
+  {
+    operationId: 'closeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/close',
+    summary: 'Cancel a session and release its cloud browser.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserCloseRequest,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'authorizeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/authorize',
+    summary: 'Request a single-use owner approval for one sensitive browser action.',
+    tags: ['browser', 'permissions'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserAuthorizationRequest,
+    response: { status: 201, description: 'Permission request', schema: PermissionRequest },
+  },
+  {
+    operationId: 'decideBrowserAuthorization',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/authorize/decision',
+    summary: 'Approve or deny one browser permission request.',
+    tags: ['browser', 'permissions'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: PermissionDecisionRequest,
+    response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'listBrowserReceipts',
+    method: 'GET',
+    path: '/v1/browser/sessions/{sessionId}/receipts',
+    summary: 'Bounded execution-receipt history for a browser session.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser receipt list', schema: BrowserReceiptList },
+  },
+  {
+    operationId: 'getBrowserArtifact',
+    method: 'GET',
+    path: '/v1/browser/artifacts/{artifactId}',
+    summary: 'Retrieve captured screenshot or transferred file bytes.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserArtifactParams,
+    response: { status: 200, description: 'Browser artifact content', schema: BrowserArtifactContent },
+  },
+  {
     operationId: 'listNotifications',
     method: 'GET',
     path: '/v1/notifications',
     summary: 'Durable completion notifications, including unread count.',
     tags: ['notifications'],
     auth: 'owner',
-    response: { status: 200, description: 'Notification list', schema: NotificationList },
+    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
+    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
+  },
+  {
+    operationId: 'createSchedule',
+    method: 'POST',
+    path: '/v1/schedules',
+    summary: 'Create a durable, owner-controlled schedule executed by the engine.',
+    tags: ['schedules'],
+    auth: 'owner',
+    body: ScheduleCreateRequest,
+    response: { status: 201, description: 'Created schedule', schema: Schedule },
+  },
+  {
+    operationId: 'listSchedules',
+    method: 'GET',
+    path: '/v1/schedules',
+    summary: 'List this owner\'s schedules with their next run and state.',
+    tags: ['schedules'],
+    auth: 'owner',
+    response: { status: 200, description: 'Schedule list', schema: ScheduleList },
+  },
+  {
+    operationId: 'markNotificationsRead',
+    method: 'POST',
+    path: '/v1/notifications/read',
+    summary: 'Mark every completion notification and schedule notice for this owner as read.',
+    tags: ['notifications'],
+    auth: 'owner',
+    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
+    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
+  },
+  {
+    operationId: 'dispatchScheduleEvent',
+    method: 'POST',
+    path: '/v1/schedule-events',
+    summary: 'Fire a named event; each matching event-triggered schedule runs at most once.',
+    tags: ['schedules'],
+    auth: 'owner',
+    body: ScheduleEventRequest,
+    response: { status: 202, description: 'Dispatched occurrences', schema: ScheduleEventResult },
+  },
+  {
+    operationId: 'getSchedule',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'One schedule with its authoritative state and next run.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Schedule', schema: Schedule },
+  },
+  {
+    operationId: 'getScheduleUpcoming',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}/upcoming',
+    summary: 'Preview the next occurrences without creating a receipt or a task.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    query: UpcomingQuery,
+    response: { status: 200, description: 'Upcoming occurrences', schema: ScheduleUpcoming },
+  },
+  {
+    operationId: 'updateSchedule',
+    method: 'PATCH',
+    path: '/v1/schedules/{scheduleId}',
+    summary: 'Edit timing, condition, retry or limits; the execution identity cannot be widened.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleUpdateRequest,
+    response: { status: 200, description: 'Updated schedule', schema: Schedule },
+  },
+  {
+    operationId: 'pauseSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/pause',
+    summary: 'Pause future occurrences; a run already in flight is not stopped.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Pause outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'resumeSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/resume',
+    summary: 'Resume a paused schedule from the next occurrence; missed runs are not stormed.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Resume outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'cancelSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/cancel',
+    summary: 'Cancel a schedule permanently and cancel its current Work task.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    response: { status: 200, description: 'Cancellation outcome', schema: ScheduleControlResult },
+  },
+  {
+    operationId: 'triggerSchedule',
+    method: 'POST',
+    path: '/v1/schedules/{scheduleId}/trigger',
+    summary: 'Run one occurrence now, deduplicated by the supplied idempotency key.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    body: ScheduleTriggerRequest,
+    response: { status: 202, description: 'Dispatched occurrence', schema: ScheduleDispatch },
+  },
+  {
+    operationId: 'listScheduleExecutions',
+    method: 'GET',
+    path: '/v1/schedules/{scheduleId}/executions',
+    summary: 'Durable execution receipts for one schedule, newest first.',
+    tags: ['schedules'],
+    auth: 'owner',
+    params: ScheduleParams,
+    query: ExecutionHistoryQuery,
+    response: { status: 200, description: 'Execution history', schema: ScheduleExecutionList },
+  },
+  {
+    operationId: 'listArtifacts',
+    method: 'GET',
+    path: '/v1/artifacts',
+    summary: 'Owner-scoped durable artifacts in one data-mode partition.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    query: ArtifactListQuery,
+    response: { status: 200, description: 'Artifact list and storage quota', schema: ArtifactDescriptorList },
+  },
+  {
+    operationId: 'artifactProjectManifest',
+    method: 'GET',
+    path: '/v1/artifacts/manifest',
+    summary: 'Version-pinned manifest for one project, with a digest of the entry list.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    query: ArtifactManifestQuery,
+    response: { status: 200, description: 'Project artifact manifest', schema: ArtifactProjectManifest },
+  },
+  {
+    operationId: 'generateDeliverable',
+    method: 'POST',
+    path: '/v1/deliverables',
+    summary:
+      'Generate, verify and durably persist a document, workbook, deck, analysis or software project.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: DeliverableRequest,
+    maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+    response: { status: 201, description: 'Created deliverable', schema: Deliverable },
+  },
+  {
+    operationId: 'uploadArtifact',
+    method: 'POST',
+    path: '/v1/artifacts',
+    summary: 'Store a new artifact version from base64-encoded bytes.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: ArtifactUploadRequest,
+    maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+    response: { status: 201, description: 'Stored artifact', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'pruneArtifacts',
+    method: 'POST',
+    path: '/v1/artifacts/prune',
+    summary: 'Delete this owner’s artifacts whose retention has expired.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    body: ArtifactModeRequest,
+    response: { status: 200, description: 'Prune result', schema: ArtifactPruneResult },
+  },
+  {
+    operationId: 'getArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}',
+    summary: 'Authoritative metadata for one artifact in the requested mode.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactModeQuery,
+    response: { status: 200, description: 'Artifact descriptor', schema: ArtifactDescriptor },
+  },
+  {
+    operationId: 'uploadArtifactVersion',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/versions',
+    summary: 'Append a new immutable version to an existing artifact.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactVersionRequest,
+    maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+    response: { status: 201, description: 'Stored artifact version', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'restoreArtifactVersion',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/restore',
+    summary: 'Point an artifact at an existing immutable version without deleting newer ones.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactRestoreRequest,
+    response: { status: 200, description: 'Restored artifact version', schema: ArtifactUploadResult },
+  },
+  {
+    operationId: 'listArtifactVersions',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/versions',
+    summary: 'Retained version history for one artifact, newest last.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactModeQuery,
+    response: { status: 200, description: 'Artifact version list', schema: ArtifactVersionList },
+  },
+  {
+    operationId: 'downloadArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/content',
+    summary: 'Exact bytes of one artifact version, integrity-verified on read.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactContentQuery,
+    response: { status: 200, description: 'Artifact content', schema: ArtifactContent },
+  },
+  {
+    operationId: 'exportArtifact',
+    method: 'GET',
+    path: '/v1/artifacts/{artifactId}/export',
+    summary: 'Portable export: descriptor, version manifest and exact bytes.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    query: ArtifactContentQuery,
+    response: { status: 200, description: 'Artifact export', schema: ArtifactExport },
+  },
+  {
+    operationId: 'deleteArtifact',
+    method: 'POST',
+    path: '/v1/artifacts/{artifactId}/delete',
+    summary: 'Delete an artifact and every retained version it owns.',
+    tags: ['artifacts'],
+    auth: 'owner',
+    params: ArtifactParams,
+    body: ArtifactModeRequest,
+    response: { status: 200, description: 'Delete result', schema: ArtifactDeleteResult },
+  },
+  {
+    operationId: 'getHandshake',
+    method: 'GET',
+    path: '/v1/handshake',
+    summary: 'Served contract identity, capability truth and version negotiation.',
+    tags: ['contract'],
+    auth: 'public',
+    query: HandshakeQuery,
+    response: { status: 200, description: 'Capability handshake', schema: CapabilityHandshake },
   },
 ]);
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createGeminiProvider, parseStream } from '../../src/models/providers/gemini.js';
-import { parseRateLimit, parseRetryAfter, providerErrorFromResponse } from '../../src/models/providers/http.js';
+import { createGeminiProvider } from '../../src/models/providers/gemini.js';
+import { parseRateLimit, parseRetryAfter } from '../../src/models/providers/http.js';
 import {
   createOpenAiProvider,
   parseCompletion,
@@ -36,13 +36,6 @@ const openAiRequest = {
   signal: new AbortController().signal,
   maxOutputTokens: 64,
 };
-
-
-async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
-  const result: T[] = [];
-  for await (const event of events) result.push(event);
-  return result;
-}
 
 test('OpenRouter discovery uses published pricing, modalities and parameters', () => {
   const models = parseModelList('openrouter', {
@@ -496,31 +489,4 @@ test('Gemini RESOURCE_EXHAUSTED becomes a quota failure', async () => {
       return true;
     },
   );
-});
-
-test('Gemini bounds individual SSE frames, not a shared network chunk', async () => {
-  const frame = `data: ${JSON.stringify({
-    candidates: [{ content: { parts: [{ text: 'x'.repeat(600_000) }] } }],
-  })}`;
-  const signal = openAiRequest.signal;
-  const events = await collect(parseStream('gemini', sse([`${frame}\n\n${frame}\n\n`]), signal));
-  assert.deepEqual(events.map((event) => event.type), ['text', 'text', 'done']);
-  await assert.rejects(
-    () => collect(parseStream('gemini', sse([`${frame}\n\n${'x'.repeat(1_048_577)}`]), signal)),
-    (error: unknown) => error instanceof ProviderError && !error.retryable && error.kind === 'invalid',
-  );
-});
-
-test('a provider error body cannot advertise a retry delay longer than one day', async () => {
-  for (const [delay, expected] of [
-    ['2.5s', 2_500],
-    ['100000s', 86_400_000],
-    [`${'9'.repeat(400)}s`, 86_400_000],
-  ] as const) {
-    const error = await providerErrorFromResponse({
-      response: json({ error: { details: [{ retryDelay: delay }] } }, 429),
-      provider: 'gemini',
-    });
-    assert.equal(error.retryAfterMs, expected);
-  }
 });

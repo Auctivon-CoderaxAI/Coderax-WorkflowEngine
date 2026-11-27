@@ -2,24 +2,30 @@ import type { EngineConfig } from '../configuration/schema.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { AuthService } from '../security/auth.js';
 import type { AgentRegistry } from '../agents/registry.js';
-import type { ModelCatalog } from '../models/catalog.js';
+import type { ModelRouter } from '../models/router.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
+import type { RunSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import type { BrowserService } from '../orchestration/browser.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
 import type { ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
-import type { ModelRouter } from '../models/router.js';
 
 /**
  * Dependencies are named, not positional.
@@ -35,7 +41,7 @@ export type InfrastructureDependencies = {
   ids: IdGenerator;
   auth: AuthService;
   agents: AgentRegistry;
-  models: ModelCatalog;
+  models: ModelRouter;
   budget: BudgetLedger;
   lease: LeaseStore;
   tasks: TaskRepository;
@@ -43,14 +49,23 @@ export type InfrastructureDependencies = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifactService: ArtifactService;
+  deliverables: DeliverableService;
+  schedules: ScheduleRepository;
+  scheduleNotices: ScheduleNoticeStore;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
-  tools: ToolRuntime;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
+  browser: BrowserService;
+  supervisor: RunSupervisor;
+  /** Registered tools, or null when the deployment disabled them. */
+  tools: ToolRuntime | null;
   knowledge: KnowledgeStore;
-  modelRouter: ModelRouter;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -67,14 +82,22 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'memory',
   'permissions',
   'notifications',
+  'artifactService',
+  'deliverables',
+  'schedules',
+  'scheduleNotices',
   'audit',
   'events',
   'runner',
   'scheduler',
   'health',
+  'studio',
+  'sessions',
+  'gaming',
+  'browser',
+  'supervisor',
   'tools',
   'knowledge',
-  'modelRouter',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {
