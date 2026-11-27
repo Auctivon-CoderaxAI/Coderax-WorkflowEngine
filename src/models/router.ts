@@ -1322,6 +1322,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
             : null,
         circuit: provider.circuit.state(at),
         requestsPerMinute: provider.settings.requestsPerMinute,
+        requestsThisMinute: provider.limiter.dispatchedThisMinute(at),
       })),
       models: [...models.values()].map((runtime): ModelHealth => ({
         ref: runtime.state.ref,

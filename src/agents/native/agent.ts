@@ -631,17 +631,16 @@ export function createNativeAgent(input: {
           }
           toolLedger.push({ callId, tool: action.tool, ok: outcome.result.ok, digest });
 
-          // The pending action is settled now that the call has an outcome. A
-          // replay that was denied or rejected is also cleared, so it cannot be
-          // replayed again on a later resume.
+          // Persist the outcome before discarding the pending action. If the
+          // clear is interrupted, the completed ledger entry prevents replay.
+          state.observations[step.id] = [...observations];
+          if (!(await persistState())) return cancelled();
           if (pending && pending.stepId === step.id) {
             if (context.savePendingAction && !(await context.savePendingAction(null))) {
               return cancelled();
             }
             pending = null;
           }
-          state.observations[step.id] = [...observations];
-          if (!(await persistState())) return cancelled();
         }
 
         if (stepText.length === 0) {

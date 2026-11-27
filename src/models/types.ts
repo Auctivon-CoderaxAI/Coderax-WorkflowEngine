@@ -335,10 +335,11 @@ export type ProviderHealth = {
   /** Configured local ceiling, reported so a client sees the real limit. */
   requestsPerMinute: number;
   /**
-   * Attempts dispatched by this replica in the current minute, when the router
-   * tracks them. The per-minute ceiling is enforced by the limiter either way.
+   * Requests this replica admitted for dispatch in the last minute. Counted by
+   * the limiter at admission and removed on a pre-dispatch refund, so it is a
+   * measured value rather than the configured ceiling or a placeholder.
    */
-  requestsThisMinute?: number;
+  requestsThisMinute: number;
 };
 
 export type RouterHealth = {
