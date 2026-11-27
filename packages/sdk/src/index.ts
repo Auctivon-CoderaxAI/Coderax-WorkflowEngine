@@ -13,15 +13,18 @@ import {
   ArtifactDescriptor,
   ArtifactDescriptorList,
   ArtifactExport,
-  ArtifactProjectManifest,
+  ArtifactKind,
   ArtifactPruneResult,
+  ArtifactUploadRequest,
   ArtifactUploadResult,
   ArtifactVersionList,
-  CapabilityHandshake,
+  ArtifactVersionRequest,
   ChatReply,
   Conversation,
   Deliverable,
   ConversationList,
+  CreativeValidation,
+  EngineHandshake,
   ExecutionEvent,
   GameBuild,
   GameBuildList,
@@ -36,9 +39,10 @@ import {
   GameSessionLogs,
   GameSessionVerification,
   HealthReport,
-  KnowledgeIngestResult,
-  KnowledgeList,
-  KnowledgeSearchResult,
+  MediaCapabilities,
+  MediaDownload,
+  MediaUploadResult,
+  MemoryEntry,
   MemoryList,
   ModelList,
   NotificationList,
@@ -56,24 +60,12 @@ import {
   TeamSubmitRequest,
 } from '@coderax/contracts';
 import type {
-  BuildGameRequest,
-  BrowserAction,
-  BrowserActionInput,
-  BrowserAuthorizationRequest,
-  BrowserCloseRequest,
-  BrowserSessionCreateInput,
-  BrowserTakeoverRequest,
-  ArtifactKind,
-  ArtifactUploadInput,
-  ArtifactUploadRequest,
-  ArtifactVersionInput,
-  ArtifactVersionRequest,
   ChatRequest,
-  DeliverableRequestInput,
-  CreateGameRequest,
-  CreateGameSessionRequest,
+  CreativeValidationRequest,
   DataMode,
-  KnowledgeIngestRequest,
+  MediaUploadRequest,
+  MemoryPutRequest,
+  NotificationReadRequest,
   PermissionDecisionRequest,
   RestoreGameBuildRequest,
   SaveGameSpecRequest,
@@ -632,7 +624,23 @@ export class CoderaxClient {
     });
   }
 
-  createSchedule(request: ScheduleCreateInput): Promise<Schedule> {
+  /** Clears the blue dot for the named terminal tasks. */
+  markNotificationsRead(taskIds: string[]): Promise<NotificationList> {
+    return this.request<NotificationList>(NotificationList, {
+      method: 'POST',
+      path: '/v1/notifications/read',
+      body: { taskIds } satisfies NotificationReadRequest,
+    });
+  }
+
+  schedules(): Promise<ScheduleList> {
+    return this.request<ScheduleList>(ScheduleList, {
+      method: 'GET',
+      path: '/v1/schedules',
+    });
+  }
+
+  createSchedule(request: ScheduleCreateRequest): Promise<Schedule> {
     return this.request<Schedule>(Schedule, {
       method: 'POST',
       path: '/v1/schedules',
@@ -669,57 +677,6 @@ export class CoderaxClient {
     return this.request<ScheduleControlResult>(ScheduleControlResult, {
       method: 'POST',
       path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
-    });
-  }
-
-  triggerSchedule(
-    scheduleId: string,
-    request: ScheduleTriggerRequest = {},
-  ): Promise<ScheduleDispatch> {
-    return this.request<ScheduleDispatch>(ScheduleDispatch, {
-      method: 'POST',
-      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/trigger`,
-      body: request,
-    });
-  }
-
-  scheduleExecutions(scheduleId: string, limit?: number): Promise<ScheduleExecutionList> {
-    return this.request<ScheduleExecutionList>(ScheduleExecutionList, {
-      method: 'GET',
-      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/executions`,
-      query: { limit },
-    });
-  }
-
-  scheduleEvent(request: ScheduleEventRequest): Promise<ScheduleEventResult> {
-    return this.request<ScheduleEventResult>(ScheduleEventResult, {
-      method: 'POST',
-      path: '/v1/schedule-events',
-      body: request,
-    });
-  }
-
-  updateSchedule(scheduleId: string, request: ScheduleUpdateRequest): Promise<Schedule> {
-    return this.request<Schedule>(Schedule, {
-      method: 'PATCH',
-      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
-      body: request,
-    });
-  }
-
-  scheduleUpcoming(scheduleId: string, limit?: number): Promise<ScheduleUpcoming> {
-    return this.request<ScheduleUpcoming>(ScheduleUpcoming, {
-      method: 'GET',
-      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/upcoming`,
-      query: { limit },
-    });
-  }
-
-  markNotificationsRead(): Promise<NotificationList> {
-    return this.request<NotificationList>(NotificationList, {
-      method: 'POST',
-      path: '/v1/notifications/read',
-      query: { includeSchedules: 'true' },
     });
   }
 
@@ -855,160 +812,44 @@ export class CoderaxClient {
     });
   }
 
-  gameCapabilities(): Promise<GameCapabilityReport> {
-    return this.request<GameCapabilityReport>(GameCapabilityReport, {
+  mediaCapabilities(): Promise<MediaCapabilities> {
+    return this.request<MediaCapabilities>(MediaCapabilities, {
       method: 'GET',
-      path: '/v1/games/capabilities',
+      path: '/v1/media/capabilities',
     });
   }
 
-  games(query: { cursor?: string; limit?: number } = {}): Promise<GameProjectList> {
-    return this.request<GameProjectList>(GameProjectList, {
-      method: 'GET',
-      path: '/v1/games',
-      query: { ...query },
-    });
-  }
-
-  createGame(request: CreateGameRequest): Promise<GameProject> {
-    return this.request<GameProject>(GameProject, {
+  uploadMedia(request: MediaUploadRequest): Promise<MediaUploadResult> {
+    return this.request<MediaUploadResult>(MediaUploadResult, {
       method: 'POST',
-      path: '/v1/games',
+      path: '/v1/media',
       body: request,
     });
   }
 
-  game(gameId: string): Promise<GameProject> {
-    return this.request<GameProject>(GameProject, {
+  media(mediaId: string): Promise<MediaDownload> {
+    return this.request<MediaDownload>(MediaDownload, {
       method: 'GET',
-      path: `/v1/games/${encodeURIComponent(gameId)}`,
+      path: `/v1/media/${encodeURIComponent(mediaId)}`,
     });
   }
 
-  saveGameSpec(gameId: string, request: SaveGameSpecRequest): Promise<GameProject> {
-    return this.request<GameProject>(GameProject, {
+  validateCreative(request: CreativeValidationRequest): Promise<CreativeValidation> {
+    return this.request<CreativeValidation>(CreativeValidation, {
       method: 'POST',
-      path: `/v1/games/${encodeURIComponent(gameId)}/spec`,
+      path: '/v1/creative/validate',
       body: request,
     });
   }
 
-  buildGame(gameId: string, request: BuildGameRequest = {}): Promise<GameBuild> {
-    return this.request<GameBuild>(GameBuild, {
-      method: 'POST',
-      path: `/v1/games/${encodeURIComponent(gameId)}/build`,
-      body: request,
-    });
-  }
-
-  gameBuilds(gameId: string): Promise<GameBuildList> {
-    return this.request<GameBuildList>(GameBuildList, {
-      method: 'GET',
-      path: `/v1/games/${encodeURIComponent(gameId)}/builds`,
-    });
-  }
-
-  restoreGameBuild(
-    gameId: string,
-    buildId: string,
-    request: RestoreGameBuildRequest,
-  ): Promise<GameProject> {
-    return this.request<GameProject>(GameProject, {
-      method: 'POST',
-      path: `/v1/games/${encodeURIComponent(gameId)}/builds/${encodeURIComponent(buildId)}/restore`,
-      body: request,
-    });
-  }
-
-  iterateGame(gameId: string, request: IterateGameRequest): Promise<GameIteration> {
-    return this.request<GameIteration>(GameIteration, {
-      method: 'POST',
-      path: `/v1/games/${encodeURIComponent(gameId)}/iterate`,
-      body: request,
-    });
-  }
-
-  /** The playable preview is HTML, not JSON; it is checked to be the declared type. */
-  async gamePreview(gameId: string): Promise<string> {
-    const path = `/v1/games/${encodeURIComponent(gameId)}/preview`;
-    const response = await this.send({ method: 'GET', path });
-    if (!response.ok) {
-      await this.parse(GameProject, response, path);
-      throw new CoderaxContractError('the preview request failed without a problem document');
-    }
-    const contentType = response.headers.get('content-type') ?? '';
-    if (!contentType.includes('text/html')) {
-      throw new CoderaxContractError('the preview was not served as HTML');
-    }
-    return response.text();
-  }
-
-  exportGame(gameId: string): Promise<GameExport> {
-    return this.request<GameExport>(GameExport, {
-      method: 'GET',
-      path: `/v1/games/${encodeURIComponent(gameId)}/export`,
-    });
-  }
-
-  createGameSession(
-    gameId: string,
-    request: CreateGameSessionRequest,
-  ): Promise<GameSession> {
-    return this.request<GameSession>(GameSession, {
-      method: 'POST',
-      path: `/v1/games/${encodeURIComponent(gameId)}/sessions`,
-      body: request,
-    });
-  }
-
-  gameSessions(): Promise<GameSessionList> {
-    return this.request<GameSessionList>(GameSessionList, {
-      method: 'GET',
-      path: '/v1/game-sessions',
-    });
-  }
-
-  gameSession(sessionId: string): Promise<GameSession> {
-    return this.request<GameSession>(GameSession, {
-      method: 'GET',
-      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}`,
-    });
-  }
-
-  observeGameSession(sessionId: string): Promise<GameObservation> {
-    return this.request<GameObservation>(GameObservation, {
-      method: 'GET',
-      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/observation`,
-    });
-  }
-
-  controlGameSession(
-    sessionId: string,
-    request: GameSessionControlRequest,
-  ): Promise<GameSession> {
-    return this.request<GameSession>(GameSession, {
-      method: 'POST',
-      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/control`,
-      body: request,
-    });
-  }
-
-  gameSessionLogs(sessionId: string): Promise<GameSessionLogs> {
-    return this.request<GameSessionLogs>(GameSessionLogs, {
-      method: 'GET',
-      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/logs`,
-    });
-  }
-
-  gameSessionVerification(sessionId: string): Promise<GameSessionVerification> {
-    return this.request<GameSessionVerification>(GameSessionVerification, {
-      method: 'GET',
-      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/verification`,
-    });
-  }
-
-  /** Replays and tails execution events from a sequence cursor. */
-  async *events(
+  /**
+   * Opens the durable Work stream. The returned generator replays from the
+   * cursor and then tails live events; `truncated` reports that the retained
+   * window no longer contains the requested cursor, and `lastSeq` is the engine's
+   * last assigned sequence at open. A consumer resumes with the last `seq` it
+   * applied, either as `after` or as `lastEventId`.
+   */
+  async openEvents(
     taskId: string,
     options: { after?: number; signal?: AbortSignal } = {},
   ): AsyncGenerator<ExecutionEvent> {
@@ -1035,25 +876,3 @@ export class CoderaxClient {
     }
   }
 }
-
-export type {
-  BrowserAction,
-  BrowserActionInput,
-  BrowserAuthorizationRequest,
-  BrowserCloseRequest,
-  BrowserSessionCreateInput,
-  BrowserTakeoverRequest,
-  ChatRequest,
-  DataMode,
-  PermissionDecisionRequest,
-  ScheduleCreateInput,
-  ScheduleUpdateRequest,
-  ScheduleEventRequest,
-  ScheduleTriggerRequest,
-  ArtifactKind,
-  ArtifactUploadInput,
-  ArtifactUploadRequest,
-  ArtifactVersionInput,
-  ArtifactVersionRequest,
-  WorkSubmitRequest,
-};

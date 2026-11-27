@@ -35,6 +35,11 @@ export const ServerConfig = z
     host: z.string().min(1).default('127.0.0.1'),
     /** 0 asks the operating system for a free port, which tests rely on. */
     port: z.number().int().min(0).max(65535).default(8788),
+    /**
+     * Bounded so a media upload fits its canonical base64 envelope while a
+     * malformed client still cannot make the process buffer without limit.
+     */
+    maxBodyBytes: z.number().int().min(1_048_576).max(16_777_216).default(8_388_608),
   })
   .strict();
 
@@ -239,56 +244,24 @@ export const ModelsConfig = z
   })
   .strict();
 
-export const ToolsConfig = z
+/**
+ * Media limits are enforced before a byte is decoded and before a provider is
+ * called. `maxBytes` is also bounded by the transport body limit, so an upload
+ * that passes validation cannot be larger than the server is willing to read.
+ */
+export const MediaConfig = z
   .object({
     enabled: z.boolean().default(true),
-    /** Shell and network are off unless the owner turns them on explicitly. */
-    shellEnabled: z.boolean().default(false),
-    allowedCommands: z.array(z.string().min(1).max(120)).max(50).default([]),
-    networkEnabled: z.boolean().default(false),
-    allowedHosts: z.array(z.string().min(1).max(255)).max(50).default([]),
-    maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(65_536),
-    commandTimeoutMs: z.number().int().min(100).max(60_000).default(15_000),
-    maxSearchFiles: z.number().int().min(1).max(20_000).default(2_000),
-  })
-  .strict();
-
-export const KnowledgeConfig = z
-  .object({
-    enabled: z.boolean().default(true),
-    maxDocuments: z.number().int().min(1).max(10_000).default(500),
-    /** Set together with an inference endpoint to enable semantic retrieval. */
-    embeddingModel: z.string().min(1).max(160).optional(),
-  })
-  .strict();
-
-export const McpServerConfig = z.discriminatedUnion('transport', [
-  z
-    .object({
-      name: z.string().min(1).max(60),
-      transport: z.literal('http'),
-      url: z.string().url(),
-      headersEnv: z.record(z.string(), z.string().min(1).max(200)).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      name: z.string().min(1).max(60),
-      transport: z.literal('stdio'),
-      command: z.string().min(1).max(200),
-      args: z.array(z.string().max(500)).max(40).default([]),
-      envFrom: z.array(z.string().min(1).max(200)).max(40).default([]),
-    })
-    .strict(),
-]);
-
-export const McpConfig = z
-  .object({ servers: z.array(McpServerConfig).max(10).default([]) })
-  .strict();
-
-export const EngineRoutingConfig = z
-  .object({
-    defaultMode: z.enum(['auto', 'fast', 'complex']).default('auto'),
+    maxBytes: z.number().int().min(1_024).max(5_242_880).default(4_194_304),
+    maxPixels: z.number().int().min(10_000).max(100_000_000).default(40_000_000),
+    maxAttachments: z.number().int().min(1).max(4).default(4),
+    creativeMaxBytes: z.number().int().min(4_096).max(1_048_576).default(262_144),
+    /**
+     * Private mode is a storage partition, not a local inference guarantee. An
+     * attachment would be sent to the verified-free provider, so exporting one
+     * from a private conversation requires an explicit operator decision.
+     */
+    allowPrivateModeAttachments: z.boolean().default(false),
   })
   .strict();
 
@@ -311,16 +284,37 @@ export const ExecutionConfig = z
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */
     cancelGraceMs: z.number().int().min(100).max(30_000).default(5_000),
-    /**
-     * How long a workspace root stays held after an execution whose termination
-     * could not be verified. A new run is refused in that root rather than
-     * writing alongside code this process can no longer observe.
-     */
-    containmentHoldMs: z.number().int().min(1_000).max(600_000).default(60_000),
-    /** Events kept per task after it settles; older ones are pruned. */
-    eventRetain: z.number().int().min(16).max(100_000).default(5_000),
   })
   .strict();
+
+export const ScheduleConfig = z
+  .object({
+    /** A durable schedule is only fired by a running engine tick. */
+    enabled: z.boolean().default(true),
+    tickIntervalMs: z.number().int().min(100).max(300_000).default(2_000),
+    /** Maximum due schedules handled in one tick, bounding a thundering herd. */
+    tickBatch: z.number().int().min(1).max(100).default(10),
+  })
+  .strict();
+
+export const ArtifactsConfig = z
+  .object({
+    maxBytesPerArtifact: z.number().int().min(1_024).max(10_485_760).default(8_388_608),
+    maxBytesPerOwner: z.number().int().min(1_024).max(1_073_741_824).default(268_435_456),
+    maxArtifactsPerOwner: z.number().int().min(1).max(10_000).default(1_000),
+    maxVersionsPerArtifact: z.number().int().min(1).max(100).default(20),
+    defaultRetentionDays: z.number().int().min(0).max(3_650).default(0),
+    maxRetentionDays: z.number().int().min(1).max(3_650).default(365),
+    chunkBytes: z.number().int().min(65_536).max(4_194_304).default(1_048_576),
+    /**
+     * Test/dev only: allow artifact and media writes through the in-memory
+     * backend, which cannot survive a restart. Production defaults to false.
+     */
+    allowEphemeral: z.boolean().default(false),
+  })
+  .strict();
+
+export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;
 
 export const PersistenceConfig = z
   .object({
@@ -373,7 +367,10 @@ export const EngineConfigSchema = z
     workspaces: WorkspacesConfig,
     engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
+    media: MediaConfig.default({}),
     execution: ExecutionConfig.default({}),
+    schedules: ScheduleConfig.default({}),
+    artifacts: ArtifactsConfig.default({}),
     persistence: PersistenceConfig.default({}),
     tools: ToolsConfig.default({}),
     knowledge: KnowledgeConfig.default({}),
@@ -387,17 +384,3 @@ export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
 export type PersistenceSettings = z.infer<typeof PersistenceConfig>;
-export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;
-
-export type BrowserSettings = z.infer<typeof BrowserConfig>;
-export type BrowserRemoteSettings = z.infer<typeof BrowserRemoteConfig>;
-
-/** Derived once so the provider and the API report the same enforced limits. */
-export function browserLimits(browsers: BrowserSettings): BrowserLimits {
-  return {
-    maxSessionTtlSeconds: Math.floor(browsers.sessionTtlMs / 1000),
-    maxSessionsPerOwner: browsers.maxSessionsPerOwner,
-    maxScreenshotBytes: browsers.maxScreenshotBytes,
-    maxUploadBytes: browsers.maxUploadBytes,
-  };
-}

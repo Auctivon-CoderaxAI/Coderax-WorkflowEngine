@@ -19,7 +19,7 @@ import {
 import {
   baseConfig,
   createWorkspaces,
-  fakeGateway,
+  fakeProvider,
   OWNER_ID,
   OWNER_TOKEN,
   type TestWorkspace,
@@ -71,7 +71,7 @@ async function boot(input: {
   const app = await composeApplication({
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
-    gateway: fakeGateway(),
+    providers: [{ adapter: fakeProvider() }],
     persistence: { database },
   });
   const { url } = await app.start();

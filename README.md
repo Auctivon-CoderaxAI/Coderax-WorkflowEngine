@@ -38,6 +38,7 @@ are clients of the same versioned API.
 | Owner-only auth, scoped permissions, private/cloud memory split | Implemented | `src/security`, `src/permissions`, `src/memory` |
 | Zero-cost model router (discovery, verification, modes, limits, fallback, health) | Implemented | `src/models/router.ts`, `src/models/providers`, tests |
 | Reproducible quality benchmark harness | Implemented; live run requires provider credentials | `benchmarks/`, `scripts/benchmark.ts` |
+| Multimodal image input and creative SVG/HTML validation | Implemented; image only, private-mode attachments off by default | `src/media`, `src/creative`, [`docs/multimodal.md`](docs/multimodal.md) |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native agent: plan, tool actions, reflection, recovery | Implemented | `src/agents/native` |
@@ -73,9 +74,9 @@ exact dependency and the narrow ports the game code exposes for that migration.
 ```bash
 npm install
 npm run build
-npm test                          # unit, contract, integration, security and e2e suites
-npm run verify                    # build + every quality gate, including real MongoDB
-npm test                          # unit, contract, integration, security, e2e
+npm run verify                    # build, reproducible SDK pack, 271 tests, OpenAPI drift gate
+npm test                          # tests only: unit, contract, integration, security, e2e
+npm run sdk:pack                  # reproducible tarballs + SHA256SUMS in dist-artifacts/
 npm run openapi:check             # fails if the published contract drifted
 ```
 

@@ -88,7 +88,12 @@ export function createHttpServer(input: {
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
-          signal: AbortSignal.any([streamShutdown.signal, disconnected.signal]),
+          accept: Array.isArray(request.headers.accept)
+            ? request.headers.accept.join(', ')
+            : request.headers.accept,
+          lastEventId: Array.isArray(request.headers['last-event-id'])
+            ? request.headers['last-event-id'][0]
+            : request.headers['last-event-id'],
         });
 
         if (result.kind === 'json') {
@@ -113,17 +118,12 @@ export function createHttpServer(input: {
         response.writeHead(result.status, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',
-          // Closing the response must also release its connection during shutdown.
-          connection: 'close',
+          connection: 'keep-alive',
         });
-        response.flushHeaders();
-        for await (const frame of result.events) {
+        for await (const event of result.events) {
           if (response.destroyed || response.writableEnded) break;
-          // The SSE id is what lets EventSource resume with Last-Event-ID;
-          // JSON properties alone are invisible to the browser reconnect.
-          const seq = (event as { seq?: unknown }).seq;
-          if (typeof seq === 'number') response.write(`id: ${seq}\n`);
-          response.write(`data: ${JSON.stringify(event)}\n\n`);
+          if (event.id) response.write(`id: ${event.id}\n`);
+          response.write(`data: ${JSON.stringify(event.data)}\n\n`);
         }
         response.end();
       } catch {

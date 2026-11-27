@@ -1,4 +1,20 @@
 import type { z } from 'zod';
+import { z as zod } from 'zod';
+import {
+  ARTIFACT_BODY_LIMIT_BYTES,
+  ArtifactContent,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactKind,
+  ArtifactModeRequest,
+  ArtifactPruneResult,
+  ArtifactUploadRequest,
+  ArtifactUploadResult,
+  ArtifactVersionList,
+  ArtifactVersionRequest,
+} from './artifacts.js';
 import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
 import {
@@ -26,19 +42,22 @@ import { HealthReport, ReadinessReport } from './health.js';
 import { CapabilityHandshake, HandshakeQuery } from './handshake.js';
 import { ModelList } from './models.js';
 import {
-  KnowledgeIngestRequest,
-  KnowledgeIngestResult,
-  KnowledgeList,
-  KnowledgeSearchResult,
-  RoutingReport,
-  ToolList,
-} from './intelligence.js';
+  CreativeValidation,
+  CreativeValidationRequest,
+  MediaCapabilities,
+  MediaDownload,
+  MediaId,
+  MediaUploadRequest,
+  MediaUploadResult,
+} from './media.js';
 import {
   NotificationList,
   NotificationReadRequest,
   PermissionDecisionRequest,
   PermissionList,
 } from './permissions.js';
+import { ArtifactId, ConversationId, DataMode, ProjectId, ScheduleId, TaskId, TaskState } from './primitives.js';
+import { Schedule, ScheduleControlResult, ScheduleCreateRequest, ScheduleList } from './schedules.js';
 import {
   CancelRequest,
   ChatReply,
@@ -53,15 +72,6 @@ import {
   TaskStatus,
   WorkSubmitRequest,
 } from './tasks.js';
-import { z as zod } from 'zod';
-import { ConversationId, TaskId } from './primitives.js';
-import {
-  TeamAccepted,
-  TeamControlResult,
-  TeamId,
-  TeamStatus,
-  TeamSubmitRequest,
-} from './team.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -96,37 +106,22 @@ export type RouteSpec = {
   };
   /** Server-sent events rather than a single JSON body. */
   stream?: boolean;
-  /**
-   * Per-operation JSON body ceiling. Absent means the transport default. Only a
-   * route that carries encoded file content may raise it, so an ordinary write
-   * cannot be made to buffer an unbounded body.
-   */
+  /** Per-operation JSON body ceiling; only encoded file content may raise it. */
   maxBodyBytes?: number;
+  /** The frame schema for an SSE response; validated before it is written. */
+  frames?: z.ZodTypeAny;
+  /**
+   * A streaming operation that also answers JSON when the client does not send
+   * `Accept: text/event-stream`. Shape reserved by `feat/intelligence-core`.
+   */
+  negotiated?: boolean;
 };
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const TeamParams = zod.object({ teamId: TeamId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
-const GameParams = zod.object({ gameId: zod.string().trim().min(1).max(120) }).strict();
-const GameBuildParams = zod
-  .object({
-    gameId: zod.string().trim().min(1).max(120),
-    buildId: zod.string().trim().min(1).max(120),
-  })
-  .strict();
-const GameSessionParams = zod
-  .object({ sessionId: zod.string().trim().min(1).max(120) })
-  .strict();
-const BrowserSessionParams = zod.object({ sessionId: BrowserSessionId }).strict();
-const BrowserArtifactParams = zod.object({ artifactId: BrowserArtifactId }).strict();
+const MediaParams = zod.object({ mediaId: MediaId }).strict();
 const ScheduleParams = zod.object({ scheduleId: ScheduleId }).strict();
-const ExecutionHistoryQuery = zod
-  .object({ limit: zod.coerce.number().int().positive().max(500).optional() })
-  .strict();
-const UpcomingQuery = zod
-  .object({ limit: zod.coerce.number().int().positive().max(20).optional() })
-  .strict();
-
 const ArtifactParams = zod.object({ artifactId: ArtifactId }).strict();
 
 const ArtifactListQuery = zod
@@ -139,14 +134,9 @@ const ArtifactListQuery = zod
     limit: zod.coerce.number().int().min(1).max(500).optional(),
   })
   .strict();
-
 const ArtifactModeQuery = zod.object({ mode: DataMode.optional() }).strict();
-
 const ArtifactContentQuery = zod
-  .object({
-    mode: DataMode.optional(),
-    version: zod.coerce.number().int().positive().optional(),
-  })
+  .object({ mode: DataMode.optional(), version: zod.coerce.number().int().positive().optional() })
   .strict();
 
 export const ROUTES: readonly RouteSpec[] = Object.freeze([
@@ -187,61 +177,43 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Model list', schema: ModelList },
   },
   {
-    operationId: 'listTools',
+    operationId: 'getMediaCapabilities',
     method: 'GET',
-    path: '/v1/tools',
-    summary: 'Tools Coderax Native may call, with their scopes and approval policy.',
-    tags: ['discovery'],
+    path: '/v1/media/capabilities',
+    summary: 'What image, audio, video, document and creative handling is actually available.',
+    tags: ['media'],
     auth: 'owner',
-    response: { status: 200, description: 'Tool list', schema: ToolList },
+    response: { status: 200, description: 'Media capabilities', schema: MediaCapabilities },
   },
   {
-    operationId: 'getRouting',
-    method: 'GET',
-    path: '/v1/routing',
-    summary: 'Provider quotas, verified cost evidence and the ranked zero-cost route.',
-    tags: ['discovery'],
-    auth: 'owner',
-    query: zod
-      .object({ mode: zod.enum(['auto', 'fast', 'complex']).optional() })
-      .strict(),
-    response: { status: 200, description: 'Routing report', schema: RoutingReport },
-  },
-  {
-    operationId: 'ingestKnowledge',
+    operationId: 'uploadMedia',
     method: 'POST',
-    path: '/v1/knowledge',
-    summary: 'Store one document for retrieval in a data mode.',
-    tags: ['knowledge'],
+    path: '/v1/media',
+    summary: 'Upload one owner-scoped image; the format is identified from its header.',
+    tags: ['media'],
     auth: 'owner',
-    body: KnowledgeIngestRequest,
-    response: { status: 202, description: 'Stored document', schema: KnowledgeIngestResult },
+    body: MediaUploadRequest,
+    response: { status: 201, description: 'Stored media', schema: MediaUploadResult },
   },
   {
-    operationId: 'listKnowledge',
+    operationId: 'getMedia',
     method: 'GET',
-    path: '/v1/knowledge',
-    summary: 'Documents stored for owner-scoped retrieval.',
-    tags: ['knowledge'],
+    path: '/v1/media/{mediaId}',
+    summary: 'Read one owner-scoped media item and its canonical base64 bytes.',
+    tags: ['media'],
     auth: 'owner',
-    query: zod.object({ mode: zod.enum(['private', 'cloud']).optional() }).strict(),
-    response: { status: 200, description: 'Knowledge list', schema: KnowledgeList },
+    params: MediaParams,
+    response: { status: 200, description: 'Media bytes', schema: MediaDownload },
   },
   {
-    operationId: 'searchKnowledge',
-    method: 'GET',
-    path: '/v1/knowledge/search',
-    summary: 'Retrieve the most relevant stored passages for a query.',
-    tags: ['knowledge'],
+    operationId: 'validateCreative',
+    method: 'POST',
+    path: '/v1/creative/validate',
+    summary: 'Validate a generated SVG or HTML draft against the sandboxed-render allowlist.',
+    tags: ['creative'],
     auth: 'owner',
-    query: zod
-      .object({
-        q: zod.string().min(1).max(2000),
-        k: zod.coerce.number().int().min(1).max(20).optional(),
-        mode: zod.enum(['private', 'cloud']).optional(),
-      })
-      .strict(),
-    response: { status: 200, description: 'Knowledge hits', schema: KnowledgeSearchResult },
+    body: CreativeValidationRequest,
+    response: { status: 200, description: 'Validation result', schema: CreativeValidation },
   },
   {
     operationId: 'submitChat',
@@ -370,200 +342,62 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     response: { status: 200, description: 'Permission list', schema: PermissionList },
   },
   {
-    operationId: 'submitTeam',
-    method: 'POST',
-    path: '/v1/teams',
-    summary: 'Submit a bounded multi-agent team with a dependency graph.',
-    tags: ['teams'],
-    auth: 'owner',
-    body: TeamSubmitRequest,
-    response: { status: 202, description: 'Team accepted', schema: TeamAccepted },
-  },
-  {
-    operationId: 'getTeam',
-    method: 'GET',
-    path: '/v1/teams/{teamId}',
-    summary: 'Authoritative team snapshot, members and evidence verification.',
-    tags: ['teams'],
-    auth: 'owner',
-    params: TeamParams,
-    response: { status: 200, description: 'Team status', schema: TeamStatus },
-  },
-  {
-    operationId: 'cancelTeam',
-    method: 'POST',
-    path: '/v1/teams/{teamId}/cancel',
-    summary: 'Cancel every member of a team; durable across replicas.',
-    tags: ['teams'],
-    auth: 'owner',
-    params: TeamParams,
-    body: CancelRequest,
-    response: { status: 200, description: 'Cancellation outcome', schema: TeamControlResult },
-  },
-  {
-    operationId: 'resumeTeam',
-    method: 'POST',
-    path: '/v1/teams/{teamId}/resume',
-    summary: 'Resume an interrupted or approval-suspended team from its snapshot.',
-    tags: ['teams'],
-    auth: 'owner',
-    params: TeamParams,
-    body: ResumeRequest,
-    response: { status: 200, description: 'Resume outcome', schema: TeamControlResult },
-  },
-  {
-    operationId: 'listTeamPermissions',
-    method: 'GET',
-    path: '/v1/teams/{teamId}/permissions',
-    summary: 'Scoped permission requests for the team and its members.',
-    tags: ['teams', 'permissions'],
-    auth: 'owner',
-    params: TeamParams,
-    response: { status: 200, description: 'Permission list', schema: PermissionList },
-  },
-  {
-    operationId: 'decideTeamPermission',
-    method: 'POST',
-    path: '/v1/teams/{teamId}/permissions',
-    summary: 'Approve or deny one member-scoped resource grant.',
-    tags: ['teams', 'permissions'],
-    auth: 'owner',
-    params: TeamParams,
-    body: PermissionDecisionRequest,
-    response: { status: 200, description: 'Permission list', schema: PermissionList },
-  },
-  {
     operationId: 'listNotifications',
     method: 'GET',
     path: '/v1/notifications',
     summary: 'Durable completion notifications, including unread count.',
     tags: ['notifications'],
     auth: 'owner',
-    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
-    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
+    response: { status: 200, description: 'Notification list', schema: NotificationList },
+  },
+  {
+    operationId: 'markNotificationsRead',
+    method: 'POST',
+    path: '/v1/notifications/read',
+    summary: 'Clear the unread flag for the named terminal notifications.',
+    tags: ['notifications'],
+    auth: 'owner',
+    body: NotificationReadRequest,
+    response: { status: 200, description: 'Notification list', schema: NotificationList },
+  },
+  {
+    operationId: 'listSchedules',
+    method: 'GET',
+    path: '/v1/schedules',
+    summary: 'Durable schedules owned by the caller.',
+    tags: ['schedules'],
+    auth: 'owner',
+    response: { status: 200, description: 'Schedule list', schema: ScheduleList },
   },
   {
     operationId: 'createSchedule',
     method: 'POST',
     path: '/v1/schedules',
-    summary: 'Create a durable, owner-controlled schedule executed by the engine.',
+    summary: 'Store a durable one-shot or repeating Work schedule.',
     tags: ['schedules'],
     auth: 'owner',
     body: ScheduleCreateRequest,
     response: { status: 201, description: 'Created schedule', schema: Schedule },
   },
   {
-    operationId: 'listSchedules',
-    method: 'GET',
-    path: '/v1/schedules',
-    summary: 'List this owner\'s schedules with their next run and state.',
-    tags: ['schedules'],
-    auth: 'owner',
-    response: { status: 200, description: 'Schedule list', schema: ScheduleList },
-  },
-  {
-    operationId: 'markNotificationsRead',
-    method: 'POST',
-    path: '/v1/notifications/read',
-    summary: 'Mark every completion notification and schedule notice for this owner as read.',
-    tags: ['notifications'],
-    auth: 'owner',
-    query: zod.object({ includeSchedules: zod.literal('true').optional() }).strict(),
-    response: { status: 200, description: 'Notification list', schema: NotificationResponse },
-  },
-  {
-    operationId: 'dispatchScheduleEvent',
-    method: 'POST',
-    path: '/v1/schedule-events',
-    summary: 'Fire a named event; each matching event-triggered schedule runs at most once.',
-    tags: ['schedules'],
-    auth: 'owner',
-    body: ScheduleEventRequest,
-    response: { status: 202, description: 'Dispatched occurrences', schema: ScheduleEventResult },
-  },
-  {
     operationId: 'getSchedule',
     method: 'GET',
     path: '/v1/schedules/{scheduleId}',
-    summary: 'One schedule with its authoritative state and next run.',
+    summary: 'One durable schedule and its last submission outcome.',
     tags: ['schedules'],
     auth: 'owner',
     params: ScheduleParams,
     response: { status: 200, description: 'Schedule', schema: Schedule },
   },
   {
-    operationId: 'getScheduleUpcoming',
-    method: 'GET',
-    path: '/v1/schedules/{scheduleId}/upcoming',
-    summary: 'Preview the next occurrences without creating a receipt or a task.',
-    tags: ['schedules'],
-    auth: 'owner',
-    params: ScheduleParams,
-    query: UpcomingQuery,
-    response: { status: 200, description: 'Upcoming occurrences', schema: ScheduleUpcoming },
-  },
-  {
-    operationId: 'updateSchedule',
-    method: 'PATCH',
-    path: '/v1/schedules/{scheduleId}',
-    summary: 'Edit timing, condition, retry or limits; the execution identity cannot be widened.',
-    tags: ['schedules'],
-    auth: 'owner',
-    params: ScheduleParams,
-    body: ScheduleUpdateRequest,
-    response: { status: 200, description: 'Updated schedule', schema: Schedule },
-  },
-  {
-    operationId: 'pauseSchedule',
-    method: 'POST',
-    path: '/v1/schedules/{scheduleId}/pause',
-    summary: 'Pause future occurrences; a run already in flight is not stopped.',
-    tags: ['schedules'],
-    auth: 'owner',
-    params: ScheduleParams,
-    response: { status: 200, description: 'Pause outcome', schema: ScheduleControlResult },
-  },
-  {
-    operationId: 'resumeSchedule',
-    method: 'POST',
-    path: '/v1/schedules/{scheduleId}/resume',
-    summary: 'Resume a paused schedule from the next occurrence; missed runs are not stormed.',
-    tags: ['schedules'],
-    auth: 'owner',
-    params: ScheduleParams,
-    response: { status: 200, description: 'Resume outcome', schema: ScheduleControlResult },
-  },
-  {
     operationId: 'cancelSchedule',
     method: 'POST',
     path: '/v1/schedules/{scheduleId}/cancel',
-    summary: 'Cancel a schedule permanently and cancel its current Work task.',
+    summary: 'Cancel a schedule before its next due time.',
     tags: ['schedules'],
     auth: 'owner',
     params: ScheduleParams,
-    response: { status: 200, description: 'Cancellation outcome', schema: ScheduleControlResult },
-  },
-  {
-    operationId: 'triggerSchedule',
-    method: 'POST',
-    path: '/v1/schedules/{scheduleId}/trigger',
-    summary: 'Run one occurrence now, deduplicated by the supplied idempotency key.',
-    tags: ['schedules'],
-    auth: 'owner',
-    params: ScheduleParams,
-    body: ScheduleTriggerRequest,
-    response: { status: 202, description: 'Dispatched occurrence', schema: ScheduleDispatch },
-  },
-  {
-    operationId: 'listScheduleExecutions',
-    method: 'GET',
-    path: '/v1/schedules/{scheduleId}/executions',
-    summary: 'Durable execution receipts for one schedule, newest first.',
-    tags: ['schedules'],
-    auth: 'owner',
-    params: ScheduleParams,
-    query: ExecutionHistoryQuery,
-    response: { status: 200, description: 'Execution history', schema: ScheduleExecutionList },
+    response: { status: 200, description: 'Schedule cancellation outcome', schema: ScheduleControlResult },
   },
   {
     operationId: 'listArtifacts',
@@ -695,16 +529,6 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     params: ArtifactParams,
     body: ArtifactModeRequest,
     response: { status: 200, description: 'Delete result', schema: ArtifactDeleteResult },
-  },
-  {
-    operationId: 'getHandshake',
-    method: 'GET',
-    path: '/v1/handshake',
-    summary: 'Served contract identity, capability truth and version negotiation.',
-    tags: ['contract'],
-    auth: 'public',
-    query: HandshakeQuery,
-    response: { status: 200, description: 'Capability handshake', schema: CapabilityHandshake },
   },
 ]);
 

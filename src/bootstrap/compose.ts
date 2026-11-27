@@ -25,7 +25,9 @@ import { createBuiltinTools } from '../tools/builtin.js';
 import { createToolRuntime } from '../tools/runtime.js';
 import { attachMcpServers } from '../mcp/client.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionGate } from '../permissions/gate.js';
+import { createMediaService } from '../media/service.js';
+import { createCreativeService } from '../creative/service.js';
+import { createArtifactService } from '../artifacts/service.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
@@ -37,9 +39,6 @@ import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createTeamService } from '../orchestration/team.js';
 import { createMemoryResourceLockStore, createMongoResourceLockStore } from '../execution/locks.js';
 import { createApplicationService } from '../orchestration/service.js';
-import { createArtifactService } from '../artifacts/service.js';
-import { createArtifactToolkit } from '../artifacts/toolkit.js';
-import { createDeliverableService } from '../artifacts/deliver.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
@@ -532,40 +531,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       : {}),
   });
   const notifications = persistence.notifications;
-
-  const mcp = await attachMcpServers(config.mcp.servers);
-  const embeddingBase = env.CODERAX_INFERENCE_BASE_URL;
-  const embeddingKey = env.CODERAX_INFERENCE_KEY;
-  const embeddings =
-    config.knowledge.embeddingModel && embeddingBase && embeddingKey
-      ? createOpenAiEmbeddingProvider({
-          baseURL: embeddingBase,
-          apiKey: embeddingKey,
-          model: config.knowledge.embeddingModel,
-          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-        })
-      : null;
-  const knowledge = createKnowledgeStore({
-    clock,
-    ids,
-    embeddings,
-    maxDocuments: config.knowledge.maxDocuments,
-  });
-  const builtinTools = config.tools.enabled
-    ? createBuiltinTools({
-        shellEnabled: config.tools.shellEnabled,
-        allowedCommands: config.tools.allowedCommands,
-        networkEnabled: config.tools.networkEnabled,
-        allowedHosts: config.tools.allowedHosts,
-        maxOutputBytes: config.tools.maxOutputBytes,
-        commandTimeoutMs: config.tools.commandTimeoutMs,
-        maxSearchFiles: config.tools.maxSearchFiles,
-        memory,
-        knowledge: config.knowledge.enabled ? knowledge : null,
-      })
-    : [];
-  const tools = createToolRuntime({ tools: [...builtinTools, ...mcp.tools] });
-
+  const schedules = persistence.schedules;
   const audit = createAuditLog({ clock, ids });
   const artifactService = createArtifactService({
     artifacts: persistence.artifacts,
@@ -579,34 +545,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     ids,
     settings: config.artifacts,
   });
-  const artifactRoots = await validateWorkspaceRoots(workspaceRoots(config.workspaces));
-  if (!artifactRoots.ok) {
-    throw new StartupError([artifactRoots.detail]);
-  }
-  const deliverables = createDeliverableService({
-    toolkit: createArtifactToolkit(),
+  const media = createMediaService({
     artifacts: artifactService,
-    audit,
     clock,
-    ids,
-    roots: artifactRoots.value,
+    limits: config.media,
   });
-  const browserProvider =
-    input.browserProvider ??
-    buildBrowserProvider({
-      config,
-      env,
-      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-    });
-  const browser = createBrowserService({
-    config,
-    clock,
-    ids,
-    permissions,
-    audit,
-    provider: browserProvider,
-    store: createBrowserStore(),
-  });
+  const creative = createCreativeService({ maxBytes: config.media.creativeMaxBytes });
   const events = createEventBus({
     store: persistence.events,
     // The task row is the fenced sequence authority; the bus never numbers an
@@ -695,34 +639,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
-        name: 'artifacts',
-        required: persistence.driver === 'mongo',
-        check: async () => {
-          if (!persistence.blobs.durable) {
-            // Consistent with the persistence probe: a memory deployment is a
-            // known non-durable configuration, reported as ok-with-limitation
-            // rather than as a fault. What matters is that it is never silent.
-            return {
-              status: 'ok' as const,
-              detail:
-                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
-            };
-          }
-          try {
-            await persistence.blobs.check();
-            return {
-              status: 'ok' as const,
-              detail: 'Artifact metadata and content are stored durably in MongoDB.',
-            };
-          } catch {
-            return {
-              status: 'failed' as const,
-              detail: 'Artifact storage could not be read.',
-            };
-          }
-        },
-      },
-      {
         name: 'persistence',
         required: true,
         check: async () => ({
@@ -781,6 +697,30 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
+        name: 'artifacts',
+        required: false,
+        check: async () => {
+          if (artifactService.durable) {
+            return {
+              status: 'ok' as const,
+              detail: `Versioned artifacts and media use the durable ${artifactService.backend} store.`,
+            };
+          }
+          if (config.artifacts.allowEphemeral) {
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact uploads use the explicitly enabled in-memory test store; a restart loses them.',
+            };
+          }
+          return {
+            status: 'failed' as const,
+            detail:
+              'Artifact and media uploads are refused because persistence.driver=memory cannot survive a restart.',
+          };
+        },
+      },
+      {
         // Optional on purpose: an enabled external agent being down degrades the
         // report without stopping an engine that still has Native.
         name: 'agents',
@@ -821,11 +761,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     conversations,
     memory,
     permissions,
+    media,
+    creative,
     notifications,
-    artifactService,
-    deliverables,
     schedules,
-    scheduleNotices,
+    artifactService,
     audit,
     events,
     runner,
@@ -900,38 +840,12 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
   health.markReady();
 
+  let scheduleTimer: NodeJS.Timeout | null = null;
   const server = createHttpServer({
     router,
     host: config.server.host,
     port: config.server.port,
   });
-
-  let stopPromise: Promise<void> | null = null;
-  const stop = (): Promise<void> => {
-    if (stopPromise) return stopPromise;
-    stopPromise = (async () => {
-      service.beginShutdown();
-      // Stop accepting new HTTP work immediately; in-flight requests may finish
-      // while the service drains, but they cannot admit new execution.
-      const serverClosed = server.close();
-      const drain = Promise.all([service.shutdown(), serverClosed]).then(() => persistence.close());
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        await Promise.race([
-          drain,
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new ShutdownTimeoutError(config.execution.shutdownGraceMs)),
-              config.execution.shutdownGraceMs,
-            );
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    })();
-    return stopPromise;
-  };
 
   return {
     dependencies: finalContainer.dependencies,
@@ -942,21 +856,27 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     providerPolicy: policy,
     persistence: { driver: persistence.driver },
     start: async () => {
-      // Rebuild quota availability from committed rows before the socket is
-      // open, so an early request cannot be admitted against stale capacity.
-      await service.artifacts.reconcile();
       const { url } = await server.listen();
       models.start();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
+      await service.artifacts.reconcile();
+      await service.artifacts.sweepExpiredArtifacts();
       await service.recoverInterrupted();
-      // A team owned by a replica that stopped is marked interrupted, never left
-      // running forever. It stays resumable from its snapshot.
-      await teams.reconcile();
+      if (config.schedules.enabled) {
+        scheduleTimer = setInterval(() => {
+          void service.tickSchedules().catch(() => undefined);
+        }, config.schedules.tickIntervalMs);
+        scheduleTimer.unref();
+      }
       return { url };
     },
     stop: async () => {
-      await teams.shutdown();
+      if (scheduleTimer) {
+        clearInterval(scheduleTimer);
+        scheduleTimer = null;
+      }
+      models.stop();
       await service.shutdown();
       await mcp.close();
       await server.close();

@@ -15,6 +15,12 @@ export const ModelDescriptor = z
     contextTokens: z.number().int().positive().optional(),
     toolCalling: z.boolean(),
     streaming: z.boolean(),
+    /**
+     * What the provider metadata establishes about input. `image` is present only
+     * when discovery classified the model as vision-capable; a client must not
+     * infer it from a model name.
+     */
+    inputModalities: z.array(z.enum(['text', 'image'])).max(2).optional(),
     availability: Availability,
   })
   .strict();

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Budget } from './models.js';
+import { CreativeArtifact, MEDIA_MAX_ATTACHMENTS, MediaId } from './media.js';
 import {
   AgentId,
   ConversationId,
@@ -19,6 +20,7 @@ export const ChatRequest = z
     agent: AgentId.default('coderax'),
     model: ModelRef.optional(),
     mode: DataMode.default('private'),
+    attachments: z.array(MediaId).max(MEDIA_MAX_ATTACHMENTS).optional(),
   })
   .strict();
 export type ChatRequest = z.infer<typeof ChatRequest>;
@@ -31,6 +33,7 @@ export const ChatReply = z
     agent: AgentId,
     model: ModelRef,
     usage: Usage.optional(),
+    creative: z.array(CreativeArtifact).max(4).optional(),
     createdAt: IsoDateTime,
   })
   .strict();
@@ -52,6 +55,7 @@ export const WorkSubmitRequest = z
     budget: Budget.optional(),
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
+    attachments: z.array(MediaId).max(MEDIA_MAX_ATTACHMENTS).optional(),
     /**
      * `auto` lets Native choose from the objective's structure. `fast` plans and
      * executes directly; `complex` decomposes, parallelises and replans within
@@ -103,15 +107,7 @@ export const TaskStatus = z
       .object({
         summary: z.string().max(20_000).optional(),
         artifacts: z.array(Artifact),
-        /** Present only when the objective was assessed against evidence. */
-        verification: z
-          .object({
-            passed: z.boolean(),
-            reason: z.string().max(1000),
-            evidence: z.array(z.string().max(500)).max(20),
-          })
-          .strict()
-          .optional(),
+        creative: z.array(CreativeArtifact).max(4).optional(),
       })
       .strict()
       .optional(),
@@ -168,6 +164,7 @@ export const Message = z
     createdAt: IsoDateTime,
     unfinished: z.boolean().optional(),
     agent: AgentId.optional(),
+    attachments: z.array(MediaId).max(MEDIA_MAX_ATTACHMENTS).optional(),
   })
   .strict();
 export type Message = z.infer<typeof Message>;

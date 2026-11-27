@@ -338,32 +338,60 @@ export function createNativeAgent(input: {
             };
           }
 
-          const action = parseAction(text);
-          if (action.kind === 'final') {
-            stepText = action.text.trim();
-            break;
-          }
-
-          if (action.kind === 'invalid') {
-            // A model that answers in prose instead of the action protocol has
-            // still answered. Accept that once, but only when it did not attempt
-            // a malformed JSON object; a broken tool call is repaired, not
-            // silently treated as the result.
-            if (invalidAnswers === 0 && !text.includes('{')) {
-              const prose = text.trim();
-              if (prose.length > 0) {
-                stepText = prose;
-                break;
+        report({ type: 'step.started', stepId: step.id, title: step.title });
+        const images = request.images ?? [];
+        try {
+          let stepText = '';
+          if (gateway.stream) {
+            for await (const event of gateway.stream({
+              ownerId: request.ownerId,
+              model: request.model,
+              mode: request.mode,
+              operation: request.operation,
+              routing: request.routing,
+              allowFallback: request.allowFallback,
+              system: NATIVE_SYSTEM,
+              prompt: stepPrompt,
+              ...(images.length > 0
+                ? { messages: [{ role: 'user' as const, text: stepPrompt, images }] }
+                : {}),
+              signal: request.signal,
+              ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+            })) {
+              if (event.type === 'text') {
+                stepText += event.text;
+                report({ type: 'text.delta', text: event.text });
+              } else if (event.type === 'usage') {
+                if (event.usage.inputTokens !== undefined) {
+                  usageIn = (usageIn ?? 0) + event.usage.inputTokens;
+                }
+                if (event.usage.outputTokens !== undefined) {
+                  usageOut = (usageOut ?? 0) + event.usage.outputTokens;
+                }
+              } else if (event.type === 'model') {
+                actualModel = event.model;
               }
             }
-            invalidAnswers += 1;
-            if (invalidAnswers >= 2) {
-              return {
-                ok: false,
-                code: 'protocol_error',
-                detail: 'The model did not return a valid action after a repair attempt.',
-                retryable: false,
-              };
+          } else {
+            const completion = await gateway.complete({
+              ownerId: request.ownerId,
+              model: request.model,
+              mode: request.mode,
+              operation: request.operation,
+              routing: request.routing,
+              allowFallback: request.allowFallback,
+              system: NATIVE_SYSTEM,
+              prompt: stepPrompt,
+              ...(images.length > 0
+                ? { messages: [{ role: 'user' as const, text: stepPrompt, images }] }
+                : {}),
+              signal: request.signal,
+              ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+            });
+            stepText = completion.text;
+            actualModel = completion.model;
+            if (completion.usage?.inputTokens !== undefined) {
+              usageIn = (usageIn ?? 0) + completion.usage.inputTokens;
             }
             observations.push(
               `Your previous answer was rejected: ${action.reason} Return exactly one JSON object with a tool call or a final answer.`,

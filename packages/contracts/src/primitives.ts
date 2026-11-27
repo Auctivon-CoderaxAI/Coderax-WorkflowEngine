@@ -68,9 +68,6 @@ export type ScheduleId = z.infer<typeof ScheduleId>;
 export const ExecutionId = identifier('schedule execution identifier');
 export type ExecutionId = z.infer<typeof ExecutionId>;
 
-export const ArtifactId = identifier('artifact identifier');
-export type ArtifactId = z.infer<typeof ArtifactId>;
-
 export const ProjectId = identifier('project identifier');
 export type ProjectId = z.infer<typeof ProjectId>;
 
@@ -124,8 +121,7 @@ export const EngineFailureCode = z.enum([
   'provider_error',
   'budget_exhausted',
   'paid_model_refused',
-  'model_missing',
-  'approval_required',
+  'media_unsupported',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;
 

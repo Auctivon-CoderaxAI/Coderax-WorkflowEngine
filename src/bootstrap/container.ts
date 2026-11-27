@@ -8,9 +8,12 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
-import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
+import type { ScheduleRepository } from '../persistence/schedules.js';
+import type { ArtifactService } from '../artifacts/service.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
+import type { MediaService } from '../media/service.js';
+import type { CreativeService } from '../creative/service.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
@@ -19,9 +22,6 @@ import type { ExecutionSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { TeamService } from '../orchestration/team.js';
 import type { ApplicationService } from '../orchestration/service.js';
-import type { BrowserService } from '../orchestration/browser.js';
-import type { ArtifactService } from '../artifacts/service.js';
-import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
 import type { ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
@@ -48,11 +48,11 @@ export type InfrastructureDependencies = {
   conversations: ConversationRepository;
   memory: MemoryStore;
   permissions: PermissionStore;
+  media: MediaService;
+  creative: CreativeService;
   notifications: NotificationStore;
-  artifactService: ArtifactService;
-  deliverables: DeliverableService;
   schedules: ScheduleRepository;
-  scheduleNotices: ScheduleNoticeStore;
+  artifactService: ArtifactService;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -78,11 +78,11 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'conversations',
   'memory',
   'permissions',
+  'media',
+  'creative',
   'notifications',
-  'artifactService',
-  'deliverables',
   'schedules',
-  'scheduleNotices',
+  'artifactService',
   'audit',
   'events',
   'runner',

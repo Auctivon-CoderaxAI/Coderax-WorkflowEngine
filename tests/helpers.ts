@@ -1,15 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type {
-  GatewayCompletion,
-  GatewayRequest,
-  ModelGateway,
-  ProviderAdapter,
-  ProviderCompletionRequest,
-  ProviderSettings,
-} from '../src/models/types.js';
-import type { ExternalAgentTransport } from '../src/agents/adapters/external.js';
+import type { ProviderAdapter, ProviderCompletionRequest } from '../src/models/types.js';
 import { ProviderError } from '../src/models/types.js';
 import type { ProviderPolicy } from '../src/models/policy.js';
 import { PROCESSING_OPERATIONS } from '../src/models/policy.js';
@@ -137,6 +129,7 @@ export function fakeProvider(input: {
   text?: string;
   beforeReturn?: () => Promise<void>;
   modelId?: string;
+  vision?: boolean;
 } = {}): ProviderAdapter & { calls: number } {
   const provider = {
     id: 'free',
@@ -148,7 +141,12 @@ export function fakeProvider(input: {
         label: 'Free test model',
         contextTokens: 32_768,
         maxOutputTokens: 4_096,
-        capabilities: { vision: true, toolCalling: true, reasoning: true, streaming: true },
+        capabilities: {
+          vision: input.vision ?? true,
+          toolCalling: true,
+          reasoning: true,
+          streaming: true,
+        },
         pricing: { prompt: '0', completion: '0', request: '0' },
       },
     ],
@@ -248,8 +246,8 @@ export async function startTestApp(options: {
   /** A transport fixture for the agent loop; not a routing authority. */
   gateway?: ModelGateway | null;
   config?: Record<string, unknown>;
-  externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
-  env?: Record<string, string>;
+  externals?: Parameters<typeof composeApplication>[0]['externals'];
+  persistence?: Parameters<typeof composeApplication>[0]['persistence'];
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -257,18 +255,16 @@ export async function startTestApp(options: {
   close: () => Promise<void>;
 }> {
   const workspace = createWorkspaces();
-  const config = baseConfig(workspace, options.config);
+  const config = baseConfig(workspace, {
+    artifacts: { allowEphemeral: true },
+    ...(options.config ?? {}),
+  });
   const app = await composeApplication({
     config,
-    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, ...(options.env ?? {}) },
-    providers: [
-      {
-        adapter: options.provider ?? fakeProvider(),
-        ...(options.providerSettings ? { settings: options.providerSettings } : {}),
-      },
-    ],
+    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
+    providers: [{ adapter: options.provider ?? fakeProvider() }],
     ...(options.externals ? { externals: options.externals } : {}),
-    ...(options.gateway !== undefined ? { gateway: options.gateway } : {}),
+    ...(options.persistence ? { persistence: options.persistence } : {}),
   });
   const { url } = await app.start();
   return {
@@ -297,6 +293,73 @@ export async function waitFor<T>(
   }
 }
 
+export function pngBytes(width = 2, height = 2): Buffer {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const header = Buffer.alloc(25);
+  header.writeUInt32BE(13, 0);
+  header.write('IHDR', 4, 'latin1');
+  header.writeUInt32BE(width, 8);
+  header.writeUInt32BE(height, 12);
+  header[16] = 8;
+  header[17] = 2;
+  const data = Buffer.alloc(16);
+  data.writeUInt32BE(4, 0);
+  data.write('IDAT', 4, 'latin1');
+  Buffer.from([0x78, 0x9c, 0x03, 0x00]).copy(data, 8);
+  const end = Buffer.alloc(12);
+  end.write('IEND', 4, 'latin1');
+  // The sniffer verifies chunk structure, not CRC values; these fixtures are
+  // not decodable images and never claim to be.
+  return Buffer.concat([signature, header, data, end]);
+}
+
+export function jpegBytes(width = 2, height = 2): Buffer {
+  return Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xc0, 0x00, 0x0b, 0x08,
+    (height >> 8) & 0xff, height & 0xff,
+    (width >> 8) & 0xff, width & 0xff,
+    0x01, 0x01, 0x11, 0x00,
+    0xff, 0xd9,
+  ]);
+}
+
+export function webpBytes(width = 2, height = 2, animated = false): Buffer {
+  const chunk = Buffer.alloc(10);
+  chunk[0] = animated ? 0x02 : 0x00;
+  chunk.writeUIntLE(width - 1, 4, 3);
+  chunk.writeUIntLE(height - 1, 7, 3);
+  const header = Buffer.alloc(12);
+  header.write('RIFF', 0, 'latin1');
+  header.writeUInt32LE(4 + 8 + chunk.length, 4);
+  header.write('WEBP', 8, 'latin1');
+  const metadata = Buffer.alloc(8);
+  metadata.write('VP8X', 0, 'latin1');
+  metadata.writeUInt32LE(chunk.length, 4);
+  return Buffer.concat([header, metadata, chunk]);
+}
+
+export function gifBytes(width = 2, height = 2, frames = 1): Buffer {
+  const header = Buffer.alloc(13);
+  header.write('GIF89a', 0, 'latin1');
+  header.writeUInt16LE(width, 6);
+  header.writeUInt16LE(height, 8);
+  const parts: Buffer[] = [header];
+  for (let frame = 0; frame < frames; frame += 1) {
+    parts.push(
+      Buffer.from([
+        0x2c, 0x00, 0x00, 0x00, 0x00,
+        width & 0xff, (width >> 8) & 0xff,
+        height & 0xff, (height >> 8) & 0xff,
+        0x00,
+        0x02, 0x02, 0x44, 0x01, 0x00,
+      ]),
+    );
+  }
+  parts.push(Buffer.from([0x3b]));
+  return Buffer.concat(parts);
+}
+
 export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
   const now = new Date().toISOString();
   return {
@@ -308,6 +371,7 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     engine: 'native',
     mode: 'cloud',
     objective: 'Do the thing',
+    attachments: [],
     model: { providerId: 'free', modelId: 'coderax-small' },
     modelPinned: false,
     state: 'queued',

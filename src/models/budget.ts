@@ -14,14 +14,10 @@ import { createMemoryQuotaStore, type QuotaStore } from './quota.js';
  * memory persistence driver.
  */
 export type BudgetLedger = {
-  /** Non-mutating admission check; the reservation is what actually charges. */
-  available: (ownerId: string, at: Date) => Promise<boolean>;
-  reserve: (ownerId: string, at: Date) => Promise<{ allowed: boolean; requests: number }>;
-  consume: (ownerId: string, usage: Usage, at: Date) => Promise<void>;
-  /** Returns request slots that were reserved for work that never ran. */
-  release: (ownerId: string, count: number, at: Date) => Promise<void>;
-  snapshot: (ownerId: string, at: Date) => Promise<{
-    requests: number;
+  available: (ownerId: string, at: Date) => boolean;
+  reserve: (input: {
+    ownerId: string;
+    at: Date;
     inputTokens: number;
     outputTokens: number;
   }>;
@@ -59,22 +55,65 @@ export function createBudgetLedger(input: {
     reserve: (ownerId, at) =>
       store.reserve({
         ownerId,
-        day: dayKey(at),
-        maxRequests: input.maxRequestsPerDay,
-        maxTokens: input.maxTokensPerDay,
-      }),
-    consume: (ownerId, usage, at) =>
-      store.settle({
-        ownerId,
-        day: dayKey(at),
-        usage: {
-          requests: 0,
-          inputTokens: usage.inputTokens ?? 0,
-          outputTokens: usage.outputTokens ?? 0,
-        },
-      }),
-    release: (ownerId, count, at) =>
-      store.release({ ownerId, day: dayKey(at), count }),
-    snapshot: (ownerId, at) => store.snapshot(ownerId, dayKey(at)),
+        inputTokens: inTokens,
+        outputTokens: outTokens,
+      };
+      state.reservedRequests += 1;
+      state.reservedInput += inTokens;
+      state.reservedOutput += outTokens;
+      reservations.set(reservation.id, { key: dayKey(ownerId, at), reservation });
+      return {
+        allowed: true,
+        reservation,
+        requests: state.requests + state.reservedRequests,
+      };
+    },
+
+    settle: (reservationId, usage) => {
+      const held = reservations.get(reservationId);
+      if (!held) return;
+      reservations.delete(reservationId);
+      const state = days.get(held.key);
+      if (!state) return;
+      state.reservedRequests = Math.max(0, state.reservedRequests - 1);
+      state.reservedInput = Math.max(0, state.reservedInput - held.reservation.inputTokens);
+      state.reservedOutput = Math.max(0, state.reservedOutput - held.reservation.outputTokens);
+      state.requests += 1;
+      // A provider can omit one side of its usage report. Charging zero for the
+      // omitted side would refund tokens that were already reserved and could
+      // have been consumed, so the reservation is the conservative fallback.
+      state.inputTokens += Math.max(0, usage.inputTokens ?? held.reservation.inputTokens);
+      state.outputTokens += Math.max(0, usage.outputTokens ?? held.reservation.outputTokens);
+    },
+
+    release: (reservationId, options = {}) => {
+      const held = reservations.get(reservationId);
+      if (!held) return;
+      reservations.delete(reservationId);
+      const state = days.get(held.key);
+      if (!state) return;
+      state.reservedRequests = Math.max(0, state.reservedRequests - 1);
+      state.reservedInput = Math.max(0, state.reservedInput - held.reservation.inputTokens);
+      state.reservedOutput = Math.max(0, state.reservedOutput - held.reservation.outputTokens);
+      // A dispatched attempt consumes one request even when it produced no
+      // usage; it must not become free just because the provider failed.
+      if (options.dispatched === true) state.requests += 1;
+    },
+
+    charge: (ownerId, usage, at) => {
+      const state = day(ownerId, at);
+      state.requests += 1;
+      state.inputTokens += Math.max(0, usage.inputTokens ?? 0);
+      state.outputTokens += Math.max(0, usage.outputTokens ?? 0);
+    },
+
+    snapshot: (ownerId, at) => {
+      const state = day(ownerId, at);
+      return {
+        requests: state.requests,
+        inputTokens: state.inputTokens,
+        outputTokens: state.outputTokens,
+      };
+    },
   };
 }

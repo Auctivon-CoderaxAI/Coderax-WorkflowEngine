@@ -46,20 +46,28 @@ function matches(document: Document, filter: MongoFilter): boolean {
         return Number.NaN;
       };
       if ('$lte' in operators) {
-        const delta = compare(operators.$lte);
-        if (Number.isNaN(delta) || delta > 0) return false;
-      }
-      if ('$lt' in operators) {
-        const delta = compare(operators.$lt);
-        if (Number.isNaN(delta) || delta >= 0) return false;
-      }
-      if ('$gt' in operators) {
-        const delta = compare(operators.$gt);
-        if (Number.isNaN(delta) || delta <= 0) return false;
+        const bound = operators.$lte as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left > right) return false;
       }
       if ('$gte' in operators) {
-        const delta = compare(operators.$gte);
-        if (Number.isNaN(delta) || delta < 0) return false;
+        const bound = operators.$gte as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left < right) return false;
+      }
+      if ('$lt' in operators) {
+        const bound = operators.$lt as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left >= right) return false;
+      }
+      if ('$gt' in operators) {
+        const bound = operators.$gt as Date | string | number;
+        const left = value instanceof Date ? value.getTime() : value;
+        const right = bound instanceof Date ? bound.getTime() : bound;
+        if (left === undefined || left === null || left <= right) return false;
       }
       if ('$in' in operators) {
         const list = operators.$in as unknown[];
@@ -91,12 +99,11 @@ function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
   return JSON.stringify(Object.keys(keys).map((field) => document[field] ?? null));
 }
 
-/** `$inc`, `$push` and `$pull` are how quota counters and blob leases move. */
-function applyUpdate(document: Document, update: MongoUpdate): Document {
-  const next = { ...document, ...(update.$set ?? {}) };
-  for (const [field, amount] of Object.entries(update.$inc ?? {})) {
+function applyUpdate(document: Document, update: Record<string, unknown>): Document {
+  const next: Document = { ...document, ...(update.$set as Document | undefined) };
+  for (const [field, delta] of Object.entries((update.$inc as Record<string, number>) ?? {})) {
     const current = typeof next[field] === 'number' ? (next[field] as number) : 0;
-    next[field] = current + amount;
+    next[field] = current + delta;
   }
   for (const [field, value] of Object.entries(update.$push ?? {})) {
     const existing = next[field];
@@ -211,13 +218,8 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      const next = { ...documents[index] };
-      for (const [field, value] of Object.entries(update.$set ?? {})) {
-        setPath(next, field, value);
-      }
-      assertUnique(next, index);
-      documents[index] = next;
-      return { ...next };
+      documents[index] = applyUpdate(documents[index] ?? {}, update);
+      return { ...documents[index] };
     },
     updateOne: async (filter, update, options) => {
       const apply = (document: Document): Document => {
@@ -240,7 +242,7 @@ export function createFakeCollection(): FakeCollection {
       };
       const index = firstIndex(filter);
       if (index !== -1) {
-        const next = applyUpdate(documents[index], update);
+        const next = applyUpdate(documents[index] ?? {}, update);
         assertUnique(next, index);
         documents[index] = next;
         return { matchedCount: 1, upsertedCount: 0 };
@@ -248,7 +250,7 @@ export function createFakeCollection(): FakeCollection {
       if (!options.upsert) {
         return { matchedCount: 0, upsertedCount: 0 };
       }
-      const candidate = applyUpdate({ ...(update.$setOnInsert ?? {}) }, update);
+      const candidate = { ...(update.$setOnInsert ?? {}), ...update.$set };
       assertUnique(candidate, -1);
       documents.push(candidate);
       return { matchedCount: 0, upsertedCount: 1 };

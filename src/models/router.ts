@@ -342,6 +342,7 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
       ...(state.contextTokens === null ? {} : { contextTokens: state.contextTokens }),
       toolCalling: state.capabilities.toolCalling,
       streaming: state.capabilities.streaming,
+      inputModalities: state.capabilities.vision ? ['text', 'image'] : ['text'],
       availability: modelAvailability(runtime, at),
     };
   }
@@ -642,6 +643,8 @@ export function createModelRouter(options: ModelRouterOptions): ModelRouter {
           retryable: false,
         };
       }
+      // An explicitly pinned model is never substituted, but it still has to
+      // support the request: media must not be sent to a text-only endpoint.
       if (resolveOptions.requireVision && !runtime.state.capabilities.vision) {
         return {
           ok: false,

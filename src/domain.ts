@@ -3,6 +3,7 @@ import type {
   ArtifactKind,
   ArtifactMediaType,
   Budget,
+  CreativeArtifact,
   DataMode,
   EngineId,
   GameAction,
@@ -134,7 +135,8 @@ export type TaskVerification = {
 export type TaskResult = {
   summary?: string;
   artifacts: Array<{ path: string; bytes?: number; digest?: string }>;
-  verification?: TaskVerification;
+  /** Validated or explicitly withheld SVG/HTML fragments from the agent output. */
+  creative?: CreativeArtifact[];
 };
 
 export type TaskFailure = {
@@ -178,6 +180,8 @@ export type TaskRecord = {
   kind?: TaskWorkload;
   game?: GameRunSpec | null;
   objective: string;
+  /** Owner-scoped media attached at submission; re-resolved under this task's mode. */
+  attachments: string[];
   model: ModelRef | null;
   /**
    * True only when the owner named the model. A route-chosen model stays
@@ -394,6 +398,7 @@ export type StoredMessage = {
   createdAt: IsoDateTime;
   unfinished?: boolean;
   agent?: AgentId;
+  attachments?: string[];
 };
 
 export type MemoryRecord = {
@@ -451,98 +456,6 @@ export type ScheduleRecord = {
   cancelReason: string | null;
 };
 
-export type SchedulePatch = Partial<
-  Pick<
-    ScheduleRecord,
-    | 'name'
-    | 'timingRevision'
-    | 'timing'
-    | 'condition'
-    | 'retry'
-    | 'priority'
-    | 'limits'
-    | 'missedRunPolicy'
-    | 'state'
-    | 'nextRunAt'
-    | 'lastRunAt'
-    | 'lastExecutionId'
-    | 'runsTotal'
-    | 'acceptedDay'
-    | 'consecutiveFailures'
-    | 'accountedFailures'
-    | 'updatedAt'
-    | 'pausedAt'
-    | 'cancelledAt'
-    | 'cancelReason'
-  >
->;
-
-/**
- * One durable execution receipt. `executionKey` is unique across replicas and
- * occurrences, and `taskId` is deterministic, so a retried dispatch of the same
- * occurrence cannot create a second Work task.
- */
-export type ScheduleExecutionRecord = {
-  executionId: string;
-  executionKey: string;
-  claimGeneration?: number;
-  admissionStarted?: boolean;
-  failureAccountingPending?: boolean;
-  noticePending?: boolean;
-  completionNoticeSummary?: string;
-  selectedTimingRevision?: number;
-  scheduleId: string;
-  ownerId: string;
-  occurrenceKey: string;
-  trigger: ScheduleTrigger;
-  scheduledFor: IsoDateTime;
-  state: ScheduleExecutionState;
-  attempt: number;
-  maxAttempts: number;
-  taskId: string | null;
-  conversationId: string;
-  priority: number;
-  detail: string | null;
-  nextAttemptAt: IsoDateTime | null;
-  condition: ScheduleConditionState;
-  createdAt: IsoDateTime;
-  updatedAt: IsoDateTime;
-  finishedAt: IsoDateTime | null;
-};
-
-export type ScheduleExecutionPatch = Partial<
-  Pick<
-    ScheduleExecutionRecord,
-    | 'state'
-    | 'admissionStarted'
-    | 'failureAccountingPending'
-    | 'noticePending'
-    | 'completionNoticeSummary'
-    | 'attempt'
-    | 'taskId'
-    | 'detail'
-    | 'nextAttemptAt'
-    | 'condition'
-    | 'updatedAt'
-    | 'finishedAt'
-  >
->;
-
-export type ScheduleNoticeRecord = {
-  noticeId: string;
-  scheduleId: string;
-  executionId: string;
-  ownerId: string;
-  kind: ScheduleNoticeKind;
-  summary: string;
-  createdAt: IsoDateTime;
-  read: boolean;
-};
-
-/**
- * Durable artifact metadata. The bytes live in a content-addressed blob and are
- * named only by `sha256`; the file name here is metadata and never a path.
- */
 export type ArtifactRecord = {
   mutationRevision?: number;
   slotTracked?: boolean;
@@ -559,9 +472,7 @@ export type ArtifactRecord = {
   mediaType: ArtifactMediaType;
   bytes: number;
   sha256: string;
-  /** Current version number. Immutable version rows live alongside. */
   version: number;
-  /** Retained version count, including the current one. */
   versions: number;
   projectId: string | null;
   conversationId: string | null;
@@ -580,9 +491,7 @@ export type ArtifactVersionRecord = {
   filename: string;
   relativePath?: string;
   mediaType: ArtifactMediaType;
-  /** Immutable per version, so a rollback restores the kind that version had. */
   kind: ArtifactKind;
-  /** Size and digest of this exact version, so history is independently auditable. */
   bytes: number;
   sha256: string;
   note?: string;

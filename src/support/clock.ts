@@ -17,7 +17,6 @@ export type IdGenerator = {
   taskId: () => string;
   teamId: () => string;
   messageId: () => string;
-  artifactId: () => string;
   eventId: () => string;
   scheduleId: () => string;
   executionId: () => string;
@@ -42,7 +41,6 @@ export function createIdGenerator(): IdGenerator {
     taskId: () => `task_${randomUUID()}`,
     teamId: () => `team_${randomUUID()}`,
     messageId: () => `msg_${randomUUID()}`,
-
     eventId: () => `evt_${randomUUID()}`,
     scheduleId: () => `sch_${randomUUID()}`,
     executionId: () => `exe_${randomUUID()}`,

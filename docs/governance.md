@@ -1,29 +1,56 @@
 # Governance: public source, private application, free CI
 
-Verified on 2026-11-26 against the public repository metadata. Nothing below is
-inferred from a plan name, and no visibility, permission or protection setting
-was changed by this branch.
+Updated 2026-11-26 against the live repository. Nothing here is inferred from a
+plan name.
 
-```console
-$ curl -s https://api.github.com/repos/Auctivon-CoderaxAI/Coderax-WorkflowEngine
-{"private": false, "visibility": "public", "default_branch": "main", ...}
-```
+## Source visibility does not make the application public
 
-## What is public, and what is not
+The owner intentionally made the Coderax source repositories public so standard
+GitHub-hosted Actions run at no cost. That decision applies to **source code
+visibility only**. The deployed application, owner data, credentials,
+conversations, memory and artifacts remain private, and this repository still
+publishes no public-facing endpoint.
 
-| Surface | Visibility | Notes |
+Do not describe the deployed system as public, and do not weaken owner-only
+authentication because the source can be read.
+
+## Branch protection is available, but is not verified enabled
+
+Public repositories support branch protection and rulesets on the free plan. The
+earlier claim that protection required GitHub Pro applied to a private
+repository and is obsolete. This branch did not change repository settings;
+whether protection is currently enabled must be checked in Settings rather than
+assumed.
+
+### Equivalent policy that is followed regardless
+
+Every pull request records the evidence:
+
+| Rule | How it is honoured |
+| --- | --- |
+| No direct push to `main` | Every change lands through a pull request from a short-lived branch. |
+| Independent approval | A pull request is not merged by its author without a recorded review. |
+| Required checks at the current head | `npm run verify` and hosted CI are run at the pushed head; a pass at an earlier head is not accepted. |
+| Code-owner review | `.github/CODEOWNERS` names the owner for every path. |
+| No force-push | Changes are additive; no history is rewritten. |
+| No bypass | No administrator override is used or simulated. |
+
+The gap is real: until platform protection is verified enabled, nothing prevents
+a direct push except discipline. It is recorded here so it is never mistaken for
+enforcement.
+
+## Reviewers available at $0.00
+
+| Reviewer | Free tier on a **public source repository** | Verdict |
 | --- | --- | --- |
-| Source repositories (WorkflowEngine and the other Coderax sources) | **Public** | Deliberate: standard GitHub-hosted Actions are free for public repositories. |
-| Deployed owner application | **Private, owner-only** | Access is authenticated; public source never implies public application access. |
-| Conversations, projects, memory, artifacts | **Private per owner** | Enforced by the engine's owner/mode/conversation isolation, not by repository visibility. |
-| Credentials, provider keys, production infrastructure | **Restricted** | Supplied through environment and deployment secrets; never committed. |
-| Data modes | **`private` and `cloud` are separate** | A private conversation, workspace or transcript is never reused for cloud work. |
+| **Greptile** | Starter: 1 active developer, 50 credits/month; a base review is 1 credit. Requires the owner to install the GitHub App once. | Usable as an independent signal; not installed. |
+| CodeRabbit | Free plan covers unlimited repositories; review depth varies by plan. | Not relied on here. |
+| Codex (ChatGPT code review) | Requires a paid ChatGPT plan. | Not usable at $0. |
+| GitHub Copilot review | Plan-dependent. | Not relied on here. |
 
-A public repository is a source-code disclosure, nothing more. The deployment,
-its data and its credentials remain private, and the security tests in
-`tests/security/` are what enforce that separation.
-
-## CI at $0.00
+No reviewer is installed on this repository. A pull request stays unapproved
+until a genuine review is recorded. Fabricating an approval, self-approving, or
+merging without review is not an option.
 
 Standard GitHub-hosted runners are free for public repositories. The
 `verify` workflow runs on `ubuntu-latest` with no paid runner, action, database
@@ -31,43 +58,26 @@ or model; the real-MongoDB job uses the pinned `mongo:7.0.14` service container.
 The workflow triggers on every pull request targeting `main` and on pushes to
 `main`, so a passing result is only meaningful at the exact pushed head.
 
-`npm run verify` is the local equivalent. It requires a disposable
-`CODERAX_TEST_MONGO_URI` and runs every gate exactly once.
+Hosted GitHub Actions now run on this public repository. Exact-head evidence:
 
-## Protection and review status (read-only verification)
-
-| Requirement | Verified state | How it was checked |
+| Run | Head | Result |
 | --- | --- | --- |
-| Repository visibility | Public (`private: false`) | Unauthenticated repository metadata |
-| Default branch | `main` | Same metadata |
-| Rulesets | None configured (`[]`) | `GET /repos/.../rulesets` |
-| Classic branch protection | **Not verifiable unauthenticated** (`401 Requires authentication`) | `GET /repos/.../branches/main/protection` |
-| CODEOWNERS | Present | `.github/CODEOWNERS` |
-| Required CI workflow | Present | `.github/workflows/verify.yml` |
-| Secret scanning / push protection | **Not verifiable unauthenticated** | Requires owner access to repository security settings |
-| Independent approval | **Not yet obtained** | A PR must be opened and reviewed by someone other than the author |
+| `45885151358` | `77cc40b49e8f` | `verify` success |
+| `45877952215` | `c0cfa993ef2d` | `verify` success |
+| `45877479332` | `a22c496daa52` | `verify` success |
 
-No protection, permission or visibility setting was modified. The rules below
-remain policy until an authorized owner confirms or enables platform
-enforcement:
-
-- No direct push to `main`; every change lands through a pull request.
-- A pull request is not merged without a recorded independent approval.
-- `npm run verify` must pass at the exact head being merged; an earlier pass is
-  not accepted.
-- No force-push, no branch deletion, no administrator bypass.
+The workflow installs from the lockfile, builds, runs the full test suite and
+checks OpenAPI drift. Hosted runs are free standard runners; no paid minutes are
+purchased. Local `npm run verify` remains the fast feedback loop, not a substitute
+for the exact-head hosted run.
 
 ## Current state
 
 | Item | State |
 | --- | --- |
-| Source visibility | Public (intentional) |
-| Owner application / conversations / artifacts | Private and owner-scoped |
-| Hosted Actions | Available at $0 for public repositories |
-| Rulesets | None configured |
-| Classic branch protection | Unverifiable without owner-authenticated read access |
-| Independent review | Required, not yet recorded |
-| Secret scanning / push protection | Owner must confirm in repository settings |
-
-Until an owner-authorized read confirms branch protection and secret scanning,
-those two rows stay "unverified" rather than being claimed as enabled.
+| Source visibility | Public, by owner decision, for free standard Actions |
+| `main` protection | Available on the free plan; enabled state not verified by this branch |
+| Reviewers installed | None |
+| Pull request for this branch | Not opened (no write credential in the agent environment) |
+| Hosted CI at `77cc40b` | Success |
+| Local verification at `77cc40b` | 209/209 tests, OpenAPI drift clean |

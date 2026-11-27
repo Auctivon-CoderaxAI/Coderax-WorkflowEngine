@@ -16,10 +16,10 @@ repository is bound by that charter:
   no purchased CI minutes, no trials.
 - Substantive compute is cloud-hosted. The owner's PC and WSL never run inference,
   agents, development workloads or databases for this system.
-- Public source-repository visibility is authorized to enable free GitHub-hosted
-  Actions. The Coderax application is owner-only and has no public-facing
-  endpoint; credentials, conversations, memory, artifacts and personal data stay
-  private. Do not change repository visibility without an explicit owner decision.
+- Source repositories are public by owner decision so standard GitHub Actions
+  run at no cost. Source visibility does not make the deployed application or
+  owner data public: credentials, conversations, memory, artifacts and the
+  deployment remain private, and there is no public-facing endpoint.
 - No silent paid routing and no silent substitution between agents.
 - No placeholder or mocked capability presented as a working feature.
 
