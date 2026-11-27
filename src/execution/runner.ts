@@ -1,12 +1,25 @@
 import type { EngineFailureCode, Usage } from '@coderax/contracts';
+import type { TaskVerification } from '../domain.js';
 import type { Clock } from '../support/clock.js';
 import type { LeaseStore, RunScope } from './lease.js';
 import { workRunKey } from './lease.js';
-import type { AgentAdapter, AgentReport, AgentRunRequest } from '../agents/types.js';
+import type { AgentAdapter, AgentReport, AgentRunOutcome, AgentRunRequest } from '../agents/types.js';
 
 export type RunOutcome =
-  | { kind: 'completed'; summary: string; usage?: Usage }
-  | { kind: 'failed'; code: EngineFailureCode; detail: string; retryable: boolean }
+  | {
+      kind: 'completed';
+      summary: string;
+      usage?: Usage;
+      artifacts?: Array<{ path: string; bytes?: number; digest?: string }>;
+      verification?: TaskVerification;
+    }
+  | {
+      kind: 'failed';
+      code: EngineFailureCode;
+      detail: string;
+      retryable: boolean;
+      usage?: Usage;
+}
   /** `abandoned` means the adapter ignored its abort and may still be running. */
   | { kind: 'cancelled'; abandoned?: boolean }
   | { kind: 'interrupted'; detail: string };
@@ -18,7 +31,32 @@ export type RunResult = {
    * state in that case: another generation may already own the task.
    */
   ownershipLost: boolean;
+  /**
+   * True when the adapter's promise settled (or rejected) inside the grace
+   * bound. False means termination could not be verified and the caller must
+   * revoke the run's access to its workspace and credentials.
+   */
+  terminated: boolean;
 };
+
+/**
+ * An adapter is another process's code. Its resolved value is untrusted input, so
+ * a malformed result must settle the task as a typed protocol failure instead of
+ * throwing or being read as a completion.
+ */
+function isAgentOutcome(value: unknown): value is AgentRunOutcome {
+  if (typeof value !== 'object' || value === null) return false;
+  const outcome = value as Record<string, unknown>;
+  if (outcome.ok === true) return typeof outcome.summary === 'string';
+  if (outcome.ok !== false) return false;
+  return (
+    typeof outcome.code === 'string' &&
+    outcome.code.length >= 1 &&
+    outcome.code.length <= 60 &&
+    typeof outcome.detail === 'string' &&
+    typeof outcome.retryable === 'boolean'
+  );
+}
 
 export type TaskRunner = {
   run: (input: {
@@ -27,6 +65,8 @@ export type TaskRunner = {
     adapter: AgentAdapter;
     request: AgentRunRequest;
     report: AgentReport;
+    onSettled?: (result: RunResult, signal: AbortSignal, lostOwnership: () => boolean) => Promise<void>;
+    cancellationRequested?: () => Promise<boolean>;
     /** The fencing generation this run belongs to (used when it is abandoned). */
     generation?: number;
     /** The directory the run may write, quarantined if the adapter is abandoned. */
@@ -66,7 +106,7 @@ export function createTaskRunner(input: {
     token: string;
     generation: number;
     workspaceRoot: string;
-  }) => void;
+  }) => void | Promise<void>;
 }): TaskRunner {
   return {
     run: async ({
@@ -75,6 +115,8 @@ export function createTaskRunner(input: {
       adapter,
       request,
       report,
+      cancellationRequested,
+      onSettled,
       generation = 0,
       workspaceRoot = '',
     }) => {
@@ -105,7 +147,7 @@ export function createTaskRunner(input: {
           controller.abort();
           return;
         }
-        if (result.cancelRequested) {
+        if (result.cancelRequested || (cancellationRequested && await cancellationRequested())) {
           cancelRequested = true;
           controller.abort();
         }
@@ -148,77 +190,126 @@ export function createTaskRunner(input: {
                 detail: 'Execution ownership was superseded by another run.',
               },
               ownershipLost: true,
+              terminated: !abandoned,
             }
-          : { outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) }, ownershipLost: false };
+          : {
+              outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) },
+              ownershipLost: false,
+              terminated: !abandoned,
+            };
 
-      try {
-        const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
-        const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
-        if (settled === null) {
-          // The adapter ignored the abort. Its eventual rejection must not become
-          // an unhandled one, and its result must never be applied: the lease and
-          // the task record already say this run is over.
-          void running.catch(() => undefined);
-          if (!ownershipLost) {
-            input.onAbandoned?.({ scope, token, generation, workspaceRoot });
+      const executeAdapter = async (): Promise<RunResult> => {
+        try {
+          if (controller.signal.aborted) return cancelled(false);
+          if (cancellationRequested) {
+            try {
+              if (await Promise.race([cancellationRequested(), grace]) || controller.signal.aborted) return cancelled(false);
+            } catch {
+              if (controller.signal.aborted) return cancelled(false);
+              return { ownershipLost: false, outcome: { kind: 'interrupted', detail: 'Work admission could not be verified.' }, terminated: true };
+            }
           }
-          return cancelled(true);
-        }
-        const outcome = settled.outcome;
-        if (ownershipLost) {
+          const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
+          const settled = await Promise.race([running.then((outcome) => ({ outcome })), grace]);
+          if (settled === null) {
+            // The adapter ignored the abort. Its eventual rejection must not become
+            // an unhandled one, and its result must never be applied: the lease and
+            // the task record already say this run is over.
+            void running.catch(() => undefined);
+            // Whether the lease was lost or the owner cancelled, an adapter that
+            // ignored its abort may still be executing. Revocation is awaited so
+            // the caller cannot settle (or shut down) while the workspace is
+            // still reachable by the abandoned generation.
+            await input.onAbandoned?.({ scope, token, generation, workspaceRoot });
+            return cancelled(true);
+          }
+          const outcome = settled.outcome;
+          if (ownershipLost) {
+            return {
+              outcome: {
+                kind: 'interrupted',
+                detail: 'Execution ownership was superseded by another run.',
+              },
+              ownershipLost: true,
+              terminated: true,
+            };
+          }
+          if (cancelRequested) {
+            return { outcome: { kind: 'cancelled' }, ownershipLost: false, terminated: true };
+          }
+          if (!isAgentOutcome(outcome)) {
+            return {
+              outcome: {
+                kind: 'failed',
+                code: 'protocol_error',
+                detail: 'The agent returned an outcome the engine could not interpret.',
+                retryable: false,
+              },
+              ownershipLost: false,
+              terminated: true,
+            };
+          }
+          if (!outcome.ok && outcome.code === 'cancelled') {
+            return { outcome: { kind: 'cancelled' }, ownershipLost: false, terminated: true };
+          }
+          if (outcome.ok) {
+            return {
+              outcome: {
+                kind: 'completed',
+                summary: outcome.summary,
+                ...(outcome.usage ? { usage: outcome.usage } : {}),
+                ...(outcome.artifacts ? { artifacts: outcome.artifacts } : {}),
+                ...(outcome.verification ? { verification: outcome.verification } : {}),
+              },
+              ownershipLost: false,
+              terminated: true,
+            };
+          }
           return {
             outcome: {
-              kind: 'interrupted',
-              detail: 'Execution ownership was superseded by another run.',
-            },
-            ownershipLost: true,
-          };
-        }
-        if (cancelRequested || (!outcome.ok && outcome.code === 'cancelled')) {
-          return { outcome: { kind: 'cancelled' }, ownershipLost: false };
-        }
-        if (outcome.ok) {
-          return {
-            outcome: {
-              kind: 'completed',
-              summary: outcome.summary,
+              kind: 'failed',
+              code: outcome.code,
+              detail: outcome.detail,
+              retryable: outcome.retryable,
               ...(outcome.usage ? { usage: outcome.usage } : {}),
             },
             ownershipLost: false,
+            terminated: true,
           };
-        }
-        return {
-          outcome: {
-            kind: 'failed',
-            code: outcome.code,
-            detail: outcome.detail,
-            retryable: outcome.retryable,
-          },
-          ownershipLost: false,
-        };
-      } catch {
-        if (ownershipLost) {
+        } catch {
+          // A rejection is a settled promise, so termination itself is verified.
+          if (ownershipLost) {
+            return {
+              outcome: {
+                kind: 'interrupted',
+                detail: 'Execution ownership was superseded by another run.',
+              },
+              ownershipLost: true,
+              terminated: true,
+            };
+          }
+          // An adapter that throws on abort was cancelled, not broken. Reporting a
+          // provider failure here would tell the owner to retry something they
+          // deliberately stopped.
+          if (cancelRequested) {
+            return { outcome: { kind: 'cancelled' }, ownershipLost: false, terminated: true };
+          }
           return {
             outcome: {
-              kind: 'interrupted',
-              detail: 'Execution ownership was superseded by another run.',
+              kind: 'failed',
+              code: 'provider_error',
+              detail: 'The agent failed unexpectedly.',
+              retryable: false,
             },
-            ownershipLost: true,
+            ownershipLost: false,
+            terminated: true,
           };
         }
-        // An adapter that throws on abort was cancelled, not broken. Reporting a
-        // provider failure here would tell the owner to retry something they
-        // deliberately stopped.
-        if (cancelRequested) return { outcome: { kind: 'cancelled' }, ownershipLost: false };
-        return {
-          outcome: {
-            kind: 'failed',
-            code: 'provider_error',
-            detail: 'The agent failed unexpectedly.',
-            retryable: false,
-          },
-          ownershipLost: false,
-        };
+      };
+      try {
+        const result = await executeAdapter();
+        await onSettled?.(result, controller.signal, () => ownershipLost);
+        return result;
       } finally {
         clearInterval(timer);
         if (graceTimer) clearTimeout(graceTimer);

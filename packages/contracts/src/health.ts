@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { EngineStatus } from './models.js';
-import { CONTRACT_VERSION, IsoDateTime } from './primitives.js';
+import { IsoDateTime } from './primitives.js';
 
 export const CheckStatus = z.enum(['ok', 'degraded', 'failed']);
 export type CheckStatus = z.infer<typeof CheckStatus>;
@@ -15,10 +15,13 @@ export const HealthCheck = z
   .strict();
 export type HealthCheck = z.infer<typeof HealthCheck>;
 
+// Existing /v1 clients validate this literal, independently of catalog additions.
+export const V1_HEALTH_VERSION = '1.0.0' as const;
+
 export const HealthReport = z
   .object({
     status: CheckStatus,
-    contractVersion: z.literal(CONTRACT_VERSION),
+    contractVersion: z.literal(V1_HEALTH_VERSION),
     startedAt: IsoDateTime,
     uptimeMs: z.number().int().nonnegative(),
     checks: z.array(HealthCheck),

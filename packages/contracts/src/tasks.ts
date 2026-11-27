@@ -1,10 +1,10 @@
 import { z } from 'zod';
+import { MediaAttachmentInput, MediaReference } from './media.js';
 import { Budget } from './models.js';
 import {
   AgentId,
   ConversationId,
   DataMode,
-  IdempotencyKey,
   IsoDateTime,
   MessageId,
   ModelRef,
@@ -16,6 +16,11 @@ import {
 export const ChatRequest = z
   .object({
     message: z.string().min(1).max(200_000),
+    /**
+     * Optional image attachments. Validated against their own bytes before a
+     * provider is called; the accepted references are part of the stored turn.
+     */
+    attachments: z.array(MediaAttachmentInput).max(4).optional(),
     conversationId: ConversationId.optional(),
     agent: AgentId.default('coderax'),
     model: ModelRef.optional(),
@@ -54,10 +59,11 @@ export const WorkSubmitRequest = z
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
     /**
-     * A repeated submission with the same key returns the task the first one
-     * created. The key is scoped to the owner, so two owners can never collide.
+     * `auto` lets Native choose from the objective's structure. `fast` plans and
+     * executes directly; `complex` decomposes, parallelises and replans within
+     * the configured bounds. The resolved mode is reported on the task.
      */
-    idempotencyKey: IdempotencyKey.optional(),
+    reasoning: z.enum(['auto', 'fast', 'complex']).optional(),
   })
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
@@ -85,13 +91,33 @@ export const TaskStatus = z
     updatedAt: IsoDateTime,
     leaseExpiresAt: IsoDateTime.optional(),
     cancelRequested: z.boolean(),
+    /** The resolved reasoning mode, published once the plan exists. */
+    reasoning: z.enum(['fast', 'complex']).optional(),
     steps: z.array(
-      z.object({ id: z.string().min(1).max(80), title: z.string().max(200), state: TaskState }).strict(),
+      z
+        .object({
+          id: z.string().min(1).max(80),
+          title: z.string().max(200),
+          state: TaskState,
+          /** Dependencies make the execution plan observable, not implied. */
+          dependsOn: z.array(z.string().min(1).max(80)).max(64).optional(),
+          attempts: z.number().int().nonnegative().optional(),
+        })
+        .strict(),
     ),
     result: z
       .object({
         summary: z.string().max(20_000).optional(),
         artifacts: z.array(Artifact),
+        /** Present only when the objective was assessed against evidence. */
+        verification: z
+          .object({
+            passed: z.boolean(),
+            reason: z.string().max(1000),
+            evidence: z.array(z.string().max(500)).max(20),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
@@ -148,6 +174,8 @@ export const Message = z
     createdAt: IsoDateTime,
     unfinished: z.boolean().optional(),
     agent: AgentId.optional(),
+    /** Metadata for images accepted on this turn; never the bytes. */
+    media: z.array(MediaReference).optional(),
   })
   .strict();
 export type Message = z.infer<typeof Message>;
@@ -194,39 +222,3 @@ export type MemoryEntry = z.infer<typeof MemoryEntry>;
 
 export const MemoryList = z.object({ entries: z.array(MemoryEntry) }).strict();
 export type MemoryList = z.infer<typeof MemoryList>;
-
-/**
- * Writing memory over HTTP is explicit and owner-scoped. It is not retrieval:
- * the returned entry is exact key/value storage in one data mode, and the
- * handshake reports retrieval augmentation as unavailable.
- */
-export const MemoryPutRequest = z
-  .object({
-    key: z.string().trim().min(1).max(200),
-    value: z.string().max(20_000),
-    mode: DataMode.default('private'),
-  })
-  .strict();
-export type MemoryPutRequest = z.infer<typeof MemoryPutRequest>;
-
-/** The task read model. It is a projection, not a second task record. */
-export const TaskSummary = z
-  .object({
-    taskId: TaskId,
-    conversationId: ConversationId,
-    objective: z.string().min(1).max(200_000),
-    state: TaskState,
-    agent: AgentId,
-    mode: DataMode,
-    generation: z.number().int().nonnegative(),
-    createdAt: IsoDateTime,
-    updatedAt: IsoDateTime,
-    cancelRequested: z.boolean(),
-  })
-  .strict();
-export type TaskSummary = z.infer<typeof TaskSummary>;
-
-export const TaskList = z
-  .object({ tasks: z.array(TaskSummary), total: z.number().int().nonnegative() })
-  .strict();
-export type TaskList = z.infer<typeof TaskList>;

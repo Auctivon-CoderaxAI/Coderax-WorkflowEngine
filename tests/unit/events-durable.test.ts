@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createEventBus } from '../../src/events/bus.js';
 import { createMemoryEventLog } from '../../src/events/log.js';
-import { createQuarantineRegistry } from '../../src/execution/quarantine.js';
 
 // One id space for the file: a simulated restart must keep the same identity
 // domain, or a fresh prefix would make an old event look new again.
@@ -97,7 +96,13 @@ test('a stale generation cannot append to a stream a newer generation owns', asy
   const staleBus = busOver(log);
   staleBus.publish({ taskId: 'task-3', agent: 'coderax', generation: 1, type: 'task.queued' });
   await staleBus.flush('task-3');
-  staleBus.publish({ taskId: 'task-3', agent: 'coderax', generation: 1, type: 'text.delta', payload: { text: 'late' } });
+  staleBus.publish({
+    taskId: 'task-3',
+    agent: 'coderax',
+    generation: 1,
+    type: 'text.delta',
+    payload: { text: 'late' },
+  });
   await staleBus.flush('task-3');
   const events = await log.read('task-3', 0, 50);
   assert.equal(events.length, 1);
@@ -155,27 +160,4 @@ test('backpressure drops intermediate deltas but never the terminal event', asyn
   await bus.flush('task-5');
   const stored = await log.read('task-5', 0, 1_000);
   assert.equal(stored.at(-1)?.type, 'task.completed');
-});
-
-test('a quarantined workspace refuses new work until it expires or is released', () => {
-  const registry = createQuarantineRegistry({ ttlMs: 1_000 });
-  registry.poison({
-    root: '/srv/cloud',
-    generation: 2,
-    taskId: 'task-6',
-    reason: 'adapter ignored abort',
-    now: 0,
-  });
-  assert.equal(registry.check('/srv/cloud', 500)?.generation, 2);
-  assert.equal(registry.check('/srv/cloud', 1_001), null, 'the entry expires without an operator');
-  registry.poison({
-    root: '/srv/private',
-    generation: 1,
-    taskId: 'task-7',
-    reason: 'adapter ignored abort',
-    now: 0,
-  });
-  assert.equal(registry.list(0).length, 1);
-  assert.equal(registry.release('/srv/private'), true);
-  assert.equal(registry.check('/srv/private', 0), null);
 });

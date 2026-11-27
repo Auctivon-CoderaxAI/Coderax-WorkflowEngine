@@ -1,5 +1,5 @@
 import type { RouteSpec } from '@coderax/contracts';
-import { ROUTE_INDEX } from '@coderax/contracts';
+import { HTTP_STATUS_FOR_CODE, ROUTE_INDEX } from '@coderax/contracts';
 import { buildOpenApiDocument, type OpenApiDocument } from '@coderax/contracts';
 import type { ProblemCode } from '@coderax/contracts';
 import type { AuthService, Principal } from '../security/auth.js';
@@ -10,23 +10,23 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
-  /** The client's Accept header, so a route can negotiate SSE against JSON. */
-  accept: string;
-  /** A resume cursor from `Last-Event-ID`, used when no `after` query is sent. */
-  lastEventId: string | undefined;
+  signal?: AbortSignal;
+  lastEventId?: string | undefined;
 };
 
-/** One SSE frame: an optional cursor and the JSON payload the client parses. */
-export type SseFrame = { id?: string; data: unknown };
+/**
+ * One server-sent frame. A `comment` is written as a `:` line, which is valid
+ * SSE that every client must ignore; carrying metadata that way lets the stream
+ * report its own log bounds without changing the event contract.
+ */
+export type SseFrame =
+  | { kind: 'event'; event: unknown }
+  | { kind: 'comment'; comment: string };
 
 export type HandlerResult =
   | { kind: 'json'; status: number; body: unknown }
-  | {
-      kind: 'sse';
-      status: number;
-      events: AsyncIterable<SseFrame | unknown>;
-      headers?: Record<string, string>;
-    };
+  | { kind: 'text'; status: number; contentType: string; body: string }
+  | { kind: 'sse'; status: number; events: AsyncIterable<SseFrame> };
 
 export type RouteHandler = (context: RequestContext) => Promise<HandlerResult>;
 
@@ -37,18 +37,14 @@ export type RawRequest = {
   path: string;
   authorization: string | undefined;
   bodyText: string;
-  accept?: string | undefined;
+  signal?: AbortSignal;
   lastEventId?: string | undefined;
 };
 
 export type RouterResult =
   | { kind: 'json'; status: number; body: unknown }
-  | {
-      kind: 'sse';
-      status: number;
-      events: AsyncIterable<SseFrame>;
-      headers?: Record<string, string>;
-    };
+  | { kind: 'text'; status: number; contentType: string; body: string }
+  | { kind: 'sse'; status: number; events: AsyncIterable<SseFrame> };
 
 export type RouteRegistry = {
   register: (operationId: string, handler: RouteHandler) => void;
@@ -97,7 +93,9 @@ export function createRouteRegistry(): RouteRegistry {
     missing: () => [...ROUTE_INDEX.keys()].filter((operationId) => !handlers.has(operationId)),
     openapi: () =>
       buildOpenApiDocument(
-        [...handlers.keys()].map((operationId) => ROUTE_INDEX.get(operationId) as RouteSpec),
+        [...ROUTE_INDEX.keys()]
+          .filter((operationId) => handlers.has(operationId))
+          .map((operationId) => ROUTE_INDEX.get(operationId) as RouteSpec),
       ),
   };
 }
@@ -108,28 +106,9 @@ function problem(
   requestId: string,
   retryable = false,
 ): { kind: 'json'; status: number; body: unknown } {
-  const status =
-    code === 'unauthorized'
-      ? 401
-      : code === 'forbidden' || code === 'workspace_denied'
-        ? 403
-        : code === 'not_found'
-          ? 404
-          : code === 'validation_failed'
-            ? 400
-            : code === 'conflict' || code === 'busy' || code === 'permission_required' || code === 'cancelled'
-              ? 409
-              : code === 'budget_exhausted'
-                ? 429
-                : code === 'paid_model_refused'
-                  ? 402
-                  : code === 'not_ready' ||
-                      code === 'engine_unavailable' ||
-                      code === 'engine_not_configured'
-                    ? 503
-                    : code === 'protocol_error'
-                      ? 502
-                      : 500;
+  // One table decides the status for both the router and any handler, so a new
+  // failure code cannot mean two different HTTP statuses in two places.
+  const status = HTTP_STATUS_FOR_CODE[code];
   return {
     kind: 'json',
     status,
@@ -162,44 +141,13 @@ export const problemResult = problem;
 export type Router = {
   handle: (request: RawRequest) => Promise<RouterResult>;
   registry: RouteRegistry;
+  /**
+   * The body ceiling for the operation that matches this method and path, or
+   * `undefined` for the transport default. The server reads the body before a
+   * handler runs, so only the route that carries file content may raise it.
+   */
+  bodyLimit: (method: string, path: string, authorization?: string) => number | undefined;
 };
-
-function toFrame(value: unknown): SseFrame {
-  // A wrapper is explicit: an execution event has a `type` and no `data`, so the
-  // two cannot be confused even after a new event type is added.
-  if (typeof value === 'object' && value !== null && 'data' in value && !('type' in value)) {
-    const candidate = value as { data: unknown; id?: unknown };
-    return {
-      ...(typeof candidate.id === 'string' ? { id: candidate.id } : {}),
-      data: candidate.data,
-    };
-  }
-  return { data: value };
-}
-
-/**
- * Every SSE payload is validated against the route's frame schema before it
- * reaches the socket, so a stream cannot teach a client a shape the catalogue
- * does not describe. A violation breaks the stream instead of returning a 200
- * that lies about its contents.
- */
-async function* validatedFrames(
-  events: AsyncIterable<unknown>,
-  schema: RouteSpec['frames'],
-): AsyncIterable<SseFrame> {
-  for await (const value of events) {
-    const frame = toFrame(value);
-    if (!schema) {
-      yield frame;
-      continue;
-    }
-    const parsed = schema.safeParse(frame.data);
-    if (!parsed.success) {
-      throw new Error('a stream frame did not match its published contract');
-    }
-    yield { ...frame, data: parsed.data };
-  }
-}
 
 export function createRouter(input: {
   registry: RouteRegistry;
@@ -214,10 +162,20 @@ export function createRouter(input: {
 
   return {
     registry: input.registry,
+    bodyLimit: (method, path, authorization) => {
+      const [pathname = ''] = path.split('?');
+      const upper = method.toUpperCase();
+      for (const route of routes) {
+        if (route.spec.method !== upper) continue;
+        if (!route.matcher.test(pathname)) continue;
+        return input.auth.authenticate(authorization) ? route.spec.maxBodyBytes : undefined;
+      }
+      return undefined;
+    },
     handle: async (raw) => {
       const requestId = input.requestId();
       const [pathname, search = ''] = raw.path.split('?');
-      const query = Object.fromEntries(new URLSearchParams(search).entries());
+      const rawQuery = Object.fromEntries(new URLSearchParams(search).entries());
       const method = raw.method.toUpperCase();
 
       for (const route of routes) {
@@ -230,18 +188,23 @@ export function createRouter(input: {
           return problem('unauthorized', 'A valid owner token is required.', requestId);
         }
 
-        const params = (match.groups ?? {}) as Record<string, string>;
+        let params = (match.groups ?? {}) as Record<string, string>;
         if (route.spec.params) {
           const parsed = route.spec.params.safeParse(params);
           if (!parsed.success) {
             return problem('validation_failed', 'A path parameter is invalid.', requestId);
           }
+          params = parsed.data as Record<string, string>;
         }
+        // Handlers receive the coerced data, not the raw query string: a numeric
+        // `after` or `limit` must be a number before any service sees it.
+        let query: Record<string, unknown> = rawQuery;
         if (route.spec.query) {
-          const parsed = route.spec.query.safeParse(query);
+          const parsed = route.spec.query.safeParse(rawQuery);
           if (!parsed.success) {
             return problem('validation_failed', 'A query parameter is invalid.', requestId);
           }
+          query = parsed.data as Record<string, unknown>;
         }
 
         let body: unknown = undefined;
@@ -276,7 +239,7 @@ export function createRouter(input: {
             query,
             body,
             requestId,
-            accept: raw.accept ?? '',
+            signal: raw.signal,
             lastEventId: raw.lastEventId,
           });
         } catch {
@@ -297,12 +260,10 @@ export function createRouter(input: {
           }
           return { kind: 'json', status: result.status, body: parsed.data };
         }
-        return {
-          kind: 'sse',
-          status: result.status,
-          events: validatedFrames(result.events, route.spec.frames),
-          ...(result.headers ? { headers: result.headers } : {}),
-        };
+        if (result.kind === 'text') {
+          return result;
+        }
+        return { kind: 'sse', status: result.status, events: result.events };
       }
 
       return problem('not_found', 'No operation matches that method and path.', requestId);

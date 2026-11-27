@@ -8,18 +8,22 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
-import type { ScheduleRepository } from '../persistence/schedules.js';
-import type { ArtifactRepository, ArtifactStorage } from '../artifacts/store.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
+import type { RunSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
-import type { QuarantineRegistry } from '../execution/quarantine.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import type { BrowserService } from '../orchestration/browser.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
 
 /**
  * Dependencies are named, not positional.
@@ -43,15 +47,20 @@ export type InfrastructureDependencies = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifactService: ArtifactService;
+  deliverables: DeliverableService;
   schedules: ScheduleRepository;
-  artifacts: ArtifactRepository;
-  artifactStorage: ArtifactStorage;
+  scheduleNotices: ScheduleNoticeStore;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
-  quarantine: QuarantineRegistry;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
+  browser: BrowserService;
+  supervisor: RunSupervisor;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -68,15 +77,20 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'memory',
   'permissions',
   'notifications',
+  'artifactService',
+  'deliverables',
   'schedules',
-  'artifacts',
-  'artifactStorage',
+  'scheduleNotices',
   'audit',
   'events',
   'runner',
   'scheduler',
   'health',
-  'quarantine',
+  'studio',
+  'sessions',
+  'gaming',
+  'browser',
+  'supervisor',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

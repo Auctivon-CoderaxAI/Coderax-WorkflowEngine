@@ -1,5 +1,6 @@
 import type { AuditRecord } from '../domain.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
+import { redactText } from './redact.js';
 
 /**
  * Every accepted, refused and settled task leaves a receipt. The log is
@@ -19,6 +20,7 @@ export function createAuditLog(input: { clock: Clock; ids: IdGenerator; limit?: 
     record: (entry) => {
       const record: AuditRecord = {
         ...entry,
+        ...(entry.detail !== undefined ? { detail: redactText(entry.detail, [], 500) } : {}),
         at: input.clock.iso(),
         receipt: input.ids.receipt(),
       };

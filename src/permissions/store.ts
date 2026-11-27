@@ -16,28 +16,7 @@ import { fail, ok } from '../support/result.js';
  * resource only, so an agent cannot widen `workspace.read` into a broader path by
  * asking once. External agents begin with nothing; Native is the only agent whose
  * isolation already includes memory and conversations.
- *
- * The rows live behind a table port so a Mongo deployment keeps a pending
- * approval across a restart instead of forgetting it with the process.
  */
-export type PermissionRow = PermissionRequest & { ownerId: string };
-
-export type PermissionTable = {
-  insert: (row: PermissionRow) => Promise<void>;
-  get: (requestId: string) => Promise<PermissionRow | null>;
-  listTask: (ownerId: string, taskId: string) => Promise<PermissionRow[]>;
-  listPending: (ownerId: string) => Promise<PermissionRow[]>;
-  /** Engine-internal checks; never a route read. */
-  listByTask: (taskId: string) => Promise<PermissionRow[]>;
-  updateDecision: (input: {
-    requestId: string;
-    ownerId: string;
-    taskId: string;
-    decision: 'approved' | 'denied';
-    decidedAt: string;
-  }) => Promise<PermissionRow | null>;
-};
-
 export type PermissionStore = {
   request: (input: {
     ownerId: string;
@@ -49,7 +28,6 @@ export type PermissionStore = {
     ttlMs?: number;
   }) => Promise<PermissionRequest>;
   list: (ownerId: string, taskId: string) => Promise<PermissionList>;
-  listPending: (ownerId: string) => Promise<PermissionList>;
   decide: (input: {
     ownerId: string;
     taskId: string;
@@ -58,29 +36,40 @@ export type PermissionStore = {
     reason?: string;
   }) => Promise<ServiceResult<PermissionList>>;
   isApproved: (taskId: string, scope: PermissionScope, resource: string) => Promise<boolean>;
+  /**
+   * One request by id inside its owner and task scope. The browser integration
+   * uses this to bind an approval to a single exact resource and to consume it
+   * once; a caller that only checks `isApproved` could reuse a grant.
+   */
+  get: (
+    ownerId: string,
+    taskId: string,
+    requestId: string,
+  ) => Promise<PermissionRequest | null>;
   hasPending: (taskId: string) => Promise<boolean>;
 };
-
-function toContract(row: PermissionRow): PermissionRequest {
-  const { ownerId: _owner, ...rest } = row;
-  return rest;
-}
 
 export function createPermissionStore(input: {
   clock: Clock;
   ids: IdGenerator;
-  table: PermissionTable;
   defaultTtlMs?: number;
 }): PermissionStore {
-  async function listFor(ownerId: string, taskId: string): Promise<PermissionList> {
-    return { requests: (await input.table.listTask(ownerId, taskId)).map(toContract) };
+  const requests = new Map<string, PermissionRequest & { ownerId: string }>();
+
+  function listFor(ownerId: string, taskId: string): PermissionList {
+    return {
+      requests: [...requests.values()]
+        .filter((entry) => entry.ownerId === ownerId && entry.taskId === taskId)
+        .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+        .map(({ ownerId: _owner, ...rest }) => rest),
+    };
   }
 
   return {
     request: async ({ ownerId, taskId, agent, scope, description, resource, ttlMs }) => {
       const now = input.clock.now();
-      const ttl = ttlMs ?? 15 * 60_000;
-      const row: PermissionRow = {
+      const ttl = ttlMs ?? input.defaultTtlMs ?? 15 * 60_000;
+      const record = {
         requestId: input.ids.requestId(),
         taskId,
         agent,
@@ -89,18 +78,16 @@ export function createPermissionStore(input: {
         resource,
         requestedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + ttl).toISOString(),
-        decision: 'pending',
+        decision: 'pending' as const,
         ownerId,
       };
-      await input.table.insert(row);
-      return toContract(row);
+      requests.set(record.requestId, record);
+      const { ownerId: _owner, ...contract } = record;
+      return contract;
     },
-    list: listFor,
-    listPending: async (ownerId) => ({
-      requests: (await input.table.listPending(ownerId)).map(toContract),
-    }),
+    list: async (ownerId, taskId) => listFor(ownerId, taskId),
     decide: async ({ ownerId, taskId, requestId, decision }) => {
-      const record = await input.table.get(requestId);
+      const record = requests.get(requestId);
       if (!record || record.ownerId !== ownerId || record.taskId !== taskId) {
         return fail('not_found', 'That permission request does not exist for this task.');
       }
@@ -108,32 +95,36 @@ export function createPermissionStore(input: {
       if (new Date(record.expiresAt).getTime() <= now.getTime()) {
         return fail('conflict', 'That permission request has expired.');
       }
-      if (record.decision !== 'pending') {
-        return fail('conflict', 'That permission request has already been decided.');
-      }
-      const updated = await input.table.updateDecision({
-        requestId,
-        ownerId,
-        taskId,
-        decision,
-        decidedAt: now.toISOString(),
-      });
-      if (!updated) {
-        return fail('conflict', 'That permission request changed before it was decided.');
-      }
-      return ok(await listFor(ownerId, taskId));
+      record.decision = decision;
+      record.decidedAt = now.toISOString();
+      return ok(listFor(ownerId, taskId));
+    },
+    get: async (ownerId, taskId, requestId) => {
+      const record = requests.get(requestId);
+      if (!record || record.ownerId !== ownerId || record.taskId !== taskId) return null;
+      const { ownerId: _owner, ...contract } = record;
+      return contract;
     },
     isApproved: async (taskId, scope, resource) => {
       const now = input.clock.now();
-      return (await input.table.listByTask(taskId)).some(
-        (row) =>
-          row.scope === scope &&
-          row.resource === resource &&
-          row.decision === 'approved' &&
-          new Date(row.expiresAt).getTime() > now.getTime(),
-      );
+      for (const record of requests.values()) {
+        if (
+          record.taskId === taskId &&
+          record.scope === scope &&
+          record.resource === resource &&
+          record.decision === 'approved' &&
+          new Date(record.expiresAt).getTime() > now.getTime()
+        ) {
+          return true;
+        }
+      }
+      return false;
     },
-    hasPending: async (taskId) =>
-      (await input.table.listByTask(taskId)).some((row) => row.decision === 'pending'),
+    hasPending: async (taskId) => {
+      for (const record of requests.values()) {
+        if (record.taskId === taskId && record.decision === 'pending') return true;
+      }
+      return false;
+    },
   };
 }

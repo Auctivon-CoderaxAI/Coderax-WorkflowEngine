@@ -21,11 +21,15 @@ export type ModelCatalog = {
   resolve: (
     requested: ModelRef | null | undefined,
     mode: DataMode,
+    options?: { requireVision?: boolean },
   ) => ServiceResult<ModelDescriptor>;
 };
 
-function usable(descriptor: ModelDescriptor, mode: DataMode): boolean {
+function usable(descriptor: ModelDescriptor, mode: DataMode, requireVision = false): boolean {
   if (!descriptor.availability.available) return false;
+  // Capability is only what the catalogue verified; an image turn may not route
+  // to a model whose vision support was never established.
+  if (requireVision && descriptor.vision !== true) return false;
   // Private mode is BYOK/local only; a hosted model is not a private resource.
   if (mode === 'private' && descriptor.costClass !== 'free') return false;
   return true;
@@ -42,7 +46,9 @@ export function createModelCatalog(input: {
   function resolve(
     requested: ModelRef | null | undefined,
     mode: DataMode,
+    options?: { requireVision?: boolean },
   ): ServiceResult<ModelDescriptor> {
+    const requireVision = options?.requireVision === true;
     if (requested) {
       const descriptor = byKey.get(modelKey(requested));
       if (!descriptor) {
@@ -54,10 +60,12 @@ export function createModelCatalog(input: {
           'Coderax does not route to paid models; choose a verified zero-cost model.',
         );
       }
-      if (!usable(descriptor, mode)) {
+      if (!usable(descriptor, mode, requireVision)) {
         return fail(
           'model_missing',
-          `That model is not available for ${mode} execution: ${descriptor.availability.detail}`,
+          requireVision && descriptor.vision !== true
+            ? 'That model is not verified to accept image input.'
+            : `That model is not available for ${mode} execution: ${descriptor.availability.detail}`,
         );
       }
       return ok(descriptor);
@@ -65,13 +73,19 @@ export function createModelCatalog(input: {
 
     for (const ref of routeRefs) {
       const descriptor = byKey.get(modelKey(ref));
-      if (descriptor && descriptor.costClass === 'free' && usable(descriptor, mode)) {
+      if (
+        descriptor &&
+        descriptor.costClass === 'free' &&
+        usable(descriptor, mode, requireVision)
+      ) {
         return ok(descriptor);
       }
     }
     return fail(
       'model_missing',
-      'No verified zero-cost model is available for this data mode.',
+      requireVision
+        ? 'No verified zero-cost model with image input is available for this data mode.'
+        : 'No verified zero-cost model is available for this data mode.',
     );
   }
 

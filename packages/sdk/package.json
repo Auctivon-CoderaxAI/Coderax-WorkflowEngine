@@ -1,38 +1,25 @@
 {
   "name": "@coderax/sdk",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "private": true,
   "description": "Typed Coderax WorkflowEngine client: auth, chat, work, discovery, history, memory, tasks, events, permissions, notifications and health.",
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./client": {
-      "types": "./dist/client.d.ts",
-      "default": "./dist/client.js"
-    },
-    "./version": {
-      "types": "./dist/version.d.ts",
-      "default": "./dist/version.js"
-    },
-    "./stream": {
-      "types": "./dist/stream.d.ts",
-      "default": "./dist/stream.js"
-    },
-    "./manifest": {
-      "types": "./dist/manifest.d.ts",
-      "default": "./dist/manifest.js"
     }
   },
   "scripts": {
     "build": "tsc -b"
   },
   "dependencies": {
-    "@coderax/contracts": "1.1.0",
-    "zod": "^3.25.67"
+    "@coderax/contracts": "*",
+    "zod": "^4.6.7"
   }
 }

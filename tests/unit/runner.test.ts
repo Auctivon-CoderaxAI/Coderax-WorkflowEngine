@@ -24,6 +24,8 @@ function request(signal: AbortSignal): AgentRunRequest {
     ownerId: 'owner',
     tenantId: null,
     conversationId: 'conv',
+    workload: 'work',
+    game: null,
     objective: 'Do the work',
     model: { providerId: 'free', modelId: 'coderax-small' },
     mode: 'cloud',
@@ -38,6 +40,7 @@ function adapter(run: AgentAdapter['run']): AgentAdapter {
   return {
     agent: 'coderax',
     engine: 'native',
+    sideEffects: 'none',
     capabilities: {
       streaming: true,
       tools: false,
@@ -87,6 +90,7 @@ test('a cancelled run stops waiting when the adapter ignores its abort', async (
   assert.deepEqual(result, {
     outcome: { kind: 'cancelled', abandoned: true },
     ownershipLost: false,
+    terminated: false,
   });
   assert.ok(Date.now() - started < 1_000, 'the grace bound must end the wait');
 });
@@ -112,7 +116,11 @@ test('an adapter that stops on abort is settled without using the grace bound', 
   });
   setTimeout(() => external.abort(), 5);
 
-  assert.deepEqual(await running, { outcome: { kind: 'cancelled' }, ownershipLost: false });
+  assert.deepEqual(await running, {
+    outcome: { kind: 'cancelled' },
+    ownershipLost: false,
+    terminated: true,
+  });
 });
 
 test('a lost lease aborts a hung adapter and settles as interrupted', async () => {
@@ -147,5 +155,63 @@ test('a completed run is not cut short by the grace bound', async () => {
   assert.deepEqual(result, {
     outcome: { kind: 'completed', summary: 'finished' },
     ownershipLost: false,
+    terminated: true,
+  });
+});
+
+test('a pending admission check cannot start an adapter after cancellation', async () => {
+  const external = new AbortController();
+  let starts = 0;
+  const pending = runnerWith(lease()).run({
+    scope, token: 'pending', request: request(external.signal), report: () => {},
+    adapter: adapter(async () => { starts++; return { ok: true, summary: '' }; }),
+    cancellationRequested: () => new Promise(() => {}),
+  });
+  external.abort();
+  assert.deepEqual(await pending, { ownershipLost: false, outcome: { kind: 'cancelled' }, terminated: true });
+  assert.equal(starts, 0);
+});
+
+test('an unavailable pre-start check interrupts without starting the provider', async () => {
+  const result = await runnerWith(lease()).run({
+    scope, token: 'pending', request: request(new AbortController().signal), report: () => {},
+    adapter: adapter(() => assert.fail('adapter started')),
+    cancellationRequested: async () => { throw new Error('unavailable'); },
+  });
+  assert.equal(result.outcome.kind, 'interrupted');
+  assert.equal(result.ownershipLost, false);
+});
+
+test('a late false admission response cannot start Work after lease loss', async () => {
+  let finish!: (allowed: boolean) => void;
+  const blocked = new Promise<boolean>(resolve => { finish = resolve; });
+  let starts = 0;
+  const result = await runnerWith(lease({ renew: async () => {
+    setImmediate(() => finish(false));
+    return { renewed: false, cancelRequested: false };
+  } }), { heartbeatIntervalMs: 5 }).run({
+    scope, token: 'retired', request: request(new AbortController().signal), report: () => {},
+    adapter: adapter(async () => { starts++; return { ok: true, summary: '' }; }),
+    cancellationRequested: () => blocked,
+  });
+  assert.equal(starts, 0);
+  assert.equal(result.ownershipLost, true);
+});
+
+test('the runner renews ownership until its settlement callback finishes', async () => {
+  let settling = false;
+  let renewed = false;
+  const runner = runnerWith(lease({ renew: async () => {
+    if (settling) renewed = true;
+    return { renewed: true, cancelRequested: false };
+  } }), { heartbeatIntervalMs: 5 });
+  await runner.run({
+    scope, token: 'settling', request: request(new AbortController().signal), report: () => {},
+    adapter: adapter(async () => ({ ok: true, summary: 'finished' })),
+    onSettled: async () => {
+      settling = true;
+      await new Promise(resolve => setTimeout(resolve, 30));
+      assert.ok(renewed, 'a slow settlement keeps the conversation lease');
+    },
   });
 });
