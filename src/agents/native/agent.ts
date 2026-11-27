@@ -1,107 +1,54 @@
-import type { Availability, EngineCapabilities, PermissionScope, Usage } from '@coderax/contracts';
+import type { Availability, EngineCapabilities, ModelRef, Usage } from '@coderax/contracts';
 import type {
   AgentAdapter,
   AgentReport,
   AgentRunOutcome,
   AgentRunRequest,
 } from '../types.js';
-import type {
-  ReasoningMode,
-  TaskPlan,
-  TaskPlanStep,
-  TaskVerification,
-} from '../../domain.js';
-import type {
-  ActionAuthorizer,
-  ActionExecutor,
-  ModelGateway,
-  NativeLimits,
-  Planner,
-  StepActionFailure,
-  StepEvidence,
-} from './types.js';
-import { createNativePlanner, validatePlan } from './plan.js';
-import { createNativeExecutor } from './actions.js';
-import { planWaves } from './schedule.js';
-import { resolveReasoningMode, limitsFor } from './reason.js';
-import { decideCorrection, pause, toFailureCode } from './errors.js';
-import {
-  structuralAssessment,
-  verificationSummaryText,
-  verifyObjective,
-} from './verify.js';
+import type { ModelGateway, Planner } from './types.js';
+import { createNativePlanner } from './planner.js';
+import { buildActionPrompt, NATIVE_ACTION_SYSTEM } from './prompt.js';
+import { parseAction } from './action.js';
+import type { ToolContext } from '../../tools/types.js';
+import { routingFailure } from '../../models/types.js';
+import { estimateTokens } from '../../models/verify.js';
 
 /**
  * Coderax Native's independent reasoning loop.
  *
- * Planning is a separate port that returns data. Execution is a separate port
- * that performs one action. Every action is authorized before the executor sees
- * it, and a scoped action cannot run on Native's own authority. Verification is
- * structural first and model-assisted second; a run reports `completed` only
- * when the evidence proves the objective, and a run that needs an owner decision
- * stops at `approval_required` instead of inventing the grant.
+ * Its loop is plan → act → observe → reflect, bounded at every level: a step has
+ * a fixed action budget, a malformed action gets one repair attempt, and a step
+ * that exhausts its tools is summarised from what it actually happened rather
+ * than claiming a result it never produced. An action that needs the owner
+ * suspends the task with a durable permission request; it does not silently
+ * proceed and does not fail permanently.
+ *
+ * Every model call goes through the single model router gateway. The router —
+ * not this agent — decides whether a provider may serve the request, so a
+ * private turn can never reach a hosted endpoint the owner has not approved.
  */
 
-const DEFAULT_LIMITS: NativeLimits = {
-  maxSteps: 12,
-  maxParallelSteps: 3,
-  maxReplans: 2,
-  maxStepAttempts: 2,
-  maxIterations: 32,
-};
+const MAX_TOOL_CALLS_PER_STEP = 4;
 
-const MAX_STEP_RESULT = 20_000;
-const REASONING_PAUSE_MS = 50;
-
-class IterationLimitError extends Error {
-  constructor(readonly limit: number) {
-    super(`iteration bound ${limit} exhausted`);
-    this.name = 'IterationLimitError';
-  }
+function accumulate(
+  totals: { input: number | undefined; output: number | undefined },
+  usage: Usage | undefined,
+): void {
+  if (!usage) return;
+  if (usage.inputTokens !== undefined) totals.input = (totals.input ?? 0) + usage.inputTokens;
+  if (usage.outputTokens !== undefined) totals.output = (totals.output ?? 0) + usage.outputTokens;
 }
 
-function normalizeLimits(partial?: Partial<NativeLimits>): NativeLimits {
-  const clamp = (value: number | undefined, fallback: number, min: number, max: number): number => {
-    const resolved = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback;
-    return Math.min(max, Math.max(min, resolved));
-  };
+function usageOf(totals: { input: number | undefined; output: number | undefined }): Usage | undefined {
+  if (totals.input === undefined && totals.output === undefined) return undefined;
   return {
-    maxSteps: clamp(partial?.maxSteps, DEFAULT_LIMITS.maxSteps, 1, 64),
-    maxParallelSteps: clamp(partial?.maxParallelSteps, DEFAULT_LIMITS.maxParallelSteps, 1, 8),
-    maxReplans: clamp(partial?.maxReplans, DEFAULT_LIMITS.maxReplans, 0, 5),
-    maxStepAttempts: clamp(partial?.maxStepAttempts, DEFAULT_LIMITS.maxStepAttempts, 1, 3),
-    maxIterations: clamp(partial?.maxIterations, DEFAULT_LIMITS.maxIterations, 1, 128),
+    ...(totals.input !== undefined ? { inputTokens: totals.input } : {}),
+    ...(totals.output !== undefined ? { outputTokens: totals.output } : {}),
   };
 }
 
-/** Without a permission authority, Native can reason but cannot grant a scope. */
-const denyScoped: ActionAuthorizer = {
-  authorize: async ({ scope }) =>
-    scope === null ? { decision: 'allowed' } : { decision: 'denied' },
-};
-
-type StepRunResult =
-  | { kind: 'completed' }
-  | { kind: 'failed'; failure: StepActionFailure }
-  | { kind: 'approval'; requestId: string }
-  | { kind: 'cancelled' };
-
-function mergeReplannedPlan(input: {
-  current: TaskPlan;
-  revised: TaskPlan;
-  completed: ReadonlySet<string>;
-}): TaskPlan {
-  const completedSteps = input.current.steps.filter((step) => input.completed.has(step.id));
-  const completedIds = new Set(completedSteps.map((step) => step.id));
-  const additions = input.revised.steps.filter(
-    (step) => !completedIds.has(step.id) && !input.completed.has(step.id),
-  );
-  return {
-    revision: input.current.revision + 1,
-    mode: input.current.mode,
-    steps: [...completedSteps, ...additions],
-    ...(input.revised.note ? { note: input.revised.note } : {}),
-  };
+function bounded(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
 }
 
 export function createNativeAgent(input: {
@@ -112,18 +59,14 @@ export function createNativeAgent(input: {
   authorizer?: ActionAuthorizer;
   limits?: Partial<NativeLimits>;
   unavailableDetail?: string;
+  /** Live route admission; a gateway may exist while every endpoint is excluded. */
+  modelsAvailable?: () => boolean;
 }): AgentAdapter {
-  const limits = normalizeLimits(input.limits);
-  const gateway = input.gateway;
-  const planner =
-    input.planner ??
-    (gateway ? createNativePlanner({ gateway, maxSteps: limits.maxSteps }) : null);
-  const executor = input.executor ?? (gateway ? createNativeExecutor(gateway) : null);
-  const authorizer = input.authorizer ?? denyScoped;
+  const planner = input.planner ?? createNativePlanner();
 
   const capabilities: EngineCapabilities = {
     streaming: true,
-    tools: false,
+    tools: true,
     cancellation: true,
     resume: true,
     modelSelection: true,
@@ -143,12 +86,21 @@ export function createNativeAgent(input: {
           'No zero-cost inference endpoint is configured for Coderax Native.',
       };
     }
+    if (input.modelsAvailable && !input.modelsAvailable()) {
+      return {
+        available: false,
+        reason: 'model_missing',
+        detail:
+          'No verified zero-cost model is currently routable; Native fails closed rather than using a paid endpoint.',
+      };
+    }
     return { available: true, reason: 'ready', detail: 'Coderax Native is ready.' };
   }
 
   return {
     agent: 'coderax',
     engine: 'native',
+    workload: 'in-process',
     capabilities,
     // Native only produces text in this tree; it exposes no side-effecting tool.
     sideEffects: 'none',
@@ -160,9 +112,8 @@ export function createNativeAgent(input: {
     },
     availability,
     probe: async () => {
-      // Native's readiness is its configuration: there is no remote endpoint to
-      // ask, and calling the model to prove it works would spend the budget on
-      // every health check.
+      // Native's readiness is its configuration and its verified route: there is
+      // no remote endpoint to ask, and calling a model would spend the budget.
       const status = availability();
       return { ok: status.available, detail: status.detail };
     },
@@ -172,7 +123,12 @@ export function createNativeAgent(input: {
       if (!status.available) {
         return {
           ok: false,
-          code: status.reason === 'disabled' ? 'disabled' : 'not_configured',
+          code:
+            status.reason === 'disabled'
+              ? 'disabled'
+              : status.reason === 'model_missing'
+                ? 'model_missing'
+                : 'not_configured',
           detail: status.detail,
           retryable: false,
         };
@@ -186,10 +142,13 @@ export function createNativeAgent(input: {
         };
       }
 
-      // Captured once: a property path is not narrowed across a function
-      // boundary, and the step runner below is a closure.
-      const model = request.model;
-
+      const context = request.context ?? {};
+      const tools = context.tools ?? null;
+      const totals: { input: number | undefined; output: number | undefined } = {
+        input: undefined,
+        output: undefined,
+      };
+      const history = request.history ?? [];
       const cancelled = (): AgentRunOutcome => ({
         ok: false,
         code: 'cancelled',
@@ -197,105 +156,322 @@ export function createNativeAgent(input: {
         retryable: false,
       });
 
-      /**
-       * Chat is one answer, not a Work objective: it goes through the permission
-       * and execution layers once and is not planned or verification-assessed.
-       * Work is the path that carries a durable plan, evidence and completion.
-       */
-      if (!request.taskId) {
-        const chatStep: TaskPlanStep = {
-          id: 'chat',
-          title: 'Answer the owner',
-          dependsOn: [],
-          kind: 'reason',
-        };
-        const decision = await authorizer.authorize({
-          taskId: '',
-          ownerId: request.ownerId,
-          agent: 'coderax',
-          scope: null,
-          resource: 'chat',
-          description: 'Answer this Chat turn.',
-        });
-        if (decision.decision !== 'allowed' && decision.decision !== 'approved') {
-          return {
-            ok: false,
-            code: 'workspace_denied',
-            detail: 'This Chat turn is not authorized.',
-            retryable: false,
-          };
-        }
-        if (request.signal.aborted) return cancelled();
-        const execution = await executor.execute({
-          step: chatStep,
-          objective: request.objective,
-          mode: 'fast',
-          history: request.history ?? [],
-          evidence: [],
-          workspaceRoot: request.workspaceRoot,
-          model: request.model,
-          signal: request.signal,
-        });
-        if (request.signal.aborted) return cancelled();
-        if (!execution.ok) {
-          return {
-            ok: false,
-            code: toFailureCode(execution.failure),
-            detail: execution.failure.detail,
-            retryable: execution.failure.retryable,
-          };
-        }
-        return {
-          ok: true,
-          summary: execution.text,
-          ...(execution.usage ? { usage: execution.usage } : {}),
-        };
+      if (request.signal.aborted) return cancelled();
+
+      let steps = context.plannedSteps ?? [];
+      if (steps.length === 0) {
+        steps =
+          request.maxSteps <= 1
+            ? [{ id: 'step-1', title: 'Respond to the owner' }]
+            : await planner.plan({
+                objective: request.objective,
+                maxSteps: request.maxSteps,
+                history,
+                signal: request.signal,
+                ...(tools
+                  ? {
+                      complete: async (prompt: string, signalAbort: AbortSignal) => {
+                        const completion = await gateway.complete({
+                          ownerId: request.ownerId,
+                          model: request.model,
+                          mode: request.mode,
+                          operation: request.operation,
+                          routing: 'complex',
+                          allowFallback: request.allowFallback,
+                          system:
+                            'You are Coderax Native. Plan the work. Return only a JSON array of step titles.',
+                          prompt,
+                          signal: signalAbort,
+                        });
+                        accumulate(totals, completion.usage);
+                        return completion.text;
+                      },
+                    }
+                  : {}),
+              });
+        if (context.savePlan && !(await context.savePlan(steps))) return cancelled();
       }
 
-      const mode: ReasoningMode =
-        request.plan?.mode ??
-        resolveReasoningMode({ requested: request.reasoning, objective: request.objective });
-      const activeLimits = limitsFor(mode, limits);
-      const maxSteps = Math.max(1, Math.min(request.maxSteps, activeLimits.maxSteps));
-      const evidence = new Map<string, StepEvidence>(
-        (request.evidence ?? []).map((entry) => [entry.stepId, entry]),
-      );
-      // A completed step without persisted evidence cannot be verified or used as
-      // context, so it is re-executed rather than trusted. Both Native actions
-      // are idempotent, so this is safe.
-      const completed = new Set<string>(
-        (request.completedSteps ?? []).filter((id) => evidence.has(id)),
-      );
-      let emittedSections = 0;
+      const completed = new Set(context.completedSteps ?? []);
+      const sections: string[] = context.priorText ? [context.priorText] : [];
+      const outputs = [
+        ...(context.priorOutputs ??
+          (context.priorText
+            ? [{ stepId: [...completed].join(', '), text: context.priorText }]
+            : [])),
+      ];
+      // Resume replaces the visible turn with the durable checkpoint before it
+      // streams new work, so earlier text is not duplicated in the transcript.
+      if (context.priorText) report({ type: 'text.replace', text: context.priorText });
 
-      let plan: TaskPlan | null = request.plan ?? null;
-      if (plan) {
-        const validation = validatePlan({
-          plan,
-          completedSteps: [...completed],
-          maxSteps,
-        });
-        if (!validation.ok) {
-          return {
-            ok: false,
-            code: 'protocol_error',
-            detail: `The persisted plan cannot be resumed safely: ${validation.reason}`,
-            retryable: false,
-          };
+      // Context is fetched before the loop so every step sees the same durable
+      // memory and the same retrieved passages for this objective.
+      let memoryLines: string[] = [];
+      if (context.memory) {
+        try {
+          memoryLines = (await context.memory.list()).slice(0, 8).map((line) => bounded(line, 600));
+        } catch {
+          memoryLines = [];
+        }
+      }
+      let knowledgeLines: string[] = [];
+      if (context.knowledge) {
+        try {
+          const found = await context.knowledge.search(request.objective.slice(0, 1000), 4);
+          knowledgeLines = found.hits.map(
+            (hit) => `[${bounded(hit.title, 120)}]\n${bounded(hit.text, 1000)}`,
+          );
+        } catch {
+          knowledgeLines = [];
         }
       }
 
-      let iterations = request.iterationsUsed ?? 0;
-      let replans = 0;
-      let usageIn: number | undefined;
-      let usageOut: number | undefined;
+      const toolCatalogue = tools?.runtime.catalogue() ?? '';
+      let pending = context.pendingAction;
+      let callIndex = 0;
+      let actualModel: ModelRef | undefined;
 
-      const spend = (): void => {
-        iterations += 1;
-        if (iterations > activeLimits.maxIterations) {
-          throw new IterationLimitError(activeLimits.maxIterations);
+      /** Per-step token ceiling, independent of the router's own reservation. */
+      // Reservations, not just actual usage: a provider that omits a token side
+      // must not let the next step spend the same headroom again.
+      let reservedInput = 0;
+      let reservedOutput = 0;
+      function budgetExhausted(prompt: string, maxOutput: number | undefined): boolean {
+        if (!request.budget) return false;
+        // The router already bounded the first dispatch. Cumulative reservations
+        // guard every later step, including when usage omitted a token side.
+        if (reservedInput === 0 && reservedOutput === 0) return false;
+        const inputTokens = estimateTokens([NATIVE_ACTION_SYSTEM, prompt]);
+        const outputTokens = maxOutput ?? request.budget.maxOutputTokens;
+        return (
+          reservedInput + inputTokens > request.budget.maxInputTokens ||
+          reservedOutput + outputTokens > request.budget.maxOutputTokens
+        );
+      }
+
+      for (const step of steps) {
+        if (request.signal.aborted) return cancelled();
+        if (completed.has(step.id)) continue;
+
+        report({ type: 'step.started', stepId: step.id, title: step.title });
+        const saved = pending?.stepId === step.id ? pending : null;
+        const observations = [...(saved?.observations ?? [])];
+        let stepText = '';
+        let invalidAnswers = saved?.invalidAnswers ?? 0;
+        let actions = saved?.priorActions ?? 0;
+
+        while (stepText.length === 0 && actions < MAX_TOOL_CALLS_PER_STEP) {
+          if (request.signal.aborted) return cancelled();
+
+          const replay = pending?.stepId === step.id ? pending : null;
+          const prompt = buildActionPrompt({
+            objective: request.objective,
+            steps,
+            step,
+            completed: [...completed],
+            outputs,
+            history,
+            observations,
+            memory: memoryLines,
+            knowledge: knowledgeLines,
+            catalogue: toolCatalogue,
+          });
+          if (!replay && budgetExhausted(prompt, request.budget?.maxOutputTokens)) {
+            return {
+              ok: false,
+              code: 'budget_exhausted',
+              detail: 'The task token budget is exhausted; no further step was sent.',
+              retryable: false,
+            };
+          }
+          let text: string;
+          try {
+            if (replay) {
+              text = replay.json;
+            } else {
+              const completion = await gateway.complete({
+                ownerId: request.ownerId,
+                model: request.model,
+                mode: request.mode,
+                operation: request.operation,
+                routing: tools ? 'complex' : 'fast',
+                allowFallback: request.allowFallback,
+                system: NATIVE_ACTION_SYSTEM,
+                prompt,
+                signal: request.signal,
+                ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
+              });
+              accumulate(totals, completion.usage);
+              reservedInput += estimateTokens([NATIVE_ACTION_SYSTEM, prompt]);
+              reservedOutput += request.budget?.maxOutputTokens ?? 0;
+              actualModel = completion.model;
+              text = completion.text;
+            }
+          } catch (error) {
+            if (request.signal.aborted) return cancelled();
+            const failure = routingFailure(error);
+            if (failure) {
+              return {
+                ok: false,
+                code:
+                  failure.code === 'budget_exhausted'
+                    ? 'budget_exhausted'
+                    : failure.code === 'paid_model_refused'
+                      ? 'paid_model_refused'
+                      : failure.code === 'cancelled'
+                        ? 'cancelled'
+                        : failure.code === 'model_missing'
+                          ? 'model_missing'
+                          : 'provider_error',
+                detail: failure.detail,
+                // A partial step is never safe to replay blindly.
+                retryable: failure.code === 'model_missing',
+              };
+            }
+            return {
+              ok: false,
+              code: 'provider_error',
+              detail: 'The inference endpoint failed while executing this step.',
+              // A provider failure may have reached the model, so replaying the
+              // whole run is not automatically safe.
+              retryable: false,
+            };
+          }
+
+          const action = parseAction(text);
+          if (action.kind === 'final') {
+            stepText = action.text.trim();
+            break;
+          }
+
+          if (action.kind === 'invalid') {
+            // A model that answers in prose instead of the action protocol has
+            // still answered. Accept that once, but only when it did not attempt
+            // a malformed JSON object; a broken tool call is repaired, not
+            // silently treated as the result.
+            if (invalidAnswers === 0 && !text.includes('{')) {
+              const prose = text.trim();
+              if (prose.length > 0) {
+                stepText = prose;
+                break;
+              }
+            }
+            invalidAnswers += 1;
+            if (invalidAnswers >= 2) {
+              return {
+                ok: false,
+                code: 'protocol_error',
+                detail: 'The model did not return a valid action after a repair attempt.',
+                retryable: false,
+              };
+            }
+            observations.push(
+              `Your previous answer was rejected: ${action.reason} Return exactly one JSON object with a tool call or a final answer.`,
+            );
+            continue;
+          }
+
+          if (!tools) {
+            observations.push('No tools are available on this run. Return a final answer.');
+            actions += 1;
+            continue;
+          }
+
+          actions += 1;
+          callIndex += 1;
+          const callId = `${step.id}-call-${callIndex}`;
+          report({ type: 'tool.call', callId, tool: action.tool, input: action.input });
+
+          const toolContext: ToolContext = {
+            ownerId: request.ownerId,
+            taskId: context.taskId ?? null,
+            agent: 'coderax',
+            mode: request.mode,
+            workspaceRoot: request.workspaceRoot,
+            signal: request.signal,
+            callId,
+            ...(context.tools?.guard ? { guard: context.tools.guard } : {}),
+          };
+          if (replay) {
+            if (context.savePendingAction && !(await context.savePendingAction(null))) return cancelled();
+            pending = null;
+          }
+          const outcome = await tools.runtime.call({
+            name: action.tool,
+            arguments: action.input,
+            context: toolContext,
+            gate: tools.gate,
+          });
+
+          report({
+            type: 'tool.result',
+            callId,
+            tool: action.tool,
+            ok: outcome.result.ok,
+            output: bounded(outcome.result.ok ? outcome.result.output : outcome.result.detail, 4000),
+          });
+
+          if (outcome.approval === 'pending') {
+            if (context.savePendingAction && !(await context.savePendingAction({
+              observations, priorActions: actions - 1, invalidAnswers,
+              stepId: step.id, json: JSON.stringify({ tool: action.tool, input: action.input }),
+            }))) return cancelled();
+            report({
+              type: 'approval.required',
+              requestId: outcome.requestId ?? callId,
+              tool: action.tool,
+              description: bounded(
+                `Approval is required for ${action.tool}.`,
+                2000,
+              ),
+            });
+            // Persist what was produced so far, then suspend: the owner decides,
+            // and resume continues this task from its checkpoint.
+            if (sections.length > 0) report({ type: 'text.replace', text: sections.join('\n\n') });
+            return {
+              ok: false,
+              code: 'approval_required',
+              detail: outcome.result.ok
+                ? 'Owner approval is required to continue this run.'
+                : outcome.result.detail,
+              retryable: true,
+            };
+          }
+
+          if (outcome.result.ok) {
+            observations.push(`Tool ${action.tool} succeeded:\n${bounded(outcome.result.output, 4000)}`);
+          } else {
+            observations.push(
+              `Tool ${action.tool} failed (${outcome.result.code}): ${bounded(outcome.result.detail, 1000)}`,
+            );
+          }
         }
-        report({ type: 'budget', iterations });
+
+        if (stepText.length === 0) {
+          // Recovery: report what the step actually established instead of
+          // inventing an answer the tools never produced.
+          stepText =
+            observations.length > 0
+              ? `Step "${step.title}" reached its action limit. Recorded observations:\n${observations
+                  .slice(-3)
+                  .join('\n')}`
+              : `Step "${step.title}" produced no result.`;
+        }
+
+        sections.push(stepText);
+        outputs.push({ stepId: step.id, text: stepText });
+        report({ type: 'text.delta', text: stepText });
+        report({ type: 'step.completed', stepId: step.id, title: step.title, output: stepText });
+        completed.add(step.id);
+      }
+
+      const summary = sections.join('\n\n').trim();
+      const usage = usageOf(totals);
+      return {
+        ok: true,
+        summary: summary.length > 0 ? summary : 'The objective produced no content.',
+        ...(usage ? { usage } : {}),
+        ...(actualModel ? { model: actualModel } : {}),
       };
       const accumulate = (usage: Usage | undefined): void => {
         if (usage?.inputTokens !== undefined) usageIn = (usageIn ?? 0) + usage.inputTokens;

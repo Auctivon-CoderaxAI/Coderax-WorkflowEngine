@@ -7,16 +7,15 @@ import type {
   EngineCapabilities,
   EngineFailureCode,
   EngineId,
+  KnowledgeSearchResult,
   ModelRef,
   Usage,
 } from '@coderax/contracts';
-import type { GameRunSpec, TaskWorkload } from '../domain.js';
-import type {
-  ReasoningMode,
-  TaskEvidence,
-  TaskPlan,
-  TaskVerification,
-} from '../domain.js';
+import type { ProcessingOperation } from '../models/policy.js';
+import type { RoutingMode } from '../models/types.js';
+import type { PendingAction, StepOutput } from '../domain.js';
+import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
+import type { ToolExecutionGuard } from '../execution/guard.js';
 
 /**
  * Agents execute an objective inside one confined workspace and report what they
@@ -35,6 +34,28 @@ export type AgentHistoryTurn = {
   text: string;
 };
 
+/**
+ * Capabilities the engine lends to an agent for one turn. They are supplied per
+ * run, never held by the adapter: an external agent receives no context at all,
+ * and Native receives only what this owner's task is allowed to use.
+ */
+export type AgentContext = {
+  taskId?: string | null;
+  tools?: { runtime: ToolRuntime; gate: ApprovalGate; guard?: ToolExecutionGuard };
+  memory?: { list: () => Promise<string[]> };
+  knowledge?: { search: (query: string, k: number) => Promise<KnowledgeSearchResult> };
+  /** Persisted plan and finished steps, so a resume does not re-plan or re-run. */
+  pendingAction?: PendingAction | null;
+  savePendingAction?: (action: PendingAction | null) => Promise<boolean>;
+  savePlan?: (steps: Array<{ id: string; title: string }>) => Promise<boolean>;
+  plannedSteps?: Array<{ id: string; title: string }>;
+  completedSteps?: string[];
+  priorText?: string;
+  priorOutputs?: StepOutput[];
+  /** Owner approval policy for tool actions that need a decision. */
+  requireApproval?: boolean;
+};
+
 export type AgentRunRequest = {
   ownerId: string;
   tenantId: string | null;
@@ -50,39 +71,25 @@ export type AgentRunRequest = {
    * is passed separately so an agent never answers the same message twice.
    */
   history?: AgentHistoryTurn[];
-  /** Already resolved by the model catalogue; null for a deterministic game session. */
-  model: ModelRef | null;
+  /** Already resolved by the model catalogue; never a raw provider override. */
+  model: ModelRef;
+  /** Automatic, Fast or Complex ranking, chosen by the engine from the task. */
+  routing: RoutingMode;
+  /** False pins the owner's explicit model; a route-chosen model may fall back. */
+  allowFallback: boolean;
   mode: DataMode;
+  /** The exact processing operation this run performs through the gateway. */
+  operation: ProcessingOperation;
   workspaceRoot: string;
   maxSteps: number;
   budget: Budget | null;
   signal: AbortSignal;
-  /** `auto` lets the agent choose; a resumed task passes its resolved mode. */
-  reasoning?: 'auto' | 'fast' | 'complex';
-  /** Steps the durable checkpoint already completed; resume skips exactly these. */
-  completedSteps?: string[];
-  /** The persisted dependency-aware plan, reused on resume or retry. */
-  plan?: TaskPlan | null;
-  /** Evidence already produced by completed steps in an earlier generation. */
-  evidence?: TaskEvidence[];
-  /** Iterations already consumed by a suspended generation; a resume continues the same bound. */
-  iterationsUsed?: number;
+  context?: AgentContext;
 };
 
 export type AgentReportEvent =
-  /** The planner produced or revised a dependency-aware plan; nothing ran yet. */
-  | { type: 'plan.ready'; plan: TaskPlan; iterations?: number }
-  | { type: 'budget'; iterations: number }
-  | { type: 'step.started'; stepId: string; title: string; iterations?: number }
-  | {
-      type: 'step.completed';
-      stepId: string;
-      title: string;
-      attempts?: number;
-      evidence?: TaskEvidence;
-      iterations?: number;
-    }
-  | { type: 'step.failed'; stepId: string; title: string; detail: string; iterations?: number }
+  | { type: 'step.started'; stepId: string; title: string }
+  | { type: 'step.completed'; stepId: string; title: string; output?: string }
   | { type: 'text.delta'; text: string }
   /** The agent replaced what it had streamed for this turn so far. */
   | { type: 'text.replace'; text: string }
@@ -99,30 +106,20 @@ export type AgentReportEvent =
 export type AgentReport = (event: AgentReportEvent) => void;
 
 export type AgentRunOutcome =
-  | {
-      ok: true;
-      summary: string;
-      usage?: Usage;
-      verification?: TaskVerification;
-      artifacts?: Array<{
-        path: string;
-        bytes?: number;
-        digest?: string;
-      }>;
-    }
-  | {
-      ok: false;
-      code: EngineFailureCode;
-      detail: string;
-      retryable: boolean;
-      usage?: Usage;
-    };
+  | { ok: true; summary: string; usage?: Usage; model?: ModelRef }
+  | { ok: false; code: EngineFailureCode; detail: string; retryable: boolean };
 
-export type { ReasoningMode };
+export type AgentWorkload = 'in-process' | 'external';
 
 export type AgentAdapter = {
   agent: AgentId;
   engine: EngineId;
+  /**
+   * Where the workload executes. The supervisor uses this to decide whether it
+   * can verify termination locally; an external workload always needs a
+   * workload-isolation provider, because its process tree is not ours.
+   */
+  workload?: AgentWorkload;
   capabilities: EngineCapabilities;
   /**
    * How this adapter's side effects are authorized. `none` means it has no side
@@ -138,5 +135,10 @@ export type AgentAdapter = {
    * admission; this may contact the agent. Omitted when no honest probe exists.
    */
   probe?: () => Promise<{ ok: boolean; detail: string }>;
-  run: (request: AgentRunRequest, report: AgentReport) => Promise<AgentRunOutcome>;
+  run: (
+    request: AgentRunRequest,
+    report: AgentReport,
+    /** External adapters call this after probing and immediately before sending content. */
+    admitDispatch?: () => boolean,
+  ) => Promise<AgentRunOutcome>;
 };

@@ -129,6 +129,46 @@ export function registerRoutes(
     body: service.models(),
   }));
 
+  registry.register('listTools', async () => ({
+    kind: 'json',
+    status: 200,
+    body: service.tools(),
+  }));
+
+  registry.register('getRouting', async (context) => {
+    const mode =
+      context.query.mode === 'fast' || context.query.mode === 'complex'
+        ? context.query.mode
+        : 'auto';
+    return { kind: 'json', status: 200, body: service.routing(mode) };
+  });
+
+  registry.register('ingestKnowledge', async (context) => {
+    const result = await service.ingestKnowledge(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('listKnowledge', async (context) => {
+    const mode: DataMode = context.query.mode === 'cloud' ? 'cloud' : 'private';
+    return { kind: 'json', status: 200, body: await service.knowledge(context.principal, mode) };
+  });
+
+  registry.register('searchKnowledge', async (context) => {
+    const query = context.query as { q: string; k?: number; mode?: string };
+    const mode: DataMode = query.mode === 'cloud' ? 'cloud' : 'private';
+    return {
+      kind: 'json',
+      status: 200,
+      body: await service.searchKnowledge(
+        context.principal,
+        query.q,
+        typeof query.k === 'number' ? query.k : 4,
+        mode,
+      ),
+    };
+  });
+
   registry.register('submitChat', async (context) => {
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);

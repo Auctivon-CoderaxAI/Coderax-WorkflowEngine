@@ -23,6 +23,8 @@ export type IdGenerator = {
   noticeId: () => string;
   /** A unique fencing token per claim; never a counter that can be reused. */
   runToken: () => string;
+  /** Names one supervised attempt, distinct from the task it executes. */
+  executionId: () => string;
   requestId: () => string;
   receipt: () => string;
   /** A persistent game project identity; URL-safe and unguessable. */
@@ -44,6 +46,7 @@ export function createIdGenerator(): IdGenerator {
     executionId: () => `exe_${randomUUID()}`,
     noticeId: () => `ntc_${randomUUID()}`,
     runToken: () => `run_${randomUUID()}`,
+    executionId: () => `exec_${randomUUID()}`,
     requestId: () => `req_${randomUUID()}`,
     receipt: () => `rcpt_${randomUUID()}`,
     gameId: () => `game_${randomUUID()}`,

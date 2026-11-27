@@ -17,81 +17,81 @@ type Index = {
   };
 };
 
-/** Reads a dotted path; an array segment yields the values of its elements. */
-function readPath(document: Document, path: string): unknown {
+/** Mongo semantics for the filters this engine uses: dotted paths and `$or`. */
+function atPath(document: Document, field: string): unknown {
   let current: unknown = document;
-  for (const part of path.split('.')) {
-    if (Array.isArray(current)) {
-      return current
-        .map((entry) =>
-          entry !== null && typeof entry === 'object' ? (entry as Document)[part] : undefined,
-        )
-        .filter((value) => value !== undefined);
-    }
+  for (const part of field.split('.')) {
     if (current === null || typeof current !== 'object') return undefined;
     current = (current as Document)[part];
   }
   return current;
 }
 
-/**
- * Ordering covers the three comparable shapes the stores use: dates for leases
- * and retention, numbers for event sequences, and strings for identifiers. A
- * numeric comparison that fell back to string order would put sequence 10 before
- * 9, which is exactly the bug a durable log cannot afford.
- */
-function compare(left: unknown, right: unknown): number | null {
-  if (left instanceof Date && right instanceof Date) {
-    return Math.sign(left.getTime() - right.getTime());
-  }
-  if (typeof left === 'number' && typeof right === 'number') {
-    return Math.sign(left - right);
-  }
-  if (typeof left === 'string' && typeof right === 'string') {
-    return Math.sign(left.localeCompare(right));
-  }
-  return null;
-}
-
 function matches(document: Document, filter: MongoFilter): boolean {
-  return Object.entries(filter).every(([field, condition]) => {
-    if (field === '$or') {
-      const list = Array.isArray(condition) ? condition : [];
-      return list.some((entry) => matches(document, entry as MongoFilter));
-    }
-    const value = readPath(document, field);
+  const anyOf = (filter as Record<string, unknown>).$or;
+  if (Array.isArray(anyOf)) {
+    if (!anyOf.some((option) => matches(document, option as MongoFilter))) return false;
+  }
+  return Object.entries(filter)
+    .filter(([field]) => field !== '$or')
+    .every(([field, condition]) => {
+    const value = atPath(document, field);
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
-      for (const [operator, operand] of Object.entries(operators)) {
-        if (operator === '$lte' || operator === '$lt' || operator === '$gte' || operator === '$gt') {
-          const order = compare(value, operand);
-          if (order === null) return false;
-          if (operator === '$lte' && order > 0) return false;
-          if (operator === '$lt' && order >= 0) return false;
-          if (operator === '$gte' && order < 0) return false;
-          if (operator === '$gt' && order <= 0) return false;
-        } else if (operator === '$type') {
-          if (operand === 'string' && typeof value !== 'string') return false;
-        } else if (operator === '$exists') {
-          if ((value !== undefined) !== (operand === true)) return false;
-        } else if (operator === '$type') {
-          if (operand === 'string' && typeof value !== 'string') return false;
-        } else if (operator === '$in') {
-          if (!(operand as unknown[]).includes(value)) return false;
-        } else if (operator === '$nin') {
-          if ((Array.isArray(value) ? value : [value]).some(item => (operand as unknown[]).includes(item))) return false;
-        } else if (operator === '$ne') {
-          if (value === operand) return false;
-        } else {
-          // An operator the fake does not model must fail loudly, not match.
-          return false;
+      if ('$exists' in operators) {
+        const shouldExist = operators.$exists === true;
+        if (shouldExist !== (value !== undefined)) return false;
+      }
+      if ('$ne' in operators && value === operators.$ne) return false;
+      const compare = (bound: unknown): number => {
+        if (value instanceof Date && bound instanceof Date) return value.getTime() - bound.getTime();
+        if (typeof value === 'number' && typeof bound === 'number') return value - bound;
+        if (typeof value === 'string' && typeof bound === 'string') {
+          return value < bound ? -1 : value > bound ? 1 : 0;
         }
+        return Number.NaN;
+      };
+      if ('$ne' in operators && value === operators.$ne) return false;
+      if ('$lte' in operators) {
+        const delta = compare(operators.$lte);
+        if (Number.isNaN(delta) || delta > 0) return false;
+      }
+      if ('$lt' in operators) {
+        const delta = compare(operators.$lt);
+        if (Number.isNaN(delta) || delta >= 0) return false;
+      }
+      if ('$gt' in operators) {
+        const delta = compare(operators.$gt);
+        if (Number.isNaN(delta) || delta <= 0) return false;
+      }
+      if ('$gte' in operators) {
+        const delta = compare(operators.$gte);
+        if (Number.isNaN(delta) || delta < 0) return false;
+      }
+      if ('$in' in operators) {
+        const list = operators.$in as unknown[];
+        if (!list.includes(value)) return false;
+      }
+      if ('$nin' in operators) {
+        const list = operators.$nin as unknown[];
+        if (list.includes(value)) return false;
       }
       return true;
     }
     if (Array.isArray(value)) return value.some((entry) => entry === condition);
     return value === condition;
   });
+}
+
+function setPath(document: Document, field: string, value: unknown): void {
+  const parts = field.split('.');
+  let current = document;
+  for (const part of parts.slice(0, -1)) {
+    const next = current[part];
+    if (next === null || typeof next !== 'object') current[part] = {};
+    current = current[part] as Document;
+  }
+  current[parts[parts.length - 1] as string] = value;
 }
 
 function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
@@ -218,12 +218,33 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      const next = applyUpdate(documents[index] as Document, update);
+      const next = { ...documents[index] };
+      for (const [field, value] of Object.entries(update.$set ?? {})) {
+        setPath(next, field, value);
+      }
       assertUnique(next, index);
       documents[index] = next;
       return { ...next };
     },
     updateOne: async (filter, update, options) => {
+      const apply = (document: Document): Document => {
+        const next = { ...document };
+        for (const [field, value] of Object.entries(update.$set ?? {})) {
+          setPath(next, field, value);
+        }
+        // `$max` is monotonic under concurrency, which is exactly what the event
+        // head and the generation guard rely on.
+        for (const [field, value] of Object.entries(update.$max ?? {})) {
+          const current = next[field];
+          next[field] =
+            typeof current === 'number' && typeof value === 'number'
+              ? Math.max(current, value)
+              : current === undefined
+                ? value
+                : current;
+        }
+        return next;
+      };
       const index = firstIndex(filter);
       if (index !== -1) {
         const next = applyUpdate(documents[index], update);

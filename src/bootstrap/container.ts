@@ -15,15 +15,16 @@ import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
-import type { RunSupervisor } from '../execution/supervisor.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { BrowserService } from '../orchestration/browser.js';
 import type { ArtifactService } from '../artifacts/service.js';
 import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
-import type { GameStudio } from '../games/studio.js';
-import type { GameSessionService, GamingAgent } from '../games/session.js';
+import type { ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import type { ModelRouter } from '../models/router.js';
 
 /**
  * Dependencies are named, not positional.
@@ -54,13 +55,13 @@ export type InfrastructureDependencies = {
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
+  supervisor: ExecutionSupervisor;
   scheduler: TaskScheduler;
   health: HealthService;
-  studio: GameStudio;
-  sessions: GameSessionService;
-  gaming: GamingAgent;
-  browser: BrowserService;
-  supervisor: RunSupervisor;
+  quarantine: QuarantineRegistry;
+  tools: ToolRuntime;
+  knowledge: KnowledgeStore;
+  modelRouter: ModelRouter;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -84,13 +85,13 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'audit',
   'events',
   'runner',
+  'supervisor',
   'scheduler',
   'health',
-  'studio',
-  'sessions',
-  'gaming',
-  'browser',
-  'supervisor',
+  'quarantine',
+  'tools',
+  'knowledge',
+  'modelRouter',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

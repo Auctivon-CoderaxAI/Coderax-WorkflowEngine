@@ -4,7 +4,26 @@ import { createPermissionStore } from '../../src/permissions/store.js';
 import { createClock, createIdGenerator } from '../../src/support/clock.js';
 import { startTestApp } from '../helpers.js';
 
-const principal = { ownerId: 'owner-test', isOwner: true as const };
+/** Exact-resource grant check through the durable lookup, owner-scoped. */
+async function isApproved(
+  store: ReturnType<typeof createPermissionStore>,
+  taskId: string,
+  scope: Parameters<ReturnType<typeof createPermissionStore>['lookup']>[0]['scope'],
+  resource: string,
+  ownerId = 'owner-test',
+): Promise<boolean> {
+  const found = await store.lookup({ ownerId, taskId, scope, resource, binding: '', consume: false });
+  return found?.decision === 'granted';
+}
+
+async function hasPending(
+  store: ReturnType<typeof createPermissionStore>,
+  taskId: string,
+  ownerId = 'owner-test',
+): Promise<boolean> {
+  const listed = await store.list(ownerId, taskId);
+  return listed.requests.some((request) => request.decision === 'pending');
+}
 
 test('a request is pending until the owner decides it, and a denial is final', async () => {
   const clock = createClock();
@@ -18,8 +37,8 @@ test('a request is pending until the owner decides it, and a denial is final', a
     resource: 'npm test',
   });
   assert.equal(request.decision, 'pending');
-  assert.equal(await store.hasPending('task_1'), true);
-  assert.equal(await store.isApproved('task_1', 'command.execute', 'npm test'), false);
+  assert.equal(await hasPending(store, 'task_1'), true);
+  assert.equal(await isApproved(store, 'task_1', 'command.execute', 'npm test'), false);
 
   const denied = await store.decide({
     ownerId: 'owner-test',
@@ -29,7 +48,7 @@ test('a request is pending until the owner decides it, and a denial is final', a
     reason: 'not now',
   });
   assert.equal(denied.ok, true);
-  assert.equal(await store.isApproved('task_1', 'command.execute', 'npm test'), false);
+  assert.equal(await isApproved(store, 'task_1', 'command.execute', 'npm test'), false);
 });
 
 test('a grant for one resource and scope is not a grant for another', async () => {
@@ -48,9 +67,9 @@ test('a grant for one resource and scope is not a grant for another', async () =
     requestId: request.requestId,
     decision: 'approved',
   });
-  assert.equal(await store.isApproved('task_2', 'workspace.write', '/workspace/one.txt'), true);
-  assert.equal(await store.isApproved('task_2', 'workspace.write', '/workspace/two.txt'), false);
-  assert.equal(await store.isApproved('task_2', 'workspace.read', '/workspace/one.txt'), false);
+  assert.equal(await isApproved(store, 'task_2', 'workspace.write', '/workspace/one.txt'), true);
+  assert.equal(await isApproved(store, 'task_2', 'workspace.write', '/workspace/two.txt'), false);
+  assert.equal(await isApproved(store, 'task_2', 'workspace.read', '/workspace/one.txt'), false);
 });
 
 test('a permission record cannot be decided through another task or owner', async () => {

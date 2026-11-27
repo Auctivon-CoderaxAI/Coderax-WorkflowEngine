@@ -1,4 +1,5 @@
-import { chmod, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { DataMode } from '@coderax/contracts';
 import type { ServiceResult } from '../support/result.js';
@@ -112,106 +113,39 @@ export async function resolveEngineWorkspace(input: {
 }
 
 /**
- * Creates the sole directory one task generation may touch.
+ * The directory one conversation may write.
  *
- * The directory is a child of the mode root, never the root itself, and it is
- * created private (0700). The resolved path is checked again after creation, so
- * a pre-existing symlink in the run directory cannot redirect writes into the
- * other mode.
+ * Two runs in the same data mode used to share the mode root, so a run could read
+ * another conversation's files and a quarantine had to take the whole mode out of
+ * service. The path is derived here from the conversation id through a digest; a
+ * caller never supplies it, and it cannot escape its mode root through a symlink
+ * because the resolved directory is checked again after creation.
+ *
+ * The directory is per conversation, not per generation, so a resume continues in
+ * the same place a previous generation wrote.
  */
-export async function createRunWorkspace(input: {
+export async function resolveConversationWorkspace(input: {
   mode: DataMode;
   roots: WorkspaceRoots;
-  runId: string;
-  generation: number;
-}): Promise<ServiceResult<RunWorkspace>> {
-  if (!RUN_ID.test(input.runId)) {
-    return fail('workspace_denied', 'The run identity is not a valid workspace name.');
+  conversationId: string;
+}): Promise<ServiceResult<ResolvedWorkspace>> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(input.conversationId)) {
+    return fail('workspace_denied', 'That conversation id cannot name a workspace.');
   }
-  if (!Number.isInteger(input.generation) || input.generation < 0 || input.generation > 1_000_000) {
-    return fail('workspace_denied', 'The run generation is not a valid workspace name.');
-  }
+  const base = await resolveEngineWorkspace({ mode: input.mode, roots: input.roots });
+  if (!base.ok) return base;
 
-  const parent = await resolveEngineWorkspace(input);
-  if (!parent.ok) return parent;
-
-  const base = path.join(parent.value.confinement, RUN_DIR);
-  const root = path.join(base, `${input.runId}-g${input.generation}`);
+  const digest = createHash('sha256').update(input.conversationId, 'utf8').digest('hex');
+  const candidate = path.join(base.value.confinement, 'conversations', digest.slice(0, 32));
   try {
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    await chmod(root, 0o700);
+    await mkdir(candidate, { recursive: true, mode: 0o700 });
   } catch {
-    return fail('workspace_denied', 'The run workspace could not be created.');
+    return fail('workspace_denied', 'The conversation workspace could not be created.');
   }
 
-  const resolved = await realOrNull(root);
-  if (!resolved) {
-    return fail('workspace_denied', 'The run workspace is unavailable.');
+  const resolved = await realOrNull(candidate);
+  if (!resolved || !isInside(resolved, base.value.confinement) || resolved === base.value.confinement) {
+    return fail('workspace_denied', 'The conversation workspace is outside its data mode root.');
   }
-  if (!isInside(resolved, parent.value.confinement) || normalize(resolved) === normalize(parent.value.confinement)) {
-    return fail('workspace_denied', 'The run workspace escapes its data mode.');
-  }
-
-  return ok({
-    mode: input.mode,
-    root: resolved,
-    confinement: resolved,
-    parent: parent.value.confinement,
-    runId: input.runId,
-    generation: input.generation,
-  });
-}
-
-/**
- * Removes a run's authority at the filesystem level.
- *
- * The engine cannot kill code that ignored its abort, but it can make the only
- * path that code was given stop existing. The directory is renamed into a
- * quarantine area on the same filesystem and made read-only, so a stale writer
- * either gets ENOENT or cannot create anything new. Returns true when the path
- * was revoked by this call.
- */
-export async function quarantineRunWorkspace(input: {
-  root: string;
-  suffix?: string;
-}): Promise<boolean> {
-  const base = path.dirname(input.root);
-  // Only a directory this module created is eligible. Nothing else is renamed.
-  if (path.basename(base) !== RUN_DIR) return false;
-
-  const modeRoot = path.dirname(base);
-  const quarantine = path.join(modeRoot, QUARANTINE_DIR);
-  const suffix = input.suffix ?? `${Date.now()}`;
-  try {
-    await realpath(input.root);
-  } catch {
-    return false;
-  }
-
-  try {
-    await mkdir(quarantine, { recursive: true, mode: 0o700 });
-    await chmod(quarantine, 0o700);
-    await rename(input.root, path.join(quarantine, `${path.basename(input.root)}-${suffix}`));
-  } catch {
-    // A rename can fail if the directory is gone or the volume refused it. In
-    // that case removing every permission is still a fail-closed revocation.
-    await chmod(input.root, 0o000).catch(() => undefined);
-    return false;
-  }
-  await chmod(path.join(quarantine, `${path.basename(input.root)}-${suffix}`), 0o500).catch(
-    () => undefined,
-  );
-  return true;
-}
-
-/** Deletes an empty run directory; a run that produced artifacts keeps them. */
-export async function removeRunWorkspaceIfEmpty(root: string): Promise<boolean> {
-  try {
-    const entries = await readdir(root);
-    if (entries.length > 0) return false;
-    await rm(root, { recursive: false, force: true });
-    return true;
-  } catch {
-    return false;
-  }
+  return ok({ mode: input.mode, root: resolved, confinement: base.value.confinement });
 }

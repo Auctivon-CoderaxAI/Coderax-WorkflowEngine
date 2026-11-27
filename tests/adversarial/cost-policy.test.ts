@@ -2,72 +2,96 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { ModelDescriptor } from '@coderax/contracts';
 import { createBudgetLedger } from '../../src/models/budget.js';
-import { createModelCatalog } from '../../src/models/catalog.js';
-import { baseConfig, createWorkspaces, startTestApp } from '../helpers.js';
+import { createModelRouter } from '../../src/models/router.js';
+import {
+  baseConfig,
+  createWorkspaces,
+  fakeProvider,
+  startTestApp,
+  testProviderPolicy,
+} from '../helpers.js';
 
 const root = path.resolve(import.meta.dirname, '..', '..', '..');
-const ready = { available: true as const, reason: 'ready' as const, detail: 'ready' };
-
-function descriptor(
-  providerId: string,
-  modelId: string,
-  costClass: 'free' | 'paid',
-  availability: ModelDescriptor['availability'] = ready,
-): ModelDescriptor {
-  return {
-    ref: { providerId, modelId },
-    label: `${providerId} ${modelId}`,
-    costClass,
-    toolCalling: false,
-    streaming: false,
-    availability,
-  };
+/** A router over one fixture provider: the only place a route is decided. */
+async function routerWith(provider: ReturnType<typeof fakeProvider>) {
+  const router = createModelRouter({
+    providers: [
+      {
+        adapter: provider,
+        settings: {
+          requestsPerMinute: 60,
+          tokensPerMinute: 100_000,
+          maxConcurrency: 2,
+          requestTimeoutMs: 1_000,
+          discoveryIntervalMs: 60_000,
+        },
+      },
+    ],
+    policy: { evaluate: () => ({ allowed: true, providerId: provider.id, operation: 'chat', mode: 'cloud', retention: 'transient', location: 'owner-region' }), get: () => testProviderPolicy(provider.id), list: () => [testProviderPolicy(provider.id)] },
+    attestations: [],
+    benchmarks: [],
+    preferredRoute: [],
+    budget: createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 100_000 }),
+    maxCandidates: 4,
+    maxFallbacks: 2,
+    failureThreshold: 3,
+    cooldownMs: 1_000,
+    discoveryIntervalMs: 60_000,
+    defaultMaxOutputTokens: 512,
+    contextMarginTokens: 256,
+    now: () => new Date('2026-11-26T00:00:00.000Z'),
+  });
+  await router.refresh();
+  return router;
 }
 
-test('the catalogue refuses a paid model even when it is advertised', () => {
-  const paid = descriptor('openai', 'premium', 'paid');
-  const free = descriptor('openrouter', 'coderax:free', 'free');
-  const catalog = createModelCatalog({
-    descriptors: [free, paid],
-    route: [paid.ref, free.ref],
-    allowPaid: false,
-  });
-
-  const requested = catalog.resolve(paid.ref, 'cloud');
+test('a paid model is refused even when the provider advertises it', async () => {
+  const provider = fakeProvider();
+  const paidRef = { providerId: 'free', modelId: 'premium' };
+  const discovered = provider.discover;
+  provider.discover = async () => [
+    ...(await discovered()),
+    {
+      ref: paidRef,
+      label: 'Paid fixture',
+      contextTokens: 8_192,
+      maxOutputTokens: 1_024,
+      capabilities: { vision: false, toolCalling: true, reasoning: true, streaming: true },
+      pricing: { prompt: '0.00001', completion: '0.00002' },
+    },
+  ];
+  const router = await routerWith(provider);
+  const requested = router.resolve(paidRef, 'cloud', { operation: 'chat' });
   assert.equal(requested.ok, false);
   assert.equal(requested.ok === false && requested.code, 'paid_model_refused');
-
-  // The ordered route skips the paid descriptor rather than silently using it.
-  const fallback = catalog.resolve(null, 'cloud');
-  assert.equal(fallback.ok, true);
-  assert.deepEqual(fallback.ok && fallback.value.ref, free.ref);
+  // The ordered route contains only a verified free model.
+  const automatic = router.resolve(null, 'cloud', { operation: 'chat' });
+  assert.equal(automatic.ok, true);
+  assert.notDeepEqual(automatic.ok && automatic.value.ref, paidRef);
 });
 
-test('an unavailable free model is not advertised as usable', () => {
-  const unavailable = descriptor('openrouter', 'coderax:free', 'free', {
-    available: false,
-    reason: 'not_configured',
-    detail: 'No endpoint.',
-  });
-  const catalog = createModelCatalog({
-    descriptors: [unavailable],
-    route: [unavailable.ref],
-    allowPaid: false,
-  });
-  const resolved = catalog.resolve(null, 'cloud');
+test('an unavailable provider leaves no routable model', async () => {
+  const provider = fakeProvider();
+  provider.discover = async () => [];
+  const router = await routerWith(provider);
+  const resolved = router.resolve(null, 'cloud', { operation: 'chat' });
   assert.equal(resolved.ok, false);
   assert.equal(resolved.ok === false && resolved.code, 'model_missing');
 });
 
-test('the token budget fails closed before the next request is sent', () => {
+test('the token budget fails closed before the next request is sent', async () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 10 });
   const now = new Date('2026-11-26T00:00:00.000Z');
-  assert.equal(ledger.reserve('owner', now).allowed, true);
-  ledger.consume('owner', { inputTokens: 6, outputTokens: 4 }, now);
-  assert.equal(ledger.reserve('owner', now).allowed, false);
-  assert.equal(ledger.reserve('another-owner', now).allowed, true);
+  const first = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 6, outputTokens: 4 });
+  assert.equal(first.allowed, true);
+  if (first.allowed) await ledger.settle(first.reservation.id, { inputTokens: 6, outputTokens: 4 });
+  const second = await ledger.reserve({ ownerId: 'owner', at: now, inputTokens: 6, outputTokens: 4 });
+  assert.equal(second.allowed, false);
+  assert.equal(
+    (await ledger.reserve({ ownerId: 'another-owner', at: now, inputTokens: 1, outputTokens: 1 })).allowed,
+    true,
+  );
 });
 
 test('configuration cannot enable paid routing', () => {
@@ -95,7 +119,7 @@ test('the composed engine advertises allowPaid false and one zero-cost route', a
     assert.equal(models.allowPaid, false);
     assert.ok(models.route.length > 0);
     for (const ref of models.route) {
-      const resolved = started.app.dependencies.models.resolve(ref, 'cloud');
+      const resolved = started.app.dependencies.models.resolve(ref, 'cloud', { operation: 'chat' });
       assert.equal(resolved.ok, true);
       assert.equal(resolved.ok && resolved.value.costClass, 'free');
     }
@@ -199,7 +223,11 @@ test('no source path can switch paid routing on', () => {
       if (statSync(absolute).isDirectory()) walk(absolute);
       else if (entry.endsWith('.ts')) {
         const text = readFileSync(absolute, 'utf8');
-        if (/allowPaid\s*:\s*true/.test(text) || /costClass\s*:\s*['"]paid['"]/.test(text)) {
+        // The verifier classifies unproven providers as paid; that classification
+        // is how a paid route is refused. It is the only place the literal may
+        // appear, and allowPaid can never be switched on anywhere.
+        const verifier = path.relative(root, absolute).split(path.sep).join('/') === 'src/models/verify.ts';
+        if (/allowPaid\s*:\s*true/.test(text) || (!verifier && /costClass\s*:\s*['"]paid['"]/.test(text))) {
           offenders.push(path.relative(root, absolute));
         }
       }

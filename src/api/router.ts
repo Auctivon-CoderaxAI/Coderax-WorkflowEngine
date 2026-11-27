@@ -122,6 +122,38 @@ function problem(
   };
 }
 
+/**
+ * Request bodies are bounded before schema validation.
+ *
+ * A JSON array is the one input shape that can cost an unbounded amount of work
+ * per byte: a validator that reports an issue per element allocates for every
+ * element, and this engine's schemas are not the only thing that could do it.
+ * The transport already caps the body at 1 MiB; this caps the amplification, so a
+ * body of half a million array entries is refused instead of parsed element by
+ * element. Legitimate request arrays (at most 100 task ids) are far below it.
+ */
+const MAX_JSON_ARRAY = 256;
+const MAX_JSON_DEPTH = 8;
+
+function oversizedJson(value: unknown, path: string, depth = 0): string | null {
+  if (depth > MAX_JSON_DEPTH) return path === '' ? 'body' : path;
+  if (Array.isArray(value)) {
+    if (value.length > MAX_JSON_ARRAY) return path === '' ? 'body' : path;
+    for (let index = 0; index < value.length; index += 1) {
+      const found = oversizedJson(value[index], `${path}[${index}]`, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      const found = oversizedJson(entry, path === '' ? key : `${path}.${key}`, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function compilePath(pattern: string): RegExp {
   const escaped = pattern
     .split('/')
@@ -215,6 +247,14 @@ export function createRouter(input: {
             json = JSON.parse(raw.bodyText);
           } catch {
             return problem('validation_failed', 'The request body is not valid JSON.', requestId);
+          }
+          const oversized = oversizedJson(json, '');
+          if (oversized !== null) {
+            return problem(
+              'validation_failed',
+              `${oversized}: the body contains too many entries or nests too deeply.`,
+              requestId,
+            );
           }
           const parsed = route.spec.body.safeParse(json);
           if (!parsed.success) {

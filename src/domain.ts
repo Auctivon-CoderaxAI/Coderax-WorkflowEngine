@@ -10,15 +10,7 @@ import type {
   IsoDateTime,
   MissedRunPolicy,
   ModelRef,
-  ScheduleCondition,
-  ScheduleConditionState,
-  ScheduleExecutionState,
-  ScheduleLimits,
-  ScheduleNoticeKind,
-  ScheduleRetry,
-  ScheduleState,
-  ScheduleTiming,
-  ScheduleTrigger,
+  PermissionScope,
   TaskState,
   Usage,
 } from '@coderax/contracts';
@@ -100,9 +92,20 @@ export type TaskEvidence = {
   attempts: number;
 };
 
+export type PendingAction = {
+  stepId: string;
+  json: string;
+  observations?: string[];
+  priorActions?: number;
+  invalidAnswers?: number;
+};
+
+export type StepOutput = { stepId: string; text: string };
+
 export type TaskCheckpoint = {
   /** Steps whose work is durably complete; a resume skips exactly these. */
   completedSteps: string[];
+  outputs?: StepOutput[];
   /** Partial assistant text already emitted, replayed on resume. */
   text: string;
   /** The dependency-aware plan this generation is executing. */
@@ -137,6 +140,20 @@ export type TaskFailure = {
 };
 
 /**
+ * The owner's decision on one permission request, stored on the task row so it
+ * survives a restart and is consumed exactly once. The in-process request list is
+ * only the prompt; the durable row is the grant.
+ */
+export type TaskApproval = {
+  requestId: string;
+  scope: PermissionScope;
+  resource: string;
+  decision: 'approved' | 'denied';
+  decidedAt: IsoDateTime;
+  consumedAt?: IsoDateTime;
+};
+
+/**
  * The authoritative record of a Work task. Only the engine writes it, and only
  * through a fenced repository call: `runToken` names the generation allowed to
  * write. A token is unique per claim, so a stale generation can never equal a
@@ -158,6 +175,11 @@ export type TaskRecord = {
   game?: GameRunSpec | null;
   objective: string;
   model: ModelRef | null;
+  /**
+   * True only when the owner named the model. A route-chosen model stays
+   * replaceable by a bounded fallback, including after a resume.
+   */
+  modelPinned?: boolean;
   state: TaskState;
   generation: number;
   runToken: string | null;
@@ -170,12 +192,15 @@ export type TaskRecord = {
   /** Resolved on the first planning pass; never guessed by a client. */
   reasoning: ReasoningMode | null;
   steps: TaskStep[];
+  pendingAction?: PendingAction | null;
   checkpoint: TaskCheckpoint;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
   leaseExpiresAt: IsoDateTime | null;
   cancelRequested: boolean;
   requireApproval: boolean;
+  /** Durable owner decision; null until one is recorded. */
+  approval: TaskApproval | null;
   budget: Budget | null;
   usage: Usage | null;
   result: TaskResult | null;
@@ -189,11 +214,13 @@ export type TaskPatch = Partial<
     | 'handoffPending'
     | 'scheduleAdmission'
     | 'steps'
+    | 'pendingAction'
     | 'checkpoint'
     | 'updatedAt'
     | 'leaseExpiresAt'
     | 'cancelRequested'
     | 'runToken'
+    | 'approval'
     | 'usage'
     | 'result'
     | 'failure'

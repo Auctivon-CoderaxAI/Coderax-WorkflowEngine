@@ -8,10 +8,10 @@ import type {
 } from './types.js';
 
 /**
- * Prompts are owned by the engine, not the provider. Markers identify the
- * planning and verification turns so a gateway response can be validated as the
- * structured data it is supposed to be, and every claim a verifier may use is
- * rendered from collected evidence rather than from an earlier model assertion.
+ * The gateway takes one prompt, so the engine owns the transcript format. Roles
+ * are spelled out rather than mapped onto provider-specific chat roles, so a
+ * different zero-cost provider cannot change what the model is told about who
+ * said what.
  */
 
 export const PLAN_SYSTEM =
@@ -38,67 +38,55 @@ export function renderHistory(turns: AgentHistoryTurn[]): string {
     .join('\n\n');
 }
 
-const MAX_RENDERED_EVIDENCE = 20;
-const MAX_EVIDENCE_EXCERPT = 600;
-
-/**
- * Citations identify what ran; the verifier also needs the bounded substance of
- * what it produced. Output is included only when asked for, because a step prompt
- * already carries its dependencies' full output.
- */
-export function renderEvidence(evidence: StepEvidence[], includeOutput = false): string {
-  if (evidence.length === 0) return 'No evidence was collected.';
-  const shown = evidence.slice(0, MAX_RENDERED_EVIDENCE);
-  const lines = shown.map((entry) => {
-    const citation = `EVIDENCE ${entry.stepId}: ${entry.citation}`;
-    if (!includeOutput) return citation;
-    const output = entry.output.trim();
-    if (output.length === 0) return `${citation}\nOUTPUT ${entry.stepId}: (empty)`;
-    const excerpt =
-      output.length > MAX_EVIDENCE_EXCERPT
-        ? `${output.slice(0, MAX_EVIDENCE_EXCERPT - 3)}...`
-        : output;
-    return `${citation}\nOUTPUT ${entry.stepId}: ${excerpt}`;
-  });
-  if (evidence.length > shown.length) {
-    // Keep every id citable even when only the first outputs fit the bound.
-    for (const entry of evidence.slice(shown.length)) {
-      lines.push(`EVIDENCE ${entry.stepId}: ${entry.citation}`);
-    }
-    lines.push(
-      `(Output for ${evidence.length - shown.length} later evidence records was omitted from this prompt; their citations remain citable by id.)`,
-    );
-  }
-  return lines.join('\n');
-}
-
-const MAX_PROMPT_OUTPUT = 4_000;
-
-function renderPlan(plan: TaskPlan, completed: ReadonlySet<string>): string {
-  return plan.steps
-    .map((step) => {
-      const state = completed.has(step.id) ? 'completed' : 'pending';
-      const deps = step.dependsOn.length > 0 ? ` depends on ${step.dependsOn.join(', ')}` : '';
-      return `- ${step.id} [${state}] (${step.kind}) ${step.title}${deps}`;
-    })
-    .join('\n');
-}
-
-export function buildStepPrompt(input: {
+export function buildPlanPrompt(input: {
   objective: string;
-  step: TaskPlanStep;
-  mode: ReasoningMode;
+  maxSteps: number;
+  history?: AgentHistoryTurn[];
+}): string {
+  const history = input.history ?? [];
+  return [
+    ...(history.length > 0
+      ? [`Earlier in this conversation:\n\n${renderHistory(history)}`, '']
+      : []),
+    `Break this objective into at most ${input.maxSteps} concrete steps.`,
+    'Return ONLY a JSON array of step titles, for example ["Read the file","Fix the bug"].',
+    'Do not include prose, numbering, or markdown fences.',
+    '',
+    'Objective:',
+    input.objective.slice(0, 20_000),
+  ].join('\n');
+}
+
+const ACTION_SYSTEM = [
+  'You are Coderax Native, the owner’s private execution agent.',
+  'You act by returning exactly one JSON object and nothing else.',
+  'To use a tool: {"thought":"why","tool":"tool.name","input":{...}}',
+  'To finish the current step: {"thought":"why","final":"the concrete result"}.',
+  'Use only tools from the catalogue. Never invent a tool name.',
+  'If a tool fails, read the observation and choose a different action.',
+  'Do not describe what you would do; either call a tool or return the result.',
+].join(' ');
+
+export function buildActionPrompt(input: {
+  objective: string;
+  steps: PlanStep[];
+  step: PlanStep;
+  completed: string[];
+  outputs: Array<{ stepId: string; text: string }>;
   history: AgentHistoryTurn[];
-  evidence: StepEvidence[];
-  completed: ReadonlySet<string>;
-  feedback?: string;
+  observations: string[];
+  memory: string[];
+  knowledge: string[];
+  catalogue: string;
 }): string {
   const sections: string[] = [];
   if (input.history.length > 0) {
     sections.push(`Earlier in this conversation:\n\n${renderHistory(input.history)}`);
   }
-  sections.push(`Objective:\n${input.objective}`);
-  sections.push(`Data mode: ${input.mode}. The workspace is confined to the configured mode root.`);
+  sections.push(`Objective:\n${input.objective.slice(0, 20_000)}`);
+  sections.push(
+    `Plan:\n${input.steps.map((step, index) => `${index + 1}. [${step.id}] ${step.title}`).join('\n')}`,
+  );
   sections.push(`Current step (${input.step.id}): ${input.step.title}`);
   if (input.step.acceptance) {
     sections.push(`This step is complete only when: ${input.step.acceptance}`);
@@ -222,5 +210,23 @@ export function buildVerificationPrompt(input: {
       '- Never cite an id that is not in the evidence list.',
     ].join('\n'),
   );
+  if (input.outputs.length) sections.push(`Completed step results:\n${JSON.stringify(input.outputs)}`);
+  if (input.memory.length > 0) {
+    sections.push(`Owner memory:\n${input.memory.map((entry) => `- ${entry}`).join('\n')}`);
+  }
+  if (input.knowledge.length > 0) {
+    sections.push(`Relevant stored passages:\n${input.knowledge.join('\n---\n')}`);
+  }
+  sections.push(`Tool catalogue:\n${input.catalogue.length > 0 ? input.catalogue : '(no tools)'}`);
+  if (input.observations.length > 0) {
+    sections.push(
+      `Observations from your actions in this step (oldest first):\n${input.observations
+        .slice(-6)
+        .join('\n')}`,
+    );
+  }
+  sections.push('Return one JSON object now.');
   return sections.join('\n\n');
 }
+
+export const NATIVE_ACTION_SYSTEM = ACTION_SYSTEM;

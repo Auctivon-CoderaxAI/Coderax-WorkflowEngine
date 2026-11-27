@@ -20,6 +20,12 @@ import type { MongoCollectionLike } from '../persistence/mongo.js';
 import { createMongoConnector, MongoUnavailableError } from '../persistence/mongo-connect.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createTaskRepository } from '../persistence/tasks.js';
+import type { ExecutionRepository } from '../persistence/executions.js';
+import { createExecutionRepository } from '../persistence/executions.js';
+import {
+  createMongoExecutionRepository,
+  ensureExecutionIndexes,
+} from '../persistence/mongo-executions.js';
 import { createConversationRepository } from '../persistence/conversations.js';
 import { createNotificationStore } from '../persistence/notifications.js';
 import {
@@ -57,13 +63,17 @@ import {
   ensureNotificationIndexes,
   ensureTaskIndexes,
 } from '../persistence/mongo-tables.js';
+import { budgetCollectionName, ensureBudgetIndexes } from '../persistence/budgets.js';
 import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
+  permissionCollection?: MongoCollectionLike;
+  /** Present only for the durable driver; the quota window is shared state. */
+  budgetCollection?: MongoCollectionLike;
   lease: LeaseStore;
   tasks: TaskRepository;
-  events: EventStore;
+  executions: ExecutionRepository;
   conversations: ConversationRepository;
   memory: MemoryStore;
   permissions: PermissionStore;
@@ -143,7 +153,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       driver: 'memory',
       lease: createLeaseStore(createInMemoryWorkRunTable()),
       tasks: createTaskRepository(),
-      events: createMemoryEventStore({ maxPerTask: config.execution.eventBufferSize }),
+      executions: createExecutionRepository(),
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       permissions: createPermissionStore({ clock, ids: input.ids }),
@@ -160,6 +170,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const database = await openDatabase(input);
   const workRuns: MongoCollectionLike = database.collection(collectionName(config, 'work_runs'));
   const tasks = database.collection(collectionName(config, 'tasks'));
+  const executions = database.collection(collectionName(config, 'executions'));
   const conversations = database.collection(collectionName(config, 'conversations'));
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
@@ -184,26 +195,20 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     chunks: artifactChunks,
   };
 
+  const permissionCollection = database.collection(collectionName(config, 'permissions'));
+  const budgetCollection = database.collection(budgetCollectionName(collectionName(config, '')));
   try {
+    await permissionCollection.createIndex({ requestId: 1 }, { unique: true, name: 'permission_request' });
+    await permissionCollection.createIndex({ ownerId: 1, taskId: 1 }, { name: 'permission_task' });
     await ensureWorkRunIndexes(workRuns);
     await ensureTaskIndexes(tasks);
+    await ensureExecutionIndexes(executions);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
     await ensurePermissionIndexes(permissions);
     await ensureNotificationIndexes(notifications);
-    await ensureEventIndexes(events, {
-      retentionSeconds: Math.floor(config.execution.eventRetentionMs / 1000),
-    });
-    await ensureScheduleIndexes({
-      schedules,
-      executions: scheduleExecutions,
-      notices: scheduleNotices,
-    });
-    await ensureArtifactIndexes(artifactCollections);
-    await ensureCapacityIndexes({
-      capacity: artifactCapacity,
-      reservations: artifactReservations,
-    });
+    await ensureEventIndexes({ events, heads: eventHeads });
+    await ensureBudgetIndexes(budgetCollection);
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -213,13 +218,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   return {
     driver: 'mongo',
+    permissionCollection,
+    budgetCollection,
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
-    events: createMongoEventStore({
-      collection: events,
-      pageSize: config.execution.eventBufferSize,
-      now: () => clock.now(),
-    }),
+    executions: createMongoExecutionRepository(executions),
     conversations: createMongoConversationRepository({ conversations, messages }),
     memory: createMongoMemoryStore({
       collection: memory,

@@ -188,6 +188,23 @@ export function validateInvariants(config: EngineConfig): string[] {
   if (models.allowPaid !== false) {
     issues.push('models.allowPaid must remain false: Coderax does not use paid models');
   }
+
+  const providerIds = new Set<string>();
+  for (const provider of models.providers) {
+    if (providerIds.has(provider.id)) {
+      issues.push(`models.providers lists ${provider.id} more than once`);
+    }
+    providerIds.add(provider.id);
+  }
+  for (const attestation of models.attestations) {
+    const verifiedAt = Date.parse(attestation.verifiedAt);
+    const expiresAt = Date.parse(attestation.expiresAt);
+    if (!Number.isFinite(verifiedAt) || !Number.isFinite(expiresAt) || expiresAt <= verifiedAt) {
+      issues.push(
+        `models.attestations for ${attestation.providerId}/${attestation.modelId} must expire after they were verified`,
+      );
+    }
+  }
   return issues;
 }
 

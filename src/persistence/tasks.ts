@@ -1,5 +1,6 @@
 import { isTerminalState } from '@coderax/contracts';
-import type { TaskPatch, TaskRecord } from '../domain.js';
+import type { PermissionScope } from '@coderax/contracts';
+import type { TaskApproval, TaskPatch, TaskRecord } from '../domain.js';
 import { isAuthorizedGeneration } from '../execution/lease.js';
 import { redactContent } from '../observability/redact.js';
 
@@ -27,6 +28,10 @@ export type FencedWriteResult =
   | { applied: true; task: TaskRecord }
   | { applied: false; reason: 'not_found' | 'superseded' | 'terminal' | 'guard_rejected' };
 
+export type ApprovalWriteResult =
+  | { applied: true; task: TaskRecord }
+  | { applied: false; reason: 'not_found' | 'terminal' | 'decided' };
+
 /**
  * The only writer of task state.
  *
@@ -34,6 +39,11 @@ export type FencedWriteResult =
  * unique run token and the task is not already terminal. That is the invariant
  * that stops an expired execution from overwriting a newer execution's state,
  * and it is enforced here rather than trusted to each caller.
+ *
+ * `recordApproval` and `consumeApproval` are the durable half of the permission
+ * system. A decision is written to the task row (so it survives a restart) and a
+ * grant can be consumed once; both transitions are conditional in the same way,
+ * so two replicas cannot both act on one approval.
  */
 export type TaskRepository = {
   create: (task: TaskRecord) => Promise<CreateTaskResult>;
@@ -58,25 +68,27 @@ export type TaskRepository = {
   reissue: (input: {
     taskId: string;
     token: string;
+    expected?: Pick<TaskRecord, 'state' | 'generation'>;
     now: string;
     leaseExpiresAt: string;
     /** States this caller is authorized to replace; checked atomically. */
     from: TaskRecord['state'][];
   }) => Promise<FencedWriteResult>;
-  /**
-   * Allocates the next durable event sequence for the generation that still
-   * holds the row's fence. The token is part of the increment itself, so a
-   * superseded generation gets `null` rather than a number it could write over
-   * the new owner's events. A settled row keeps its token, which is what lets a
-   * generation append its own terminal event after the state write.
-   */
-  allocateSeq: (input: { taskId: string; token: string }) => Promise<number | null>;
-  /**
-   * Raises the durable head to an externally adopted sequence. It never lowers
-   * the head, so adopting a replayed event cannot make the allocator hand out a
-   * sequence the log already contains.
-   */
-  adoptSeq: (input: { taskId: string; seq: number }) => Promise<void>;
+  /** Durably records the owner's decision for one request. */
+  recordApproval: (input: {
+    taskId: string;
+    requestId: string;
+    scope: PermissionScope;
+    resource: string;
+    decision: 'approved' | 'denied';
+    decidedAt: string;
+  }) => Promise<ApprovalWriteResult>;
+  /** Atomically spends an approved grant; false when it was already used. */
+  consumeApproval: (input: {
+    taskId: string;
+    requestId: string;
+    now: string;
+  }) => Promise<boolean>;
   listByConversation: (conversationId: string) => Promise<TaskRecord[]>;
   /** Tasks that are not terminal, used by startup ownership verification. */
   listUnsettled: () => Promise<TaskRecord[]>;
@@ -149,44 +161,19 @@ export function createTaskRepository(): TaskRepository {
       if (isTerminalState(next.state)) settle(next);
       return true;
     },
-    allocateSeq: async ({ taskId, token }) => {
-      const task = tasks.get(taskId);
-      if (!task || task.runToken !== token) return null;
-      const next: TaskRecord = { ...task, eventSeq: (task.eventSeq ?? 0) + 1 };
-      tasks.set(taskId, next);
-      return next.eventSeq;
-    },
-    adoptSeq: async ({ taskId, seq }) => {
-      const task = tasks.get(taskId);
-      if (!task) return;
-      tasks.set(taskId, { ...task, eventSeq: Math.max(task.eventSeq ?? 0, seq) });
-    },
-    takeHandoff: async (taskId, generation, token, leaseExpiresAt) => {
-      const task = tasks.get(taskId);
-      if (!task?.handoffPending || task.generation !== generation ||
-          (task.state !== 'queued' && task.state !== 'interrupted')) return null;
-      const next: TaskRecord = { ...task, state: 'queued', failure: null, generation: generation + 1, runToken: token, leaseExpiresAt };
-      tasks.set(taskId, next);
-      activeByConversation.set(task.conversationId, taskId);
-      return { ...next };
-    },
-    claimScheduledRetry: async (taskId, generation) => {
-      const task = tasks.get(taskId);
-      if (!task || task.state !== 'failed' || task.generation !== generation) return false;
-      tasks.set(taskId, { ...task, scheduleRetryClaimed: true });
-      return true;
-    },
-    reissue: async ({ taskId, token, now, leaseExpiresAt, from }) => {
+    reissue: async ({ taskId, token, now, leaseExpiresAt, expected }) => {
       const task = tasks.get(taskId);
       if (!task) return { applied: false, reason: 'not_found' };
-      if (task.scheduleRetryClaimed || !from.includes(task.state)) {
+      if ((expected && (expected.state !== task.state || expected.generation !== task.generation)) ||
+          (!isTerminalState(task.state) && task.state !== 'awaiting_approval')) {
         return { applied: false, reason: 'superseded' };
       }
       const next: TaskRecord = {
         ...task,
         state: 'queued',
         generation: task.generation + 1,
-        checkpoint: { ...task.checkpoint, text: '' },
+        checkpoint: expected?.state === 'awaiting_approval'
+              ? task.checkpoint : { ...task.checkpoint, text: '' },
         runToken: token,
         updatedAt: now,
         leaseExpiresAt,
@@ -197,6 +184,36 @@ export function createTaskRepository(): TaskRepository {
       tasks.set(taskId, next);
       activeByConversation.set(next.conversationId, next.taskId);
       return { applied: true, task: { ...next } };
+    },
+    recordApproval: async ({ taskId, requestId, scope, resource, decision, decidedAt }) => {
+      const task = tasks.get(taskId);
+      if (!task) return { applied: false, reason: 'not_found' };
+      if (isTerminalState(task.state)) return { applied: false, reason: 'terminal' };
+      // A spent grant can never be replaced, and the same request is not recorded
+      // twice. A later request may replace an unconsumed decision: the owner is
+      // allowed to reconsider a denial, and the request list only offers one that
+      // is still pending.
+      if (task.approval?.requestId === requestId || task.approval?.consumedAt) {
+        return { applied: false, reason: 'decided' };
+      }
+      const approval: TaskApproval = { requestId, scope, resource, decision, decidedAt };
+      const next: TaskRecord = { ...task, approval, updatedAt: decidedAt };
+      tasks.set(taskId, next);
+      return { applied: true, task: { ...next } };
+    },
+    consumeApproval: async ({ taskId, requestId, now }) => {
+      const task = tasks.get(taskId);
+      if (!task || !task.approval) return false;
+      if (task.approval.requestId !== requestId) return false;
+      if (task.approval.decision !== 'approved') return false;
+      if (task.approval.consumedAt) return false;
+      const next: TaskRecord = {
+        ...task,
+        approval: { ...task.approval, consumedAt: now },
+        updatedAt: now,
+      };
+      tasks.set(taskId, next);
+      return true;
     },
     listByConversation: async (conversationId) =>
       [...tasks.values()]

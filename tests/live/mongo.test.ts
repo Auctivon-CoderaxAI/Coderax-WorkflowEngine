@@ -6,10 +6,13 @@ import { test } from 'node:test';
 import { MongoClient } from 'mongodb';
 import { composeApplication } from '../../src/bootstrap/compose.js';
 import { createMongoConnector } from '../../src/persistence/mongo-connect.js';
+import type { MongoCollectionLike } from '../../src/persistence/mongo.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../../src/persistence/budgets.js';
+import { budgetKey, createBudgetLedger } from '../../src/models/budget.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../../src/persistence/mongo.js';
 import { createLeaseStore } from '../../src/persistence/work-runs.js';
 import { workRunKey } from '../../src/execution/lease.js';
-import { baseConfig, fakeGateway, OWNER_TOKEN, taskRecord, waitFor } from '../helpers.js';
+import { baseConfig, fakeGateway, fakeProvider, OWNER_TOKEN, taskRecord, waitFor } from '../helpers.js';
 
 /**
  * Real MongoDB only.
@@ -62,6 +65,7 @@ test(
           },
         ),
         env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+        providers: [{ adapter: fakeProvider() }],
         gateway: fakeGateway(),
       });
       try {
@@ -183,6 +187,7 @@ test(
     const first = await composeApplication({
       config: appConfig,
       env,
+      providers: [{ adapter: fakeProvider() }],
       gateway: fakeGateway(),
     });
     let taskId = '';
@@ -209,6 +214,7 @@ test(
       const second = await composeApplication({
         config: appConfig,
         env,
+        providers: [{ adapter: fakeProvider() }],
         gateway: fakeGateway(),
       });
       try {
@@ -257,6 +263,7 @@ test(
         },
       ),
       env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+      providers: [{ adapter: fakeProvider() }],
       gateway: fakeGateway(),
     });
     try {
@@ -328,6 +335,7 @@ test(
         },
       ),
       env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string },
+      providers: [{ adapter: fakeProvider() }],
       gateway: fakeGateway(),
     });
     const principal = { ownerId: 'owner-test', isOwner: true as const };
@@ -406,7 +414,7 @@ test(
       },
     );
     const env = { CODERAX_OWNER_TOKEN: OWNER_TOKEN, CODERAX_TEST_MONGO_URI: uri as string };
-    const first = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+    const first = await composeApplication({ config: appConfig, env, providers: [{ adapter: fakeProvider() }], gateway: fakeGateway() });
     const notification = {
       taskId: 'task_notify_live',
       ownerId: 'owner-test',
@@ -424,7 +432,7 @@ test(
       await first.stop();
       firstStopped = true;
 
-      const second = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+      const second = await composeApplication({ config: appConfig, env, providers: [{ adapter: fakeProvider() }], gateway: fakeGateway() });
       try {
         const before = await second.dependencies.notifications.list(notification.ownerId);
         assert.equal(before.unread, 1);
@@ -434,7 +442,7 @@ test(
         await second.stop();
       }
 
-      const third = await composeApplication({ config: appConfig, env, gateway: fakeGateway() });
+      const third = await composeApplication({ config: appConfig, env, providers: [{ adapter: fakeProvider() }], gateway: fakeGateway() });
       try {
         const after = await third.dependencies.notifications.list(notification.ownerId);
         assert.equal(after.unread, 0);
@@ -449,6 +457,93 @@ test(
       await cleanup.db(databaseName).dropDatabase().catch(() => undefined);
       await cleanup.close().catch(() => undefined);
       rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'two racing replicas in a real database produce exactly one quota winner',
+  { skip: uri ? false : required ? false : 'CODERAX_TEST_MONGO_URI is not set' },
+  async () => {
+    requiresDatabase();
+    const client = new MongoClient(uri as string);
+    await client.connect();
+    // A database of this test's own. The tests above drop the shared database
+    // when they finish, so a quota assertion must not depend on which test ran
+    // first or on a concurrent insert race to produce a result.
+    const database = client.db(`${databaseName}_quota`);
+    const collection = database.collection('budget_windows') as unknown as MongoCollectionLike;
+    try {
+      await ensureBudgetIndexes(collection);
+      const indexes = await database.collection('budget_windows').listIndexes().toArray();
+      assert.ok(
+        indexes.some((index) => index.name === 'budget_window' && index.unique === true),
+        JSON.stringify(indexes),
+      );
+
+      const now = new Date('2026-11-26T10:00:00.000Z');
+      const limits = { maxRequestsPerDay: 1, maxTokensPerDay: 1_000 };
+      const replicas = [0, 1].map(() =>
+        createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) }),
+      );
+
+      // Both replicas share one durable window and reserve in the same tick.
+      // Which replica wins is a scheduling detail; that exactly one wins is the
+      // constraint the unique index and the conditional update enforce.
+      const outcomes = await Promise.all(
+        replicas.map((replica) =>
+          replica.reserve({ ownerId: 'owner', at: now, inputTokens: 10, outputTokens: 10 }),
+        ),
+      );
+      assert.equal(
+        outcomes.filter((outcome) => outcome.allowed).length,
+        1,
+        JSON.stringify(outcomes),
+      );
+      const winnerIndex = outcomes.findIndex((outcome) => outcome.allowed);
+      const winner = outcomes[winnerIndex];
+      const winnerLedger = replicas[winnerIndex];
+      assert.ok(winner && winnerLedger && winner.allowed);
+      if (!winner || !winnerLedger || !winner.allowed) return;
+      const loser = outcomes.find((outcome) => !outcome.allowed);
+      assert.ok(loser && loser.allowed === false);
+      if (!loser || loser.allowed !== false) return;
+      assert.equal(loser.reason, 'requests');
+      assert.equal(loser.requests, 1);
+
+      // The durable window holds the winner's reservation, not two.
+      const shared = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
+      assert.deepEqual(await shared.snapshot('owner', now), {
+        requests: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      assert.equal(await shared.available('owner', now), false);
+
+      // Settlement is applied once. Replaying the same reservation through a
+      // fresh store (as another replica would) is a no-op, not a second charge.
+      await winnerLedger.settle(winner.reservation.id, { inputTokens: 7, outputTokens: 3 });
+      const replay = await createMongoBudgetStore(collection).settle({
+        key: budgetKey('owner', now),
+        reservationId: winner.reservation.id,
+        reservedTokens: 20,
+        reservedInputTokens: 10,
+        reservedOutputTokens: 10,
+        usage: { inputTokens: 7, outputTokens: 3 },
+      });
+      assert.equal(replay, false);
+
+      // A fresh process reads the same durable window, not a local copy.
+      const restarted = createBudgetLedger({ ...limits, store: createMongoBudgetStore(collection) });
+      assert.deepEqual(await restarted.snapshot('owner', now), {
+        requests: 1,
+        inputTokens: 7,
+        outputTokens: 3,
+      });
+      assert.equal(await restarted.available('owner', now), false);
+    } finally {
+      await database.dropDatabase().catch(() => undefined);
+      await client.close().catch(() => undefined);
     }
   },
 );

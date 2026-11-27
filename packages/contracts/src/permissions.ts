@@ -20,10 +20,12 @@ export const PermissionScope = z.enum([
   'command.execute',
   'network.access',
   'memory.read',
+  'memory.write',
+  'knowledge.read',
+  'knowledge.write',
   'conversation.read',
   'credential.use',
-  'browser.control',
-  'browser.transfer',
+  'browser.use',
 ]);
 export type PermissionScope = z.infer<typeof PermissionScope>;
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ModelCompletionRequest } from '../../src/agents/native/types.js';
+import type { ProviderAdapter, ProviderCompletionRequest } from '../../src/models/types.js';
 import { workRunKey } from '../../src/execution/lease.js';
 import { startTestApp, waitFor } from '../helpers.js';
 
@@ -10,26 +10,28 @@ const principal = { ownerId: 'owner-test', isOwner: true as const };
  * A gateway that keeps every prompt it was given, so the test can read what the
  * model actually saw rather than trusting that history was passed along.
  */
-function recordingGateway(): {
-  id: string;
-  prompts: string[];
-  complete: (request: ModelCompletionRequest) => Promise<{ text: string }>;
-} {
+function recordingGateway(): ProviderAdapter & { prompts: string[] } {
   const gateway = {
-    id: 'recording-gateway',
+    id: 'free',
+    kind: 'openai' as const,
     prompts: [] as string[],
-    complete: async (request: ModelCompletionRequest) => {
+    discover: async () => [
+      {
+        ref: { providerId: 'free', modelId: 'recording' },
+        label: 'Recording model',
+        contextTokens: 32_768,
+        maxOutputTokens: 4_096,
+        capabilities: { vision: false, toolCalling: false, reasoning: true, streaming: true },
+        pricing: { prompt: '0', completion: '0' },
+      },
+    ],
+    complete: async (request: ProviderCompletionRequest) => {
       gateway.prompts.push(request.prompt);
-      const turn = `${request.system}\n${request.prompt}`;
-      if (turn.includes('CODERAX_VERIFY_V1')) {
-        const cited = [...turn.matchAll(/EVIDENCE ([A-Za-z0-9._-]+):/g)]
-          .map((match) => match[1])
-          .filter((id): id is string => typeof id === 'string');
-        return {
-          text: JSON.stringify({ passed: true, reason: 'evidence covers the objective', cited }),
-        };
-      }
-      return { text: `answer-${gateway.prompts.length}` };
+      return {
+        text: `answer-${gateway.prompts.length}`,
+        toolCalls: [],
+        usage: { inputTokens: 5, outputTokens: 5 },
+      };
     },
   };
   return gateway;
@@ -37,7 +39,7 @@ function recordingGateway(): {
 
 test('a follow-up turn is prompted with the earlier exchange', async () => {
   const gateway = recordingGateway();
-  const started = await startTestApp({ gateway });
+  const started = await startTestApp({ provider: gateway });
   try {
     const first = await started.app.service.submitWork(principal, {
       objective: 'First objective',
@@ -64,7 +66,8 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
     });
 
     const firstTurnPrompts = gateway.prompts.length;
-    assert.equal(firstTurnPrompts, 2);
+    // One model-assisted plan and three planned steps.
+    assert.equal(firstTurnPrompts, 4);
     // The first turn has nothing to remember.
     assert.ok(gateway.prompts.every((prompt) => !prompt.includes('Earlier in this conversation:')));
 
@@ -83,14 +86,17 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
     });
 
     const followUpPrompts = gateway.prompts.slice(firstTurnPrompts);
-    assert.equal(followUpPrompts.length, 2);
-    // Only the reasoning step needs conversational context; verification is
-    // assessed from collected evidence, not from the transcript.
-    const followUpStep = followUpPrompts[0] ?? '';
-    assert.ok(followUpStep.includes('Earlier in this conversation:'));
-    assert.ok(followUpStep.includes('Owner: First objective'));
-    assert.ok(followUpStep.includes('Assistant: answer-1'));
-    assert.equal(followUpStep.split('Follow-up objective').length - 1, 1);
+    // One plan (with history) and three planned steps (with history).
+    assert.equal(followUpPrompts.length, 4);
+    for (const prompt of followUpPrompts) {
+      assert.ok(prompt.includes('Earlier in this conversation:'));
+      // The stored user turn and the stored assistant answer, in order.
+      assert.ok(prompt.includes('Owner: First objective'));
+      // The plan consumed answer-1; the stored answer begins at the first step.
+      assert.ok(prompt.includes('Assistant: answer-2'));
+      // The current objective is the objective, not a repeated history turn.
+      assert.equal(prompt.split('Follow-up objective').length - 1, 1);
+    }
 
     const conversation = await started.app.service.conversation(principal, conversationId);
     assert.equal(conversation.ok, true);
@@ -107,7 +113,7 @@ test('a follow-up turn is prompted with the earlier exchange', async () => {
 
 test('a chat follow-up is prompted with the earlier exchange', async () => {
   const gateway = recordingGateway();
-  const started = await startTestApp({ gateway });
+  const started = await startTestApp({ provider: gateway });
   try {
     const first = await started.app.service.chat(principal, {
       message: 'First question',

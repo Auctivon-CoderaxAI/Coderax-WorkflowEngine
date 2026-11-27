@@ -36,6 +36,8 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 | Dependency vulnerabilities | `audit`, `unit` | `dist/scripts/check-audit.js` (high and critical fail) and `tests/unit/audit.test.ts` (every fail-closed path) |
 | Model cost policy | `adversarial`, `unit` | `tests/adversarial/cost-policy.test.ts`, `tests/unit/models.test.ts` |
 | Private/cloud isolation | `security` | `tests/security/isolation.test.ts`, `tests/security/regressions.test.ts` |
+| Durable quota window | `unit`, `mongo-live` | `tests/unit/models.test.ts`, `tests/live/mongo.test.ts` |
+| External engine authorization | `integration`, `security` | `tests/integration/external-dispatch.test.ts`, `tests/security/remediation.test.ts` |
 | Generation fencing | `adversarial`, `unit` | `tests/adversarial/fencing.test.ts`, `tests/unit/fencing.test.ts` |
 | Crash recovery | `adversarial`, `integration` | `tests/adversarial/fencing.test.ts`, `tests/integration/recovery.test.ts` |
 | Event replay | `adversarial`, `integration`, `unit` | `tests/adversarial/replay.test.ts`, `tests/integration/replay.test.ts`, `tests/unit/events.test.ts` |
@@ -48,15 +50,13 @@ name a disposable MongoDB; there is no local-file or in-memory substitute. Use
 The `mongo-live` gate is deliberately not folded into `integration`. A passing
 collection fake proves repository semantics; it does not prove the official
 driver, server indexes, two-connection arbitration, generation fencing, crash
-recovery, notification durability or shutdown draining. The live suite now
-covers those eight paths and the gate forces `CODERAX_REQUIRE_MONGO=1`, so a
-missing service fails instead of silently skipping. The shutdown test is a real
-database fault injection: a checkpoint `updateOne` is delayed across `stop()`,
-and the test fails if persistence closes before every injected write settles. The image is pinned to `mongo:7.0.14`; the service is
-ephemeral and receives no production credentials. Quota, durable events,
-approvals and artifacts cannot be claimed against a database until their owning
-branches land; the gate will require their live tests then rather than treating
-the in-memory path as evidence.
+recovery or notification durability. The live suite now covers those six paths
+and the gate forces `CODERAX_REQUIRE_MONGO=1`, so a missing service fails instead
+of silently skipping. The image is pinned to `mongo:7.0.14`; the service is
+ephemeral and receives no production credentials. The live suite now also proves
+the durable quota window (two replicas racing for the last slot, replayed
+settlement charged once) and durable approval consumption, so those guarantees
+are not claimed from an in-memory path.
 
 The repository's protected `main` requires the check context `verify`. That live
 gate is therefore a step in the required `verify` job, not merely a sibling

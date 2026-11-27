@@ -179,23 +179,77 @@ test('duplicate zero-cost candidates are refused', () => {
   }
 });
 
-test('removed retry settings are rejected visibly, not silently ignored', () => {
+test('a route may be empty because discovery, not configuration, grants free cost', () => {
   const ws = workspace();
   try {
-    assert.throws(
-      () =>
-        EngineConfigSchema.parse({
-          auth: { ownerId: 'owner' },
-          workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
-          models: { route: [{ providerId: 'free', modelId: 'm' }] },
-          execution: { maxAttempts: 3, retryDelayMs: 100 },
-        }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /execution|maxAttempts|retryDelayMs/i);
-        return true;
+    const config = EngineConfigSchema.parse({
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+      models: {},
+    });
+    assert.deepEqual(config.models.route, []);
+    assert.deepEqual(config.models.providers, []);
+    assert.deepEqual(config.models.attestations, []);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('duplicate providers and inverted attestations are refused', () => {
+  const ws = workspace();
+  try {
+    const config = EngineConfigSchema.parse({
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+      models: {
+        providers: [
+          {
+            id: 'groq',
+            baseURL: 'https://api.groq.com/openai/v1',
+            apiKeyEnv: 'GROQ_API_KEY',
+          },
+          {
+            id: 'groq',
+            baseURL: 'https://api.groq.com/openai/v1',
+            apiKeyEnv: 'GROQ_API_KEY',
+          },
+        ],
+        attestations: [
+          {
+            providerId: 'groq',
+            modelId: 'model',
+            evidenceUrl: 'https://console.groq.com/docs/rate-limits',
+            verifiedAt: '2026-11-26T00:00:00.000Z',
+            expiresAt: '2026-11-01T00:00:00.000Z',
+          },
+        ],
       },
-    );
+    });
+    const issues = validateInvariants(config);
+    assert.ok(issues.some((issue) => issue.includes('models.providers lists groq more than once')));
+    assert.ok(issues.some((issue) => issue.includes('must expire after they were verified')));
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('a provider credential must be named, never inlined', () => {
+  const ws = workspace();
+  try {
+    const parsed = EngineConfigSchema.safeParse({
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+      models: {
+        providers: [
+          {
+            id: 'groq',
+            baseURL: 'https://api.groq.com/openai/v1',
+            apiKeyEnv: 'sk-not-an-env-name',
+          },
+        ],
+      },
+    });
+    assert.equal(parsed.success, false);
   } finally {
     ws.cleanup();
   }
@@ -239,6 +293,28 @@ test('an unknown persistence driver in the environment names the field', () => {
         return true;
       },
     );
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('provider URLs must be secure and must not smuggle a query or fragment', () => {
+  const ws = workspace();
+  try {
+    const base = {
+      auth: { ownerId: 'owner' },
+      workspaces: { privateRoot: ws.privateRoot, cloudRoot: ws.cloudRoot },
+    };
+    const provider = (baseURL: string) => ({
+      models: {
+        providers: [{ id: 'p', baseURL, apiKeyEnv: 'P_API_KEY' }],
+      },
+    });
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('http://api.example.com/v1') }).success, false);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1?key=x') }).success, false);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1#fragment') }).success, false);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('https://api.example.com/v1') }).success, true);
+    assert.equal(EngineConfigSchema.safeParse({ ...base, ...provider('http://127.0.0.1:4096/v1') }).success, true);
   } finally {
     ws.cleanup();
   }

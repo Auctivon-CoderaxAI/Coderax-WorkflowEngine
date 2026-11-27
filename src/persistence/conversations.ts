@@ -7,14 +7,29 @@ export type ConversationBinding =
   | { ok: true; record: ConversationRecord }
   | { ok: false; reason: 'owner' | 'mode' | 'surface' };
 
+/**
+ * A conversation carries an owner, a data mode and a kind of work.
+ *
+ * Reusing an identifier across any of them would move a private transcript into a
+ * cloud run (or a Work transcript into a chat), so `ensure` refuses the collision
+ * instead of returning the existing row. The caller maps the reason onto a stable
+ * problem; the repository is the authority.
+ */
+export type ConversationConflictReason = 'owner' | 'mode' | 'kind';
+
+export class ConversationConflictError extends Error {
+  readonly reason: ConversationConflictReason;
+
+  constructor(reason: ConversationConflictReason) {
+    super('conversation identity conflict');
+    this.name = 'ConversationConflictError';
+    this.reason = reason;
+  }
+}
+
 export type ConversationRepository = {
-  /**
-   * Returns the stored conversation only when owner, data mode and surface all
-   * match. A mismatch is refused instead of silently returning a record bound to
-   * another mode: that record's messages are the history a cloud run must never
-   * receive.
-   */
-  ensure: (record: ConversationRecord) => Promise<ConversationBinding>;
+  /** Reuse an ID only when the stored owner and data mode both match. */
+  ensure: (record: ConversationRecord) => Promise<ConversationRecord>;
   get: (ownerId: string, conversationId: string) => Promise<ConversationRecord | null>;
   list: (ownerId: string) => Promise<ConversationList>;
   appendMessage: (message: StoredMessage) => Promise<boolean>;
@@ -49,10 +64,10 @@ export function createConversationRepository(): ConversationRepository {
     ensure: async (record) => {
       const existing = conversations.get(record.conversationId);
       if (existing) {
-        if (existing.ownerId !== record.ownerId) return { ok: false, reason: 'owner' };
-        if (existing.mode !== record.mode) return { ok: false, reason: 'mode' };
-        if (existing.isWork !== record.isWork) return { ok: false, reason: 'surface' };
-        return { ok: true, record: existing };
+        if (existing.ownerId !== record.ownerId) throw new ConversationConflictError('owner');
+        if (existing.mode !== record.mode) throw new ConversationConflictError('mode');
+        if (existing.isWork !== record.isWork) throw new ConversationConflictError('kind');
+        return existing;
       }
       conversations.set(record.conversationId, { ...record });
       messages.set(record.conversationId, []);

@@ -1,0 +1,29 @@
+{
+  "capturedAt": "2026-11-26T17:55:01.380Z",
+  "source": "https://openrouter.ai/api/v1/models",
+  "responseSha256": "01217dc1cdb61041a8f0d8d731c654cf202fd604003187da1a180503db1dc078",
+  "totalModels": 477,
+  "zeroPriceModels": 14,
+  "zeroPriceModelIds": [
+    "baidu/ernie-5.5-flash-preview:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    "google/lyria-3-clip-preview",
+    "google/lyria-3-pro-preview",
+    "inclusionai/ling-3.2-flash:free",
+    "liquid/lfm-3-1.7b:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/free",
+    "particle-ai/particle-1:free",
+    "recursive/flint-v1.0:free"
+  ],
+  "capabilities": {
+    "imageInput": 9,
+    "tools": 12,
+    "reasoning": 12
+  },
+  "note": "Public catalogue capture. No credential is used or recorded. Prices are provider-published values; the router re-verifies them on every discovery refresh."
+}

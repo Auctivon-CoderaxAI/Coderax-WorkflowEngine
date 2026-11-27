@@ -1,10 +1,27 @@
 import { z } from 'zod';
+import { CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
 import {
-  CONTRACT_VERSION,
-  EngineId,
-  ModelRef,
-  type BrowserLimits,
-} from '@coderax/contracts';
+  CREDENTIAL_SOURCES,
+  DATA_RETENTION,
+  PROCESSING_LOCATIONS,
+  PROCESSING_OPERATIONS,
+  TRAINING_USE,
+} from '../models/policy.js';
+import { endpointIssue } from '../security/endpoint.js';
+
+/**
+ * Every endpoint that receives a credential must be https unless it is loopback,
+ * and no endpoint may carry a credential in its URL. The rule lives here so a
+ * provider, an external agent and an embedding endpoint cannot disagree.
+ */
+const SecureEndpoint = z
+  .string()
+  .trim()
+  .url()
+  .superRefine((value, context) => {
+    const issue = endpointIssue(value);
+    if (issue) context.addIssue({ code: z.ZodIssueCode.custom, message: `endpoint ${issue}` });
+  });
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -56,7 +73,7 @@ export const NativeConfig = z
 export const OpenCodeConfig = z
   .object({
     enabled: z.boolean().default(false),
-    baseURL: z.string().url().optional(),
+    baseURL: SecureEndpoint.optional(),
     model: z.string().min(1).optional(),
     passwordEnv: z.string().min(1).optional(),
   })
@@ -65,7 +82,7 @@ export const OpenCodeConfig = z
 export const FreebuffConfig = z
   .object({
     enabled: z.boolean().default(false),
-    baseURL: z.string().url().optional(),
+    baseURL: SecureEndpoint.optional(),
     sdkPath: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
   })
@@ -86,14 +103,192 @@ export const EnginesConfig = z
   })
   .strict();
 
+/**
+ * A provider is configured by URL and the *name* of its credential variable.
+ * The key is resolved from the environment at startup; no secret belongs in the
+ * configuration document.
+ */
+export const ModelProviderConfig = z
+  .object({
+    id: z
+      .string()
+      .trim()
+      .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'provider id must be lower-case letters, digits, - or _'),
+    kind: z.enum(['openai', 'gemini']).default('openai'),
+    baseURL: SecureEndpoint,
+    apiKeyEnv: z
+      .string()
+      .trim()
+      .regex(/^[A-Z][A-Z0-9_]{2,63}$/, 'apiKeyEnv must be an environment variable name'),
+    requestsPerMinute: z.number().int().min(1).max(600).default(20),
+    tokensPerMinute: z.number().int().min(1_000).max(50_000_000).default(100_000),
+    maxConcurrency: z.number().int().min(1).max(8).default(2),
+    requestTimeoutMs: z.number().int().min(1_000).max(300_000).default(60_000),
+  })
+  .strict();
+
+/**
+ * A time-bounded statement that an exact provider model is on a zero-cost tier,
+ * with a URL that evidences it. Required only when the provider publishes no
+ * machine-readable price. It expires so a stale claim cannot route forever.
+ */
+export const FreeTierAttestationConfig = z
+  .object({
+    providerId: z.string().trim().min(1).max(64),
+    modelId: z.string().trim().min(1).max(160),
+    evidenceUrl: z
+      .string()
+      .url()
+      .refine((value) => value.startsWith('https://'), 'evidenceUrl must be https'),
+    verifiedAt: z.string().datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+/**
+ * One explicitly approved provider policy. Every field is recorded evidence, not
+ * a default: a provider without a record is refused, and a mode or operation
+ * that is not listed is not approved. Private grants additionally require no
+ * stored retention, prohibited training, a declared location and an
+ * owner-managed credential; the router enforces those at request time.
+ */
+export const ProviderPolicyGrantConfig = z
+  .object({
+    operation: z.enum(PROCESSING_OPERATIONS),
+    mode: z.enum(['private', 'cloud']),
+    location: z.enum(PROCESSING_LOCATIONS),
+  })
+  .strict();
+
+export const ProviderPolicyConfig = z
+  .object({
+    providerId: z.string().trim().min(1).max(64),
+    retention: z.enum(DATA_RETENTION),
+    training: z.enum(TRAINING_USE),
+    location: z.enum(PROCESSING_LOCATIONS),
+    credentials: z.enum(CREDENTIAL_SOURCES),
+    modes: z.array(z.enum(['private', 'cloud'])).min(1),
+    grants: z.array(ProviderPolicyGrantConfig).default([]),
+    evidenceUrl: z
+      .string()
+      .url()
+      .refine((value) => value.startsWith('https://'), 'evidenceUrl must be https'),
+    verifiedAt: z.string().datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+
+export const RoutingConfig = z
+  .object({
+    /** How many ranked candidates a plan may consider. Bound, never unbounded. */
+    maxCandidates: z.number().int().min(1).max(8).default(4),
+    /** Extra candidates tried after the first failure. 0 disables fallback. */
+    maxFallbacks: z.number().int().min(0).max(4).default(2),
+    failureThreshold: z.number().int().min(1).max(10).default(3),
+    cooldownMs: z.number().int().min(1_000).max(600_000).default(30_000),
+    discoveryIntervalMs: z.number().int().min(60_000).max(3_600_000).default(600_000),
+    defaultMaxOutputTokens: z.number().int().min(32).max(32_768).default(1_024),
+    contextMarginTokens: z.number().int().min(0).max(8_192).default(64),
+  })
+  .strict();
+
+/**
+ * Recorded capability and quota evidence for one model. The router ranks on
+ * these numbers; a model with no entry inherits neutral defaults and is still
+ * free-only, so omission cannot create a paid path.
+ */
+export const ModelCatalogEntry = z
+  .object({
+    providerId: z.string().min(1).max(64),
+    modelId: z.string().min(1).max(160),
+    label: z.string().min(1).max(160).optional(),
+    coding: z.number().min(0).max(1).default(0.5),
+    reasoning: z.number().min(0).max(1).default(0.5),
+    speed: z.number().min(0).max(1).default(0.5),
+    toolCalling: z.boolean().default(false),
+    multimodal: z.boolean().default(false),
+    contextTokens: z.number().int().min(1).max(10_000_000).default(8192),
+    requestsPerMinute: z.number().int().min(1).max(10_000).default(20),
+    requestsPerDay: z.number().int().min(1).max(1_000_000).default(500),
+    tokensPerDay: z.number().int().min(1).max(1_000_000_000).default(500_000),
+  })
+  .strict();
+
 export const ModelsConfig = z
   .object({
-    /** Ordered candidates for free inference routing; first usable one wins. */
-    route: z.array(ModelRef).min(1),
+    /**
+     * Preferred ordering, not a free claim. A listed model is still refused unless
+     * discovery and verification establish zero cost.
+     */
+    route: z.array(ModelRef).default([]),
+    /** Optional capability/quota evidence; ranking is neutral without it. */
+    catalog: z.array(ModelCatalogEntry).default([]),
+    /** Bounded fallback across approved free models, never to a paid one. */
+    maxFallbacks: z.number().int().min(0).max(5).default(2),
     /** Zero-cost is a literal: there is no configuration that enables paid use. */
     allowPaid: z.literal(false).default(false),
     dailyRequestBudget: z.number().int().min(1).max(100_000).default(1_000),
     dailyTokenBudget: z.number().int().min(1).max(100_000_000).default(2_000_000),
+    providers: z.array(ModelProviderConfig).default([]),
+    attestations: z.array(FreeTierAttestationConfig).default([]),
+    /** Hosted inference requires an explicit owner-approved policy record. */
+    policy: z.array(ProviderPolicyConfig).default([]),
+    routing: RoutingConfig.prefault({}),
+    /** Optional results file produced by `npm run benchmark`. */
+    benchmarkResultsPath: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const ToolsConfig = z
+  .object({
+    enabled: z.boolean().default(true),
+    /** Shell and network are off unless the owner turns them on explicitly. */
+    shellEnabled: z.boolean().default(false),
+    allowedCommands: z.array(z.string().min(1).max(120)).max(50).default([]),
+    networkEnabled: z.boolean().default(false),
+    allowedHosts: z.array(z.string().min(1).max(255)).max(50).default([]),
+    maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(65_536),
+    commandTimeoutMs: z.number().int().min(100).max(60_000).default(15_000),
+    maxSearchFiles: z.number().int().min(1).max(20_000).default(2_000),
+  })
+  .strict();
+
+export const KnowledgeConfig = z
+  .object({
+    enabled: z.boolean().default(true),
+    maxDocuments: z.number().int().min(1).max(10_000).default(500),
+    /** Set together with an inference endpoint to enable semantic retrieval. */
+    embeddingModel: z.string().min(1).max(160).optional(),
+  })
+  .strict();
+
+export const McpServerConfig = z.discriminatedUnion('transport', [
+  z
+    .object({
+      name: z.string().min(1).max(60),
+      transport: z.literal('http'),
+      url: z.string().url(),
+      headersEnv: z.record(z.string(), z.string().min(1).max(200)).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      name: z.string().min(1).max(60),
+      transport: z.literal('stdio'),
+      command: z.string().min(1).max(200),
+      args: z.array(z.string().max(500)).max(40).default([]),
+      envFrom: z.array(z.string().min(1).max(200)).max(40).default([]),
+    })
+    .strict(),
+]);
+
+export const McpConfig = z
+  .object({ servers: z.array(McpServerConfig).max(10).default([]) })
+  .strict();
+
+export const EngineRoutingConfig = z
+  .object({
+    defaultMode: z.enum(['auto', 'fast', 'complex']).default('auto'),
   })
   .strict();
 
@@ -146,65 +341,13 @@ export const BrowserRemoteConfig = z
      * cloud-hosted. Without it the adapter stays fail-closed and reports
      * `unverified`; it cannot be set on the owner's behalf.
      */
-    zeroCostAttested: z.boolean().default(false),
-  })
-  .strict();
-
-/**
- * Cloud browser integration. The default is disabled with no provider, which is
- * the only truthful state until an authorized zero-cost endpoint has been
- * verified. No field can enable paid infrastructure.
- */
-export const BrowserConfig = z
-  .object({
-    enabled: z.boolean().default(false),
-    provider: z.enum(['none', 'http']).default('none'),
-    allowPaid: z.literal(false).default(false),
-    sessionTtlMs: z.number().int().min(60_000).max(3_600_000).default(900_000),
-    maxSessionsPerOwner: z.number().int().min(1).max(16).default(3),
-    maxScreenshotBytes: z.number().int().min(1_024).max(4_194_304).default(2_097_152),
-    /** Bounded by the request body limit so an upload cannot be truncated. */
-    maxUploadBytes: z.number().int().min(1_024).max(524_288).default(524_288),
-    remote: BrowserRemoteConfig.prefault({}),
-  })
-  .strict();
-
-export const SchedulesConfig = z
-  .object({
-    /** The loop is process-owned; disabling it leaves stored schedules dormant. */
-    enabled: z.boolean().default(true),
-    tickMs: z.number().int().min(50).max(60_000).default(5_000),
-    /** Schedules and receipts examined per pass; bounds one tick's work. */
-    batchSize: z.number().int().min(1).max(200).default(50),
-    /** Engine-wide ceiling on concurrently dispatched scheduled runs. */
-    maxConcurrentRuns: z.number().int().min(1).max(16).default(2),
-    /** Lateness beyond this is a missed occurrence, never a fired backlog. */
-    missedGraceMs: z.number().int().min(1_000).max(86_400_000).default(300_000),
-    /** A receipt with no task younger than this may still be dispatching. */
-    dispatchTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000),
-    /** Consecutive failures that pause a schedule to stop a runaway loop. */
-    pauseAfterFailures: z.number().int().min(1).max(100).default(5),
-    /** Execution receipts returned by the history operation by default. */
-    historyLimit: z.number().int().min(1).max(500).default(100),
-  })
-  .strict();
-
-/**
- * Durable artifact bounds. Every ceiling is a hard refusal, never a warning:
- * an oversized upload is rejected before it is written and an owner over quota
- * is refused rather than allowed to grow unbounded storage.
- */
-export const ArtifactsConfig = z
-  .object({
-    maxBytesPerArtifact: z.number().int().min(1_024).max(10_485_760).default(8_388_608),
-    maxBytesPerOwner: z.number().int().min(1_024).max(1_073_741_824).default(268_435_456),
-    maxArtifactsPerOwner: z.number().int().min(1).max(10_000).default(1_000),
-    maxVersionsPerArtifact: z.number().int().min(1).max(100).default(20),
-    /** 0 keeps an artifact until it is deleted or a version is pruned. */
-    defaultRetentionDays: z.number().int().min(0).max(3_650).default(0),
-    maxRetentionDays: z.number().int().min(1).max(3_650).default(365),
-    /** MongoDB document limit is 16 MiB; a chunk stays comfortably below it. */
-    chunkBytes: z.number().int().min(65_536).max(4_194_304).default(1_048_576),
+    cancelQuarantineMs: z.number().int().min(1_000).max(3_600_000).default(300_000),
+    /**
+     * How long a workspace root stays held after an execution whose termination
+     * could not be verified. A new run is refused in that root rather than
+     * writing alongside code this process can no longer observe.
+     */
+    containmentHoldMs: z.number().int().min(1_000).max(600_000).default(60_000),
   })
   .strict();
 
@@ -244,7 +387,10 @@ export const EngineConfigSchema = z
     schedules: SchedulesConfig.prefault({}),
     artifacts: ArtifactsConfig.prefault({}),
     persistence: PersistenceConfig.prefault({}),
-    games: GamesConfig.prefault({}),
+    tools: ToolsConfig.prefault({}),
+    knowledge: KnowledgeConfig.prefault({}),
+    mcp: McpConfig.prefault({}),
+    routing: EngineRoutingConfig.prefault({}),
   })
   .strict();
 

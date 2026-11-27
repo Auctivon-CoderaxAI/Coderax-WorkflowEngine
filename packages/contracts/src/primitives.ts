@@ -5,15 +5,7 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-export const CONTRACT_VERSION = '1.2.0' as const;
-/** Majors the server can still speak; a new major needs a new `/vN` prefix. */
-export const CONTRACT_MAJOR = 1 as const;
-/**
- * `1.0.0` was the first published surface; `1.1.0` added the router, games and
- * browser routes. `1.2.0` adds the capability handshake, which is additive: it
- * publishes one new read-only operation and moves no existing path.
- */
-export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0'] as const;
+export const CONTRACT_VERSION = '1.1.0' as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
 /** Chat streaming frames are versioned separately from both HTTP and events. */
@@ -132,12 +124,8 @@ export const EngineFailureCode = z.enum([
   'provider_error',
   'budget_exhausted',
   'paid_model_refused',
-  /** The run is suspended until the owner decides a scoped permission request. */
+  'model_missing',
   'approval_required',
-  /** The plan finished but its evidence did not verify the objective. */
-  'verification_failed',
-  /** The bounded autonomy budget was exhausted before the objective settled. */
-  'iteration_exhausted',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;
 

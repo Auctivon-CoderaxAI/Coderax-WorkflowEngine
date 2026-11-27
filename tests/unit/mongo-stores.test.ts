@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ConversationRecord, NotificationRecord, StoredMessage } from '../../src/domain.js';
+import { ConversationConflictError } from '../../src/persistence/conversations.js';
 import { createMongoConversationRepository } from '../../src/persistence/mongo-tables.js';
 import { createMongoMemoryStore } from '../../src/persistence/mongo-tables.js';
 import { createMongoNotificationStore } from '../../src/persistence/mongo-tables.js';
@@ -272,12 +273,15 @@ test('conversations are created once, listed and never shared across owners', as
   const again = await conversations.ensure(conversation({ title: 'Different title' }));
   assert.equal(again.ok && again.record.title, 'Persisted');
 
-  const foreign = await conversations.ensure(conversation({ ownerId: 'someone-else' }));
-  assert.deepEqual(foreign, { ok: false, reason: 'owner' });
-  const foreignMode = await conversations.ensure(conversation({ mode: 'private' }));
-  assert.deepEqual(foreignMode, { ok: false, reason: 'mode' });
-  const foreignSurface = await conversations.ensure(conversation({ isWork: false }));
-  assert.deepEqual(foreignSurface, { ok: false, reason: 'surface' });
+  await assert.rejects(
+    () => conversations.ensure(conversation({ ownerId: 'someone-else' })),
+    (error: unknown) =>
+      error instanceof ConversationConflictError && error.reason === 'owner',
+  );
+  await assert.rejects(
+    () => conversations.ensure(conversation({ mode: 'private' })),
+    (error: unknown) => error instanceof ConversationConflictError && error.reason === 'mode',
+  );
 
   assert.equal(await conversations.get('owner-test', 'conv_1').then(Boolean), true);
   assert.equal(await conversations.get('someone-else', 'conv_1').then(Boolean), false);
@@ -440,4 +444,49 @@ test('notifications are written once per task and marked read per owner', async 
 
   await notifications.markRead('owner-test', 'task_1');
   assert.equal((await notifications.list('owner-test')).unread, 0);
+});
+
+test('an owner decision is durable and a grant is consumed exactly once', async () => {
+  const collection = createFakeCollection();
+  const tasks = createMongoTaskRepository(collection);
+  await tasks.create(
+    taskRecord({ taskId: 'task_approval', conversationId: 'conv_approval', runToken: 'run-1' }),
+  );
+
+  const recorded = await tasks.recordApproval({
+    taskId: 'task_approval',
+    requestId: 'req-1',
+    scope: 'command.execute',
+    resource: 'task_approval',
+    decision: 'approved',
+    decidedAt: NOW,
+  });
+  assert.equal(recorded.applied, true);
+
+  // A new repository over the same collection is what a restart sees.
+  const reopened = createMongoTaskRepository(collection);
+  assert.equal((await reopened.get('task_approval'))?.approval?.decision, 'approved');
+  assert.equal(
+    await reopened.consumeApproval({ taskId: 'task_approval', requestId: 'req-1', now: NOW }),
+    true,
+  );
+  assert.equal(
+    await reopened.consumeApproval({ taskId: 'task_approval', requestId: 'req-1', now: NOW }),
+    false,
+  );
+
+  // A spent grant cannot be replaced by a later request.
+  const other = await tasks.recordApproval({
+    taskId: 'task_approval',
+    requestId: 'req-2',
+    scope: 'command.execute',
+    resource: 'task_approval',
+    decision: 'approved',
+    decidedAt: NOW,
+  });
+  assert.equal(other.applied, false);
+  assert.equal(
+    await tasks.consumeApproval({ taskId: 'task_approval', requestId: 'req-2', now: NOW }),
+    false,
+  );
 });

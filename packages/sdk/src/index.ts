@@ -36,6 +36,9 @@ import {
   GameSessionLogs,
   GameSessionVerification,
   HealthReport,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
   MemoryList,
   ModelList,
   NotificationList,
@@ -43,16 +46,11 @@ import {
   PermissionRequest,
   Problem,
   ReadinessReport,
-  Schedule,
-  ScheduleControlResult,
-  ScheduleDispatch,
-  ScheduleEventResult,
-  ScheduleExecutionList,
-  ScheduleList,
-  ScheduleUpcoming,
+  RoutingReport,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
+  ToolList,
 } from '@coderax/contracts';
 import type {
   BuildGameRequest,
@@ -72,8 +70,7 @@ import type {
   CreateGameRequest,
   CreateGameSessionRequest,
   DataMode,
-  GameSessionControlRequest,
-  IterateGameRequest,
+  KnowledgeIngestRequest,
   PermissionDecisionRequest,
   RestoreGameBuildRequest,
   SaveGameSpecRequest,
@@ -143,6 +140,11 @@ export const SDK_OPERATIONS = Object.freeze({
   getReadiness: 'readiness',
   listAgents: 'agents',
   listModels: 'models',
+  listTools: 'listTools',
+  getRouting: 'getRouting',
+  ingestKnowledge: 'ingestKnowledge',
+  listKnowledge: 'listKnowledge',
+  searchKnowledge: 'searchKnowledge',
   submitChat: 'chat',
   submitWork: 'submitWork',
   getTask: 'task',
@@ -156,62 +158,7 @@ export const SDK_OPERATIONS = Object.freeze({
   listPermissions: 'permissions',
   decidePermission: 'decidePermission',
   listNotifications: 'notifications',
-  browserCapabilities: 'browserCapabilities',
-  listBrowserSessions: 'browserSessions',
-  getBrowserSession: 'browserSession',
-  createBrowserSession: 'createBrowserSession',
-  browserAction: 'browserAction',
-  pauseBrowserSession: 'pauseBrowserSession',
-  resumeBrowserSession: 'resumeBrowserSession',
-  takeoverBrowserSession: 'takeoverBrowserSession',
-  closeBrowserSession: 'closeBrowserSession',
-  authorizeBrowserSession: 'authorizeBrowserSession',
-  decideBrowserAuthorization: 'decideBrowserAuthorization',
-  listBrowserReceipts: 'browserReceipts',
-  getBrowserArtifact: 'browserArtifact',
-  listArtifacts: 'artifacts',
-  artifactProjectManifest: 'artifactManifest',
-  generateDeliverable: 'generateDeliverable',
-  uploadArtifact: 'uploadArtifact',
-  pruneArtifacts: 'pruneArtifacts',
-  getArtifact: 'artifact',
-  uploadArtifactVersion: 'uploadArtifactVersion',
-  restoreArtifactVersion: 'restoreArtifactVersion',
-  listArtifactVersions: 'artifactVersions',
-  downloadArtifact: 'downloadArtifact',
-  exportArtifact: 'exportArtifact',
-  deleteArtifact: 'deleteArtifact',
-  createSchedule: 'createSchedule',
-  listSchedules: 'schedules',
-  getSchedule: 'schedule',
-  pauseSchedule: 'pauseSchedule',
-  resumeSchedule: 'resumeSchedule',
-  cancelSchedule: 'cancelSchedule',
-  triggerSchedule: 'triggerSchedule',
-  listScheduleExecutions: 'scheduleExecutions',
-  dispatchScheduleEvent: 'scheduleEvent',
-  updateSchedule: 'updateSchedule',
-  getScheduleUpcoming: 'scheduleUpcoming',
   markNotificationsRead: 'markNotificationsRead',
-  getHandshake: 'handshake',
-  getGameCapabilities: 'gameCapabilities',
-  listGames: 'games',
-  createGame: 'createGame',
-  getGame: 'game',
-  saveGameSpec: 'saveGameSpec',
-  buildGame: 'buildGame',
-  listGameBuilds: 'gameBuilds',
-  restoreGameBuild: 'restoreGameBuild',
-  iterateGame: 'iterateGame',
-  previewGame: 'gamePreview',
-  exportGame: 'exportGame',
-  createGameSession: 'createGameSession',
-  listGameSessions: 'gameSessions',
-  getGameSession: 'gameSession',
-  observeGameSession: 'observeGameSession',
-  controlGameSession: 'controlGameSession',
-  gameSessionLogs: 'gameSessionLogs',
-  gameSessionVerification: 'gameSessionVerification',
 } as const);
 
 export type SdkOperationId = keyof typeof SDK_OPERATIONS;
@@ -548,6 +495,45 @@ export class CoderaxClient {
       method: 'GET',
       path: '/v1/memory',
       query: { mode },
+    });
+  }
+
+  listTools(): Promise<ToolList> {
+    return this.request<ToolList>(ToolList, {
+      method: 'GET',
+      path: '/v1/tools',
+    });
+  }
+
+  getRouting(mode: 'auto' | 'fast' | 'complex' = 'auto'): Promise<RoutingReport> {
+    return this.request<RoutingReport>(RoutingReport, {
+      method: 'GET',
+      path: '/v1/routing',
+      query: { mode },
+    });
+  }
+
+  ingestKnowledge(request: KnowledgeIngestRequest): Promise<KnowledgeIngestResult> {
+    return this.request<KnowledgeIngestResult>(KnowledgeIngestResult, {
+      method: 'POST',
+      path: '/v1/knowledge',
+      body: request,
+    });
+  }
+
+  listKnowledge(mode: DataMode = 'private'): Promise<KnowledgeList> {
+    return this.request<KnowledgeList>(KnowledgeList, {
+      method: 'GET',
+      path: '/v1/knowledge',
+      query: { mode },
+    });
+  }
+
+  searchKnowledge(q: string, k?: number, mode?: DataMode): Promise<KnowledgeSearchResult> {
+    return this.request<KnowledgeSearchResult>(KnowledgeSearchResult, {
+      method: 'GET',
+      path: '/v1/knowledge/search',
+      query: { q, k, mode },
     });
   }
 

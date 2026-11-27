@@ -1,32 +1,14 @@
-import type {
-  ArtifactDescriptor,
-  DeliverableRequestInput,
-  EngineFailureCode,
-  ModelRef,
-  PermissionScope,
-  Usage,
-} from '@coderax/contracts';
-import type { AgentHistoryTurn } from '../types.js';
-import type {
-  PlanStepKind,
-  ReasoningMode,
-  TaskEvidence,
-  TaskPlan,
-  TaskPlanStep,
-} from '../../domain.js';
-
-export type ModelCompletionRequest = {
-  model: ModelRef;
-  system: string;
-  prompt: string;
-  signal: AbortSignal;
-  maxOutputTokens?: number;
-};
-
-export type ModelGateway = {
-  id: string;
-  complete: (request: ModelCompletionRequest) => Promise<{ text: string; usage?: Usage }>;
-};
+/**
+ * The gateway port is owned by the model router: an agent names a resolved model
+ * and never reaches a provider URL or key. Re-exported here so the native agent
+ * does not import routing internals.
+ */
+export type {
+  GatewayCompletion,
+  GatewayRequest,
+  GatewayStreamEvent,
+  ModelGateway,
+} from '../../models/types.js';
 
 /**
  * A plan step is the unit the planner produces and the executor consumes. The
@@ -144,8 +126,15 @@ export type PlanOutcome = {
  * and it returns data only; the agent decides whether and how to execute it.
  */
 export type Planner = {
-  plan: (input: PlanInput) => Promise<PlanOutcome>;
-  replan: (input: ReplanInput) => Promise<PlanOutcome>;
+  plan: (input: {
+    objective: string;
+    maxSteps: number;
+    /** Earlier turns, so a model plan sees the same context the run does. */
+    history?: import('../types.js').AgentHistoryTurn[];
+    /** Present when a model-assisted plan is possible; its absence is not an error. */
+    complete?: (prompt: string, signal: AbortSignal) => Promise<string>;
+    signal?: AbortSignal;
+  }) => Promise<PlanStep[]> | PlanStep[];
 };
 
 export type NativeLimits = {
