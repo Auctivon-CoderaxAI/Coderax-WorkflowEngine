@@ -224,14 +224,16 @@ test('conversations are created once, listed and never shared across owners', as
   const conversations = createMongoConversationRepository(input);
 
   const first = await conversations.ensure(conversation());
-  assert.equal(first.conversationId, 'conv_1');
+  assert.equal(first.ok && first.record.conversationId, 'conv_1');
   const again = await conversations.ensure(conversation({ title: 'Different title' }));
-  assert.equal(again.title, 'Persisted');
+  assert.equal(again.ok && again.record.title, 'Persisted');
 
-  await assert.rejects(
-    () => conversations.ensure(conversation({ ownerId: 'someone-else' })),
-    /identity collision/,
-  );
+  const foreign = await conversations.ensure(conversation({ ownerId: 'someone-else' }));
+  assert.deepEqual(foreign, { ok: false, reason: 'owner' });
+  const foreignMode = await conversations.ensure(conversation({ mode: 'private' }));
+  assert.deepEqual(foreignMode, { ok: false, reason: 'mode' });
+  const foreignSurface = await conversations.ensure(conversation({ isWork: false }));
+  assert.deepEqual(foreignSurface, { ok: false, reason: 'surface' });
 
   assert.equal(await conversations.get('owner-test', 'conv_1').then(Boolean), true);
   assert.equal(await conversations.get('someone-else', 'conv_1').then(Boolean), false);
@@ -257,8 +259,22 @@ test('messages are appended once, ordered, and reflected in the conversation', a
   );
 
   assert.deepEqual(
-    (await conversations.messages('conv_1')).map((entry) => entry.messageId),
+    (
+      await conversations.messages({
+        ownerId: 'owner-test',
+        conversationId: 'conv_1',
+        mode: 'cloud',
+      })
+    )?.map((entry) => entry.messageId),
     ['msg_1', 'msg_2'],
+  );
+  assert.equal(
+    await conversations.messages({
+      ownerId: 'owner-test',
+      conversationId: 'conv_1',
+      mode: 'private',
+    }),
+    null,
   );
   const record = await conversations.get('owner-test', 'conv_1');
   assert.ok(record);

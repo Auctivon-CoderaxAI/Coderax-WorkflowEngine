@@ -30,6 +30,12 @@ export type RunResult = {
    * state in that case: another generation may already own the task.
    */
   ownershipLost: boolean;
+  /**
+   * True when the adapter's promise settled (or rejected) inside the grace
+   * bound. False means termination could not be verified and the caller must
+   * revoke the run's access to its workspace and credentials.
+   */
+  terminated: boolean;
 };
 
 export type TaskRunner = {
@@ -79,7 +85,7 @@ export function createTaskRunner(input: {
     token: string;
     generation: number;
     workspaceRoot: string;
-  }) => void;
+  }) => void | Promise<void>;
 }): TaskRunner {
   return {
     run: async ({
@@ -162,8 +168,13 @@ export function createTaskRunner(input: {
                 detail: 'Execution ownership was superseded by another run.',
               },
               ownershipLost: true,
+              terminated: !abandoned,
             }
-          : { outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) }, ownershipLost: false };
+          : {
+              outcome: { kind: 'cancelled', ...(abandoned ? { abandoned: true } : {}) },
+              ownershipLost: false,
+              terminated: !abandoned,
+            };
 
       try {
         if (controller.signal.aborted) return cancelled(false);
@@ -172,7 +183,7 @@ export function createTaskRunner(input: {
             if (await Promise.race([cancellationRequested(), grace]) || controller.signal.aborted) return cancelled(false);
           } catch {
             if (controller.signal.aborted) return cancelled(false);
-            return { ownershipLost: false, outcome: { kind: 'interrupted', detail: 'Work admission could not be verified.' } };
+            return { ownershipLost: false, outcome: { kind: 'interrupted', detail: 'Work admission could not be verified.' }, terminated: true };
           }
         }
         const running = adapter.run({ ...request, signal: controller.signal }, guardedReport);
@@ -182,9 +193,11 @@ export function createTaskRunner(input: {
           // an unhandled one, and its result must never be applied: the lease and
           // the task record already say this run is over.
           void running.catch(() => undefined);
-          if (!ownershipLost) {
-            input.onAbandoned?.({ scope, token, generation, workspaceRoot });
-          }
+          // Whether the lease was lost or the owner cancelled, an adapter that
+          // ignored its abort may still be executing. Revocation is awaited so
+          // the caller cannot settle (or shut down) while the workspace is
+          // still reachable by the abandoned generation.
+          await input.onAbandoned?.({ scope, token, generation, workspaceRoot });
           return cancelled(true);
         }
         const outcome = settled.outcome;
@@ -195,10 +208,11 @@ export function createTaskRunner(input: {
               detail: 'Execution ownership was superseded by another run.',
             },
             ownershipLost: true,
+            terminated: true,
           };
         }
         if (cancelRequested || (!outcome.ok && outcome.code === 'cancelled')) {
-          return { outcome: { kind: 'cancelled' }, ownershipLost: false };
+          return { outcome: { kind: 'cancelled' }, ownershipLost: false, terminated: true };
         }
         if (outcome.ok) {
           return {
@@ -209,6 +223,7 @@ export function createTaskRunner(input: {
               ...(outcome.verification ? { verification: outcome.verification } : {}),
             },
             ownershipLost: false,
+            terminated: true,
           };
         }
         return {
@@ -220,8 +235,10 @@ export function createTaskRunner(input: {
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           },
           ownershipLost: false,
+          terminated: true,
         };
       } catch {
+        // A rejection is a settled promise, so termination itself is verified.
         if (ownershipLost) {
           return {
             outcome: {
@@ -229,12 +246,15 @@ export function createTaskRunner(input: {
               detail: 'Execution ownership was superseded by another run.',
             },
             ownershipLost: true,
+            terminated: true,
           };
         }
         // An adapter that throws on abort was cancelled, not broken. Reporting a
         // provider failure here would tell the owner to retry something they
         // deliberately stopped.
-        if (cancelRequested) return { outcome: { kind: 'cancelled' }, ownershipLost: false };
+        if (cancelRequested) {
+          return { outcome: { kind: 'cancelled' }, ownershipLost: false, terminated: true };
+        }
         return {
           outcome: {
             kind: 'failed',
@@ -243,6 +263,7 @@ export function createTaskRunner(input: {
             retryable: false,
           },
           ownershipLost: false,
+          terminated: true,
         };
       } finally {
         clearInterval(timer);

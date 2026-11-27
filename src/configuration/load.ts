@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { validateRemoteEndpoint } from './endpoint.js';
 import { EngineConfigSchema, type EngineConfig } from './schema.js';
 
 export class ConfigurationError extends Error {
@@ -123,11 +124,27 @@ export function validateInvariants(config: EngineConfig): string[] {
     if (!engines.opencode.passwordEnv) {
       issues.push('engines.opencode.passwordEnv is required when enabled');
     }
+    if (engines.opencode.baseURL) {
+      const endpoint = validateRemoteEndpoint({
+        url: engines.opencode.baseURL,
+        name: 'engines.opencode.baseURL',
+        carriesCredential: Boolean(engines.opencode.passwordEnv),
+      });
+      if (!endpoint.ok) issues.push(endpoint.detail);
+    }
   }
   if (engines.freebuff.enabled) {
     if (!engines.freebuff.baseURL) issues.push('engines.freebuff.baseURL is required when enabled');
     if (!engines.freebuff.sdkPath) issues.push('engines.freebuff.sdkPath is required when enabled');
     if (!engines.freebuff.model) issues.push('engines.freebuff.model is required when enabled');
+    if (engines.freebuff.baseURL) {
+      const endpoint = validateRemoteEndpoint({
+        url: engines.freebuff.baseURL,
+        name: 'engines.freebuff.baseURL',
+        carriesCredential: false,
+      });
+      if (!endpoint.ok) issues.push(endpoint.detail);
+    }
   }
 
   if (browsers.enabled && browsers.provider === 'http') {

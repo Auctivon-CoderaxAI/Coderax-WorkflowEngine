@@ -78,9 +78,9 @@ export const EnginesConfig = z
      * external dependency, so an unconfigured deployment still has one engine.
      */
     default: EngineId.default('native'),
-    native: NativeConfig.default({}),
-    opencode: OpenCodeConfig.default({}),
-    freebuff: FreebuffConfig.default({}),
+    native: NativeConfig.prefault({}),
+    opencode: OpenCodeConfig.prefault({}),
+    freebuff: FreebuffConfig.prefault({}),
   })
   .strict();
 
@@ -144,7 +144,7 @@ export const BrowserConfig = z
     maxScreenshotBytes: z.number().int().min(1_024).max(4_194_304).default(2_097_152),
     /** Bounded by the request body limit so an upload cannot be truncated. */
     maxUploadBytes: z.number().int().min(1_024).max(524_288).default(524_288),
-    remote: BrowserRemoteConfig.default({}),
+    remote: BrowserRemoteConfig.prefault({}),
   })
   .strict();
 
@@ -194,15 +194,17 @@ export const PersistenceConfig = z
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
-    server: ServerConfig.default({}),
+    server: ServerConfig.prefault({}),
     auth: AuthConfig,
     workspaces: WorkspacesConfig,
-    engines: EnginesConfig.default({}),
+    engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
-    execution: ExecutionConfig.default({}),
-    browsers: BrowserConfig.default({}),
-    schedules: SchedulesConfig.default({}),
-    persistence: PersistenceConfig.default({}),
+    // `prefault` applies the empty object before nested defaults are parsed.
+    // Zod 4's `default` requires the fully-populated output shape as its input.
+    execution: ExecutionConfig.prefault({}),
+    browsers: BrowserConfig.prefault({}),
+    schedules: SchedulesConfig.prefault({}),
+    persistence: PersistenceConfig.prefault({}),
   })
   .strict();
 
