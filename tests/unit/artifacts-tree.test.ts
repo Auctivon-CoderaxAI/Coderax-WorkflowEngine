@@ -154,3 +154,28 @@ test('a tree batch rejects duplicate, case-folded and file-directory path confli
   });
   assert.equal(empty.ok, false);
 });
+
+test('descriptor reads for reused paths fail before a mixed batch changes the project', async () => {
+  const h = artifactHarness();
+  let reads = 0;
+  const writer = createArtifactTreeWriter({ artifacts: {
+    ...h.service,
+    get: async () => {
+      reads++;
+      return { ok: false, code: 'storage_unavailable', detail: 'Descriptor unavailable.', retryable: true };
+    },
+  } });
+  const partition = { projectId: 'proj_descriptors', mode: 'cloud' as const };
+  const original = files()[0]!;
+  const first = await writer.persist(h.owner, { ...partition, files: [original] });
+  assert.ok(first.ok);
+  assert.equal(first.value.descriptors[0]?.artifactId, first.value.files[0]?.artifactId);
+  assert.equal(reads, 0);
+
+  const second = await writer.persist(h.owner, { ...partition, files: [files()[1]!, original] });
+  assert.equal(second.ok, false);
+  assert.equal(reads, 1);
+  const manifest = await h.service.manifest(h.owner, partition);
+  assert.ok(manifest.ok);
+  assert.deepEqual(manifest.value.files, first.value.files);
+});

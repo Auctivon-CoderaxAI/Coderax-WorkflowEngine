@@ -91,6 +91,9 @@ export function validateInvariants(config: EngineConfig): string[] {
   const issues: string[] = [];
   const { engines, execution, models, schedules, workspaces, browsers } = config;
 
+  if (config.artifacts.defaultRetentionDays > config.artifacts.maxRetentionDays) {
+    issues.push("artifacts.defaultRetentionDays must not exceed artifacts.maxRetentionDays");
+  }
   if (execution.heartbeatIntervalMs * 3 > execution.leaseTtlMs) {
     issues.push(
       `execution.heartbeatIntervalMs (${execution.heartbeatIntervalMs}) must be at most one third of execution.leaseTtlMs (${execution.leaseTtlMs})`,

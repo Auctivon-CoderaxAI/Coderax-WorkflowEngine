@@ -79,6 +79,43 @@ export type PdfDocumentInput = {
   footerNote?: string;
 };
 
+/**
+ * Splits a token that is wider than the line into the largest chunks that fit.
+ *
+ * Grow from a wide-glyph estimate until the prefix overflows, then binary-search
+ * that interval. Measurements stay local even for very long tokens.
+ */
+function breakToken(font: PDFFont, size: number, width: number, token: string): string[] {
+  const limit = Math.max(1, width);
+  const widest = Math.max(1, font.widthOfTextAtSize('W', size));
+  const cap = Math.max(1, Math.min(token.length, Math.floor(limit / widest) + 1));
+  const parts: string[] = [];
+  let rest = token;
+  while (rest.length > 0) {
+    let low = 1;
+    let high = Math.min(rest.length, cap);
+    let best = 1;
+    while (font.widthOfTextAtSize(rest.slice(0, high), size) <= limit) {
+      best = high;
+      low = high + 1;
+      if (high === rest.length) break;
+      high = Math.min(rest.length, high * 2);
+    }
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (font.widthOfTextAtSize(rest.slice(0, mid), size) <= limit) {
+        best = Math.max(best, mid);
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    parts.push(rest.slice(0, best));
+    rest = rest.slice(best);
+  }
+  return parts.length > 0 ? parts : [token];
+}
+
 function wrapText(
   text: string,
   font: PDFFont,
@@ -105,14 +142,9 @@ function wrapText(
         line = word;
         continue;
       }
-      let rest = word;
-      while (font.widthOfTextAtSize(rest, size) > width && rest.length > 1) {
-        let cut = rest.length - 1;
-        while (cut > 1 && font.widthOfTextAtSize(rest.slice(0, cut), size) > width) cut -= 1;
-        lines.push(rest.slice(0, cut));
-        rest = rest.slice(cut);
-      }
-      line = rest;
+      const parts = breakToken(font, size, width, word);
+      for (const part of parts.slice(0, -1)) lines.push(part);
+      line = parts[parts.length - 1] ?? '';
     }
     lines.push(line);
   }
@@ -254,14 +286,8 @@ class PdfWriter {
     const lineHeight = 11.5;
     const lines: string[] = [];
     for (const raw of toWinAnsi(value).split('\n')) {
-      let rest = raw.length === 0 ? ' ' : raw;
-      while (font.widthOfTextAtSize(rest, size) > CONTENT_WIDTH - 20) {
-        let cut = rest.length - 1;
-        while (cut > 1 && font.widthOfTextAtSize(rest.slice(0, cut), size) > CONTENT_WIDTH - 20) cut -= 1;
-        lines.push(rest.slice(0, cut));
-        rest = rest.slice(cut);
-      }
-      lines.push(rest);
+      const rest = raw.length === 0 ? ' ' : raw;
+      lines.push(...breakToken(font, size, CONTENT_WIDTH - 20, rest));
     }
     const height = lines.length * lineHeight + 12;
     this.ensure(height + 8);

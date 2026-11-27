@@ -68,7 +68,7 @@ export function createPermissionStore(input: {
   return {
     request: async ({ ownerId, taskId, agent, scope, description, resource, ttlMs }) => {
       const now = input.clock.now();
-      const ttl = ttlMs ?? 15 * 60_000;
+      const ttl = ttlMs ?? input.defaultTtlMs ?? 15 * 60_000;
       const record = {
         requestId: input.ids.requestId(),
         taskId,

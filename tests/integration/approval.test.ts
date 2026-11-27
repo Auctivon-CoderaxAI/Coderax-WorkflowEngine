@@ -135,7 +135,7 @@ test('a scoped read suspends for owner approval, then resumes with the real gran
       `evidence was ${JSON.stringify(completed.result?.verification?.evidence)}`,
     );
 
-    const replay = started.app.dependencies.events.replay(taskId, 0);
+    const replay = await started.app.dependencies.events.replay(taskId, 0);
     assert.ok(replay.events.some((event) => event.type === 'approval.required'));
     assert.ok(replay.events.some((event) => event.type === 'task.completed'));
 

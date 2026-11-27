@@ -7,7 +7,7 @@ import path from 'node:path';
  * Every compiled test file must belong to exactly one gate (the `coverage`
  * check enforces it), so adding a suite without assigning it to the gate cannot
  * silently leave it unrun. Command gates cover the checks that are not tests:
- * OpenAPI drift and the dependency audit.
+ * OpenAPI drift, dependency audit and the static architecture report.
  */
 
 export type Gate = {
@@ -21,12 +21,16 @@ export type Gate = {
 
 export const GATES: readonly Gate[] = Object.freeze([
   { id: 'unit', title: 'Unit tests', directory: 'dist/tests/unit' },
-  { id: 'contract', title: 'Route, SDK and OpenAPI contract tests', directory: 'dist/tests/contract', live: true },
-  { id: 'integration', title: 'Integration tests (real MongoDB where durable)', directory: 'dist/tests/integration', live: true },
+  { id: 'integration', title: 'Integration tests (fake Mongo labelled)', directory: 'dist/tests/integration' },
   { id: 'security', title: 'Security regression tests', directory: 'dist/tests/security' },
-  { id: 'e2e', title: 'End-to-end API-to-engine tests', directory: 'dist/tests/e2e' },
+  { id: 'adversarial', title: 'Adversarial execution tests', directory: 'dist/tests/adversarial' },
+  { id: 'contract', title: 'Route, SDK and OpenAPI contract tests', directory: 'dist/tests/contract' },
   { id: 'openapi', title: 'OpenAPI drift detection', command: 'dist/scripts/check-openapi.js' },
+  { id: 'architecture', title: 'Dependency wiring, ownership and unused capability detection', directory: 'dist/tests/architecture', command: 'dist/scripts/check-architecture.js' },
+  { id: 'artifacts', title: 'Package artifact integrity', directory: 'dist/tests/artifacts' },
+  { id: 'e2e', title: 'End-to-end API-to-engine tests', directory: 'dist/tests/e2e' },
   { id: 'audit', title: 'Dependency vulnerability scan', command: 'dist/scripts/check-audit.js' },
+  { id: 'mongo-live', title: 'Live MongoDB integration tests (real database)', directory: 'dist/tests/live', live: true },
 ]);
 
 export function discoverTests(root: string): string[] {

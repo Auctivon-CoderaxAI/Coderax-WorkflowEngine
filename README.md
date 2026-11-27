@@ -29,7 +29,7 @@ are clients of the same versioned API.
 | Atomic claim, renewal, durable cancel, prune | Implemented | `src/persistence/work-runs.ts` |
 | Terminal-state fencing (stale run cannot overwrite) | Implemented | `src/persistence/tasks.ts`, fencing tests |
 | Heartbeat, crash detection, interrupted-task recovery | Implemented | `src/execution/runner.ts`, `src/orchestration/service.ts` |
-| Cancellation, resume, bounded same-engine retry | Implemented | `src/orchestration/service.ts`, e2e tests |
+| Cancellation, resume, owner-triggered retry | Implemented | `src/orchestration/service.ts`, e2e tests |
 | Sequenced events, dedupe, out-of-order protection, replay | Implemented | `src/events/bus.ts` |
 | Durable schedules: one-time, interval, hourly, daily/weekly calendar (IANA zone), monthly and named events | Implemented | `src/scheduling`, `src/persistence/schedules.ts` |
 | Cross-replica schedule idempotency: unique receipt key, deterministic task id, Work lease | Implemented; Mongo adapter fake-verified, not live-verified | `src/scheduling/identity.ts`, `src/persistence/mongo-schedules.ts`, two-replica test |
@@ -42,7 +42,7 @@ are clients of the same versioned API.
 | Coderax Native agent | Implemented | `src/agents/native` |
 | Native Game Studio | Implemented | `src/games/studio.ts`: NL specs, design plans, original source, 8 genres, 12 composable mechanics, seeded levels, browser-boot verification, build history/restore, export, `docs/evidence/game-studio/` |
 | Native Game Studio — real-browser acceptance | Verified for two reference builds | `scripts/browser-acceptance.mjs`: desktop/mobile Chromium rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart and audio; `docs/evidence/browser/` |
-| Native Game Studio — AI-assisted generation | **Blocked** | no verified model participation or zero-cost model credential; deterministic generation remains operational |
+| Native Game Studio — AI-assisted generation | **Blocked** | no verified model participation, executed model-assisted build or zero-cost model credential; a configured route or test narrative is not proof; deterministic generation remains operational |
 | Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`: durable Work task with `kind: game`, observed state/frames, bounded controls, pause/resume, takeover, cancellation, memory, measured completion |
 | Native Gaming Agent — cloud browser | **Blocked** | no verified zero-cost browser session/observation interface; the browser acceptance controller is test code, not the agent |
 | Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
@@ -75,11 +75,17 @@ exact dependency and the narrow ports the game code exposes for that migration.
 ```bash
 npm install
 npm run build
-npm test                          # 132 tests: unit, contract, integration, security, e2e
+npm test                          # unit, contract, integration, security and e2e suites
+npm run verify                    # build + every quality gate, including real MongoDB
 npm run game:evidence             # regenerates the playable game evidence frames
 npm run game:browser -- --base-url <origin>   # real-Chromium acceptance; needs Playwright
 npm run openapi:check             # fails if the published contract drifted
 ```
+
+`npm run verify` requires `CODERAX_TEST_MONGO_URI` to name a disposable MongoDB;
+the gate fails rather than skipping when no database is present. The gate matrix,
+the pinned MongoDB job and the coordination notes are in
+`docs/quality-gates.md`.
 
 Run the engine (it refuses to start until every startup check passes):
 

@@ -57,8 +57,10 @@ test('discovery never advertises paid routing', () => {
 test('an exhausted daily budget fails closed', () => {
   const ledger = createBudgetLedger({ maxRequestsPerDay: 1, maxTokensPerDay: 100 });
   const now = new Date('2026-11-26T10:00:00.000Z');
-  assert.equal(ledger.reserve('owner', now).allowed, true);
-  assert.equal(ledger.reserve('owner', now).allowed, false);
+  const reserveAt = (at: Date) =>
+    ledger.reserve({ ownerId: 'owner', at, inputTokens: 0, outputTokens: 0 });
+  assert.equal(reserveAt(now).allowed, true);
+  assert.equal(reserveAt(now).allowed, false);
   const nextDay = new Date('2026-11-27T10:00:00.000Z');
-  assert.equal(ledger.reserve('owner', nextDay).allowed, true);
+  assert.equal(reserveAt(nextDay).allowed, true);
 });

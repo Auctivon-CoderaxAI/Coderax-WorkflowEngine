@@ -1,13 +1,20 @@
 name: verify
 
-# The acceptance gate. A passing run at an earlier head is not a pass, so the
-# workflow runs on every push to a pull request and on main after merge.
+# The permanent acceptance gate. Every job runs on a standard, free
+# GitHub-hosted runner. No paid runner, action or service is used.
+#
+# The repository protects `main` with the required check named `verify`. The real
+# MongoDB lane must therefore live inside this job, not in a sibling job that the
+# required check cannot see. The service is an ephemeral, pinned database with no
+# production credentials.
 
 on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    # A gate-branch push gets exact-head hosted evidence before the gate is
+    # allowed to reject anyone else's branch. This is still one workflow.
+    branches: [main, 'ci/**']
 
 permissions:
   contents: read
@@ -19,50 +26,92 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # A permanent, real MongoDB lane. The artifact durability tests refuse to
-    # skip when CODERAX_REQUIRE_MONGODB=1, so a missing or unreachable service
-    # fails the required check instead of reporting a green skip. The service
-    # container is the free public-repository runner path; no managed database
-    # and no paid minutes are added.
+    timeout-minutes: 40
+    # A permanent, real MongoDB lane. The scheduling and artifact durability
+    # suites refuse to skip when their REQUIRE flag is set, so a missing or
+    # unreachable service fails the required check instead of reporting a green
+    # skip. The service is an ephemeral, pinned container on the standard
+    # free public-repository runner path; no managed database, production
+    # credential or paid minutes are added.
     services:
       mongodb:
-        image: mongo:7.0
+        # Pinned so the gate cannot silently change server behavior. No
+        # production database or credential is ever connected to this job.
+        image: mongo:7.0.14
         ports:
-          - "27017:27017"
+          - 27017:27017
         options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+    env:
+      CODERAX_REQUIRE_MONGO: '1'
+      CODERAX_TEST_MONGO_URI: mongodb://127.0.0.1:27017/coderax_ci
+      CODERAX_REQUIRE_MONGODB: '1'
+      CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: '24'
           cache: npm
 
-      - name: Install
-        run: npm ci
+      - name: Install from the lockfile (no lifecycle scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Build (TypeScript project references)
+      - name: TypeScript compilation (tsc -b, project references)
         run: npm run build
 
-      - name: Acceptance gate (all suites, OpenAPI drift, dependency audit)
-        env:
-          CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
-          CODERAX_REQUIRE_MONGODB: '1'
-        run: node dist/scripts/run-gates.js all
-
-      - name: Gate coverage
+      - name: Gate manifest coverage (every test file is assigned)
         run: node dist/scripts/run-gates.js coverage
 
-      - name: Reject committed secrets and local paths
+      - name: Unit tests
+        run: node dist/scripts/run-gates.js unit
+
+      - name: Integration tests (fake MongoDB explicitly labelled)
+        run: node dist/scripts/run-gates.js integration
+
+      - name: Security regression tests
+        run: node dist/scripts/run-gates.js security
+
+      - name: Adversarial execution tests
+        run: node dist/scripts/run-gates.js adversarial
+
+      - name: Route, SDK and OpenAPI contract tests
+        run: node dist/scripts/run-gates.js contract
+
+      - name: OpenAPI drift detection
+        run: node dist/scripts/run-gates.js openapi
+
+      - name: Dependency wiring, ownership and unused capability detection
+        run: node dist/scripts/run-gates.js architecture
+
+      - name: Package artifact integrity
+        run: node dist/scripts/run-gates.js artifacts
+
+      - name: End-to-end API-to-engine tests
+        run: node dist/scripts/run-gates.js e2e
+
+      - name: Dependency vulnerability scan (high and critical)
+        run: node dist/scripts/run-gates.js audit
+
+      - name: Real MongoDB integration tests (required, no fake)
+        run: node dist/scripts/run-gates.js mongo-live
+
+      - name: Reject committed secrets and local owner paths
         run: |
           if grep -rIl --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git \
             -E '(CODERAX_OWNER_TOKEN|CODERAX_INFERENCE_KEY)=[A-Za-z0-9]' .; then
             echo "A secret value appears to be committed."
             exit 1
           fi
-          echo "No committed secret values found."
+          if grep -rIn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git \
+            -E '(/home/[a-z0-9_-]+/|/Users/[A-Za-z0-9_-]+/)' src packages scripts; then
+            echo "An absolute owner path appears in source."
+            exit 1
+          fi
+          echo "No committed secret values or owner paths found."
