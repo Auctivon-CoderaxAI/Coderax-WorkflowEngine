@@ -36,6 +36,8 @@ are clients of the same versioned API.
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
 | Coderax Native reasoning and planning | Implemented — fast/complex modes, dependency-aware plans, parallel execution, bounded replanning, evidence-based verification, approval escalation | `src/agents/native`, `tests/unit/native-reasoning.test.ts`, `tests/integration/approval.test.ts` |
+| Cloud browser surface (sessions, navigation, inspection, screenshots, inputs, tabs, files, takeover, receipts) | Implemented, fail-closed | `packages/contracts/src/browser.ts`, `src/browser`, `src/orchestration/browser.ts` |
+| Verified zero-cost cloud browser provider | **Not configured** | no provider endpoint exists here; capabilities report `not_configured` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
@@ -95,6 +97,7 @@ src/orchestration    Work lifecycle: submit, execute, cancel, resume, retry, rec
 src/execution        leases, arbitration, heartbeat runner, retry, workspace confinement
 src/persistence      task repository (fenced writes), lease tables, conversations
 src/agents           registry, Coderax Native, isolated external adapters
+src/browser          provider port, protocol v1 adapter, policy, fail-closed provider
 src/models           verified catalogue, zero-cost route, daily budget ledger
 src/events           ordered event log with dedupe and replay
 src/permissions      scoped, single-use approval requests
@@ -140,6 +143,9 @@ Native separates planning, authorization and execution:
 - **No private/cloud bleed**: memory and workspaces are partitioned by data mode.
 - **Durable Work**: closing the browser or the CLI never ends an authorized task.
 - **Fenced state**: an expired generation can never overwrite a newer one.
+- **No fabricated browsing**: a screenshot or action exists only from verified
+  provider bytes; without a verified provider every browser operation fails
+  closed and says why. See [`docs/browser.md`](docs/browser.md).
 
 ## Contributing
 

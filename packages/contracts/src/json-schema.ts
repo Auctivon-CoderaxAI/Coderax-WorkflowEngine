@@ -52,6 +52,7 @@ function stringBounds(checks: Def['checks']): JsonSchema {
     if (check.kind === 'min' && typeof check.value === 'number') out.minLength = check.value;
     if (check.kind === 'max' && typeof check.value === 'number') out.maxLength = check.value;
     if (check.kind === 'datetime') out.format = 'date-time';
+    if (check.kind === 'url') out.format = 'uri';
   }
   return out;
 }

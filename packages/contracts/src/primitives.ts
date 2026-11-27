@@ -5,7 +5,7 @@ import { z } from 'zod';
  * version it was built against and the engine reports the version it serves, so
  * a mismatch is observable instead of silent.
  */
-export const CONTRACT_VERSION = '1.0.0' as const;
+export const CONTRACT_VERSION = '1.1.0' as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -27,6 +27,12 @@ export type TaskId = z.infer<typeof TaskId>;
 
 export const MessageId = identifier('message identifier');
 export type MessageId = z.infer<typeof MessageId>;
+
+export const BrowserSessionId = identifier('browser session identifier');
+export type BrowserSessionId = z.infer<typeof BrowserSessionId>;
+
+export const BrowserArtifactId = identifier('browser artifact identifier');
+export type BrowserArtifactId = z.infer<typeof BrowserArtifactId>;
 
 export const RequestId = identifier('request correlation identifier');
 export type RequestId = z.infer<typeof RequestId>;

@@ -133,6 +133,11 @@ export function createMongoPermissionStore(input: {
       return ok(await listFor(ownerId, taskId));
     },
 
+    get: async (ownerId, taskId, requestId) => {
+      const document = await input.collection.findOne({ ownerId, taskId, requestId });
+      return document ? toRequest(document) : null;
+    },
+
     isApproved: async (taskId, scope, resource) => {
       const document = await input.collection.findOne({
         taskId,

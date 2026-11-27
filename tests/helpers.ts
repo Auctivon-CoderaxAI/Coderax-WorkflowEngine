@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ModelGateway } from '../src/agents/native/types.js';
+import type { BrowserProvider } from '../src/browser/types.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -180,6 +181,8 @@ export function slowGateway(delayMs: number): ModelGateway & { calls: number } {
 export async function startTestApp(options: {
   gateway?: ModelGateway;
   config?: Record<string, unknown>;
+  browser?: BrowserProvider;
+  env?: NodeJS.ProcessEnv;
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -190,8 +193,9 @@ export async function startTestApp(options: {
   const config = baseConfig(workspace, options.config);
   const app = await composeApplication({
     config,
-    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN },
+    env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, ...(options.env ?? {}) },
     gateway: options.gateway ?? fakeGateway(),
+    ...(options.browser ? { browserProvider: options.browser } : {}),
   });
   const { url } = await app.start();
   return {

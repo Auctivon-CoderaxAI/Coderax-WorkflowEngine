@@ -202,6 +202,119 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('browserCapabilities', async () => ({
+    kind: 'json',
+    status: 200,
+    body: await service.browserCapabilities(),
+  }));
+
+  registry.register('listBrowserSessions', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.browserSessions(context.principal),
+  }));
+
+  registry.register('createBrowserSession', async (context) => {
+    const result = await service.createBrowserSession(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('getBrowserSession', async (context) => {
+    const result = await service.browserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('browserAction', async (context) => {
+    const result = await service.browserAction(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('pauseBrowserSession', async (context) => {
+    const result = await service.pauseBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('resumeBrowserSession', async (context) => {
+    const result = await service.resumeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('takeoverBrowserSession', async (context) => {
+    const result = await service.takeoverBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('closeBrowserSession', async (context) => {
+    const result = await service.closeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      (context.body ?? {}) as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('authorizeBrowserSession', async (context) => {
+    const result = await service.authorizeBrowserSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('decideBrowserAuthorization', async (context) => {
+    const result = await service.decideBrowserAuthorization(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listBrowserReceipts', async (context) => {
+    const result = await service.browserReceipts(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getBrowserArtifact', async (context) => {
+    const result = await service.browserArtifact(
+      context.principal,
+      context.params.artifactId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('listNotifications', async (context) => ({
     kind: 'json',
     status: 200,

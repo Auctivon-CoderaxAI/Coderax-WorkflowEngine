@@ -21,6 +21,8 @@ export type IdGenerator = {
   runToken: () => string;
   requestId: () => string;
   receipt: () => string;
+  browserSessionId: () => string;
+  browserArtifactId: () => string;
 };
 
 export function createIdGenerator(): IdGenerator {
@@ -32,5 +34,7 @@ export function createIdGenerator(): IdGenerator {
     runToken: () => `run_${randomUUID()}`,
     requestId: () => `req_${randomUUID()}`,
     receipt: () => `rcpt_${randomUUID()}`,
+    browserSessionId: () => `bs_${randomUUID()}`,
+    browserArtifactId: () => `baf_${randomUUID()}`,
   };
 }

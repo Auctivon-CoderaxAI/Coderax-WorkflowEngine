@@ -16,6 +16,7 @@ import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import type { BrowserService } from '../orchestration/browser.js';
 import type { Router } from '../api/router.js';
 
 /**
@@ -45,6 +46,7 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  browser: BrowserService;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -66,6 +68,7 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'scheduler',
   'health',
+  'browser',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

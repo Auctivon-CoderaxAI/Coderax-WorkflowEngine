@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
+import {
+  CONTRACT_VERSION,
+  EngineId,
+  ModelRef,
+  type BrowserLimits,
+} from '@coderax/contracts';
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -108,6 +113,41 @@ export const ExecutionConfig = z
   })
   .strict();
 
+export const BrowserRemoteConfig = z
+  .object({
+    /** An HTTPS endpoint that implements the versioned browser protocol. */
+    baseURL: z.string().url().optional(),
+    /** Name of the variable holding the provider token, never the token. */
+    tokenEnv: z.string().trim().min(1).default('CODERAX_BROWSER_TOKEN'),
+    timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
+    /**
+     * The owner's attestation that this endpoint is authorized, zero-cost and
+     * cloud-hosted. Without it the adapter stays fail-closed and reports
+     * `unverified`; it cannot be set on the owner's behalf.
+     */
+    zeroCostAttested: z.boolean().default(false),
+  })
+  .strict();
+
+/**
+ * Cloud browser integration. The default is disabled with no provider, which is
+ * the only truthful state until an authorized zero-cost endpoint has been
+ * verified. No field can enable paid infrastructure.
+ */
+export const BrowserConfig = z
+  .object({
+    enabled: z.boolean().default(false),
+    provider: z.enum(['none', 'http']).default('none'),
+    allowPaid: z.literal(false).default(false),
+    sessionTtlMs: z.number().int().min(60_000).max(3_600_000).default(900_000),
+    maxSessionsPerOwner: z.number().int().min(1).max(16).default(3),
+    maxScreenshotBytes: z.number().int().min(1_024).max(4_194_304).default(2_097_152),
+    /** Bounded by the request body limit so an upload cannot be truncated. */
+    maxUploadBytes: z.number().int().min(1_024).max(524_288).default(524_288),
+    remote: BrowserRemoteConfig.default({}),
+  })
+  .strict();
+
 export const PersistenceConfig = z
   .object({
     /**
@@ -140,6 +180,7 @@ export const EngineConfigSchema = z
     engines: EnginesConfig.default({}),
     models: ModelsConfig,
     execution: ExecutionConfig.default({}),
+    browsers: BrowserConfig.default({}),
     persistence: PersistenceConfig.default({}),
   })
   .strict();
@@ -148,3 +189,15 @@ export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
 export type PersistenceSettings = z.infer<typeof PersistenceConfig>;
+export type BrowserSettings = z.infer<typeof BrowserConfig>;
+export type BrowserRemoteSettings = z.infer<typeof BrowserRemoteConfig>;
+
+/** Derived once so the provider and the API report the same enforced limits. */
+export function browserLimits(browsers: BrowserSettings): BrowserLimits {
+  return {
+    maxSessionTtlSeconds: Math.floor(browsers.sessionTtlMs / 1000),
+    maxSessionsPerOwner: browsers.maxSessionsPerOwner,
+    maxScreenshotBytes: browsers.maxScreenshotBytes,
+    maxUploadBytes: browsers.maxUploadBytes,
+  };
+}

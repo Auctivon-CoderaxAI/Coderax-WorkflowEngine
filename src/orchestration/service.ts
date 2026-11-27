@@ -1,6 +1,18 @@
 import type {
   AgentId,
   AgentList,
+  BrowserAction,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserAuthorizationRequest,
+  BrowserCapabilities,
+  BrowserCloseRequest,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionCreateRequest,
+  BrowserSessionList,
+  BrowserTakeoverRequest,
+  BrowserTakeoverResult,
   BudgetState,
   ChatReply,
   ChatRequest,
@@ -12,6 +24,7 @@ import type {
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
+  PermissionRequest,
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
@@ -44,6 +57,7 @@ import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
+import type { BrowserService } from './browser.js';
 import { resolveReasoningMode } from '../agents/native/reason.js';
 
 export type ApplicationServiceDeps = {
@@ -65,6 +79,7 @@ export type ApplicationServiceDeps = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  browser: BrowserService;
 };
 
 export type EventStream = {
@@ -78,6 +93,57 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  browserCapabilities: () => Promise<BrowserCapabilities>;
+  browserSessions: (principal: Principal) => Promise<BrowserSessionList>;
+  browserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  createBrowserSession: (
+    principal: Principal,
+    request: BrowserSessionCreateRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  browserAction: (
+    principal: Principal,
+    sessionId: string,
+    action: BrowserAction,
+  ) => Promise<ServiceResult<BrowserActionResult>>;
+  pauseBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  resumeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  takeoverBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ) => Promise<ServiceResult<BrowserTakeoverResult>>;
+  closeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserCloseRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  authorizeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ) => Promise<ServiceResult<PermissionRequest>>;
+  decideBrowserAuthorization: (
+    principal: Principal,
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ) => Promise<ServiceResult<PermissionList>>;
+  browserReceipts: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserReceiptList>>;
+  browserArtifact: (
+    principal: Principal,
+    artifactId: string,
+  ) => Promise<ServiceResult<BrowserArtifactContent>>;
   submitWork: (
     principal: Principal,
     request: WorkSubmitRequest,
@@ -851,6 +917,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
+    browserCapabilities: () => deps.browser.capabilities(),
+    browserSessions: (principal) => deps.browser.list(principal.ownerId),
+    browserSession: (principal, sessionId) =>
+      deps.browser.get(principal.ownerId, sessionId),
+    createBrowserSession: (principal, request) =>
+      deps.browser.create(principal.ownerId, request),
+    browserAction: (principal, sessionId, action) =>
+      deps.browser.act(principal.ownerId, sessionId, action),
+    pauseBrowserSession: (principal, sessionId) =>
+      deps.browser.pause(principal.ownerId, sessionId),
+    resumeBrowserSession: (principal, sessionId) =>
+      deps.browser.resume(principal.ownerId, sessionId),
+    takeoverBrowserSession: (principal, sessionId, request) =>
+      deps.browser.takeover(principal.ownerId, sessionId, request),
+    closeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.close(principal.ownerId, sessionId, request),
+    authorizeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.authorize(principal.ownerId, sessionId, request),
+    decideBrowserAuthorization: (principal, sessionId, request) =>
+      deps.browser.decide(principal.ownerId, sessionId, request),
+    browserReceipts: (principal, sessionId) =>
+      deps.browser.receipts(principal.ownerId, sessionId),
+    browserArtifact: (principal, artifactId) =>
+      deps.browser.artifact(principal.ownerId, artifactId),
+
     submitWork: async (principal, request) => {
       const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
       const adapter = deps.agents.resolve(agentId);
@@ -1345,6 +1436,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
+      // Release cloud browsers rather than letting them run until their TTL.
+      await deps.browser.shutdown();
     },
   };
 
