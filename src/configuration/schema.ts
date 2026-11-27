@@ -311,43 +311,14 @@ export const ExecutionConfig = z
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */
     cancelGraceMs: z.number().int().min(100).max(30_000).default(5_000),
-    /** How long graceful shutdown may drain before it fails closed. */
-    shutdownGraceMs: z.number().int().min(100).max(300_000).default(10_000),
-  })
-  .strict();
-
-export const GamesConfig = z
-  .object({
-    /** Off disables both game capabilities at the route boundary. */
-    enabled: z.boolean().default(true),
-    /** The gaming agent can be disabled without disabling the studio. */
-    agentEnabled: z.boolean().default(true),
-    maxProjectsPerOwner: z.number().int().min(1).max(500).default(50),
-    /** The hard ceiling a session request may not exceed. */
-    maxSessionTicks: z.number().int().min(600).max(200_000).default(40_000),
-    /** A paused session holds its task slot for at most this long. */
-    maxPauseMs: z.number().int().min(1_000).max(3_600_000).default(900_000),
-  })
-  .strict();
-export const BrowserRemoteConfig = z
-  .object({
-    /** An HTTPS endpoint that implements the versioned browser protocol. */
-    baseURL: z.string().url().optional(),
-    /** Name of the variable holding the provider token, never the token. */
-    tokenEnv: z.string().trim().min(1).default('CODERAX_BROWSER_TOKEN'),
-    timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
-    /**
-     * The owner's attestation that this endpoint is authorized, zero-cost and
-     * cloud-hosted. Without it the adapter stays fail-closed and reports
-     * `unverified`; it cannot be set on the owner's behalf.
-     */
-    cancelQuarantineMs: z.number().int().min(1_000).max(3_600_000).default(300_000),
     /**
      * How long a workspace root stays held after an execution whose termination
      * could not be verified. A new run is refused in that root rather than
      * writing alongside code this process can no longer observe.
      */
     containmentHoldMs: z.number().int().min(1_000).max(600_000).default(60_000),
+    /** Events kept per task after it settles; older ones are pruned. */
+    eventRetain: z.number().int().min(16).max(100_000).default(5_000),
   })
   .strict();
 
@@ -374,6 +345,26 @@ export const PersistenceConfig = z
   })
   .strict();
 
+/**
+ * Teams are bounded by configuration, not by the model's willingness to stop.
+ * Every limit is enforced by the orchestrator; a request above a bound is
+ * refused at submission.
+ */
+export const TeamConfig = z
+  .object({
+    maxMembers: z.number().int().min(1).max(64).default(8),
+    maxParallel: z.number().int().min(1).max(16).default(3),
+    maxDurationMs: z.number().int().min(1_000).max(86_400_000).default(900_000),
+    maxStepsPerMember: z.number().int().min(1).max(64).default(8),
+    maxEvidenceChars: z.number().int().min(100).max(100_000).default(4_000),
+    maxArtifactBytes: z.number().int().min(1_024).max(50_000_000).default(1_000_000),
+    /** Bound on waiting for a cancelled adapter before authority is revoked. */
+    cancelGraceMs: z.number().int().min(100).max(30_000).default(2_000),
+    /** A replica that stops heartbeating leaves an interrupted, resumable team. */
+    staleAfterMs: z.number().int().min(1_000).max(3_600_000).default(60_000),
+  })
+  .strict();
+
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
@@ -382,15 +373,13 @@ export const EngineConfigSchema = z
     workspaces: WorkspacesConfig,
     engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
-    execution: ExecutionConfig.prefault({}),
-    browsers: BrowserConfig.prefault({}),
-    schedules: SchedulesConfig.prefault({}),
-    artifacts: ArtifactsConfig.prefault({}),
-    persistence: PersistenceConfig.prefault({}),
-    tools: ToolsConfig.prefault({}),
-    knowledge: KnowledgeConfig.prefault({}),
-    mcp: McpConfig.prefault({}),
-    routing: EngineRoutingConfig.prefault({}),
+    execution: ExecutionConfig.default({}),
+    persistence: PersistenceConfig.default({}),
+    tools: ToolsConfig.default({}),
+    knowledge: KnowledgeConfig.default({}),
+    mcp: McpConfig.default({}),
+    routing: RoutingConfig.default({}),
+    teams: TeamConfig.default({}),
   })
   .strict();
 

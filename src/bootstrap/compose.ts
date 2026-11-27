@@ -15,21 +15,11 @@ import type { BrowserProvider } from '../browser/types.js';
 import { buildBrowserProvider } from './browser.js';
 import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
-import { createBudgetLedger, createMemoryBudgetStore } from '../models/budget.js';
-import { createMongoBudgetStore } from '../persistence/budgets.js';
-import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js';
-import { createGeminiProvider } from '../models/providers/gemini.js';
-import { createOpenAiProvider } from '../models/providers/openai.js';
-import { createModelRouter, type ModelRouter } from '../models/router.js';
-import { createProviderPolicyRegistry, type ProviderPolicy, type ProviderPolicyRegistry } from '../models/policy.js';
-import type {
-  BenchmarkScore,
-  FreeTierAttestation,
-  ModelGateway,
-  ProviderAdapter,
-  ProviderSettings,
-  RegisteredProvider,
-} from '../models/types.js';
+import { createRouterCatalog } from '../models/catalog.js';
+import { createBudgetLedger } from '../models/budget.js';
+import { createMongoQuotaStore } from '../models/quota.js';
+import { createRouter as createModelRouter, type ProviderDescriptor } from '../models/router.js';
+import { createRoutedGateway } from '../models/routed.js';
 import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
 import { createBuiltinTools } from '../tools/builtin.js';
 import { createToolRuntime } from '../tools/runtime.js';
@@ -43,8 +33,9 @@ import { createTaskRunner } from '../execution/runner.js';
 import { createExecutionSupervisor } from '../execution/supervisor.js';
 import { createCapabilityBroker } from '../execution/capabilities.js';
 import { createUnavailableIsolationProvider } from '../execution/termination.js';
-import { createQuarantineRegistry } from '../execution/quarantine.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
+import { createTeamService } from '../orchestration/team.js';
+import { createMemoryResourceLockStore, createMongoResourceLockStore } from '../execution/locks.js';
 import { createApplicationService } from '../orchestration/service.js';
 import { createArtifactService } from '../artifacts/service.js';
 import { createArtifactToolkit } from '../artifacts/toolkit.js';
@@ -460,7 +451,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       ? createOpenCodeHttpTransport({
           baseURL: config.engines.opencode.baseURL,
           ...(opencodePassword ? { password: opencodePassword } : {}),
-          ...(opencodeModel ? { model: opencodeModel } : {}),
           ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
         })
       : null);
@@ -498,6 +488,38 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
           : 'coderax',
   });
 
+  const models = createRouterCatalog(modelRouter);
+  // A configured OpenCode preference is still a model choice, so it must pass
+  // the same zero-cost catalogue the run's resolved model passes. The adapter
+  // itself honors `run.model` and never substitutes after admission.
+  if (opencodeModel) {
+    // Membership and cost are checked against the catalogue, not against the
+    // Native gateway's readiness: an OpenCode transport can be healthy while
+    // the Native inference endpoint is not.
+    const preference = models.verify(opencodeModel);
+    if (!preference.ok) {
+      throw new StartupError([
+        `engines.opencode.model does not resolve through the verified zero-cost catalogue (${preference.code}).`,
+      ]);
+    }
+  }
+
+  const persistence = await buildPersistence({
+    config,
+    env,
+    clock,
+    ...(input.persistence ?? {}),
+  });
+  // The quota store is chosen by the persistence driver: mongo shares one
+  // durable account per owner and day across replicas, memory is the explicit
+  // single-process mode.
+  const budget = createBudgetLedger({
+    maxRequestsPerDay: config.models.dailyRequestBudget,
+    maxTokensPerDay: config.models.dailyTokenBudget,
+    ...(persistence.quotaCollection
+      ? { store: createMongoQuotaStore({ collection: persistence.quotaCollection }) }
+      : {}),
+  });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
@@ -593,23 +615,15 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     pollMs: config.execution.eventPollMs,
     eventId: ids.eventId,
     iso: clock.iso,
+    log: persistence.events,
+    retain: config.execution.eventRetain,
   });
-  const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({
     lease,
     clock,
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
-    // The composition root is where supervision exists in production. An
-    // adapter that ignored its abort may still be running; its capability and
-    // workspace are revoked here even if the service already moved on.
-    onAbandoned: async ({ token }) => {
-      await supervisor.abandon({
-        token,
-        reason: 'A cancelled adapter did not stop within the grace period.',
-      });
-    },
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
   // There is no workload-isolation integration in this deployment. The provider
@@ -628,6 +642,24 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     containmentHoldMs: config.execution.containmentHoldMs,
     shutdownGraceMs: config.execution.cancelGraceMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
+  });
+
+  const locks = persistence.lockCollection
+    ? createMongoResourceLockStore({ collection: persistence.lockCollection })
+    : createMemoryResourceLockStore();
+  const teams = createTeamService({
+    config,
+    clock,
+    ids,
+    agents,
+    models,
+    budget,
+    permissions,
+    events,
+    supervisor,
+    scheduler,
+    teams: persistence.teams,
+    locks,
   });
 
   const health = createHealthService({
@@ -756,21 +788,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
       {
-        // A quarantined workspace means an abandoned adapter may still be
-        // writing there. New work in that root is refused until it expires.
-        name: 'workspaces.quarantine',
-        required: false,
-        check: async () => {
-          const entries = quarantine.list(clock.now().getTime());
-          return entries.length === 0
-            ? { status: 'ok' as const, detail: 'No workspace is quarantined.' }
-            : {
-                status: 'degraded' as const,
-                detail: `${entries.length} workspace root(s) quarantined after an adapter ignored cancellation.`,
-              };
-        },
-      },
-      {
         name: 'isolation',
         required: false,
         check: async () => {
@@ -814,11 +831,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     supervisor,
     scheduler,
+    teams,
     health,
-    quarantine,
     tools,
     knowledge,
-    modelRouter: models,
+    modelRouter,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -933,10 +950,13 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // A team owned by a replica that stopped is marked interrupted, never left
+      // running forever. It stays resumable from its snapshot.
+      await teams.reconcile();
       return { url };
     },
     stop: async () => {
-      models.stop();
+      await teams.shutdown();
       await service.shutdown();
       await mcp.close();
       await server.close();

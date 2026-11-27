@@ -330,30 +330,11 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         heldRoots.delete(root);
       }
 
-      /*
-       * Admission and reservation are one synchronous step. The durable write
-       * below is an await: two calls that both passed the check above would
-       * otherwise launch with write authority over the same root. A superseding
-       * generation may take the reservation over because the older execution's
-       * cleanup only removes a reservation that still names it.
-       */
-      if (exclusive) {
-        const reserved = activeRoots.get(root);
-        if (reserved !== undefined && !(replacing && reserved === busy)) {
-          return refused(
-            'workspace_busy',
-            'Another supervised execution currently holds this workspace root.',
-            input.identity.executionId,
-          );
-        }
-        activeRoots.set(root, input.identity.executionId);
-      }
-      const releaseReservation = (): void => {
-        if (exclusive && activeRoots.get(root) === input.identity.executionId) {
-          activeRoots.delete(root);
-        }
-      };
-
+      // Reserve ownership before the first await. Two concurrent writers can
+      // otherwise both pass the `activeRoots` check above and register only
+      // after their durability writes resolve.
+      const previousRootOwner = exclusive ? activeRoots.get(root) : undefined;
+      if (exclusive) activeRoots.set(root, input.identity.executionId);
       const record: ExecutionRecord = {
         ...input.identity,
         workspaceRoot: root,
@@ -366,15 +347,28 @@ export function createExecutionSupervisor(deps: SupervisorDeps): ExecutionSuperv
         capabilityRevokedAt: null,
         processUseCount: 0,
       };
+      const rollbackRoot = (): void => {
+        if (!exclusive) return;
+        // Restore the previous owner only while it is still running. It may
+        // have finished during the durability wait, and restoring a finished
+        // execution id would block the workspace forever.
+        if (previousRootOwner !== undefined && active.has(previousRootOwner)) {
+          activeRoots.set(root, previousRootOwner);
+        } else {
+          activeRoots.delete(root);
+        }
+      };
       let created: boolean;
       try {
         created = await deps.executions.create(record);
       } catch (error) {
-        releaseReservation();
+        // A rejected durability write must not leave the root reserved for an
+        // execution that was never registered.
+        rollbackRoot();
         throw error;
       }
       if (!created) {
-        releaseReservation();
+        rollbackRoot();
         return refused(
           'execution_duplicate',
           'That execution identity already exists.',

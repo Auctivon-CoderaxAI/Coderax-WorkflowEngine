@@ -119,11 +119,11 @@ export function createHttpServer(input: {
         response.flushHeaders();
         for await (const frame of result.events) {
           if (response.destroyed || response.writableEnded) break;
-          response.write(
-            frame.kind === 'comment'
-              ? `: ${frame.comment}\n\n`
-              : `data: ${JSON.stringify(frame.event)}\n\n`,
-          );
+          // The SSE id is what lets EventSource resume with Last-Event-ID;
+          // JSON properties alone are invisible to the browser reconnect.
+          const seq = (event as { seq?: unknown }).seq;
+          if (typeof seq === 'number') response.write(`id: ${seq}\n`);
+          response.write(`data: ${JSON.stringify(event)}\n\n`);
         }
         response.end();
       } catch {

@@ -15,6 +15,7 @@ export function createClock(): Clock {
 export type IdGenerator = {
   conversationId: () => string;
   taskId: () => string;
+  teamId: () => string;
   messageId: () => string;
   artifactId: () => string;
   eventId: () => string;
@@ -39,8 +40,9 @@ export function createIdGenerator(): IdGenerator {
   return {
     conversationId: () => `conv_${randomUUID()}`,
     taskId: () => `task_${randomUUID()}`,
+    teamId: () => `team_${randomUUID()}`,
     messageId: () => `msg_${randomUUID()}`,
-    artifactId: () => `art_${randomUUID()}`,
+
     eventId: () => `evt_${randomUUID()}`,
     scheduleId: () => `sch_${randomUUID()}`,
     executionId: () => `exe_${randomUUID()}`,

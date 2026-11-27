@@ -118,17 +118,14 @@ export function createToolRuntime(input: { tools: Tool[] }): ToolRuntime {
       }
     }
 
-    // An abort that raced the approval must not be recorded as tool use, and a
-    // revoked execution must not run the tool at all.
-    if (request.context.signal.aborted || (guard && !guard.live())) {
-      return { result: failure('cancelled', 'The run was cancelled.'), approval };
-    }
     if (guard) {
       for (const scope of tool.scopes) {
         guard.recordUse({ scope, resource, spawnsProcesses: tool.spawnsProcesses === true });
       }
     }
-
+    if (request.context.signal.aborted) {
+      return { result: failure('cancelled', 'The run was cancelled.'), approval };
+    }
     try {
       const result = await tool.run(parsed.data, request.context);
       return { result, approval };

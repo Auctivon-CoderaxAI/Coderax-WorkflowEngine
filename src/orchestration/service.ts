@@ -72,6 +72,10 @@ import type {
   RoutingReport,
   ToolList,
   PermissionScope,
+  TeamAccepted,
+  TeamControlResult,
+  TeamStatus,
+  TeamSubmitRequest,
 } from '@coderax/contracts';
 import {
   DeliverableRequest,
@@ -100,7 +104,8 @@ import type {
 } from '../agents/types.js';
 import type { ApprovalGate, ToolRuntime } from '../tools/types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
-import type { ModelRouter } from '../models/router.js';
+import type { TeamService } from './team.js';
+import type { Router as ModelRouter } from '../models/router.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import { inferRoutingMode } from '../models/router.js';
@@ -153,10 +158,10 @@ export type ApplicationServiceDeps = {
   supervisor: ExecutionSupervisor;
   scheduler: TaskScheduler;
   health: HealthService;
-  quarantine: QuarantineRegistry;
   tools: ToolRuntime;
   knowledge: KnowledgeStore;
   modelRouter: ModelRouter;
+  teams: TeamService;
 };
 
 /**
@@ -288,14 +293,25 @@ export type ApplicationService = {
     taskId: string,
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
-  notifications: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
-  /** Durable artifact storage; the only path that returns artifact bytes. */
-  artifacts: ArtifactService;
-  /**
-   * Generate, verify and durably persist a deliverable. The files it returns are
-   * artifact descriptors owned by `artifacts`, not paths in a workspace.
-   */
-  deliver: (
+  submitTeam: (
+    principal: Principal,
+    request: TeamSubmitRequest,
+  ) => Promise<ServiceResult<TeamAccepted>>;
+  team: (principal: Principal, teamId: string) => Promise<ServiceResult<TeamStatus>>;
+  cancelTeam: (principal: Principal, teamId: string) => Promise<ServiceResult<TeamControlResult>>;
+  resumeTeam: (
+    principal: Principal,
+    teamId: string,
+    generation: number,
+  ) => Promise<ServiceResult<TeamControlResult>>;
+  teamPermissions: (principal: Principal, teamId: string) => Promise<ServiceResult<PermissionList>>;
+  decideTeamPermission: (
+    principal: Principal,
+    teamId: string,
+    body: PermissionDecisionRequest,
+  ) => Promise<ServiceResult<PermissionList>>;
+  notifications: (principal: Principal) => Promise<NotificationList>;
+  markNotificationsRead: (
     principal: Principal,
     request: DeliverableRequestInput,
     options?: { conversationId?: string; taskId?: string; signal?: AbortSignal },
@@ -1092,36 +1108,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       return;
     }
-    const quarantined = quarantineDetail(workspace.value.root);
-    if (quarantined) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: 'workspace_denied',
-        detail: quarantined,
-        retryable: true,
-      });
-      return;
-    }
-
-    // An external agent executes actions outside this process. When the owner
-    // asked to approve actions, the engine cannot mediate them, so the run needs
-    // an explicit, durable, single-use grant. Coderax Native acts only through
-    // the engine's own tool runtime, so it is not gated here.
-    if (task.requireApproval && task.agent !== 'coderax' && adapter.value.capabilities.tools) {
-      const grant = executionGrant(task);
-      const consumed = grant
-        ? await deps.tasks.consumeApproval({
-            taskId,
-            requestId: grant.requestId,
-            now: deps.clock.iso(),
-          })
-        : false;
-      if (!consumed) {
-        await suspendForApproval(task, token);
-        return;
-      }
-    }
-
     const started = await deps.tasks.updateFenced({
       taskId,
       token,
@@ -1272,32 +1258,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
     executionsByTask.set(taskId, identity.executionId);
 
-    // External engines bypass the router, so their request slot is reserved
-    // here. Native is charged by the router's own reservation.
-    const externalReservation =
-      started.task.engine === 'native'
-        ? null
-        : await deps.budget.reserve({
-            ownerId: task.ownerId,
-            at: deps.clock.now(),
-            inputTokens: estimateTokens([task.objective]),
-            outputTokens: task.budget?.maxOutputTokens ?? 1_024,
-          });
-    if (externalReservation !== null && !externalReservation.allowed) {
-      if (executionsByTask.get(taskId) === identity.executionId) {
-        executionsByTask.delete(taskId);
-      }
-      await settle(task, token, {
-        kind: 'failed',
-        code: 'budget_exhausted',
-        detail: 'The daily zero-cost request budget is exhausted; the external run was not dispatched.',
-        retryable: true,
-      });
-      return;
-    }
-    const held = externalReservation?.allowed ? externalReservation.reservation : null;
-    let dispatched = false;
-
     // Work and Chat now share one execution path. The runner keeps its lease
     // heartbeat and bounded cancellation; the supervisor owns the identity, the
     // capability grant, revocation and the termination record around it.
@@ -1338,13 +1298,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
                     }),
                     pendingAction: started.task.pendingAction ?? null,
                     savePendingAction: async (pendingAction) => (await deps.tasks.updateFenced({
-                      taskId,
-                      token,
-                      patch: {
-                        pendingAction: pendingAction?.observations
-                          ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) }
-                          : pendingAction,
-                      },
+                      taskId, token, patch: { pendingAction: pendingAction?.observations
+                        ? { ...pendingAction, observations: pendingAction.observations.map(redactContent) } : pendingAction },
                     })).applied,
                     savePlan: async (plan) => {
                       const planned = plan.map((step) => ({ ...step, state: 'queued' as const }));
@@ -1418,8 +1373,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outcome = supervised.outcome.kind === 'completed'
       ? { ...supervised.outcome, summary: redactContent(supervised.outcome.summary) }
       : supervised.outcome;
-    // The run's own durable reports must land before settlement, and the final
-    // checkpoint carries the step outputs the newer resume path depends on.
     await reports;
     await settle(started.task, token, outcome, { completedSteps: completed, text: safeText, outputs });
   }
@@ -2145,7 +2098,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!model.ok) return model;
 
-      if (!await deps.budget.available(principal.ownerId, deps.clock.now())) {
+      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
+      if (!reservation.allowed) {
         return fail(
           'budget_exhausted',
           'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -2549,9 +2503,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!model.ok) return model;
 
-      if (!await deps.budget.available(principal.ownerId, deps.clock.now())) {
+      const reservation = await deps.budget.reserve(principal.ownerId, deps.clock.now());
+      if (!reservation.allowed) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
+      const workspace = await resolveEngineWorkspace({
+        mode: request.mode,
+        roots: workspaceRoots(deps.config.workspaces),
+      });
+      if (!workspace.ok) return workspace;
+
       const now = deps.clock.iso();
       const conversationId = request.conversationId ?? deps.ids.conversationId();
       const conversation = await ensureConversation({
@@ -2708,9 +2669,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome.kind === 'failed' ? outcome.retryable : false,
         );
       }
-      const summary = redactContent(outcome.summary);
-      const usedModel = outcome.model ?? model.value.ref;
-      if (held) await deps.budget.settle(held.id, outcome.usage ?? {});
+      await deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
@@ -2746,6 +2705,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!found.ok) return found;
       return ok(await deps.permissions.list(principal.ownerId, taskId));
     },
+
+    submitTeam: async (principal, request) => deps.teams.submit(principal, request),
+    team: async (principal, teamId) => deps.teams.status(principal, teamId),
+    cancelTeam: async (principal, teamId) => deps.teams.cancel(principal, teamId),
+    resumeTeam: async (principal, teamId, generation) =>
+      deps.teams.resume(principal, teamId, generation),
+    teamPermissions: async (principal, teamId) => deps.teams.permissions(principal, teamId),
+    decideTeamPermission: async (principal, teamId, body) =>
+      deps.teams.decidePermission(principal, teamId, body),
 
     decidePermission: async (principal, taskId, body) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);

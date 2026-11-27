@@ -38,20 +38,13 @@ function matches(document: Document, filter: MongoFilter): boolean {
     const value = atPath(document, field);
     if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
       const operators = condition as Record<string, unknown>;
-      if ('$exists' in operators) {
-        const shouldExist = operators.$exists === true;
-        if (shouldExist !== (value !== undefined)) return false;
-      }
       if ('$ne' in operators && value === operators.$ne) return false;
       const compare = (bound: unknown): number => {
         if (value instanceof Date && bound instanceof Date) return value.getTime() - bound.getTime();
         if (typeof value === 'number' && typeof bound === 'number') return value - bound;
-        if (typeof value === 'string' && typeof bound === 'string') {
-          return value < bound ? -1 : value > bound ? 1 : 0;
-        }
+        if (typeof value === 'string' && typeof bound === 'string') return value < bound ? -1 : value > bound ? 1 : 0;
         return Number.NaN;
       };
-      if ('$ne' in operators && value === operators.$ne) return false;
       if ('$lte' in operators) {
         const delta = compare(operators.$lte);
         if (Number.isNaN(delta) || delta > 0) return false;
@@ -228,9 +221,9 @@ export function createFakeCollection(): FakeCollection {
     },
     updateOne: async (filter, update, options) => {
       const apply = (document: Document): Document => {
-        const next = { ...document };
-        for (const [field, value] of Object.entries(update.$set ?? {})) {
-          setPath(next, field, value);
+        const next = { ...document, ...update.$set };
+        for (const [field, value] of Object.entries(update.$inc ?? {})) {
+          next[field] = (typeof next[field] === 'number' ? next[field] : 0) + value;
         }
         // `$max` is monotonic under concurrency, which is exactly what the event
         // head and the generation guard rely on.

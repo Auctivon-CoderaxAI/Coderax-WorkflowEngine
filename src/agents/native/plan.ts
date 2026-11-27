@@ -1,29 +1,12 @@
-import type { Usage } from '@coderax/contracts';
-import type {
-  ReasoningMode,
-  TaskPlan,
-  TaskPlanStep,
-} from '../../domain.js';
-import type {
-  ModelGateway,
-  PlanInput,
-  PlanOutcome,
-  Planner,
-  ReplanInput,
-} from './types.js';
-import {
-  buildPlanPrompt,
-  buildReplanPrompt,
-  PLAN_SYSTEM,
-  REPLAN_SYSTEM,
-} from './prompt.js';
+import type { ReasoningMode, TaskPlan, TaskPlanStep } from '../../domain.js';
 
 /**
- * The planner is pure with respect to execution: it returns a dependency graph,
- * never a provider call, file read or side effect. The deterministic planner is
- * always available, so Native can plan without an inference endpoint; the
- * model-assisted path is used only for complex reasoning and falls back with a
- * recorded note rather than pretending a model produced the plan.
+ * Plan validation is the gate every plan passes before anything executes.
+ *
+ * It is pure: it reads a graph and returns a verdict. A missing dependency, a
+ * duplicate id, a cycle or a resource outside the workspace is refused, never
+ * repaired silently. The team planner builds a TaskPlan from its members and
+ * calls this function, so the same rules guard a single-agent plan and a team.
  */
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -101,7 +84,7 @@ function hasCycle(steps: TaskPlanStep[]): boolean {
   return steps.some((step) => visit(step.id));
 }
 
-function resourceIsConfined(resource: string): boolean {
+export function resourceIsConfined(resource: string): boolean {
   if (resource.length === 0 || resource.length > 512) return false;
   if (resource.startsWith('/') || resource.includes('\\')) return false;
   if (/^[A-Za-z]:/.test(resource)) return false;
@@ -110,9 +93,9 @@ function resourceIsConfined(resource: string): boolean {
 }
 
 /**
- * Validates a plan before anything executes. A missing dependency, a duplicate
- * id, a cycle or a read outside the workspace is refused, not repaired silently:
- * a plan that cannot be executed must not be shown as if it could.
+ * Validates a plan before anything executes. A malformed dependency list is a
+ * refusal, not "no dependencies": reading it as empty would run a dependent step
+ * before the work it needs.
  */
 export function validatePlan(input: {
   plan: TaskPlan;
@@ -135,7 +118,6 @@ export function validatePlan(input: {
 
   const completed = new Set(input.completedSteps);
   const ids = new Set<string>();
-  const readResources = new Set<string>();
   for (const step of plan.steps) {
     if (!ID_PATTERN.test(step.id)) {
       return { ok: false, reason: `step id "${step.id}" is not a stable identifier` };
@@ -157,15 +139,10 @@ export function validatePlan(input: {
       if (!step.resource || !resourceIsConfined(step.resource)) {
         return { ok: false, reason: `read step "${step.id}" has an invalid workspace resource` };
       }
-      if (readResources.has(step.resource)) {
-        return { ok: false, reason: `read resource "${step.resource}" is planned more than once` };
-      }
-      readResources.add(step.resource);
     } else if (step.resource !== undefined) {
       return { ok: false, reason: `reason step "${step.id}" must not name a resource` };
     }
   }
-  // Dependencies may appear in any array order; only the graph must be acyclic.
   for (const step of plan.steps) {
     const seenDependencies = new Set<string>();
     for (const dependency of step.dependsOn) {
@@ -185,282 +162,4 @@ export function validatePlan(input: {
     return { ok: false, reason: 'plan dependencies contain a cycle' };
   }
   return { ok: true };
-}
-
-function extractJson(text: string): string | null {
-  const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  const start = trimmed.indexOf('{');
-  const end = trimmed.lastIndexOf('}');
-  if (start === -1 || end <= start) return null;
-  return trimmed.slice(start, end + 1);
-}
-
-function readString(value: unknown, max: number): string | null {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > max) return null;
-  return trimmed;
-}
-
-/**
- * Parses a model plan and validates it. A parse failure is not repaired with
- * invented steps; the caller falls back to the deterministic planner and records
- * why, or fails the run.
- */
-export function parseModelPlan(input: {
-  text: string;
-  mode: ReasoningMode;
-  maxSteps: number;
-  revision: number;
-  completedSteps: string[];
-}): { ok: true; plan: TaskPlan } | { ok: false; reason: string } {
-  const json = extractJson(input.text);
-  if (!json) return { ok: false, reason: 'the model did not return a JSON object' };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    return { ok: false, reason: 'the model plan was not valid JSON' };
-  }
-  if (typeof parsed !== 'object' || parsed === null) {
-    return { ok: false, reason: 'the model plan was not an object' };
-  }
-  const record = parsed as { steps?: unknown; note?: unknown };
-  if (!Array.isArray(record.steps)) {
-    return { ok: false, reason: 'the model plan had no steps array' };
-  }
-  if (record.steps.length === 0 || record.steps.length > input.maxSteps) {
-    return { ok: false, reason: `the model plan had ${record.steps.length} steps` };
-  }
-
-  const steps: TaskPlanStep[] = [];
-  for (const [index, raw] of record.steps.entries()) {
-    if (typeof raw !== 'object' || raw === null) {
-      return { ok: false, reason: `step ${index + 1} was not an object` };
-    }
-    const entry = raw as Record<string, unknown>;
-    const id = readString(entry.id, 80) ?? `step-${index + 1}`;
-    const title = readString(entry.title, MAX_TITLE);
-    if (!title) return { ok: false, reason: `step ${id} had no bounded title` };
-    const kind = entry.kind === 'read' ? 'read' : entry.kind === 'reason' ? 'reason' : null;
-    if (!kind) return { ok: false, reason: `step ${id} had an unsupported kind` };
-    if (entry.dependsOn !== undefined && !Array.isArray(entry.dependsOn)) {
-      return { ok: false, reason: `step ${id} had a malformed dependency list` };
-    }
-    const dependsOn = Array.isArray(entry.dependsOn)
-      ? entry.dependsOn.filter((value): value is string => typeof value === 'string')
-      : [];
-    if (Array.isArray(entry.dependsOn) && dependsOn.length !== entry.dependsOn.length) {
-      return { ok: false, reason: `step ${id} had a non-string dependency` };
-    }
-    const acceptance = readString(entry.acceptance, MAX_ACCEPTANCE);
-    const resource = readString(entry.resource, 512);
-    steps.push({
-      id,
-      title,
-      dependsOn,
-      kind,
-      ...(kind === 'read' && resource ? { resource } : {}),
-      ...(acceptance ? { acceptance } : {}),
-    });
-  }
-
-  const note = readString(record.note, 500);
-  const plan: TaskPlan = {
-    revision: input.revision,
-    mode: input.mode,
-    steps,
-    ...(note ? { note } : {}),
-  };
-  const validation = validatePlan({
-    plan,
-    completedSteps: input.completedSteps,
-    maxSteps: input.maxSteps,
-  });
-  if (!validation.ok) return { ok: false, reason: validation.reason };
-  return { ok: true, plan };
-}
-
-export function correctivePlan(input: {
-  mode: ReasoningMode;
-  revision: number;
-  completedSteps: string[];
-  failure: ReplanInput['failure'];
-}): TaskPlan {
-  const dependsOn = [...new Set(input.completedSteps)];
-  const title =
-    input.failure.reason === 'verification_failed'
-      ? `Close the verification gap: ${truncate(input.failure.detail, 120)}`
-      : `Correct the failed step: ${truncate(input.failure.detail, 120)}`;
-  return {
-    revision: input.revision,
-    mode: input.mode,
-    steps: [
-      {
-        id: `revision-${input.revision}-1`,
-        title: truncate(title, MAX_TITLE),
-        dependsOn,
-        kind: 'reason',
-        acceptance: 'Produce evidence that closes the reported gap without repeating a failure.',
-      },
-    ],
-    note: 'Deterministic corrective plan; the model revision was unavailable or invalid.',
-  };
-}
-
-async function modelPlan(input: {
-  gateway: ModelGateway;
-  planInput: PlanInput;
-  system: string;
-  prompt: string;
-}): Promise<{ plan: TaskPlan; usage?: Usage; note?: string }> {
-  try {
-    const completion = await input.gateway.complete({
-      model: input.planInput.model,
-      system: input.system,
-      prompt: input.prompt,
-      ...(input.planInput.maxOutputTokens
-        ? { maxOutputTokens: input.planInput.maxOutputTokens }
-        : {}),
-      signal: input.planInput.signal,
-    });
-    const parsed = parseModelPlan({
-      text: completion.text,
-      mode: input.planInput.mode,
-      maxSteps: input.planInput.maxSteps,
-      revision: 1,
-      completedSteps: input.planInput.completedSteps,
-    });
-    if (!parsed.ok) {
-      return {
-        plan: deterministicPlan({
-          objective: input.planInput.objective,
-          mode: input.planInput.mode,
-          maxSteps: input.planInput.maxSteps,
-          note: `Model decomposition was rejected (${parsed.reason}); deterministic decomposition used.`,
-        }),
-        usage: completion.usage,
-      };
-    }
-    return { plan: parsed.plan, usage: completion.usage };
-  } catch {
-    if (input.planInput.signal.aborted) throw new Error('cancelled');
-    return {
-      plan: deterministicPlan({
-        objective: input.planInput.objective,
-        mode: input.planInput.mode,
-        maxSteps: input.planInput.maxSteps,
-        note: 'Model decomposition was unavailable; deterministic decomposition used.',
-      }),
-    };
-  }
-}
-
-export function createNativePlanner(input: {
-  gateway: ModelGateway;
-  maxSteps: number;
-}): Planner {
-  return {
-    plan: async (planInput): Promise<PlanOutcome> => {
-      const maxSteps = Math.min(planInput.maxSteps, input.maxSteps);
-      if (planInput.mode === 'fast') {
-        return { plan: deterministicPlan({ objective: planInput.objective, mode: 'fast', maxSteps }) };
-      }
-      const attempt = await modelPlan({
-        gateway: input.gateway,
-        planInput: { ...planInput, maxSteps },
-        system: PLAN_SYSTEM,
-        prompt: buildPlanPrompt({
-          objective: planInput.objective,
-          history: planInput.history,
-          maxSteps,
-        }),
-      });
-      return {
-        plan: attempt.plan,
-        ...(attempt.usage ? { usage: attempt.usage } : {}),
-      };
-    },
-
-    replan: async (replanInput): Promise<PlanOutcome> => {
-      const maxSteps = Math.min(replanInput.maxSteps, input.maxSteps);
-      const revision = replanInput.plan.revision + 1;
-      let usage: Usage | undefined;
-      let plan: TaskPlan;
-      if (replanInput.mode === 'fast') {
-        plan = correctivePlan({
-          mode: 'fast',
-          revision,
-          completedSteps: replanInput.completedSteps,
-          failure: replanInput.failure,
-        });
-      } else {
-        let text: string;
-        try {
-          const completion = await input.gateway.complete({
-            model: replanInput.model,
-            system: REPLAN_SYSTEM,
-            prompt: buildReplanPrompt({
-              objective: replanInput.objective,
-              history: replanInput.history,
-              plan: replanInput.plan,
-              completedSteps: replanInput.completedSteps,
-              evidence: replanInput.evidence,
-              failure: replanInput.failure,
-              maxSteps,
-            }),
-            ...(replanInput.maxOutputTokens
-              ? { maxOutputTokens: replanInput.maxOutputTokens }
-              : {}),
-            signal: replanInput.signal,
-          });
-          text = completion.text;
-          usage = completion.usage;
-        } catch {
-          if (replanInput.signal.aborted) throw new Error('cancelled');
-          plan = correctivePlan({
-            mode: 'complex',
-            revision,
-            completedSteps: replanInput.completedSteps,
-            failure: replanInput.failure,
-          });
-          return { plan };
-        }
-        const parsed = parseModelPlan({
-          text,
-          mode: 'complex',
-          maxSteps,
-          revision,
-          completedSteps: replanInput.completedSteps,
-        });
-        plan = parsed.ok
-          ? parsed.plan
-          : correctivePlan({
-              mode: 'complex',
-              revision,
-              completedSteps: replanInput.completedSteps,
-              failure: replanInput.failure,
-            });
-      }
-
-      // A revision may only add work that is not already complete.
-      const completed = new Set(replanInput.completedSteps);
-      const remaining = plan.steps.filter((step) => !completed.has(step.id));
-      if (remaining.length === 0) {
-        return {
-          plan: correctivePlan({
-            mode: replanInput.mode,
-            revision,
-            completedSteps: replanInput.completedSteps,
-            failure: replanInput.failure,
-          }),
-          ...(usage ? { usage } : {}),
-        };
-      }
-      return {
-        plan: { ...plan, revision, steps: remaining },
-        ...(usage ? { usage } : {}),
-      };
-    },
-  };
 }

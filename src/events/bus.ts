@@ -60,6 +60,26 @@ export type EventBus = {
   lastSeq: (taskId: string) => Promise<number>;
 };
 
+type Stream = {
+  events: ExecutionEvent[];
+  seq: number;
+  seen: Set<string>;
+  listeners: Set<{ cursor: number; listener: (event: ExecutionEvent) => void }>;
+  pending: ExecutionEvent[];
+  /** The highest generation this process was told it no longer owns. */
+  fencedGeneration: number | null;
+  hydrated: Promise<number> | null;
+  /** Serializes flushes so a retry cannot interleave older and newer batches. */
+  flushing: Promise<void> | null;
+};
+
+const TERMINAL: ReadonlySet<ExecutionEventType> = new Set([
+  'task.completed',
+  'task.failed',
+  'task.cancelled',
+  'task.interrupted',
+]);
+
 export function createEventBus(input: {
   store: EventStore;
   seq: SeqAuthority;
@@ -68,6 +88,118 @@ export function createEventBus(input: {
   eventId: () => string;
   iso: () => string;
 }): EventBus {
+  const streams = new Map<string, Stream>();
+  const maxPending = Math.max(16, input.maxPending ?? 512);
+  const retain = Math.max(1, input.retain ?? input.bufferSize);
+  let dropped = 0;
+
+  function stream(taskId: string): Stream {
+    const existing = streams.get(taskId);
+    if (existing) return existing;
+    const created: Stream = {
+      events: [],
+      seq: 0,
+      seen: new Set(),
+      listeners: new Set(),
+      pending: [],
+      fencedGeneration: null,
+      hydrated: null,
+      flushing: null,
+    };
+    streams.set(taskId, created);
+    return created;
+  }
+
+  function append(state: Stream, event: ExecutionEvent): void {
+    state.events.push(event);
+    state.seen.add(event.eventId);
+    if (state.events.length > input.bufferSize) {
+      state.events.splice(0, state.events.length - input.bufferSize);
+    }
+    for (const subscriber of state.listeners) {
+      if (event.seq > subscriber.cursor) {
+        subscriber.cursor = event.seq;
+        subscriber.listener(event);
+      }
+    }
+  }
+
+  /** Drops the oldest non-terminal pending event; a terminal one is never lost. */
+  function shed(state: Stream): boolean {
+    const index = state.pending.findIndex((event) => !TERMINAL.has(event.type));
+    if (index === -1) return false;
+    state.pending.splice(index, 1);
+    dropped += 1;
+    return true;
+  }
+
+  async function hydrate(taskId: string): Promise<number> {
+    const state = stream(taskId);
+    if (!input.log) return state.seq;
+    if (state.hydrated) return state.hydrated;
+    state.hydrated = (async () => {
+      const last = await input.log!.lastSeq(taskId);
+      state.seq = Math.max(state.seq, last);
+      const recent = await input.log!.read(taskId, Math.max(0, last - input.bufferSize), input.bufferSize);
+      for (const event of recent) {
+        if (state.seen.has(event.eventId)) continue;
+        state.events.push(event);
+        state.seen.add(event.eventId);
+      }
+      if (state.events.length > input.bufferSize) {
+        state.events.splice(0, state.events.length - input.bufferSize);
+      }
+      return state.seq;
+    })();
+    try {
+      return await state.hydrated;
+    } catch (error) {
+      // A failed hydration must not pin the task to a stale watermark; the next
+      // call retries instead of publishing unverified sequence numbers forever.
+      state.hydrated = null;
+      throw error;
+    }
+  }
+
+  async function flush(taskId: string): Promise<void> {
+    const state = streams.get(taskId);
+    if (!state || !input.log) return;
+    if (state.flushing) return state.flushing;
+    const run = (async () => {
+      while (state.pending.length > 0) {
+        const batch = state.pending.splice(0, 200);
+        let results: Awaited<ReturnType<NonNullable<typeof input.log>['append']>>;
+        try {
+          results = await input.log!.append(batch);
+        } catch (error) {
+          // A failed append is not a lost append. Put the batch back ahead of
+          // anything published while it was in flight; the next flush retries
+          // in order, including terminal events.
+          state.pending.unshift(...batch);
+          throw error;
+        }
+        if (results.includes('stale_generation')) {
+          // This process no longer owns these generations. Fence exactly them,
+          // not the task forever: a resume in this process may legitimately
+          // publish the next generation.
+          const rejected = Math.max(...batch.map((event) => event.generation));
+          state.fencedGeneration = Math.max(state.fencedGeneration ?? 0, rejected);
+          state.pending.length = 0;
+          return;
+        }
+      }
+    })();
+    // Do not clear this inside the async function: an empty flush resolves
+    // synchronously, before this assignment, which would pin a fulfilled
+    // promise and suppress every later flush.
+    state.flushing = run;
+    try {
+      await run;
+    } finally {
+      if (state.flushing === run) state.flushing = null;
+    }
+  }
+
   return {
     publish: async (draft) => {
       const seq = await input.seq.allocateSeq({
@@ -88,17 +220,34 @@ export function createEventBus(input: {
         // streamed or persisted has already crossed this line.
         ...(draft.payload === undefined ? {} : { payload: redactValue(draft.payload) }),
       } as ExecutionEvent;
-      // A duplicate here means the allocated sequence was already stored, which
-      // only happens if the head lagged the log. Reporting it as unpublished is
-      // honest: the caller must not treat this event as delivered.
-      return (await input.store.append(event)) === 'stored' ? event : null;
+      if (state.fencedGeneration !== null) {
+        if (draft.generation <= state.fencedGeneration) return event;
+        // A newer generation re-claims the stream in this process.
+        state.fencedGeneration = null;
+      }
+      append(state, event);
+      state.pending.push(event);
+      while (state.pending.length > maxPending) {
+        if (!shed(state)) {
+          // A queue of terminal events only means the database is very slow;
+          // keep them and let flush try, rather than dropping a settlement.
+          break;
+        }
+      }
+      return event;
     },
 
     accept: async (event) => {
       if (await input.store.has(event.eventId)) {
         return { accepted: false, reason: 'duplicate' };
       }
-      if (event.seq <= (await input.store.lastSeq(event.taskId))) {
+      if (state.fencedGeneration !== null) {
+        if (event.generation <= state.fencedGeneration) {
+          return { accepted: false, reason: 'out_of_order' };
+        }
+        state.fencedGeneration = null;
+      }
+      if (event.seq <= state.seq) {
         return { accepted: false, reason: 'out_of_order' };
       }
       // An adopted event crosses the same redaction boundary a published one
@@ -156,6 +305,24 @@ export function createEventBus(input: {
       };
     },
 
-    lastSeq: (taskId) => input.store.lastSeq(taskId),
+    lastSeq: (taskId) => streams.get(taskId)?.seq ?? 0,
+
+    hydrate,
+
+    flush: async (taskId) => {
+      await flush(taskId);
+      const state = streams.get(taskId);
+      if (!state || !input.log || state.fencedGeneration !== null) return;
+      const last = state.events.at(-1);
+      if (last && TERMINAL.has(last.type)) {
+        await input.log.prune(taskId, retain).catch(() => 0);
+      }
+    },
+
+    close: async () => {
+      await Promise.all([...streams.keys()].map((taskId) => flush(taskId)));
+    },
+
+    dropped: () => dropped,
   };
 }

@@ -56,6 +56,132 @@ function identity(overrides: Partial<ExecutionIdentity> = {}): ExecutionIdentity
 
 const SCOPES: readonly PermissionScope[] = ['workspace.read', 'workspace.write'];
 
+test('two concurrent writers cannot both own one workspace root', async () => {
+  const h = harness();
+  const original = h.executions.create.bind(h.executions);
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  h.executions.create = async (record) => {
+    await gate;
+    return original(record);
+  };
+  const launch = async (): Promise<SupervisionLaunch> => ({
+    outcome: { kind: 'completed', summary: 'done' },
+  });
+  const start = (executionId: string, conversationId: string) =>
+    h.supervisor.run({
+      identity: identity({ executionId, conversationId }),
+      adapter: { agent: 'coderax', workload: 'in-process' },
+      workspaceRoot: '/work/cloud',
+      scopes: SCOPES,
+      launch,
+    });
+  const first = start('exec_a', 'conv_a');
+  const second = start('exec_b', 'conv_b');
+  release();
+  const outcomes = await Promise.all([first, second]);
+  assert.equal(
+    outcomes.filter((outcome) => outcome.admitted).length,
+    1,
+    'the workspace root is reserved before the first await',
+  );
+});
+
+test('a rejected durability write releases the workspace reservation', async () => {
+  const h = harness();
+  const original = h.executions.create.bind(h.executions);
+  let attempts = 0;
+  h.executions.create = async (record) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('durability unavailable');
+    return original(record);
+  };
+  const launch = async (): Promise<SupervisionLaunch> => ({
+    outcome: { kind: 'completed', summary: 'done' },
+  });
+
+  await assert.rejects(
+    h.supervisor.run({
+      identity: identity({ executionId: 'exec_rejected' }),
+      adapter: { agent: 'coderax', workload: 'in-process' },
+      workspaceRoot: '/work/cloud',
+      scopes: SCOPES,
+      launch,
+    }),
+    /durability unavailable/,
+  );
+
+  const next = await h.supervisor.run({
+    identity: identity({ executionId: 'exec_after_rejection' }),
+    adapter: { agent: 'coderax', workload: 'in-process' },
+    workspaceRoot: '/work/cloud',
+    scopes: SCOPES,
+    launch,
+  });
+  assert.equal(next.admitted, true, 'the root is free after the rejected write');
+});
+
+test('rollback does not restore an owner that finished during the wait', async () => {
+  const h = harness();
+  const launch = async (): Promise<SupervisionLaunch> => ({
+    outcome: { kind: 'completed', summary: 'done' },
+  });
+  let firstLaunched: () => void = () => undefined;
+  const firstReady = new Promise<void>((resolve) => {
+    firstLaunched = resolve;
+  });
+  const first = h.supervisor.run({
+    identity: identity({ executionId: 'exec_old', generation: 1 }),
+    adapter: { agent: 'coderax', workload: 'in-process' },
+    workspaceRoot: '/work/cloud',
+    scopes: SCOPES,
+    launch: async (execution) => {
+      firstLaunched();
+      return new Promise<SupervisionLaunch>((resolve) => {
+        execution.signal.addEventListener(
+          'abort',
+          () => resolve({ outcome: { kind: 'cancelled' } }),
+          { once: true },
+        );
+      });
+    },
+  });
+  await firstReady;
+
+  const original = h.executions.create.bind(h.executions);
+  h.executions.create = async (record) => {
+    if (record.executionId === 'exec_new') {
+      // The superseded owner finishes while this replacement's durability
+      // write is in flight; the duplicate result must not restore its id.
+      await first;
+      return false;
+    }
+    return original(record);
+  };
+
+  const second = await h.supervisor.run({
+    identity: identity({ executionId: 'exec_new', generation: 2 }),
+    adapter: { agent: 'coderax', workload: 'in-process' },
+    workspaceRoot: '/work/cloud',
+    scopes: SCOPES,
+    launch,
+  });
+  assert.equal(second.admitted, false);
+  if (!second.admitted) assert.equal(second.code, 'execution_duplicate');
+
+  h.executions.create = original;
+  const third = await h.supervisor.run({
+    identity: identity({ executionId: 'exec_after_duplicate', generation: 3 }),
+    adapter: { agent: 'coderax', workload: 'in-process' },
+    workspaceRoot: '/work/cloud',
+    scopes: SCOPES,
+    launch,
+  });
+  assert.equal(third.admitted, true, 'a finished owner is not restored');
+});
+
 test('an execution is recorded durably and its capability is revoked when it ends', async () => {
   const h = harness();
   const id = identity();

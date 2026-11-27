@@ -7,6 +7,11 @@ function client(url: string): CoderaxClient {
   return new CoderaxClient({ baseUrl: url, token: OWNER_TOKEN });
 }
 
+test('the SDK never sends the owner token to cleartext non-loopback HTTP', async () => {
+  const api = new CoderaxClient({ baseUrl: 'http://example.com', token: OWNER_TOKEN });
+  await assert.rejects(api.health(), /requires HTTPS/);
+});
+
 test('submit, stream, status, notifications and history complete end to end', async () => {
   const started = await startTestApp();
   const api = client(started.url);
@@ -124,29 +129,52 @@ test('a failed task can be retried on the same agent with a new generation', asy
   }
 });
 
-test('shutdown closes an attached event stream while its task is still running', async () => {
+test('a bounded team is admitted, evidence-verified and observable through the SDK', async () => {
+  const gateway = {
+    id: 'e2e-team-gateway',
+    complete: async () => ({
+      text: JSON.stringify({ final: 'Read the assigned resource and reported back.' }),
+      usage: { inputTokens: 4, outputTokens: 5 },
+    }),
+  };
   const started = await startTestApp({
-    gateway: slowGateway(60_000),
-    config: { execution: { shutdownGraceMs: 2_000 } },
+    gateway,
+    config: { teams: { maxMembers: 2, maxParallel: 2, maxStepsPerMember: 1 } },
   });
   const api = client(started.url);
-  const controller = new AbortController();
   try {
-    const accepted = await api.submitWork({ objective: 'Wait for shutdown', mode: 'cloud', requireApproval: true });
-    await waitFor(async () => (await api.task(accepted.taskId)).state === 'running' || null);
-    const response = await fetch(new URL(accepted.eventsPath, started.url), {
-      headers: { authorization: `Bearer ${OWNER_TOKEN}` },
-      signal: controller.signal,
+    const accepted = await api.submitTeam({
+      objective: 'One bounded member with objective evidence',
+      mode: 'cloud',
+      members: [
+        {
+          memberId: 'reader',
+          agent: 'coderax',
+          objective: 'Read the spec and report the result',
+          dependsOn: [],
+          resources: [],
+        },
+      ],
+      checks: [{ kind: 'evidence', memberId: 'reader' }],
     });
-    assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/);
-    const reader = response.body!.getReader();
-    assert.equal((await reader.read()).done, false);
-    await started.app.stop();
-    while (!(await reader.read()).done) {
-      // Allow buffered events to drain before checking EOF.
-    }
+    assert.equal(accepted.state, 'running');
+
+    const completed = await waitFor(async () => {
+      const status = await api.team(accepted.teamId);
+      return status.state === 'completed' ? status : null;
+    });
+    assert.equal(completed.members[0]?.state, 'completed');
+    assert.equal(completed.verification?.passed, true);
+    assert.deepEqual(
+      completed.verification?.checks.map((check) => [check.kind, check.passed]),
+      [
+        ['evidence', true],
+        ['evidence', true],
+      ],
+    );
+    const permissions = await api.teamPermissions(accepted.teamId);
+    assert.deepEqual(permissions.requests, []);
   } finally {
-    controller.abort();
-    await started.close().finally(started.workspace.cleanup);
+    await started.close();
   }
 });

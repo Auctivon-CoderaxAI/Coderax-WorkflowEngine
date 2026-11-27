@@ -50,7 +50,10 @@ import {
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
-  ToolList,
+  TeamAccepted,
+  TeamControlResult,
+  TeamStatus,
+  TeamSubmitRequest,
 } from '@coderax/contracts';
 import type {
   BuildGameRequest,
@@ -235,7 +238,24 @@ export class CoderaxClient {
     };
   }
 
+  /**
+   * The owner bearer token is never attached to a cleartext non-loopback URL.
+   * Loopback HTTP stays available for local development and tests.
+   */
+  private assertSecureOrigin(): void {
+    const url = new URL(this.options.baseUrl);
+    const loopback =
+      url.hostname === 'localhost' ||
+      url.hostname === '127.0.0.1' ||
+      url.hostname === '[::1]' ||
+      url.hostname === '::1';
+    if (url.protocol !== 'https:' && !loopback) {
+      throw new Error('CoderaxClient requires HTTPS for a non-loopback base URL.');
+    }
+  }
+
   private async send(input: RequestInput): Promise<Response> {
+    this.assertSecureOrigin();
     return this.options.fetchImpl(
       joinUrl(this.options.baseUrl, input.path, input.query),
       {
@@ -551,6 +571,55 @@ export class CoderaxClient {
     return this.request<PermissionList>(PermissionList, {
       method: 'POST',
       path: `/v1/work/${encodeURIComponent(taskId)}/permissions`,
+      body: request,
+    });
+  }
+
+  submitTeam(request: TeamSubmitRequest): Promise<TeamAccepted> {
+    return this.request<TeamAccepted>(TeamAccepted, {
+      method: 'POST',
+      path: '/v1/teams',
+      body: request,
+    });
+  }
+
+  team(teamId: string): Promise<TeamStatus> {
+    return this.request<TeamStatus>(TeamStatus, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}`,
+    });
+  }
+
+  cancelTeam(teamId: string): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/cancel`,
+      body: {},
+    });
+  }
+
+  resumeTeam(teamId: string, generation: number): Promise<TeamControlResult> {
+    return this.request<TeamControlResult>(TeamControlResult, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/resume`,
+      body: { generation },
+    });
+  }
+
+  teamPermissions(teamId: string): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'GET',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
+    });
+  }
+
+  decideTeamPermission(
+    teamId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/teams/${encodeURIComponent(teamId)}/permissions`,
       body: request,
     });
   }

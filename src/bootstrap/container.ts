@@ -17,6 +17,7 @@ import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
 import type { ExecutionSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
+import type { TeamService } from '../orchestration/team.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { BrowserService } from '../orchestration/browser.js';
 import type { ArtifactService } from '../artifacts/service.js';
@@ -57,8 +58,8 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   supervisor: ExecutionSupervisor;
   scheduler: TaskScheduler;
+  teams: TeamService;
   health: HealthService;
-  quarantine: QuarantineRegistry;
   tools: ToolRuntime;
   knowledge: KnowledgeStore;
   modelRouter: ModelRouter;
@@ -87,8 +88,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'supervisor',
   'scheduler',
+  'teams',
   'health',
-  'quarantine',
   'tools',
   'knowledge',
   'modelRouter',
