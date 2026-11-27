@@ -701,6 +701,10 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (outcome.kind === 'interrupted') {
       return;
     }
+    // Barrier: everything the run published is stored before the task record
+    // says the run is over, so a client cannot read a terminal task whose
+    // stream is missing the events that led to it.
+    await deps.events.flush(task.taskId).catch(() => undefined);
     const now = deps.clock.iso();
     const failureDetail = outcome.kind === 'failed' ? redactText(outcome.detail, [], 1000) : undefined;
     const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
@@ -895,6 +899,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
     } finally {
+      // The terminal event is durable before the lease can be reissued, so a new
+      // generation never starts behind an unfinished stream.
+      await deps.events.flush(task.taskId).catch(() => undefined);
       await releaseLease(task, token);
     }
   }
@@ -1061,6 +1068,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
     });
     if (!started.applied) return;
+    // Continue the sequence after anything a previous process already stored.
+    await deps.events.hydrate(taskId).catch(() => 0);
     await deps.supervisor.begin({
       taskId,
       token,
@@ -1399,6 +1408,46 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
   }
 
+  const TERMINAL_EVENT = new Set([
+    'task.completed',
+    'task.failed',
+    'task.cancelled',
+    'task.interrupted',
+  ]);
+
+  /**
+   * Repairs the one contradiction a crash can leave behind: a task record that
+   * says it finished, and a stream that never received the terminal event. The
+   * client reads the stream, so the stream is completed here from the
+   * authoritative task record — never the other way around.
+   */
+  async function ensureTerminalEvent(task: TaskRecord): Promise<void> {
+    if (!isTerminalState(task.state)) return;
+    const last = deps.events.lastSeq(task.taskId);
+    const tail = await deps.events.read(task.taskId, Math.max(0, last - 1));
+    if (tail.events.some((event) => TERMINAL_EVENT.has(event.type))) return;
+    if (task.state === 'completed') {
+      publish(task, 'task.completed', {
+        ...(task.result?.summary ? { summary: task.result.summary } : {}),
+        ...(task.model ? { model: task.model } : {}),
+        ...(task.usage ? { usage: task.usage } : {}),
+      });
+    } else if (task.state === 'cancelled') {
+      publish(task, 'task.cancelled', {});
+    } else if (task.state === 'failed') {
+      publish(task, 'task.failed', {
+        code: task.failure?.code ?? 'provider_error',
+        ...(task.failure?.detail ? { detail: task.failure.detail } : {}),
+        retryable: task.failure?.retryable ?? false,
+      });
+    } else {
+      publish(task, 'task.interrupted', {
+        detail: task.failure?.detail ?? 'The run stopped before it could report a terminal event.',
+      });
+    }
+    await deps.events.flush(task.taskId).catch(() => undefined);
+  }
+
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
     if (isTerminalState(task.state) || task.state === 'awaiting_approval') {
       return task;
@@ -1423,6 +1472,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
+        await deps.events.flush(applied.task.taskId).catch(() => undefined);
         await notifyTerminal(applied.task, 'interrupted');
         deps.audit.record({
           actor: task.ownerId,
@@ -2181,6 +2231,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       await publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
+      await deps.events.flush(applied.task.taskId).catch(() => undefined);
       await notifyTerminal(applied.task, 'interrupted');
       return ok({
         taskId: task.taskId,

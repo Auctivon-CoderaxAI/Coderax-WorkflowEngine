@@ -59,6 +59,9 @@ import {
   ensureNotificationIndexes,
   ensureTaskIndexes,
 } from '../persistence/mongo-tables.js';
+import { createMemoryEventLog } from '../events/log.js';
+import type { EventLog } from '../events/log.js';
+import { createMongoEventLog, ensureEventIndexes } from '../persistence/mongo-events.js';
 import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
@@ -81,6 +84,8 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
+  /** Durable execution events; the payload side of the event stream. */
+  events: EventLog;
   budget: BudgetWindowStore;
   close: () => Promise<void>;
 };
@@ -154,6 +159,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      events: createMemoryEventLog(),
       budget: createMemoryBudgetStore(),
       schedules: createScheduleRepository(),
       scheduleNotices: createScheduleNoticeStore(),
@@ -181,6 +187,8 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
+  const eventRows = database.collection(collectionName(config, 'events'));
+  const eventHeads = database.collection(collectionName(config, 'event_heads'));
   const budgetWindows = database.collection(collectionName(config, 'budget_windows'));
   const artifactCollections = {
     artifacts,
@@ -210,6 +218,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     });
+    await ensureEventIndexes({ events: eventRows, heads: eventHeads });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -253,6 +262,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
+    events: createMongoEventLog({ events: eventRows, heads: eventHeads }),
     budget: createMongoBudgetStore(budgetWindows),
     close: database.close,
   };
