@@ -2508,27 +2508,33 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
         if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
-      const applied = await deps.tasks.reissue({
-        expected: { state: task.state, generation },
-        taskId,
-        token,
-        now: deps.clock.iso(),
-        leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
-      });
-      if (!applied.applied) {
-        await releaseLease(task, token);
-        return fail('conflict', 'That task cannot be retried.');
+        const applied = await deps.tasks.reissue({
+          taskId,
+          token,
+          now: deps.clock.iso(),
+          leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+          from: ['failed', 'interrupted'],
+        });
+        if (!applied.applied) {
+          await releaseLease(task, token);
+          return fail('conflict', 'That task cannot be retried.');
+        }
+        await publish(applied.task, 'task.queued', {});
+        await publish(applied.task, 'text.replace', { text: '' });
+        if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+          return rejectUnscheduledRun(applied.task, token);
+        }
+        accepted = true;
+        return ok({
+          taskId,
+          state: 'queued',
+          generation: applied.task.generation,
+          outcome: 'accepted',
+        });
+      } finally {
+        if (!accepted) reservation.release();
       }
-      publish(applied.task, 'task.queued', {});
-      publish(applied.task, 'text.replace', { text: '' });
-      deps.scheduler.enqueue(() => execute(taskId, token));
-      return ok({
-        taskId,
-        state: 'queued',
-        generation: applied.task.generation,
-        outcome: 'accepted',
-      });
-    },
+    }),
 
     chat: trackAdmission<[Principal, ChatRequest], ChatReply>(async (principal, request) => {
       const adapter = deps.agents.resolve(request.agent);
