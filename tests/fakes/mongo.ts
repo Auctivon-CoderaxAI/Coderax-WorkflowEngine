@@ -15,6 +15,7 @@ type Index = {
  */
 function compare(left: unknown, right: unknown): number | null {
   if (left instanceof Date && right instanceof Date) return left.getTime() - right.getTime();
+  if (typeof left === 'number' && typeof right === 'number') return left - right;
   if (typeof left === 'string' && typeof right === 'string') {
     return left < right ? -1 : left > right ? 1 : 0;
   }

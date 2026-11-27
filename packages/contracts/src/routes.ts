@@ -3,7 +3,12 @@ import { AgentList } from './capabilities.js';
 import { Problem } from './errors.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
-import { NotificationResponse, PermissionDecisionRequest, PermissionList } from './permissions.js';
+import {
+  NotificationResponse,
+  PermissionDecisionRequest,
+  PermissionList,
+  PermissionRequest,
+} from './permissions.js';
 import {
   CancelRequest,
   ChatReply,
@@ -19,6 +24,21 @@ import {
   WorkSubmitRequest,
 } from './tasks.js';
 import { z as zod } from 'zod';
+import { BrowserArtifactId, BrowserSessionId, ConversationId, ScheduleId, TaskId } from './primitives.js';
+import {
+  BrowserAction,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserAuthorizationRequest,
+  BrowserCapabilities,
+  BrowserCloseRequest,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionCreateRequest,
+  BrowserSessionList,
+  BrowserTakeoverRequest,
+  BrowserTakeoverResult,
+} from './browser.js';
 import {
   Schedule,
   ScheduleControlResult,
@@ -32,7 +52,6 @@ import {
   ScheduleUpcoming,
   ScheduleUpdateRequest,
 } from './schedules.js';
-import { ConversationId, ScheduleId, TaskId } from './primitives.js';
 
 /**
  * The single authoritative HTTP surface.
@@ -65,6 +84,8 @@ export type RouteSpec = {
 
 const TaskParams = zod.object({ taskId: TaskId }).strict();
 const ConversationParams = zod.object({ conversationId: ConversationId }).strict();
+const BrowserSessionParams = zod.object({ sessionId: BrowserSessionId }).strict();
+const BrowserArtifactParams = zod.object({ artifactId: BrowserArtifactId }).strict();
 const ScheduleParams = zod.object({ scheduleId: ScheduleId }).strict();
 const ExecutionHistoryQuery = zod
   .object({ limit: zod.coerce.number().int().positive().max(500).optional() })
@@ -235,6 +256,139 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     params: TaskParams,
     body: PermissionDecisionRequest,
     response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'browserCapabilities',
+    method: 'GET',
+    path: '/v1/browser/capabilities',
+    summary: 'Truthful cloud browser availability; unverified when not attested.',
+    tags: ['browser'],
+    auth: 'owner',
+    response: { status: 200, description: 'Browser capabilities', schema: BrowserCapabilities },
+  },
+  {
+    operationId: 'listBrowserSessions',
+    method: 'GET',
+    path: '/v1/browser/sessions',
+    summary: 'Owner-scoped cloud browser sessions and their current state.',
+    tags: ['browser'],
+    auth: 'owner',
+    response: { status: 200, description: 'Browser session list', schema: BrowserSessionList },
+  },
+  {
+    operationId: 'createBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions',
+    summary: 'Create an isolated cloud browser session with an origin allowlist.',
+    tags: ['browser'],
+    auth: 'owner',
+    body: BrowserSessionCreateRequest,
+    response: { status: 201, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'getBrowserSession',
+    method: 'GET',
+    path: '/v1/browser/sessions/{sessionId}',
+    summary: 'One cloud browser session, including tabs and expiry.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'browserAction',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/actions',
+    summary: 'Perform one authorized navigation, inspection, capture or input action.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserAction,
+    response: { status: 200, description: 'Browser action result', schema: BrowserActionResult },
+  },
+  {
+    operationId: 'pauseBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/pause',
+    summary: 'Pause a session while keeping its provider state and tabs.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'resumeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/resume',
+    summary: 'Resume a paused session with its tabs and current page intact.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'takeoverBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/takeover',
+    summary: 'Hand the live session to the owner, or return control to the agent.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserTakeoverRequest,
+    response: { status: 200, description: 'Owner takeover result', schema: BrowserTakeoverResult },
+  },
+  {
+    operationId: 'closeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/close',
+    summary: 'Cancel a session and release its cloud browser.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserCloseRequest,
+    response: { status: 200, description: 'Browser session', schema: BrowserSession },
+  },
+  {
+    operationId: 'authorizeBrowserSession',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/authorize',
+    summary: 'Request a single-use owner approval for one sensitive browser action.',
+    tags: ['browser', 'permissions'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: BrowserAuthorizationRequest,
+    response: { status: 201, description: 'Permission request', schema: PermissionRequest },
+  },
+  {
+    operationId: 'decideBrowserAuthorization',
+    method: 'POST',
+    path: '/v1/browser/sessions/{sessionId}/authorize/decision',
+    summary: 'Approve or deny one browser permission request.',
+    tags: ['browser', 'permissions'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    body: PermissionDecisionRequest,
+    response: { status: 200, description: 'Permission list', schema: PermissionList },
+  },
+  {
+    operationId: 'listBrowserReceipts',
+    method: 'GET',
+    path: '/v1/browser/sessions/{sessionId}/receipts',
+    summary: 'Bounded execution-receipt history for a browser session.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserSessionParams,
+    response: { status: 200, description: 'Browser receipt list', schema: BrowserReceiptList },
+  },
+  {
+    operationId: 'getBrowserArtifact',
+    method: 'GET',
+    path: '/v1/browser/artifacts/{artifactId}',
+    summary: 'Retrieve captured screenshot or transferred file bytes.',
+    tags: ['browser'],
+    auth: 'owner',
+    params: BrowserArtifactParams,
+    response: { status: 200, description: 'Browser artifact content', schema: BrowserArtifactContent },
   },
   {
     operationId: 'listNotifications',

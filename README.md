@@ -39,7 +39,9 @@ are clients of the same versioned API.
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
-| Coderax Native agent | Implemented | `src/agents/native` |
+| Coderax Native reasoning and planning | Implemented — fast/complex modes, dependency-aware plans, parallel execution, bounded replanning, evidence-based verification, approval escalation | `src/agents/native`, `tests/unit/native-reasoning.test.ts`, `tests/integration/approval.test.ts` |
+| Cloud browser surface (sessions, navigation, inspection, screenshots, inputs, tabs, files, takeover, receipts) | Implemented, fail-closed | `packages/contracts/src/browser.ts`, `src/browser`, `src/orchestration/browser.ts` |
+| Verified zero-cost cloud browser provider | **Not configured** | no provider endpoint exists here; capabilities report `not_configured` |
 | External agent adapters (OpenCode, FreeBuff) | Contract + isolation only | `src/agents/adapters/external.ts` |
 | Durable lease persistence across replicas | Selected by `persistence.driver=mongo`; startup fails without a reachable collection; not live-verified | `src/bootstrap/compose.ts` |
 | Task, conversation, memory, event and notification persistence | In-memory only | `src/persistence/*` |
@@ -58,7 +60,7 @@ simplified and what is still missing.
 ```bash
 npm install
 npm run build
-npm test                          # 162 tests: unit, contract, integration, security, e2e
+npm test                          # unit, contract, integration, security and e2e suites
 npm run openapi:check             # fails if the published contract drifted
 ```
 
@@ -100,6 +102,7 @@ src/scheduling       zone-aware recurrence, durable schedule engine, occurrence 
 src/execution        leases, arbitration, heartbeat runner, retry, workspace confinement
 src/persistence      task repository (fenced writes), lease tables, conversations
 src/agents           registry, Coderax Native, isolated external adapters
+src/browser          provider port, protocol v1 adapter, policy, fail-closed provider
 src/models           verified catalogue, zero-cost route, daily budget ledger
 src/events           ordered event log with dedupe and replay
 src/permissions      scoped, single-use approval requests
@@ -112,6 +115,29 @@ models/persistence`, and `packages/sdk -> packages/contracts`. No module reads
 another module's internals, no route touches a repository, and nothing constructs
 its own collaborators.
 
+## Coderax Native reasoning and planning
+
+Native separates planning, authorization and execution:
+
+- `src/agents/native/plan.ts` and `schedule.ts` produce and validate a persisted
+  dependency graph. Planning is pure: it cannot call a provider, read a file or
+  change a task. Independent steps run in parallel; a cycle or missing dependency
+  is refused rather than treated as ready.
+- `reason.ts` selects fast mode (one reasoning path, one verification) or complex
+  mode (model-assisted decomposition, parallel waves, bounded replanning). `auto`
+  chooses from the objective's structure and the resolved mode is persisted.
+- Every step passes the permission layer before `src/agents/native/actions.ts`
+  executes it. A scoped workspace read is requested from the owner and suspends
+  the task as `awaiting_approval`; a resumed generation executes only after the
+  stored grant exists. A denial is not re-asked.
+- `verify.ts` requires every planned step to be complete with non-empty evidence,
+  then asks the model to pass the objective only by citing real evidence ids. An
+  uncited or malformed verdict is a failed verification, not a completion.
+- Attempts, parallel steps, replans and total iterations are bounded by
+  `engines.native`; exhausting them reports `iteration_exhausted` or
+  `verification_failed` instead of claiming success. Evidence and the plan live in
+  the checkpoint, so a resumed generation verifies what actually ran.
+
 ## Non-negotiables enforced in code
 
 - **$0**: no paid model is representable (`allowPaid` is a literal `false`), and a
@@ -122,6 +148,9 @@ its own collaborators.
 - **No private/cloud bleed**: memory and workspaces are partitioned by data mode.
 - **Durable Work**: closing the browser or the CLI never ends an authorized task.
 - **Fenced state**: an expired generation can never overwrite a newer one.
+- **No fabricated browsing**: a screenshot or action exists only from verified
+  provider bytes; without a verified provider every browser operation fails
+  closed and says why. See [`docs/browser.md`](docs/browser.md).
 
 ## Scheduling
 

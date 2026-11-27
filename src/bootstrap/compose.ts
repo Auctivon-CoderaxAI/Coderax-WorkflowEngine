@@ -9,11 +9,16 @@ import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
+import { createBrowserService } from '../orchestration/browser.js';
+import { createBrowserStore } from '../browser/store.js';
+import type { BrowserProvider } from '../browser/types.js';
+import { buildBrowserProvider } from './browser.js';
+import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
-import { createPermissionStore } from '../permissions/store.js';
+import { createPermissionGate } from '../permissions/gate.js';
 import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
@@ -56,6 +61,8 @@ export type ComposeInput = {
   /** Test and future-adapter injection; nothing here changes production defaults. */
   gateway?: ModelGateway | null;
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
+  /** Test and future-provider injection; the default is configuration-driven. */
+  browserProvider?: BrowserProvider;
   fetchImpl?: typeof fetch;
   /**
    * Persistence injection for tests and for a host that owns its own driver. A
@@ -129,6 +136,12 @@ function modelDescriptors(input: {
 export async function composeApplication(input: ComposeInput): Promise<Application> {
   const env = input.env ?? process.env;
   const { config } = input;
+  // `loadConfig` validates this for the normal entry point. Programmatic
+  // callers must not be able to bypass the same fail-closed invariants.
+  const invariantIssues = validateInvariants(config);
+  if (invariantIssues.length > 0) {
+    throw new StartupError(invariantIssues);
+  }
   const clock = createClock();
   const ids = createIdGenerator();
 
@@ -143,7 +156,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
 
   const gateway = buildGateway(input);
-  const native = createNativeAgent({ enabled: config.engines.native.enabled, gateway });
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
@@ -167,16 +179,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
-  const adapters: AgentAdapter[] = [native, opencode, freebuff];
-  const agents = createAgentRegistry({
-    adapters,
-    defaultAgent: config.engines.default === 'opencode'
-      ? 'opencode'
-      : config.engines.default === 'freebuff'
-        ? 'freebuff'
-        : 'coderax',
-  });
-
   const models = createModelCatalog({
     descriptors: modelDescriptors({ config, gateway }),
     route: config.models.route,
@@ -192,17 +194,56 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     config,
     env,
     clock,
+    ids,
     ...(input.persistence ?? {}),
   });
   const lease = persistence.lease;
   const tasks = persistence.tasks;
   const conversations = persistence.conversations;
   const memory = persistence.memory;
-  const permissions = createPermissionStore({ clock, ids });
+  const permissions = persistence.permissions;
+  const permissionsGate = createPermissionGate({ permissions, clock });
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway,
+    authorizer: permissionsGate,
+    limits: {
+      maxSteps: config.engines.native.maxSteps,
+      maxParallelSteps: config.engines.native.maxParallelSteps,
+      maxReplans: config.engines.native.maxReplans,
+      maxStepAttempts: config.engines.native.maxStepAttempts,
+      maxIterations: config.engines.native.maxIterations,
+    },
+  });
+  const adapters: AgentAdapter[] = [native, opencode, freebuff];
+  const agents = createAgentRegistry({
+    adapters,
+    defaultAgent: config.engines.default === 'opencode'
+      ? 'opencode'
+      : config.engines.default === 'freebuff'
+        ? 'freebuff'
+        : 'coderax',
+  });
   const notifications = persistence.notifications;
   const schedules = persistence.schedules;
   const scheduleNotices = persistence.scheduleNotices;
   const audit = createAuditLog({ clock, ids });
+  const browserProvider =
+    input.browserProvider ??
+    buildBrowserProvider({
+      config,
+      env,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    });
+  const browser = createBrowserService({
+    config,
+    clock,
+    ids,
+    permissions,
+    audit,
+    provider: browserProvider,
+    store: createBrowserStore(),
+  });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
@@ -286,6 +327,26 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         required: false,
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
+      ...(config.browsers.enabled
+        ? [
+            {
+              // Optional: no verified browser provider is required to run Work.
+              // It is reported truthfully, and an unavailable one degrades rather
+              // than blocks the engine.
+              name: 'browser',
+              required: false,
+              check: async () => {
+                const capabilities = await browser.capabilities();
+                return capabilities.operational
+                  ? {
+                      status: 'ok' as const,
+                      detail: `Browser provider ${capabilities.provider} is operational.`,
+                    }
+                  : { status: 'degraded' as const, detail: capabilities.detail };
+              },
+            },
+          ]
+        : []),
     ],
   });
 
@@ -310,6 +371,7 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     scheduler,
     health,
+    browser,
   });
   if (!container.dependencies) {
     throw new StartupError(

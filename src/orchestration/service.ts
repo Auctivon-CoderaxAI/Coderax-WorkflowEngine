@@ -2,6 +2,18 @@ import { scheduledConversationId } from '../scheduling/identity.js';
 import type {
   AgentId,
   AgentList,
+  BrowserAction,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserAuthorizationRequest,
+  BrowserCapabilities,
+  BrowserCloseRequest,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionCreateRequest,
+  BrowserSessionList,
+  BrowserTakeoverRequest,
+  BrowserTakeoverResult,
   BudgetState,
   ChatReply,
   ChatRequest,
@@ -13,6 +25,7 @@ import type {
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
+  PermissionRequest,
   Schedule,
   ScheduleControlResult,
   ScheduleCreateRequest,
@@ -28,11 +41,12 @@ import type {
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
+  Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
 import { isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { ScheduleExecutionRecord, ScheduleRecord, TaskRecord } from '../domain.js';
+import type { ScheduleExecutionRecord, ScheduleRecord, TaskEvidence, TaskPatch, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
@@ -61,6 +75,8 @@ import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
 import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
+import type { BrowserService } from './browser.js';
+import { resolveReasoningMode } from '../agents/native/reason.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -83,6 +99,7 @@ export type ApplicationServiceDeps = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  browser: BrowserService;
 };
 
 export type EventStream = {
@@ -96,6 +113,57 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  browserCapabilities: () => Promise<BrowserCapabilities>;
+  browserSessions: (principal: Principal) => Promise<BrowserSessionList>;
+  browserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  createBrowserSession: (
+    principal: Principal,
+    request: BrowserSessionCreateRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  browserAction: (
+    principal: Principal,
+    sessionId: string,
+    action: BrowserAction,
+  ) => Promise<ServiceResult<BrowserActionResult>>;
+  pauseBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  resumeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  takeoverBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ) => Promise<ServiceResult<BrowserTakeoverResult>>;
+  closeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserCloseRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  authorizeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ) => Promise<ServiceResult<PermissionRequest>>;
+  decideBrowserAuthorization: (
+    principal: Principal,
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ) => Promise<ServiceResult<PermissionList>>;
+  browserReceipts: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserReceiptList>>;
+  browserArtifact: (
+    principal: Principal,
+    artifactId: string,
+  ) => Promise<ServiceResult<BrowserArtifactContent>>;
   submitWork: (
     principal: Principal,
     request: WorkSubmitRequest,
@@ -258,16 +326,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       updatedAt: task.updatedAt,
       ...(task.leaseExpiresAt ? { leaseExpiresAt: task.leaseExpiresAt } : {}),
       cancelRequested: task.cancelRequested,
+      ...(task.reasoning ? { reasoning: task.reasoning } : {}),
       steps: task.steps.map((step) => ({
         id: step.id,
         title: step.title,
         state: step.state,
+        ...(step.dependsOn ? { dependsOn: [...step.dependsOn] } : {}),
+        ...(step.attempts !== undefined ? { attempts: step.attempts } : {}),
       })),
       ...(task.result
         ? {
             result: {
               ...(task.result.summary ? { summary: task.result.summary } : {}),
               artifacts: task.result.artifacts,
+              ...(task.result.verification
+                ? {
+                    verification: {
+                      passed: task.result.verification.passed,
+                      reason: redactText(task.result.verification.reason, [], 1000),
+                      evidence: task.result.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
           }
         : {}),
@@ -310,6 +392,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
   }
 
+  /** Usage is cumulative across a suspend/resume boundary, never reset by it. */
+  function mergeUsage(previous: Usage | null, next: Usage | undefined): Usage | null {
+    if (!previous && !next) return null;
+    const inputTokens = (previous?.inputTokens ?? 0) + (next?.inputTokens ?? 0);
+    const outputTokens = (previous?.outputTokens ?? 0) + (next?.outputTokens ?? 0);
+    return {
+      ...(inputTokens > 0 ? { inputTokens } : {}),
+      ...(outputTokens > 0 ? { outputTokens } : {}),
+    };
+  }
+
   async function releaseLease(task: TaskRecord, token: string): Promise<void> {
     await deps.lease
       .release({ key: workRunKey(scopeOf(task)), token })
@@ -326,20 +419,86 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     token: string,
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
+    steps?: TaskRecord['steps'],
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
-      const retired = await deps.tasks.updateFenced({ taskId: task.taskId, token,
-        patch: { state: 'interrupted', updatedAt: deps.clock.iso(),
-          failure: { code: 'server_unavailable', retryable: true, detail: outcome.detail } } });
-      try {
-        if (retired.applied) {
-          publish(retired.task, 'task.interrupted', { detail: outcome.detail });
-          await notifyTerminal(retired.task, 'interrupted');
-        }
-      } finally { await releaseLease(task, token); }
       return;
     }
     const now = deps.clock.iso();
+    const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
+    const mergedUsage = mergeUsage(task.usage, generationUsage);
+    let partialSaved = false;
+
+    // Escalation is a suspended state, not a failure: the plan, its checkpoint
+    // and any partial text stay durable so an approved resume continues exactly
+    // where authorization stopped. No completion notification is emitted because
+    // nothing completed.
+    if (outcome.kind === 'failed' && outcome.code === 'approval_required') {
+      // Save partial text before another generation can start.
+      const partial = checkpoint?.text ?? '';
+      if (partial.length > 0) {
+        partialSaved = await deps.conversations
+          .appendMessage({
+            messageId: deps.ids.messageId(),
+            conversationId: task.conversationId,
+            role: 'assistant',
+            text: partial,
+            createdAt: now,
+            unfinished: true,
+            agent: task.agent,
+          })
+          .then(() => true, () => false);
+      }
+      // Persist the suspension under the old fence before releasing ownership.
+      // A restart between these operations can resume from the saved checkpoint
+      // once the old lease expires.
+      const applied = await deps.tasks.updateFenced({
+        taskId: task.taskId,
+        token,
+        guard: 'not_cancel_requested',
+        patch: {
+          state: 'awaiting_approval',
+          updatedAt: now,
+          leaseExpiresAt: null,
+          failure: {
+            code: outcome.code,
+            detail: outcome.detail,
+            retryable: false,
+          },
+          ...(checkpoint ? { checkpoint } : {}),
+          ...(steps ? { steps } : {}),
+          ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+          ...(mergedUsage ? { usage: mergedUsage } : {}),
+        },
+      });
+      if (!applied.applied && applied.reason === 'guard_rejected') {
+        // The cancellation flag won the task write after the runner stopped.
+        outcome = { kind: 'cancelled' };
+      } else {
+        try {
+          if (applied.applied) {
+            // Suspension settles this generation's usage even though the task is not
+            // terminal. The resumed generation is charged separately, so the daily
+            // ledger matches the cumulative usage the owner sees.
+            if (generationUsage) {
+              deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+            }
+            deps.audit.record({
+              actor: task.ownerId,
+              action: 'work.awaiting_approval',
+              taskId: task.taskId,
+              conversationId: task.conversationId,
+              outcome: 'accepted',
+              detail: outcome.code,
+            });
+          }
+        } finally {
+          await releaseLease(task, token);
+        }
+        return;
+      }
+    }
+
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -348,6 +507,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             result: {
               summary: outcome.summary.slice(0, 20_000),
               artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+              ...(outcome.verification
+                ? {
+                    verification: {
+                      passed: outcome.verification.passed,
+                      reason: redactText(outcome.verification.reason, [], 1000),
+                      evidence: outcome.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           }
@@ -363,10 +533,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               },
             };
 
+    const statePatch = {
+      ...patch,
+      ...(checkpoint ? { checkpoint } : {}),
+      ...(steps ? { steps } : {}),
+      ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+      ...(mergedUsage ? { usage: mergedUsage } : {}),
+    };
     const applied = await deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
-      patch: checkpoint ? { ...patch, checkpoint } : patch,
+      patch: statePatch,
     });
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
@@ -375,15 +552,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    // Only the generation that actually settled the task may charge the ledger,
-    // so a superseded run cannot consume the same inference twice. Without this,
-    // Work and scheduled runs would escape the daily token ceiling that Chat
-    // already honours.
-    if (outcome.kind === 'completed' && outcome.usage) {
-      deps.budget.consume(task.ownerId, outcome.usage, deps.clock.now());
-    }
-
     const settled = applied.task;
+    // Charge the usage produced by this generation, not the merged task total:
+    // the previous generation was already charged when it settled.
+    if (generationUsage) {
+      deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+    }
     try {
       if (outcome.kind === 'completed') {
         publish(settled, 'task.completed', {
@@ -400,7 +574,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
 
       const text = checkpoint?.text ?? '';
-      if (text.length > 0) {
+      if (text.length > 0 && !partialSaved) {
         await deps.conversations.appendMessage({
           messageId: deps.ids.messageId(),
           conversationId: task.conversationId,
@@ -520,8 +694,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
+    const evidence: TaskEvidence[] = [...(started.task.checkpoint.evidence ?? [])];
+    let plan: TaskPlan | null = started.task.checkpoint.plan ?? null;
+    let iterations = started.task.checkpoint.iterations ?? 0;
     let text = '';
     let visible = text;
+    // Report patches are snapshots of mutable local arrays. Serialize them in
+    // issue order so a delayed plan.ready cannot overwrite a later completed
+    // checkpoint on a replica that applies writes out of order.
+    let writeChain: Promise<void> = Promise.resolve();
+    const persist = (patch: TaskPatch): void => {
+      const snapshot = structuredClone(patch);
+      writeChain = writeChain
+        .then(async () => {
+          await deps.tasks.updateFenced({ taskId, token, patch: snapshot });
+        })
+        .catch(() => undefined);
+    };
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
       else if (next !== visible) publish(started.task, 'text.delta', { text: next.slice(visible.length) });
@@ -530,32 +719,103 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const report = (event: AgentReportEvent): void => {
       if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
-      if (event.type === 'step.started') {
-        const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'running';
-        else steps.push({ id: event.stepId, title: event.title, state: 'running' });
-        publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
+
+      if (event.type === 'budget') {
+        iterations = event.iterations;
+        return;
+      }
+
+      /**
+       * A plan is persisted before its first step starts, so the owner can see
+       * the dependency graph and a resume executes the plan that was shown, not
+       * a different one produced by a second model call.
+       */
+      if (event.type === 'plan.ready') {
+        plan = event.plan;
+        const previous = new Map(steps.map((step) => [step.id, step]));
+        const next: TaskStep[] = event.plan.steps.map((step) => {
+          const existing = previous.get(step.id);
+          const state = existing?.state ?? (completed.includes(step.id) ? 'completed' : 'queued');
+          return {
+            id: step.id,
+            title: step.title,
+            state,
+            dependsOn: [...step.dependsOn],
+            ...(existing?.attempts !== undefined ? { attempts: existing.attempts } : {}),
+          };
         });
+        for (const step of steps) {
+          if (step.state === 'completed' && !next.some((entry) => entry.id === step.id)) {
+            next.unshift(step);
+          }
+        }
+        steps.length = 0;
+        steps.push(...next);
+        persist({
+          steps,
+          reasoning: event.plan.mode,
+          checkpoint: {
+            completedSteps: [...completed],
+            text: visible,
+            plan: event.plan,
+            evidence,
+            iterations,
+          },
+          updatedAt: deps.clock.iso(),
+        });
+        return;
+      }
+
+      if (event.type === 'step.started') {
+        const planned = plan?.steps.find((step) => step.id === event.stepId);
+        const existing = steps.find((step) => step.id === event.stepId);
+        if (existing) {
+          existing.state = 'running';
+          if (planned) existing.dependsOn = [...planned.dependsOn];
+        } else {
+          steps.push({
+            id: event.stepId,
+            title: event.title,
+            state: 'running',
+            ...(planned ? { dependsOn: [...planned.dependsOn] } : {}),
+          });
+        }
+        publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'step.completed') {
         const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'completed';
-        completed.push(event.stepId);
+        if (existing) {
+          existing.state = 'completed';
+          if (event.attempts !== undefined) existing.attempts = event.attempts;
+        }
+        if (!completed.includes(event.stepId)) completed.push(event.stepId);
+        if (event.evidence) {
+          // Evidence is persisted, so it is scrubbed before it reaches the
+          // checkpoint: the transcript path already redacts, and a durable
+          // record must not become the one place a credential survives.
+          const safeEvidence: TaskEvidence = {
+            ...event.evidence,
+            citation: redactText(event.evidence.citation, [], 500),
+            output: redactContent(event.evidence.output).slice(0, 20_000),
+          };
+          const index = evidence.findIndex((entry) => entry.stepId === event.stepId);
+          if (index === -1) evidence.push(safeEvidence);
+          else evidence[index] = safeEvidence;
+        }
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            checkpoint: { completedSteps: [...completed], text: visible },
-            updatedAt: deps.clock.iso(),
-          },
+        persist({
+          steps,
+          checkpoint: { completedSteps: [...completed], text: visible, plan, evidence, iterations },
+          updatedAt: deps.clock.iso(),
         });
+        return;
+      }
+      if (event.type === 'step.failed') {
+        const existing = steps.find((step) => step.id === event.stepId);
+        if (existing) existing.state = 'failed';
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'text.delta' || event.type === 'text.replace') {
@@ -613,6 +873,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ownerId: task.ownerId,
         tenantId: task.tenantId,
         conversationId: task.conversationId,
+        taskId: task.taskId,
         objective: task.objective,
         history,
         model: model.value.ref,
@@ -621,11 +882,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         maxSteps: deps.config.engines.native.maxSteps,
         budget: task.budget,
         signal: controller.signal,
+        reasoning: task.reasoning ?? 'auto',
+        completedSteps: [...started.task.checkpoint.completedSteps],
+        plan: started.task.checkpoint.plan ?? null,
+        evidence: [...(started.task.checkpoint.evidence ?? [])],
+        iterationsUsed: started.task.checkpoint.iterations ?? 0,
       },
       report,
     });
     if (controllers.get(taskId) !== controller) return;
     controllers.delete(taskId);
+    await writeChain.catch(() => undefined);
 
     if (result.ownershipLost) {
       // Deliberately no terminal write and no notification: this run no longer
@@ -637,7 +904,19 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const outcome = result.outcome.kind === 'completed'
       ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
       : result.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
+    await settle(
+      started.task,
+      token,
+      outcome,
+      {
+        completedSteps: completed,
+        text: safeText,
+        plan,
+        evidence,
+        iterations,
+      },
+      steps,
+    );
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
@@ -678,6 +957,48 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return task;
   }
 
+  async function cancelSuspended(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const applied = await deps.tasks.updateFenced({
+      taskId: task.taskId,
+      token: task.runToken ?? '',
+      patch: {
+        state: 'cancelled',
+        updatedAt: deps.clock.iso(),
+        cancelRequested: true,
+      },
+    });
+    if (applied.applied) {
+      publish(applied.task, 'task.cancelled', {});
+      await notifyTerminal(applied.task, 'cancelled');
+      deps.audit.record({
+        actor: task.ownerId,
+        action: 'work.cancelled',
+        taskId: task.taskId,
+        conversationId: task.conversationId,
+        outcome: 'cancelled',
+      });
+      return ok({
+        taskId: task.taskId,
+        state: 'cancelled',
+        generation: task.generation,
+        outcome: 'accepted',
+      });
+    }
+    return lostCancellation(task);
+  }
+
+  async function lostCancellation(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const current = await deps.tasks.get(task.taskId);
+    const cancelled = current?.runToken === task.runToken && current?.state === 'cancelled';
+    return ok({
+      taskId: task.taskId,
+      state: current?.state ?? task.state,
+      generation: current?.generation ?? task.generation,
+      outcome: cancelled ? 'accepted' : 'superseded',
+    });
+  }
+
+
   type SubmitOptions = { scheduleAdmission?: TaskRecord['scheduleAdmission']; eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
 
   /**
@@ -709,6 +1030,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const model = deps.models.resolve(request.model, request.mode);
     if (!model.ok) return model;
 
+    const reasoning = resolveReasoningMode({ requested: request.reasoning, objective: request.objective });
     const reserve = () => deps.budget.reserve(principal.ownerId, deps.clock.now()).allowed;
     if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
       return fail(
@@ -755,8 +1077,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       state: 'queued',
       generation: 1,
       runToken: null,
+      reasoning,
       steps: [],
-      checkpoint: { completedSteps: [], text: '' },
+      checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
       createdAt: now,
       updatedAt: now,
       leaseExpiresAt: null,
@@ -1094,13 +1417,52 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
+    browserCapabilities: () => deps.browser.capabilities(),
+    browserSessions: (principal) => deps.browser.list(principal.ownerId),
+    browserSession: (principal, sessionId) =>
+      deps.browser.get(principal.ownerId, sessionId),
+    createBrowserSession: (principal, request) =>
+      deps.browser.create(principal.ownerId, request),
+    browserAction: (principal, sessionId, action) =>
+      deps.browser.act(principal.ownerId, sessionId, action),
+    pauseBrowserSession: (principal, sessionId) =>
+      deps.browser.pause(principal.ownerId, sessionId),
+    resumeBrowserSession: (principal, sessionId) =>
+      deps.browser.resume(principal.ownerId, sessionId),
+    takeoverBrowserSession: (principal, sessionId, request) =>
+      deps.browser.takeover(principal.ownerId, sessionId, request),
+    closeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.close(principal.ownerId, sessionId, request),
+    authorizeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.authorize(principal.ownerId, sessionId, request),
+    decideBrowserAuthorization: (principal, sessionId, request) =>
+      deps.browser.decide(principal.ownerId, sessionId, request),
+    browserReceipts: (principal, sessionId) =>
+      deps.browser.receipts(principal.ownerId, sessionId),
+    browserArtifact: (principal, artifactId) =>
+      deps.browser.artifact(principal.ownerId, artifactId),
+
     submitWork: (principal, request) => acceptTask(principal, request),
+
 
     task: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      const reconciled = await reconcile(found.value);
-      return ok(toStatus(reconciled));
+      const task = await reconcile(found.value);
+      if (task.state === 'awaiting_approval') {
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
+        // A durable suspension is ready to expose only after its run no longer
+        // holds the lease. An owner who sees it can immediately claim a resume.
+        if (lease?.live && lease.token === task.runToken) {
+          return ok(toStatus({
+            ...task,
+            state: 'running',
+            failure: null,
+            leaseExpiresAt: lease.expiresAt.toISOString(),
+          }));
+        }
+      }
+      return ok(toStatus(task));
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -1116,20 +1478,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
+      // Once suspended, the task can be cancelled even without a live lease.
+      if (task.state === 'awaiting_approval') return cancelSuspended(task);
+
       const outcome = await deps.lease.cancel({
         key: workRunKey(scopeOf(task)),
         now: deps.clock.now(),
       });
       if (outcome === 'none') {
+        const current = await deps.tasks.get(taskId);
+        if (current?.runToken === task.runToken && current?.state === 'awaiting_approval') {
+          return cancelSuspended(current);
+        }
         return fail('not_found', 'No live run exists for that task.');
       }
 
       if (outcome === 'requested') {
-        await deps.tasks.updateFenced({
+        const applied = await deps.tasks.updateFenced({
           taskId: task.taskId,
           token: task.runToken ?? '',
+          guard: 'not_awaiting_approval',
           patch: { cancelRequested: true, updatedAt: deps.clock.iso() },
         });
+        if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+        if (!applied.applied) return lostCancellation(task);
         controllers.get(task.taskId)?.abort();
         return ok({
           taskId: task.taskId,
@@ -1142,6 +1514,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const applied = await deps.tasks.updateFenced({
         taskId: task.taskId,
         token: task.runToken ?? '',
+        guard: 'not_awaiting_approval',
         patch: {
           state: 'interrupted',
           updatedAt: deps.clock.iso(),
@@ -1153,14 +1526,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           },
         },
       });
-      if (!applied.applied) {
-        return ok({
-          taskId: task.taskId,
-          state: (await deps.tasks.get(task.taskId))?.state ?? task.state,
-          generation: task.generation,
-          outcome: 'superseded',
-        });
-      }
+      if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+      if (!applied.applied) return lostCancellation(task);
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
@@ -1212,8 +1579,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        // A concurrent cancel may land between the read above and this write.
+        // Only the two suspending states may be revived; a cancelled task stays
+        // cancelled.
+        from: ['interrupted', 'awaiting_approval'],
       });
-      if (!applied.applied) return fail('conflict', 'That task cannot be resumed.');
+      if (!applied.applied) {
+        await releaseLease(task, token);
+        return fail('conflict', 'That task cannot be resumed.');
+      }
       publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
@@ -1271,6 +1645,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           token,
           now: deps.clock.iso(),
           leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+          from: ['failed', 'interrupted'],
         });
         if (!applied.applied) {
           await releaseLease(task, token);
@@ -1342,6 +1717,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           maxSteps: 1,
           budget: null,
           signal: controller.signal,
+          reasoning: 'fast',
+          completedSteps: [],
+          plan: null,
         },
         () => undefined,
       );
@@ -1824,6 +2202,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
+      // Release cloud browsers rather than letting them run until their TTL.
+      await deps.browser.shutdown();
     },
   };
 

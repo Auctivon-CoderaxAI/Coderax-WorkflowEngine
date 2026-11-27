@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Coderax WorkflowEngine API",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Authoritative HTTP surface for Coderax Native intelligence, agent orchestration and durable Work execution. Every operation is generated from the versioned route catalogue."
   },
   "servers": [
@@ -49,6 +49,7 @@
               "not_ready",
               "engine_unavailable",
               "engine_not_configured",
+              "browser_unavailable",
               "model_missing",
               "workspace_denied",
               "budget_exhausted",
@@ -271,6 +272,3188 @@
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/artifacts/{artifactId}": {
+      "get": {
+        "operationId": "getBrowserArtifact",
+        "summary": "Retrieve captured screenshot or transferred file bytes.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser artifact content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "sessionId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "screenshot",
+                            "download",
+                            "upload"
+                          ]
+                        },
+                        "contentType": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 120
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "digest": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "sessionId",
+                        "kind",
+                        "contentType",
+                        "bytes",
+                        "digest",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "dataBase64": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "artifact",
+                    "dataBase64"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/browser/capabilities": {
+      "get": {
+        "operationId": "browserCapabilities",
+        "summary": "Truthful cloud browser availability; unverified when not attested.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "operational": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "ready",
+                        "disabled",
+                        "not_configured",
+                        "unverified",
+                        "unreachable",
+                        "protocol_error",
+                        "missing_features",
+                        "paid_refused"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "scope": {
+                      "const": "browser"
+                    },
+                    "costClass": {
+                      "type": "string",
+                      "enum": [
+                        "free",
+                        "paid",
+                        "unknown"
+                      ]
+                    },
+                    "features": {
+                      "type": "object",
+                      "properties": {
+                        "sessions": {
+                          "type": "boolean"
+                        },
+                        "navigation": {
+                          "type": "boolean"
+                        },
+                        "inspection": {
+                          "type": "boolean"
+                        },
+                        "screenshots": {
+                          "type": "boolean"
+                        },
+                        "accessibleElements": {
+                          "type": "boolean"
+                        },
+                        "forms": {
+                          "type": "boolean"
+                        },
+                        "keyboard": {
+                          "type": "boolean"
+                        },
+                        "mouse": {
+                          "type": "boolean"
+                        },
+                        "tabs": {
+                          "type": "boolean"
+                        },
+                        "uploads": {
+                          "type": "boolean"
+                        },
+                        "downloads": {
+                          "type": "boolean"
+                        },
+                        "sessionPersistence": {
+                          "type": "boolean"
+                        },
+                        "pauseResume": {
+                          "type": "boolean"
+                        },
+                        "takeover": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "sessions",
+                        "navigation",
+                        "inspection",
+                        "screenshots",
+                        "accessibleElements",
+                        "forms",
+                        "keyboard",
+                        "mouse",
+                        "tabs",
+                        "uploads",
+                        "downloads",
+                        "sessionPersistence",
+                        "pauseResume",
+                        "takeover"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "limits": {
+                      "type": "object",
+                      "properties": {
+                        "maxSessionTtlSeconds": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "maxSessionsPerOwner": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "maxScreenshotBytes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "maxUploadBytes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "maxSessionTtlSeconds",
+                        "maxSessionsPerOwner",
+                        "maxScreenshotBytes",
+                        "maxUploadBytes"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "checkedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "operational",
+                    "reason",
+                    "detail",
+                    "scope",
+                    "costClass",
+                    "features",
+                    "limits",
+                    "checkedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/sessions": {
+      "get": {
+        "operationId": "listBrowserSessions",
+        "summary": "Owner-scoped cloud browser sessions and their current state.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser session list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sessionId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "purpose": {
+                            "type": "string",
+                            "enum": [
+                              "research",
+                              "testing",
+                              "general"
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "creating",
+                              "ready",
+                              "paused",
+                              "owner_controlled",
+                              "closed",
+                              "expired",
+                              "failed",
+                              "quarantined"
+                            ]
+                          },
+                          "environment": {
+                            "const": "cloud"
+                          },
+                          "provider": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "tabs": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "tabId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 200
+                                },
+                                "url": {
+                                  "type": "string",
+                                  "maxLength": 2048
+                                },
+                                "title": {
+                                  "type": "string",
+                                  "maxLength": 300
+                                },
+                                "active": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "tabId",
+                                "url",
+                                "title",
+                                "active"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "maxItems": 20
+                          },
+                          "allowedOrigins": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 300
+                            },
+                            "minItems": 1,
+                            "maxItems": 20
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "updatedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "expiresAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "closedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "failure": {
+                            "type": "object",
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 60
+                              },
+                              "detail": {
+                                "type": "string",
+                                "maxLength": 500
+                              }
+                            },
+                            "required": [
+                              "code"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "sessionId",
+                          "label",
+                          "purpose",
+                          "state",
+                          "environment",
+                          "provider",
+                          "url",
+                          "title",
+                          "tabs",
+                          "allowedOrigins",
+                          "createdAt",
+                          "updatedAt",
+                          "expiresAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "sessions"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createBrowserSession",
+        "summary": "Create an isolated cloud browser session with an origin allowlist.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessionId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "enum": [
+                        "research",
+                        "testing",
+                        "general"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "ready",
+                        "paused",
+                        "owner_controlled",
+                        "closed",
+                        "expired",
+                        "failed",
+                        "quarantined"
+                      ]
+                    },
+                    "environment": {
+                      "const": "cloud"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "url": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "tabs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "active": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "tabId",
+                          "url",
+                          "title",
+                          "active"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "maxItems": 20
+                    },
+                    "allowedOrigins": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "failure": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 60
+                        },
+                        "detail": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "sessionId",
+                    "label",
+                    "purpose",
+                    "state",
+                    "environment",
+                    "provider",
+                    "url",
+                    "title",
+                    "tabs",
+                    "allowedOrigins",
+                    "createdAt",
+                    "updatedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "enum": [
+                      "research",
+                      "testing",
+                      "general"
+                    ]
+                  },
+                  "origins": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 300
+                    },
+                    "minItems": 1,
+                    "maxItems": 20
+                  },
+                  "ttlSeconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 3600
+                  },
+                  "viewport": {
+                    "type": "object",
+                    "properties": {
+                      "width": {
+                        "type": "integer",
+                        "minimum": 320,
+                        "maximum": 3840
+                      },
+                      "height": {
+                        "type": "integer",
+                        "minimum": 240,
+                        "maximum": 2160
+                      }
+                    },
+                    "required": [
+                      "width",
+                      "height"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "label",
+                  "origins"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/sessions/{sessionId}": {
+      "get": {
+        "operationId": "getBrowserSession",
+        "summary": "One cloud browser session, including tabs and expiry.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessionId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "enum": [
+                        "research",
+                        "testing",
+                        "general"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "ready",
+                        "paused",
+                        "owner_controlled",
+                        "closed",
+                        "expired",
+                        "failed",
+                        "quarantined"
+                      ]
+                    },
+                    "environment": {
+                      "const": "cloud"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "url": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "tabs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "active": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "tabId",
+                          "url",
+                          "title",
+                          "active"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "maxItems": 20
+                    },
+                    "allowedOrigins": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "failure": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 60
+                        },
+                        "detail": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "sessionId",
+                    "label",
+                    "purpose",
+                    "state",
+                    "environment",
+                    "provider",
+                    "url",
+                    "title",
+                    "tabs",
+                    "allowedOrigins",
+                    "createdAt",
+                    "updatedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/actions": {
+      "post": {
+        "operationId": "browserAction",
+        "summary": "Perform one authorized navigation, inspection, capture or input action.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser action result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessionId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "receiptId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "navigate",
+                        "inspect",
+                        "screenshot",
+                        "find",
+                        "click",
+                        "fill",
+                        "press",
+                        "mouse",
+                        "tab",
+                        "upload",
+                        "download"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "ready",
+                        "paused",
+                        "owner_controlled",
+                        "closed",
+                        "expired",
+                        "failed",
+                        "quarantined"
+                      ]
+                    },
+                    "observation": {
+                      "type": "object",
+                      "properties": {
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "text": {
+                          "type": "string",
+                          "maxLength": 20000
+                        },
+                        "elements": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "elementId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              },
+                              "role": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 64
+                              },
+                              "name": {
+                                "type": "string",
+                                "maxLength": 300
+                              },
+                              "value": {
+                                "type": "string",
+                                "maxLength": 1000
+                              },
+                              "inputType": {
+                                "type": "string",
+                                "maxLength": 64
+                              },
+                              "disabled": {
+                                "type": "boolean"
+                              },
+                              "focused": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "elementId",
+                              "role",
+                              "name",
+                              "disabled",
+                              "focused"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "maxItems": 200
+                        },
+                        "tabs": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "tabId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              },
+                              "url": {
+                                "type": "string",
+                                "maxLength": 2048
+                              },
+                              "title": {
+                                "type": "string",
+                                "maxLength": 300
+                              },
+                              "active": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "tabId",
+                              "url",
+                              "title",
+                              "active"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "maxItems": 20
+                        },
+                        "trust": {
+                          "const": "untrusted"
+                        },
+                        "truncated": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "url",
+                        "title",
+                        "elements",
+                        "tabs",
+                        "trust",
+                        "truncated"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "artifactId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "sessionId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "screenshot",
+                            "download",
+                            "upload"
+                          ]
+                        },
+                        "contentType": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 120
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "digest": {
+                          "type": "string",
+                          "minLength": 64,
+                          "maxLength": 64
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "artifactId",
+                        "sessionId",
+                        "kind",
+                        "contentType",
+                        "bytes",
+                        "digest",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "sessionId",
+                    "receiptId",
+                    "action",
+                    "state",
+                    "at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "navigate"
+                      },
+                      "url": {
+                        "type": "string",
+                        "format": "uri",
+                        "maxLength": 2048
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "url"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "inspect"
+                      },
+                      "maxTextChars": {
+                        "type": "integer",
+                        "minimum": 200,
+                        "maximum": 20000
+                      },
+                      "includeElements": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "screenshot"
+                      },
+                      "fullPage": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "find"
+                      },
+                      "query": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "role": {
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      "name": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "click"
+                      },
+                      "target": {
+                        "type": "object",
+                        "properties": {
+                          "elementId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        },
+                        "required": [
+                          "elementId"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "button": {
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "middle",
+                          "right"
+                        ]
+                      },
+                      "clickCount": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "target"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "fill"
+                      },
+                      "target": {
+                        "type": "object",
+                        "properties": {
+                          "elementId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        },
+                        "required": [
+                          "elementId"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "value": {
+                        "type": "string",
+                        "maxLength": 10000
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "target",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "press"
+                      },
+                      "key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50
+                      },
+                      "target": {
+                        "type": "object",
+                        "properties": {
+                          "elementId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        },
+                        "required": [
+                          "elementId"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "key"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "mouse"
+                      },
+                      "input": {
+                        "type": "string",
+                        "enum": [
+                          "move",
+                          "down",
+                          "up",
+                          "wheel"
+                        ]
+                      },
+                      "x": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 20000
+                      },
+                      "y": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 20000
+                      },
+                      "button": {
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "middle",
+                          "right"
+                        ]
+                      },
+                      "deltaY": {
+                        "type": "integer",
+                        "minimum": -10000,
+                        "maximum": 10000
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "input",
+                      "x",
+                      "y"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "tab"
+                      },
+                      "input": {
+                        "type": "string",
+                        "enum": [
+                          "list",
+                          "open",
+                          "close",
+                          "activate"
+                        ]
+                      },
+                      "tabId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "url": {
+                        "type": "string",
+                        "format": "uri",
+                        "maxLength": 2048
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "input"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "upload"
+                      },
+                      "target": {
+                        "type": "object",
+                        "properties": {
+                          "elementId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        },
+                        "required": [
+                          "elementId"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "filename": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "contentType": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 120
+                      },
+                      "dataBase64": {
+                        "type": "string",
+                        "minLength": 4,
+                        "maxLength": 700000
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "target",
+                      "filename",
+                      "contentType",
+                      "dataBase64"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "download"
+                      },
+                      "target": {
+                        "type": "object",
+                        "properties": {
+                          "elementId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        },
+                        "required": [
+                          "elementId"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "intent": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "read",
+                              "navigate",
+                              "form_input",
+                              "file_transfer",
+                              "authentication",
+                              "account_change",
+                              "purchase",
+                              "irreversible"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "target"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/authorize": {
+      "post": {
+        "operationId": "authorizeBrowserSession",
+        "summary": "Request a single-use owner approval for one sensitive browser action.",
+        "tags": [
+          "browser",
+          "permissions"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Permission request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "requestId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "taskId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "agent": {
+                      "type": "string",
+                      "enum": [
+                        "coderax",
+                        "opencode",
+                        "freebuff"
+                      ]
+                    },
+                    "scope": {
+                      "type": "string",
+                      "enum": [
+                        "workspace.read",
+                        "workspace.write",
+                        "command.execute",
+                        "network.access",
+                        "memory.read",
+                        "conversation.read",
+                        "credential.use",
+                        "browser.control",
+                        "browser.transfer"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "resource": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    },
+                    "requestedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "decision": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "approved",
+                        "denied"
+                      ]
+                    },
+                    "decidedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "requestId",
+                    "taskId",
+                    "agent",
+                    "scope",
+                    "description",
+                    "resource",
+                    "requestedAt",
+                    "expiresAt",
+                    "decision"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "file_transfer",
+                      "authentication",
+                      "account_change",
+                      "purchase",
+                      "irreversible"
+                    ]
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "category",
+                  "description"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/authorize/decision": {
+      "post": {
+        "operationId": "decideBrowserAuthorization",
+        "summary": "Approve or deny one browser permission request.",
+        "tags": [
+          "browser",
+          "permissions"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Permission list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "requests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "requestId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "taskId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "agent": {
+                            "type": "string",
+                            "enum": [
+                              "coderax",
+                              "opencode",
+                              "freebuff"
+                            ]
+                          },
+                          "scope": {
+                            "type": "string",
+                            "enum": [
+                              "workspace.read",
+                              "workspace.write",
+                              "command.execute",
+                              "network.access",
+                              "memory.read",
+                              "conversation.read",
+                              "credential.use",
+                              "browser.control",
+                              "browser.transfer"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "resource": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
+                          "requestedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "expiresAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "decision": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "approved",
+                              "denied"
+                            ]
+                          },
+                          "decidedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "requestId",
+                          "taskId",
+                          "agent",
+                          "scope",
+                          "description",
+                          "resource",
+                          "requestedAt",
+                          "expiresAt",
+                          "decision"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "requests"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "approved",
+                      "denied"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "decision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/close": {
+      "post": {
+        "operationId": "closeBrowserSession",
+        "summary": "Cancel a session and release its cloud browser.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessionId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "enum": [
+                        "research",
+                        "testing",
+                        "general"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "ready",
+                        "paused",
+                        "owner_controlled",
+                        "closed",
+                        "expired",
+                        "failed",
+                        "quarantined"
+                      ]
+                    },
+                    "environment": {
+                      "const": "cloud"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "url": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "tabs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "active": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "tabId",
+                          "url",
+                          "title",
+                          "active"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "maxItems": 20
+                    },
+                    "allowedOrigins": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "failure": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 60
+                        },
+                        "detail": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "sessionId",
+                    "label",
+                    "purpose",
+                    "state",
+                    "environment",
+                    "provider",
+                    "url",
+                    "title",
+                    "tabs",
+                    "allowedOrigins",
+                    "createdAt",
+                    "updatedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/pause": {
+      "post": {
+        "operationId": "pauseBrowserSession",
+        "summary": "Pause a session while keeping its provider state and tabs.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessionId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "enum": [
+                        "research",
+                        "testing",
+                        "general"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "ready",
+                        "paused",
+                        "owner_controlled",
+                        "closed",
+                        "expired",
+                        "failed",
+                        "quarantined"
+                      ]
+                    },
+                    "environment": {
+                      "const": "cloud"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "url": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "tabs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "active": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "tabId",
+                          "url",
+                          "title",
+                          "active"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "maxItems": 20
+                    },
+                    "allowedOrigins": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "failure": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 60
+                        },
+                        "detail": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "sessionId",
+                    "label",
+                    "purpose",
+                    "state",
+                    "environment",
+                    "provider",
+                    "url",
+                    "title",
+                    "tabs",
+                    "allowedOrigins",
+                    "createdAt",
+                    "updatedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/receipts": {
+      "get": {
+        "operationId": "listBrowserReceipts",
+        "summary": "Bounded execution-receipt history for a browser session.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser receipt list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "receipts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "receiptId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "sessionId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "action": {
+                            "type": "string",
+                            "enum": [
+                              "session.create",
+                              "navigate",
+                              "inspect",
+                              "screenshot",
+                              "find",
+                              "click",
+                              "fill",
+                              "press",
+                              "mouse",
+                              "tab",
+                              "upload",
+                              "download",
+                              "pause",
+                              "resume",
+                              "takeover",
+                              "release",
+                              "close"
+                            ]
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "enum": [
+                              "succeeded",
+                              "refused",
+                              "failed"
+                            ]
+                          },
+                          "outcomeUnknown": {
+                            "type": "boolean"
+                          },
+                          "provider": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "at": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "durationMs": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "approvalId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "artifactId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 500
+                          }
+                        },
+                        "required": [
+                          "receiptId",
+                          "sessionId",
+                          "action",
+                          "outcome",
+                          "provider",
+                          "at",
+                          "durationMs"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "receipts"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/resume": {
+      "post": {
+        "operationId": "resumeBrowserSession",
+        "summary": "Resume a paused session with its tabs and current page intact.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessionId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "purpose": {
+                      "type": "string",
+                      "enum": [
+                        "research",
+                        "testing",
+                        "general"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "ready",
+                        "paused",
+                        "owner_controlled",
+                        "closed",
+                        "expired",
+                        "failed",
+                        "quarantined"
+                      ]
+                    },
+                    "environment": {
+                      "const": "cloud"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "url": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "tabs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tabId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "active": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "tabId",
+                          "url",
+                          "title",
+                          "active"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "maxItems": 20
+                    },
+                    "allowedOrigins": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "minItems": 1,
+                      "maxItems": 20
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "closedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "failure": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 60
+                        },
+                        "detail": {
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "required": [
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "sessionId",
+                    "label",
+                    "purpose",
+                    "state",
+                    "environment",
+                    "provider",
+                    "url",
+                    "title",
+                    "tabs",
+                    "allowedOrigins",
+                    "createdAt",
+                    "updatedAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/browser/sessions/{sessionId}/takeover": {
+      "post": {
+        "operationId": "takeoverBrowserSession",
+        "summary": "Hand the live session to the owner, or return control to the agent.",
+        "tags": [
+          "browser"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner takeover result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "type": "object",
+                      "properties": {
+                        "sessionId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 120
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "enum": [
+                            "research",
+                            "testing",
+                            "general"
+                          ]
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "creating",
+                            "ready",
+                            "paused",
+                            "owner_controlled",
+                            "closed",
+                            "expired",
+                            "failed",
+                            "quarantined"
+                          ]
+                        },
+                        "environment": {
+                          "const": "cloud"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 120
+                        },
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "tabs": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "tabId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              },
+                              "url": {
+                                "type": "string",
+                                "maxLength": 2048
+                              },
+                              "title": {
+                                "type": "string",
+                                "maxLength": 300
+                              },
+                              "active": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "tabId",
+                              "url",
+                              "title",
+                              "active"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "maxItems": 20
+                        },
+                        "allowedOrigins": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          },
+                          "minItems": 1,
+                          "maxItems": 20
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "closedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "failure": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 60
+                            },
+                            "detail": {
+                              "type": "string",
+                              "maxLength": 500
+                            }
+                          },
+                          "required": [
+                            "code"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "sessionId",
+                        "label",
+                        "purpose",
+                        "state",
+                        "environment",
+                        "provider",
+                        "url",
+                        "title",
+                        "tabs",
+                        "allowedOrigins",
+                        "createdAt",
+                        "updatedAt",
+                        "expiresAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "interactiveUrl": {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  },
+                  "required": [
+                    "session"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "active": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "active"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -5288,6 +8471,14 @@
                   },
                   "requireApproval": {
                     "type": "boolean"
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "fast",
+                      "complex"
+                    ]
                   }
                 },
                 "required": [
@@ -5396,6 +8587,13 @@
                     "cancelRequested": {
                       "type": "boolean"
                     },
+                    "reasoning": {
+                      "type": "string",
+                      "enum": [
+                        "fast",
+                        "complex"
+                      ]
+                    },
                     "steps": {
                       "type": "array",
                       "items": {
@@ -5421,6 +8619,19 @@
                               "cancelled",
                               "interrupted"
                             ]
+                          },
+                          "dependsOn": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 80
+                            },
+                            "maxItems": 64
+                          },
+                          "attempts": {
+                            "type": "integer",
+                            "minimum": 0
                           }
                         },
                         "required": [
@@ -5463,6 +8674,32 @@
                             ],
                             "additionalProperties": false
                           }
+                        },
+                        "verification": {
+                          "type": "object",
+                          "properties": {
+                            "passed": {
+                              "type": "boolean"
+                            },
+                            "reason": {
+                              "type": "string",
+                              "maxLength": 1000
+                            },
+                            "evidence": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              "maxItems": 20
+                            }
+                          },
+                          "required": [
+                            "passed",
+                            "reason",
+                            "evidence"
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
@@ -5788,7 +9025,9 @@
                               "network.access",
                               "memory.read",
                               "conversation.read",
-                              "credential.use"
+                              "credential.use",
+                              "browser.control",
+                              "browser.transfer"
                             ]
                           },
                           "description": {
@@ -5930,7 +9169,9 @@
                               "network.access",
                               "memory.read",
                               "conversation.read",
-                              "credential.use"
+                              "credential.use",
+                              "browser.control",
+                              "browser.transfer"
                             ]
                           },
                           "description": {

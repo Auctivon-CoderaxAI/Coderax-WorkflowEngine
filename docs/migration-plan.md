@@ -52,7 +52,7 @@ Deliberately **not** extracted yet:
 | Mongo lease table | The adapter exists (`adaptMongoWorkRunMethods`); the default here is the in-process table, which is honest but single-process | Phase 8 |
 | OpenCode server transport | Needs the pinned `@opencode-ai/sdk` and an operator-run server | Phase 4 |
 | FreeBuff SDK transport | Needs a trusted source-built SDK | Phase 4 |
-| Cloud browser orchestration, DeploymentPlatformAI integration, plugins | Not implemented anywhere yet | Phase 7 |
+| Cloud browser provider, DeploymentPlatformAI integration, plugins | Browser contract and fail-closed adapter exist; no verified provider yet. DeploymentPlatformAI and plugins are not implemented | Phase 7 |
 
 ## Phase 5–6: client integration
 

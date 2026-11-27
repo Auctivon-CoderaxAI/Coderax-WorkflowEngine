@@ -24,6 +24,20 @@ test('a task is written only by the generation that owns it', async () => {
   assert.deepEqual(byB, { applied: false, reason: 'superseded' });
 });
 
+test('a resume cannot revive a task cancelled after the resume read', async () => {
+  const tasks = createTaskRepository();
+  await tasks.create(taskRecord({ state: 'cancelled', runToken: 'token-old', generation: 1 }));
+
+  const revived = await tasks.reissue({
+    taskId: 'task_test',
+    token: 'token-new',
+    now: new Date().toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+    from: ['interrupted', 'awaiting_approval'],
+  });
+  assert.deepEqual(revived, { applied: false, reason: 'superseded' });
+});
+
 test('an expired generation cannot overwrite the state a newer generation owns', async () => {
   const tasks = createTaskRepository();
   await tasks.create(taskRecord({ state: 'interrupted', runToken: 'token-old', generation: 1 }));
@@ -33,6 +47,7 @@ test('an expired generation cannot overwrite the state a newer generation owns',
     token: 'token-new',
     now: new Date().toISOString(),
     leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+    from: ['interrupted'],
   });
   assert.equal(reissued.applied, true);
   assert.equal(reissued.applied && reissued.task.generation, 2);
