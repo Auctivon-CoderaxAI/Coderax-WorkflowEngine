@@ -15,18 +15,37 @@ import type {
   BrowserTakeoverRequest,
   BrowserTakeoverResult,
   BudgetState,
+  BuildGameRequest,
   ChatReply,
   ChatRequest,
   Conversation,
   ConversationList,
+  CreateGameRequest,
+  CreateGameSessionRequest,
   DataMode,
   Deliverable,
   DeliverableRequestInput,
+  GameBuildList,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionControlRequest,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
+  IterateGameRequest,
   MemoryList,
   ModelList,
+  ModelRef,
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
+  RestoreGameBuildRequest,
+  SaveGameSpecRequest,
   PermissionRequest,
   Schedule,
   ScheduleControlResult,
@@ -53,14 +72,28 @@ import {
   modelKey,
 } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { ScheduleExecutionRecord, ScheduleRecord, TaskEvidence, TaskPatch, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
+import type {
+  ConversationRecord,
+  GameRunSpec,
+  ScheduleExecutionRecord,
+  ScheduleRecord,
+  TaskEvidence,
+  TaskPatch,
+  TaskPlan,
+  TaskRecord,
+  TaskStep,
+} from '../domain.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
+import { createGameCapabilityReport } from '../games/capability.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
-import type { TaskRunner, RunOutcome } from '../execution/runner.js';
+import type { TaskRunner, RunOutcome, RunResult } from '../execution/runner.js';
+import type { RunSupervisor } from '../execution/supervisor.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
@@ -80,7 +113,11 @@ import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
-import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
+import {
+  createRunWorkspace,
+  removeRunWorkspaceIfEmpty,
+  workspaceRoots,
+} from '../execution/workspace.js';
 import { buildTranscript } from './transcript.js';
 import type { ArtifactService } from '../artifacts/service.js';
 import type { DeliverableService } from '../artifacts/deliver.js';
@@ -110,7 +147,11 @@ export type ApplicationServiceDeps = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
   browser: BrowserService;
+  supervisor: RunSupervisor;
 };
 
 /**
@@ -134,9 +175,10 @@ export function readDeliverableDirective(objective: string): DeliverableDirectiv
 }
 
 export type EventStream = {
+  /** The first page at the caller's cursor, with the durable log's own metadata. */
   replay: Replay;
+  /** Tails strictly after the last replayed event, so the hand-off loses nothing. */
   subscribe: (listener: (event: unknown) => void) => Unsubscribe;
-  lastSeq: number;
 };
 
 export type ApplicationService = {
@@ -246,6 +288,70 @@ export type ApplicationService = {
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
   budget: (principal: Principal) => BudgetState;
+  gameCapabilities: (principal: Principal) => GameCapabilityReport;
+  listGames: (
+    principal: Principal,
+    query: { cursor?: string; limit?: number },
+  ) => Promise<GameProjectList>;
+  createGame: (
+    principal: Principal,
+    request: CreateGameRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  getGame: (principal: Principal, gameId: string) => Promise<ServiceResult<GameProject>>;
+  saveGameSpec: (
+    principal: Principal,
+    gameId: string,
+    request: SaveGameSpecRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  buildGame: (
+    principal: Principal,
+    gameId: string,
+    request: BuildGameRequest,
+  ) => Promise<ServiceResult<import('@coderax/contracts').GameBuild>>;
+  listGameBuilds: (
+    principal: Principal,
+    gameId: string,
+  ) => Promise<ServiceResult<GameBuildList>>;
+  restoreGameBuild: (
+    principal: Principal,
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  iterateGame: (
+    principal: Principal,
+    gameId: string,
+    request: IterateGameRequest,
+  ) => Promise<ServiceResult<GameIteration>>;
+  gamePreview: (principal: Principal, gameId: string) => Promise<ServiceResult<string>>;
+  exportGame: (principal: Principal, gameId: string) => Promise<ServiceResult<GameExport>>;
+  createGameSession: (
+    principal: Principal,
+    gameId: string,
+    request: CreateGameSessionRequest,
+  ) => Promise<ServiceResult<GameSession>>;
+  listGameSessions: (principal: Principal) => Promise<GameSessionList>;
+  getGameSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSession>>;
+  observeGameSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameObservation>>;
+  controlGameSession: (
+    principal: Principal,
+    sessionId: string,
+    request: GameSessionControlRequest,
+  ) => Promise<ServiceResult<GameSession>>;
+  gameSessionLogs: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSessionLogs>>;
+  gameSessionVerification: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSessionVerification>>;
   schedules: (principal: Principal) => Promise<ScheduleList>;
   schedule: (principal: Principal, scheduleId: string) => Promise<ServiceResult<Schedule>>;
   createSchedule: (
@@ -317,24 +423,84 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    * objective is excluded because it is sent separately.
    */
   async function historyFor(
-    conversationId: string,
+    conversation: ConversationRecord,
     currentText: string,
+    adapter: AgentAdapter,
   ): Promise<AgentHistoryTurn[]> {
+    // The adapter's declared isolation is the authority, not the call site. An
+    // agent that advertises `conversations: none` never receives earlier turns,
+    // even when the owner selected it inside an existing thread.
+    if (adapter.isolation.conversations === 'none') return [];
     try {
-      const messages = await deps.conversations.messages(conversationId);
+      const messages = await deps.conversations.messages({
+        ownerId: conversation.ownerId,
+        conversationId: conversation.conversationId,
+        mode: conversation.mode,
+      });
+      if (messages === null) return [];
       return buildTranscript({ messages, currentText });
     } catch {
       return [];
     }
   }
 
-  function publish(
+  /**
+   * Resolves the one conversation a request may use. A caller-supplied id is
+   * accepted only when the stored record has the same owner, data mode and
+   * surface; otherwise private history could enter a cloud run, or a Work run
+   * could be started inside a Chat thread. The failure is deliberately uniform
+   * so it does not reveal that a foreign conversation exists.
+   */
+  async function bindConversation(input: {
+    principal: Principal;
+    conversationId?: string;
+    mode: DataMode;
+    isWork: boolean;
+    agent: AgentId;
+    title?: string;
+  }): Promise<ServiceResult<ConversationRecord>> {
+    const now = deps.clock.iso();
+    const binding = await deps.conversations.ensure({
+      conversationId: input.conversationId ?? deps.ids.conversationId(),
+      ownerId: input.principal.ownerId,
+      tenantId: null,
+      ...(input.title ? { title: input.title } : {}),
+      mode: input.mode,
+      isWork: input.isWork,
+      agent: input.agent,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (!binding.ok) {
+      return fail(
+        'conflict',
+        'That conversation is bound to a different owner, data mode or surface; start a new conversation.',
+      );
+    }
+    if (binding.record.agent !== input.agent) {
+      await deps.conversations.updateAgent(binding.record.conversationId, input.agent);
+      return ok({ ...binding.record, agent: input.agent, updatedAt: now });
+    }
+    return ok(binding.record);
+  }
+
+  /**
+   * Appends one event to the durable log for the generation that owns the task.
+   * Callers that can be told about a failure await it, so a settlement never
+   * announces state the stream has not recorded. A refused append means this
+   * generation no longer holds the fence, and writing nothing is the outcome.
+   */
+  async function publish(
     task: TaskRecord,
     type: Parameters<EventBus['publish']>[0]['type'],
     payload?: unknown,
-  ): void {
-    deps.events.publish({
+    /** Present for run-origin events: a revoked generation may not publish. */
+    token?: string,
+  ): Promise<void> {
+    if (token !== undefined && !deps.supervisor.isLive(task.taskId, token)) return;
+    await deps.events.publish({
       taskId: task.taskId,
+      runToken: task.runToken ?? '',
       agent: task.agent,
       generation: task.generation,
       type,
@@ -604,7 +770,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: now,
             result: {
               summary: outcome.summary.slice(0, 20_000),
-              artifacts: produced,
+              artifacts: task.kind === 'game' ? (outcome.artifacts ?? []) : produced,
               ...(outcome.verification
                 ? {
                     verification: {
@@ -658,15 +824,15 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
     try {
       if (outcome.kind === 'completed') {
-        publish(settled, 'task.completed', {
+        await publish(settled, 'task.completed', {
           summary: outcome.summary.slice(0, 20_000),
           ...(task.model ? { model: task.model } : {}),
           ...(outcome.usage ? { usage: outcome.usage } : {}),
         });
       } else if (outcome.kind === 'cancelled') {
-        publish(settled, 'task.cancelled', {});
+        await publish(settled, 'task.cancelled', {});
       } else {
-        publish(settled, 'task.failed', {
+        await publish(settled, 'task.failed', {
           code: outcome.code, detail: outcome.detail, retryable: outcome.retryable,
         });
       }
@@ -698,6 +864,58 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     }
   }
 
+  /**
+   * The gaming workload is a Native capability, not a fourth agent identity. It
+   * borrows the supervisor's lease, fencing, cancellation and event path through
+   * the same adapter port; only the run body differs.
+   */
+  function gamingAdapter(task: TaskRecord): AgentAdapter {
+    return {
+      agent: task.agent,
+      engine: 'native',
+      sideEffects: 'gated',
+      capabilities: {
+        streaming: false,
+        tools: false,
+        cancellation: true,
+        resume: true,
+        modelSelection: false,
+        durable: true,
+      },
+      isolation: {
+        workspace: 'isolated',
+        memory: 'granted',
+        credentials: 'none',
+        conversations: 'none',
+      },
+      availability: () => ({
+        available: true,
+        reason: 'ready',
+        detail: 'The Native gaming workload is ready inside the isolated runtime.',
+      }),
+      run: (request, report) => {
+        if (!request.game) {
+          return Promise.resolve({
+            ok: false as const,
+            code: 'protocol_error' as const,
+            detail: 'A game task has no session payload.',
+            retryable: false,
+          });
+        }
+        return deps.gaming.run({
+          ownerId: request.ownerId,
+          taskId: request.taskId ?? task.taskId,
+          game: request.game,
+          signal: request.signal,
+          report,
+          loadBuild: (ownerId, gameId, buildId) =>
+            deps.studio.readVerifiedBuild({ ownerId, gameId, buildId }),
+          isApproved: (taskId, scope, resource) =>
+            deps.permissions.isApproved(taskId, scope, resource),
+        });
+      },
+    };
+  }
   // Earlier tasks have no explicit marker. Their accounting write or persisted
   // execution steps are evidence of admission; an interrupted claim alone is not.
   async function canRunScheduled(task: TaskRecord): Promise<boolean> {
@@ -735,33 +953,46 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return;
     }
 
-    const adapter = deps.agents.resolve(task.agent);
-    if (!adapter.ok) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: 'not_configured',
-        detail: adapter.detail,
-        retryable: false,
-      });
-      return;
+    const workload = task.kind ?? 'work';
+    let adapter: AgentAdapter;
+    let modelRef: ModelRef | null = null;
+    if (workload === 'game') {
+      adapter = gamingAdapter(task);
+    } else {
+      const resolved = deps.agents.resolve(task.agent);
+      if (!resolved.ok) {
+        await settle(task, token, {
+          kind: 'failed',
+          code: 'not_configured',
+          detail: resolved.detail,
+          retryable: false,
+        });
+        return;
+      }
+      adapter = resolved.value;
+      const model = task.model
+        ? deps.models.resolve(task.model, task.mode)
+        : deps.models.resolve(null, task.mode);
+      if (!model.ok) {
+        await settle(task, token, {
+          kind: 'failed',
+          code: model.code === 'paid_model_refused' ? 'paid_model_refused' : 'not_configured',
+          detail: model.detail,
+          retryable: false,
+        });
+        return;
+      }
+      modelRef = model.value.ref;
     }
 
-    const model = task.model
-      ? deps.models.resolve(task.model, task.mode)
-      : deps.models.resolve(null, task.mode);
-    if (!model.ok) {
-      await settle(task, token, {
-        kind: 'failed',
-        code: model.code === 'paid_model_refused' ? 'paid_model_refused' : 'not_configured',
-        detail: model.detail,
-        retryable: false,
-      });
-      return;
-    }
-
-    const workspace = await resolveEngineWorkspace({
+    // One directory per task and generation. Two runs in the same mode, and two
+    // generations of the same task, therefore cannot read or overwrite each
+    // other's files, and revoking one run cannot affect another.
+    const workspace = await createRunWorkspace({
       mode: task.mode,
       roots: workspaceRoots(deps.config.workspaces),
+      runId: task.taskId,
+      generation: task.generation,
     });
     if (!workspace.ok) {
       await settle(task, token, {
@@ -781,14 +1012,48 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         ...(task.handoffPending && { handoffPending: false }),
         updatedAt: deps.clock.iso(),
         leaseExpiresAt: lease.expiresAt.toISOString(),
-        model: model.value.ref,
+        ...(modelRef ? { model: modelRef } : {}),
       },
     });
     if (!started.applied) return;
-    publish(started.task, 'task.started');
+    await deps.supervisor.begin({
+      taskId,
+      token,
+      generation: started.task.generation,
+      workspaceRoot: workspace.value.root,
+    });
+    await publish(started.task, 'task.started');
 
     const controller = new AbortController();
     controllers.set(taskId, controller);
+
+    /**
+     * A report arrives synchronously but the append is asynchronous. Chaining the
+     * appends preserves the order the adapter produced, and `drain` makes the run
+     * wait for the log before it settles, so a replay can never show a settlement
+     * whose deltas were not written.
+     */
+    let emitted: Promise<void> = Promise.resolve();
+    let emitFailure: { error: unknown } | null = null;
+    const emit = (
+      type: Parameters<EventBus['publish']>[0]['type'],
+      payload?: unknown,
+    ): void => {
+      emitted = emitted
+        .then(() => publish(started.task, type, payload, token))
+        .then(
+          () => undefined,
+          (error: unknown) => {
+            emitFailure ??= { error };
+          },
+        );
+    };
+    const drain = async (): Promise<void> => {
+      await emitted;
+      const failed = emitFailure;
+      emitFailure = null;
+      if (failed) throw failed.error;
+    };
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
@@ -810,13 +1075,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         .catch(() => undefined);
     };
     const emitText = (next: string, replace = false): void => {
-      if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
-      else if (next !== visible) publish(started.task, 'text.delta', { text: next.slice(visible.length) });
+      if (replace || !next.startsWith(visible)) {
+        emit('text.replace', { text: next });
+      } else if (next !== visible) {
+        emit('text.delta', { text: next.slice(visible.length) });
+      }
       visible = next;
     };
 
     const report = (event: AgentReportEvent): void => {
       if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
+
+      // The controller is replaced by a resume; the supervisor is the durable
+      // answer to "may this generation still act". Both must agree.
+      if (!deps.supervisor.isLive(taskId, token)) return;
 
       if (event.type === 'budget') {
         iterations = event.iterations;
@@ -878,7 +1150,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             ...(planned ? { dependsOn: [...planned.dependsOn] } : {}),
           });
         }
-        publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
+        emit('step.started', { stepId: event.stepId, title: event.title });
         persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
@@ -902,7 +1174,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           if (index === -1) evidence.push(safeEvidence);
           else evidence[index] = safeEvidence;
         }
-        publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
+        emit('step.completed', { stepId: event.stepId, title: event.title });
         persist({
           steps,
           checkpoint: { completedSteps: [...completed], text: visible, plan, evidence, iterations },
@@ -926,7 +1198,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return;
       }
       if (event.type === 'tool.call') {
-        publish(started.task, 'tool.call', {
+        emit('tool.call', {
           callId: event.callId,
           tool: event.tool,
           ...(event.input === undefined ? {} : { input: redactToolInput(event.input) }),
@@ -934,7 +1206,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return;
       }
       if (event.type === 'tool.result') {
-        publish(started.task, 'tool.result', {
+        emit('tool.result', {
           callId: event.callId,
           tool: event.tool,
           ok: event.ok,
@@ -946,7 +1218,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         if (typeof event.path !== 'string' || event.path.length < 1 || event.path.length > 1024) {
           throw new RangeError('file.edit path must contain 1–1024 characters.');
         }
-        publish(started.task, 'file.edit', { path: event.path });
+        emit('file.edit', { path: event.path });
         return;
       }
       /**
@@ -954,67 +1226,122 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
        * authority that can approve a resource, and the adapter must have created
        * that request before reporting it.
        */
-      publish(started.task, 'approval.required', {
+      emit('approval.required', {
         requestId: event.requestId,
         tool: event.tool,
         description: redactText(event.description, [], 2000),
       });
     };
 
-    const history = await historyFor(task.conversationId, task.objective);
-    const result = await deps.runner.run({
-      scope: scopeOf(started.task),
-      ...((task.scheduleAdmission || task.taskId.startsWith('task_sched_')) && { cancellationRequested: async () => !(await canRunScheduled(task)) }),
-      token,
-      adapter: adapter.value as AgentAdapter,
-      request: {
+    const history = await historyFor(
+      {
+        conversationId: task.conversationId,
         ownerId: task.ownerId,
         tenantId: task.tenantId,
-        conversationId: task.conversationId,
-        taskId: task.taskId,
-        objective: task.objective,
-        history,
-        model: model.value.ref,
         mode: task.mode,
-        workspaceRoot: workspace.value.root,
-        maxSteps: deps.config.engines.native.maxSteps,
-        budget: task.budget,
-        signal: controller.signal,
-        reasoning: task.reasoning ?? 'auto',
-        completedSteps: [...started.task.checkpoint.completedSteps],
-        plan: started.task.checkpoint.plan ?? null,
-        evidence: [...(started.task.checkpoint.evidence ?? [])],
-        iterationsUsed: started.task.checkpoint.iterations ?? 0,
+        isWork: true,
+        agent: task.agent,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
       },
-      report,
-    });
-    if (controllers.get(taskId) !== controller) return;
-    controllers.delete(taskId);
-    await writeChain.catch(() => undefined);
+      task.objective,
+      adapter,
+    );
 
-    if (result.ownershipLost) {
-      // Deliberately no terminal write and no notification: this run no longer
-      // owns the task, and the new owner is the only writer of its state.
+    let result: RunResult;
+    try {
+      result = await deps.runner.run({
+        scope: scopeOf(started.task),
+        ...((task.scheduleAdmission ||
+          task.taskId.startsWith('task_sched_')) && {
+          cancellationRequested: async () =>
+            !(await canRunScheduled(task)),
+        }),
+        token,
+        adapter,
+        request: {
+          ownerId: task.ownerId,
+          tenantId: task.tenantId,
+          conversationId: task.conversationId,
+          taskId: task.taskId,
+          workload,
+          game: task.game ?? null,
+          objective: task.objective,
+          history,
+          model: modelRef,
+          mode: task.mode,
+          workspaceRoot: workspace.value.root,
+          maxSteps: deps.config.engines.native.maxSteps,
+          budget: task.budget,
+          signal: controller.signal,
+          reasoning: task.reasoning ?? 'auto',
+          completedSteps: [...started.task.checkpoint.completedSteps],
+          plan: started.task.checkpoint.plan ?? null,
+          evidence: [...(started.task.checkpoint.evidence ?? [])],
+          iterationsUsed: started.task.checkpoint.iterations ?? 0,
+        },
+        report,
+        generation: started.task.generation,
+        workspaceRoot: workspace.value.root,
+      });
+    } catch {
+      await deps.supervisor.abandon({
+        taskId,
+        token,
+        reason: 'The runner failed before termination could be verified.',
+      });
+      await settle(started.task, token, {
+        kind: 'failed',
+        code: 'provider_error',
+        detail: 'The execution supervisor could not verify the run.',
+        retryable: true,
+      });
       return;
     }
-    const safeText = redactContent(text);
-    emitText(safeText);
-    const outcome = result.outcome.kind === 'completed'
-      ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
-      : result.outcome;
-    await settle(
-      started.task,
-      token,
-      outcome,
-      {
-        completedSteps: completed,
-        text: safeText,
-        plan,
-        evidence,
-        iterations,
-      },
-      steps,
-    );
+
+    const current = controllers.get(taskId);
+    const superseded = current !== undefined && current !== controller;
+    if (!superseded) controllers.delete(taskId);
+    await writeChain.catch(() => undefined);
+
+    const verified = result.terminated;
+    try {
+      if (superseded || result.ownershipLost) {
+        return;
+      }
+      const safeText = redactContent(text);
+      emitText(safeText);
+      await drain();
+      const outcome = result.outcome.kind === 'completed'
+        ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
+        : result.outcome;
+      await settle(
+        started.task,
+        token,
+        outcome,
+        {
+          completedSteps: completed,
+          text: safeText,
+          plan,
+          evidence,
+          iterations,
+        },
+        steps,
+      );
+    } finally {
+      // Verified termination means the adapter returned. Anything else means it
+      // may still be running, so its capability and workspace are revoked rather
+      // than left available to a generation the engine can no longer supervise.
+      if (verified) {
+        deps.supervisor.finish(taskId, token);
+      } else {
+        await deps.supervisor.abandon({
+          taskId,
+          token,
+          reason: 'The adapter did not verify termination within the cancellation grace period.',
+        });
+      }
+    }
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
@@ -1038,7 +1365,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
-        publish(applied.task, 'task.interrupted', {
+        await publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
         await notifyTerminal(applied.task, 'interrupted');
@@ -1066,7 +1393,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
     });
     if (applied.applied) {
-      publish(applied.task, 'task.cancelled', {});
+      await publish(applied.task, 'task.cancelled', {});
       await notifyTerminal(applied.task, 'cancelled');
       deps.audit.record({
         actor: task.ownerId,
@@ -1085,6 +1412,132 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return lostCancellation(task);
   }
 
+  async function admitTask(input: {
+    principal: Principal;
+    agentId: 'coderax';
+    objective: string;
+    mode: 'cloud';
+    model: null;
+    budget: null;
+    requireApproval: boolean;
+    kind: 'game';
+    game: GameRunSpec;
+  }): Promise<ServiceResult<{
+    task: TaskRecord;
+    token: string;
+    conversationId: string;
+  }>> {
+    const now = deps.clock.iso();
+
+    const bound = await bindConversation({
+      principal: input.principal,
+      mode: input.mode,
+      isWork: true,
+      agent: input.agentId,
+      title: input.objective.slice(0, 120),
+    });
+    if (!bound.ok) return bound;
+
+    const conversationId = bound.value.conversationId;
+
+    await deps.conversations.appendMessage({
+      messageId: deps.ids.messageId(),
+      conversationId,
+      role: 'user',
+      text: input.objective,
+      createdAt: now,
+    });
+
+    const task: TaskRecord = {
+      taskId: deps.ids.taskId(),
+      ownerId: input.principal.ownerId,
+      tenantId: null,
+      conversationId,
+      agent: input.agentId,
+      engine: 'native',
+      mode: input.mode,
+      kind: input.kind,
+      game: input.game,
+      objective: input.objective,
+      model: null,
+      state: 'queued',
+      generation: 1,
+      runToken: null,
+      eventSeq: 0,
+      reasoning: null,
+      steps: [],
+      checkpoint: {
+        completedSteps: [],
+        text: '',
+        plan: null,
+        evidence: [],
+      },
+      createdAt: now,
+      updatedAt: now,
+      leaseExpiresAt: null,
+      cancelRequested: false,
+      requireApproval: input.requireApproval,
+      budget: null,
+      usage: null,
+      result: null,
+      failure: null,
+    };
+
+    const token = deps.ids.runToken();
+    const claimedAt = deps.clock.now();
+    const key = workRunKey(scopeOf(task));
+    const expiresAt = new Date(
+      claimedAt.getTime() +
+        deps.config.execution.leaseTtlMs,
+    );
+
+    const claimed = await deps.lease.claim({
+      key,
+      owner: task.ownerId,
+      token,
+      now: claimedAt,
+      expiresAt,
+    });
+
+    if (!claimed) {
+      return fail(
+        'busy',
+        'This conversation already has a live Work run.',
+      );
+    }
+
+    const created = await deps.tasks.create({
+      ...task,
+      runToken: token,
+      leaseExpiresAt: expiresAt.toISOString(),
+    });
+
+    if (!created.ok) {
+      await deps.lease.release({ key, token })
+        .catch(() => false);
+      return fail(
+        'busy',
+        'This conversation already has an active Work task.',
+      );
+    }
+
+    await publish(created.task, 'task.queued');
+
+    deps.audit.record({
+      actor: input.principal.ownerId,
+      action: 'game.session.accepted',
+      taskId: task.taskId,
+      conversationId,
+      outcome: 'accepted',
+    });
+
+    return ok({
+      task: created.task,
+      token,
+      conversationId,
+    });
+  }
+  
   async function lostCancellation(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
     const current = await deps.tasks.get(task.taskId);
     const cancelled = current?.runToken === task.runToken && current?.state === 'cancelled';
@@ -1129,6 +1582,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!model.ok) return model;
 
     const reasoning = resolveReasoningMode({ requested: request.reasoning, objective: request.objective });
+
+    const now = deps.clock.iso();
+    // Bind before reserving: a conversation owned by another principal, bound to
+    // another data mode or opened by the other surface is refused here, without
+    // spending the daily budget or letting private history into a cloud run.
+    const target = options.conversationId ?? request.conversationId;
+    const bound = await bindConversation({
+      principal,
+      ...(target ? { conversationId: target } : {}),
+      mode: request.mode,
+      isWork: true,
+      agent: agentId,
+      title: request.objective.slice(0, 120),
+    });
+    if (!bound.ok) return bound;
+    const conversationId = bound.value.conversationId;
+
     const reserve = () => deps.budget.reserve(principal.ownerId, deps.clock.now()).allowed;
     if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
       return fail(
@@ -1136,21 +1606,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
       );
     }
-
-    const now = deps.clock.iso();
-    const conversationId =
-      options.conversationId ?? request.conversationId ?? deps.ids.conversationId();
-    await deps.conversations.ensure({
-      conversationId,
-      ownerId: principal.ownerId,
-      tenantId: null,
-      title: request.objective.slice(0, 120),
-      mode: request.mode,
-      isWork: true,
-      agent: agentId,
-      createdAt: now,
-      updatedAt: now,
-    });
     const appendObjective = () => deps.conversations.appendMessage({
       messageId: options.taskId ? `msg_${options.taskId}` : deps.ids.messageId(),
       conversationId,
@@ -1175,6 +1630,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       state: 'queued',
       generation: 1,
       runToken: null,
+      eventSeq: 0,
       reasoning,
       steps: [],
       checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
@@ -1215,7 +1671,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       // No task exists or budget is reserved until its objective is durable.
       try {
         if (!(await appendObjective())) {
-          const messages = await deps.conversations.messages(conversationId);
+          const messages = await deps.conversations.messages({
+            ownerId: principal.ownerId,
+            conversationId,
+            mode: request.mode,
+          }) ?? [];
           if (!messages.some(message => message.messageId === `msg_${options.taskId}`)) {
             throw new Error('The scheduled objective was not persisted.');
           }
@@ -1289,7 +1749,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     }
 
-    publish(created.task, 'task.queued');
+    await publish(created.task, 'task.queued');
     deps.audit.record({
       actor: principal.ownerId,
       action: 'work.accepted',
@@ -1418,7 +1878,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           !(task.scheduleAdmission.complete ??
             ((await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId === task.scheduleAdmission.executionId || task.steps.length > 0)) }),
         generation: reconciled.generation,
-        state: reconciled.state,
+
+     state: reconciled.state,
         summary: reconciled.result?.summary ?? null,
         failure: reconciled.failure
           ? {
@@ -1626,7 +2087,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
       if (!applied.applied) return lostCancellation(task);
-      publish(applied.task, 'task.interrupted', {
+      await publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
       await notifyTerminal(applied.task, 'interrupted');
@@ -1686,8 +2147,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await releaseLease(task, token);
         return fail('conflict', 'That task cannot be resumed.');
       }
-      publish(applied.task, 'task.queued', {});
-      publish(applied.task, 'text.replace', { text: '' });
+      await publish(applied.task, 'task.queued', {});
+      await publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
       return ok({
         taskId,
@@ -1750,8 +2211,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           return fail('conflict', 'That task cannot be retried.');
         }
         accepted = true;
-        publish(applied.task, 'task.queued', {});
-        publish(applied.task, 'text.replace', { text: '' });
+        await publish(applied.task, 'task.queued', {});
+        await publish(applied.task, 'text.replace', { text: '' });
         deps.scheduler.enqueue(() => execute(taskId, token));
         return ok({
           taskId,
@@ -1774,24 +2235,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (!reservation.allowed) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
-      const workspace = await resolveEngineWorkspace({
+      // A chat turn is a run too, so it gets its own empty directory instead of
+      // the shared mode root. It is removed afterwards when it produced nothing.
+      const workspace = await createRunWorkspace({
         mode: request.mode,
         roots: workspaceRoots(deps.config.workspaces),
+        runId: deps.ids.runToken(),
+        generation: 0,
       });
       if (!workspace.ok) return workspace;
 
       const now = deps.clock.iso();
-      const conversationId = request.conversationId ?? deps.ids.conversationId();
-      const conversation = await deps.conversations.ensure({
-        conversationId,
-        ownerId: principal.ownerId,
-        tenantId: null,
+      const bound = await bindConversation({
+        principal,
+        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
         mode: request.mode,
         isWork: false,
         agent: request.agent,
-        createdAt: now,
-        updatedAt: now,
       });
+      if (!bound.ok) {
+        await removeRunWorkspaceIfEmpty(workspace.value.root);
+        return bound;
+      }
+      const conversation = bound.value;
+      const conversationId = conversation.conversationId;
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1800,27 +2267,34 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
-      const history = await historyFor(conversationId, request.message);
+      const history = await historyFor(conversation, request.message, adapter.value);
       const controller = new AbortController();
-      const outcome = await adapter.value.run(
-        {
-          ownerId: principal.ownerId,
-          tenantId: conversation.tenantId,
-          conversationId,
-          objective: request.message,
-          history,
-          model: model.value.ref,
-          mode: request.mode,
-          workspaceRoot: workspace.value.root,
-          maxSteps: 1,
-          budget: null,
-          signal: controller.signal,
-          reasoning: 'fast',
-          completedSteps: [],
-          plan: null,
-        },
-        () => undefined,
-      );
+      let outcome: Awaited<ReturnType<AgentAdapter['run']>>;
+      try {
+        outcome = await adapter.value.run(
+          {
+            ownerId: principal.ownerId,
+            tenantId: conversation.tenantId,
+            conversationId,
+            workload: 'work',
+            game: null,
+            objective: request.message,
+            history,
+            model: model.value.ref,
+            mode: request.mode,
+            workspaceRoot: workspace.value.root,
+            maxSteps: 1,
+            budget: null,
+            signal: controller.signal,
+            reasoning: 'fast',
+            completedSteps: [],
+            plan: null,
+          },
+          () => undefined,
+        );
+      } finally {
+        await removeRunWorkspaceIfEmpty(workspace.value.root);
+      }
       if (!outcome.ok) {
         return fail(
           outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
@@ -1828,20 +2302,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome.retryable,
         );
       }
+      const reply = redactContent(outcome.summary);
       deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
         conversationId,
         role: 'assistant',
-        text: outcome.summary,
+        text: reply,
         createdAt: deps.clock.iso(),
         agent: request.agent,
       });
       return ok({
         conversationId,
         messageId,
-        text: outcome.summary,
+        text: reply,
         agent: request.agent,
         model: model.value.ref,
         ...(outcome.usage ? { usage: outcome.usage } : {}),
@@ -1910,10 +2385,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
+      const replay = await deps.events.replay(taskId, after);
+      // Tail strictly after what was replayed; a poll re-reads the log from that
+      // cursor, so an event that lands between the read and the subscription is
+      // picked up instead of falling into the gap a listener-only bus had.
+      const cursor = replay.events.at(-1)?.seq ?? after;
       return ok({
-        replay: deps.events.replay(taskId, after),
-        subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
-        lastSeq: deps.events.lastSeq(taskId),
+        replay,
+        subscribe: (listener) => deps.events.subscribe(taskId, cursor, listener),
       });
     },
 
@@ -1935,6 +2414,200 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       };
     },
 
+    gameCapabilities: () => {
+      const modelReady = deps.models
+        .list()
+        .models.some((model) => model.availability.available);
+      return createGameCapabilityReport({
+        now: deps.clock.iso(),
+        studioEnabled: deps.config.games.enabled,
+        agentEnabled: deps.config.games.enabled && deps.config.games.agentEnabled,
+        sandboxReady: deps.config.games.enabled,
+        modelAssisted: modelReady && deps.studio.modelAssisted,
+        studioMessage: deps.config.games.enabled
+          ? 'Builds are generated and verified in the cloud engine; no owner device runs a game or a model.'
+          : 'Native Game Studio is disabled in this deployment.',
+        agentMessage:
+          deps.config.games.enabled && deps.config.games.agentEnabled
+            ? `Sessions run in the engine's isolated runtime with a ${deps.config.games.maxSessionTicks} tick ceiling; nothing executes on the owner device.`
+            : 'Native Gaming Agent is disabled in this deployment.',
+      });
+    },
+
+    listGames: async (principal, query) =>
+      deps.studio.list(principal.ownerId, {
+        limit: query.limit ?? 20,
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+      }),
+
+    createGame: async (principal, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.create(principal.ownerId, request);
+    },
+
+    getGame: async (principal, gameId) => deps.studio.get(principal.ownerId, gameId),
+
+    saveGameSpec: async (principal, gameId, request) =>
+      deps.studio.saveSpec({
+        ownerId: principal.ownerId,
+        gameId,
+        spec: request.spec,
+        expectedRevision: request.expectedRevision,
+      }),
+    buildGame: async (principal, gameId, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.build({
+        ownerId: principal.ownerId,
+        gameId,
+        ...(request.expectedSpecRevision !== undefined
+          ? { expectedSpecRevision: request.expectedSpecRevision }
+          : {}),
+      });
+    },
+
+    listGameBuilds: async (principal, gameId) =>
+      deps.studio.listBuilds(principal.ownerId, gameId),
+
+    restoreGameBuild: async (principal, gameId, buildId, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.restore({
+        ownerId: principal.ownerId,
+        gameId,
+        buildId,
+        expectedRevision: request.expectedRevision,
+      });
+    },
+
+    iterateGame: async (principal, gameId, request) =>
+      deps.studio.iterate({
+        ownerId: principal.ownerId,
+        gameId,
+        instruction: request.instruction,
+        expectedRevision: request.expectedRevision,
+      }),
+
+    gamePreview: async (principal, gameId) => deps.studio.preview(principal.ownerId, gameId),
+
+    exportGame: async (principal, gameId) => deps.studio.export(principal.ownerId, gameId),
+
+    createGameSession: async (principal, gameId, request) => {
+      if (!deps.config.games.enabled || !deps.config.games.agentEnabled) {
+        return fail('engine_not_configured', 'Native Gaming Agent is disabled in this deployment.');
+      }
+      if (request.maxTicks > deps.config.games.maxSessionTicks) {
+        return fail(
+          'validation_failed',
+          `The tick budget exceeds this deployment's ceiling of ${deps.config.games.maxSessionTicks}.`,
+        );
+      }
+      const project = await deps.studio.get(principal.ownerId, gameId);
+      if (!project.ok) return project;
+      if (!project.value.spec || !project.value.build) {
+        return fail('conflict', 'Build and verify this game before starting a session.');
+      }
+      const buildId = request.buildId ?? project.value.build.buildId;
+      const loaded = await deps.studio.readVerifiedBuild({
+        ownerId: principal.ownerId,
+        gameId,
+        buildId,
+      });
+      if (!loaded.ok) return loaded;
+      const created = await deps.sessions.create({
+        ownerId: principal.ownerId,
+        project: { gameId, spec: project.value.spec },
+        build: loaded.value.build,
+        request,
+      });
+      if (!created.ok) return created;
+      const session = created.value;
+      const admitted = await admitTask({
+        principal,
+        agentId: 'coderax',
+        objective: `Play ${project.value.name}: ${request.objective.kind}`,
+        mode: 'cloud',
+        model: null,
+        budget: null,
+        requireApproval: false,
+        kind: 'game',
+        game: {
+          sessionId: session.sessionId,
+          gameId,
+          buildId,
+          objective: request.objective,
+          allowedActions: request.allowedActions,
+          maxTicks: request.maxTicks,
+        },
+      });
+      if (!admitted.ok) {
+        await deps.sessions.fail(session.sessionId, admitted.code, admitted.detail);
+        return admitted;
+      }
+      const grant = await deps.permissions.request({
+        ownerId: principal.ownerId,
+        taskId: admitted.value.task.taskId,
+        agent: 'coderax',
+        scope: 'command.execute',
+        description: `Bounded control of game session ${session.sessionId}.`,
+        resource: `game-session:${session.sessionId}`,
+        ttlMs: 60 * 60_000,
+      });
+      const decided = await deps.permissions.decide({
+        ownerId: principal.ownerId,
+        taskId: admitted.value.task.taskId,
+        requestId: grant.requestId,
+        decision: 'approved',
+        reason: 'Owner authorized the session when creating it.',
+      });
+      if (!decided.ok) {
+        await deps.sessions.fail(session.sessionId, decided.code, decided.detail);
+        return decided;
+      }
+      await deps.sessions.attachTask(session.sessionId, admitted.value.task.taskId, 1);
+      deps.scheduler.enqueue(() => execute(admitted.value.task.taskId, admitted.value.token));
+      return deps.sessions.get(principal.ownerId, session.sessionId);
+    },
+
+    listGameSessions: async (principal) => deps.sessions.list(principal.ownerId),
+
+    getGameSession: async (principal, sessionId) => {
+      const found = await deps.sessions.get(principal.ownerId, sessionId);
+      if (!found.ok) return found;
+      const taskId = found.value.taskId;
+      if (!taskId) return found;
+      const task = await deps.tasks.get(taskId);
+      return ok({ ...found.value, generation: task?.generation ?? found.value.generation });
+    },
+
+    observeGameSession: async (principal, sessionId) =>
+      deps.sessions.observation(principal.ownerId, sessionId),
+
+    controlGameSession: async (principal, sessionId, request) => {
+      const controlled = await deps.sessions.control({
+        ownerId: principal.ownerId,
+        sessionId,
+        request,
+      });
+      if (!controlled.ok) return controlled;
+      const taskId = controlled.value.taskId;
+      if (request.action === 'cancel' && taskId) {
+        await service
+          .cancelTask(principal, taskId, request.reason)
+          .catch(() => undefined);
+      }
+      return controlled;
+    },
+
+    gameSessionLogs: async (principal, sessionId) =>
+      deps.sessions.logs(principal.ownerId, sessionId),
+
+    gameSessionVerification: async (principal, sessionId) =>
+      deps.sessions.verification(principal.ownerId, sessionId),
     schedules: async (principal) => ({
       schedules: (await deps.schedules.listByOwner(principal.ownerId)).map(toSchedule),
     }),
@@ -2303,6 +2976,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       deps.scheduler.stop();
       for (const controller of controllers.values()) controller.abort();
       controllers.clear();
+      // Wait for the runner's grace bound to turn every aborted run into a
+      // settled outcome, then revoke whatever is still registered. The second
+      // step is the verified part: no capability survives shutdown.
+      await Promise.race([
+        deps.scheduler.idle(),
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, deps.config.execution.cancelGraceMs + 1_000);
+          timer.unref();
+        }),
+      ]);
+      await deps.supervisor.shutdown();
       // Release cloud browsers rather than letting them run until their TTL.
       await deps.browser.shutdown();
     },

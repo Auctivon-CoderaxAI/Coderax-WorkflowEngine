@@ -88,5 +88,5 @@ Fallbacks, cheapest first:
 | PR for `feat/durable-artifacts` | None |
 | Hosted CI at `bf2e9b2` | No run: no PR exists, and `verify` triggers on PR/main |
 | Local verification at `bf2e9b2` | build 0, 157/157 tests, contract gate clean; real MongoDB |
-| Local verification after the artifact integration | build 0, 166/166 tests, contract gate clean; real MongoDB |
-| Dependency audit | `npm audit --omit=dev` reports one high finding, `GHSA-mrhx-c7xc-m3w5` / CVE-2023-54404 for `zod <4.6.6`; the CVE was rejected by its CNA, the owner-only API has a hard request-body limit, and the Zod 4 migration belongs to the quality-gate owner. Not suppressed. |
+| Local verification after the artifact API integration | build 0, 168/168 tests, zero skipped, contract gate clean; real MongoDB |
+| Dependency audit | `npm audit` reports one high finding: `zod 3.25.76` (patched 4.6.6), owned by the quality-gate workstream. The `image-size` and `uuid` findings are fixed by scoped overrides to patched releases (2.2.0 / 11.1.1) and covered by the generator tests. ExcelJS 4.4.0 has no upstream patch for the 2026-11-13 CVE records (CVE-2026-128338 through CVE-2026-128348); their references point at a hardened fork, which would be a dependency substitution needing an owner decision. Nothing is suppressed. |

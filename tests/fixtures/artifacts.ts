@@ -8,6 +8,7 @@ import { createConversationRepository } from '../../src/persistence/conversation
 import { createTaskRepository } from '../../src/persistence/tasks.js';
 import { createArtifactService, type ArtifactService } from '../../src/artifacts/service.js';
 import { createAuditLog } from '../../src/observability/audit.js';
+import { writeZip } from '../../src/artifacts/zip.js';
 import { createIdGenerator, type Clock } from '../../src/support/clock.js';
 import type { Principal } from '../../src/security/auth.js';
 import { OWNER_ID } from '../helpers.js';
@@ -53,17 +54,17 @@ export function zipBytes(): Buffer {
 
 export function ooxmlBytes(kind: 'docx' | 'xlsx' | 'pptx'): Buffer {
   const folder = kind === 'docx' ? 'word/' : kind === 'xlsx' ? 'xl/' : 'ppt/';
-  return Buffer.concat([
-    Buffer.from([0x50, 0x4b, 0x03, 0x04]),
-    Buffer.from(`[Content_Types].xml ${folder}document.xml`, 'latin1'),
+  return writeZip([
+    { name: '[Content_Types].xml', data: Buffer.from('<Types/>', 'utf8') },
+    { name: `${folder}document.xml`, data: Buffer.from('<document/>', 'utf8') },
   ]);
 }
 
 export function odfBytes(kind: 'text' | 'spreadsheet' | 'presentation'): Buffer {
   const mime = `application/vnd.oasis.opendocument.${kind}`;
-  return Buffer.concat([
-    Buffer.from([0x50, 0x4b, 0x03, 0x04]),
-    Buffer.from(`mimetype${mime}`, 'latin1'),
+  return writeZip([
+    { name: 'mimetype', data: Buffer.from(mime, 'utf8') },
+    { name: 'content.xml', data: Buffer.from('<document/>', 'utf8') },
   ]);
 }
 

@@ -78,9 +78,9 @@ export const EnginesConfig = z
      * external dependency, so an unconfigured deployment still has one engine.
      */
     default: EngineId.default('native'),
-    native: NativeConfig.default({}),
-    opencode: OpenCodeConfig.default({}),
-    freebuff: FreebuffConfig.default({}),
+    native: NativeConfig.prefault({}),
+    opencode: OpenCodeConfig.prefault({}),
+    freebuff: FreebuffConfig.prefault({}),
   })
   .strict();
 
@@ -104,8 +104,15 @@ export const ExecutionConfig = z
     maxAttempts: z.number().int().min(1).max(5).default(1),
     retryDelayMs: z.number().int().min(0).max(1_000).default(250),
     maxConcurrentTasks: z.number().int().min(1).max(64).default(4),
-    /** Events retained per task for replay; older events require a new query. */
+    /**
+     * Bounds one replay read and the memory driver's retained window. The durable
+     * log keeps everything else; a tail reads the next page on its next poll.
+     */
     eventBufferSize: z.number().int().min(16).max(100_000).default(2_000),
+    /** How often a live tail re-reads the durable log for new events. */
+    eventPollMs: z.number().int().min(10).max(5_000).default(100),
+    /** Age at which a stored event expires; the only source of truncation. */
+    eventRetentionMs: z.number().int().min(60_000).max(2_592_000_000).default(604_800_000),
     /** A crashed run's row is readable for this long before a sweep reclaims it. */
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */
@@ -113,22 +120,17 @@ export const ExecutionConfig = z
   })
   .strict();
 
-/**
- * Durable artifact bounds. Every ceiling is a hard refusal, never a warning:
- * an oversized upload is rejected before it is written and an owner over quota
- * is refused rather than allowed to grow unbounded storage.
- */
-export const ArtifactsConfig = z
+export const GamesConfig = z
   .object({
-    maxBytesPerArtifact: z.number().int().min(1_024).max(10_485_760).default(8_388_608),
-    maxBytesPerOwner: z.number().int().min(1_024).max(1_073_741_824).default(268_435_456),
-    maxArtifactsPerOwner: z.number().int().min(1).max(10_000).default(1_000),
-    maxVersionsPerArtifact: z.number().int().min(1).max(100).default(20),
-    /** 0 keeps an artifact until it is deleted or a version is pruned. */
-    defaultRetentionDays: z.number().int().min(0).max(3_650).default(0),
-    maxRetentionDays: z.number().int().min(1).max(3_650).default(365),
-    /** MongoDB document limit is 16 MiB; a chunk stays comfortably below it. */
-    chunkBytes: z.number().int().min(65_536).max(4_194_304).default(1_048_576),
+    /** Off disables both game capabilities at the route boundary. */
+    enabled: z.boolean().default(true),
+    /** The gaming agent can be disabled without disabling the studio. */
+    agentEnabled: z.boolean().default(true),
+    maxProjectsPerOwner: z.number().int().min(1).max(500).default(50),
+    /** The hard ceiling a session request may not exceed. */
+    maxSessionTicks: z.number().int().min(600).max(200_000).default(40_000),
+    /** A paused session holds its task slot for at most this long. */
+    maxPauseMs: z.number().int().min(1_000).max(3_600_000).default(900_000),
   })
   .strict();
 export const BrowserRemoteConfig = z
@@ -162,7 +164,7 @@ export const BrowserConfig = z
     maxScreenshotBytes: z.number().int().min(1_024).max(4_194_304).default(2_097_152),
     /** Bounded by the request body limit so an upload cannot be truncated. */
     maxUploadBytes: z.number().int().min(1_024).max(524_288).default(524_288),
-    remote: BrowserRemoteConfig.default({}),
+    remote: BrowserRemoteConfig.prefault({}),
   })
   .strict();
 
@@ -183,6 +185,25 @@ export const SchedulesConfig = z
     pauseAfterFailures: z.number().int().min(1).max(100).default(5),
     /** Execution receipts returned by the history operation by default. */
     historyLimit: z.number().int().min(1).max(500).default(100),
+  })
+  .strict();
+
+/**
+ * Durable artifact bounds. Every ceiling is a hard refusal, never a warning:
+ * an oversized upload is rejected before it is written and an owner over quota
+ * is refused rather than allowed to grow unbounded storage.
+ */
+export const ArtifactsConfig = z
+  .object({
+    maxBytesPerArtifact: z.number().int().min(1_024).max(10_485_760).default(8_388_608),
+    maxBytesPerOwner: z.number().int().min(1_024).max(1_073_741_824).default(268_435_456),
+    maxArtifactsPerOwner: z.number().int().min(1).max(10_000).default(1_000),
+    maxVersionsPerArtifact: z.number().int().min(1).max(100).default(20),
+    /** 0 keeps an artifact until it is deleted or a version is pruned. */
+    defaultRetentionDays: z.number().int().min(0).max(3_650).default(0),
+    maxRetentionDays: z.number().int().min(1).max(3_650).default(365),
+    /** MongoDB document limit is 16 MiB; a chunk stays comfortably below it. */
+    chunkBytes: z.number().int().min(65_536).max(4_194_304).default(1_048_576),
   })
   .strict();
 
@@ -212,16 +233,17 @@ export const PersistenceConfig = z
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
-    server: ServerConfig.default({}),
+    server: ServerConfig.prefault({}),
     auth: AuthConfig,
     workspaces: WorkspacesConfig,
-    engines: EnginesConfig.default({}),
+    engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
-    execution: ExecutionConfig.default({}),
-    artifacts: ArtifactsConfig.default({}),
-    browsers: BrowserConfig.default({}),
-    schedules: SchedulesConfig.default({}),
-    persistence: PersistenceConfig.default({}),
+    execution: ExecutionConfig.prefault({}),
+    browsers: BrowserConfig.prefault({}),
+    schedules: SchedulesConfig.prefault({}),
+    artifacts: ArtifactsConfig.prefault({}),
+    persistence: PersistenceConfig.prefault({}),
+    games: GamesConfig.prefault({}),
   })
   .strict();
 

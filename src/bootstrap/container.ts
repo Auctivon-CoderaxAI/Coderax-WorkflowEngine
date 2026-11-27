@@ -15,12 +15,15 @@ import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
+import type { RunSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { BrowserService } from '../orchestration/browser.js';
 import type { ArtifactService } from '../artifacts/service.js';
 import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
 
 /**
  * Dependencies are named, not positional.
@@ -53,7 +56,11 @@ export type InfrastructureDependencies = {
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
   browser: BrowserService;
+  supervisor: RunSupervisor;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -79,7 +86,11 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'runner',
   'scheduler',
   'health',
+  'studio',
+  'sessions',
+  'gaming',
   'browser',
+  'supervisor',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

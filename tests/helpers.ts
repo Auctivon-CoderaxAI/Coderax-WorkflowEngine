@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ModelGateway } from '../src/agents/native/types.js';
-import type { MongoConnector, MongoDatabase } from '../src/persistence/mongo-connect.js';
 import type { BrowserProvider } from '../src/browser/types.js';
+import type { MongoConnector, MongoDatabase } from '../src/persistence/mongo-connect.js';
 import { composeApplication, type Application } from '../src/bootstrap/compose.js';
 import { EngineConfigSchema, type EngineConfig } from '../src/configuration/schema.js';
 import type { TaskRecord } from '../src/domain.js';
@@ -182,10 +182,10 @@ export function slowGateway(delayMs: number): ModelGateway & { calls: number } {
 export async function startTestApp(options: {
   gateway?: ModelGateway;
   config?: Record<string, unknown>;
-  /** A shared database, so two app instances can prove they read the same rows. */
-  persistence?: { database?: MongoDatabase; connect?: MongoConnector };
   browser?: BrowserProvider;
   env?: NodeJS.ProcessEnv;
+  /** A shared database, so two app instances can prove they read the same rows. */
+  persistence?: { database?: MongoDatabase; connect?: MongoConnector };
 } = {}): Promise<{
   app: Application;
   url: string;
@@ -198,8 +198,8 @@ export async function startTestApp(options: {
     config,
     env: { CODERAX_OWNER_TOKEN: OWNER_TOKEN, ...(options.env ?? {}) },
     gateway: options.gateway ?? fakeGateway(),
-    ...(options.persistence ? { persistence: options.persistence } : {}),
     ...(options.browser ? { browserProvider: options.browser } : {}),
+    ...(options.persistence ? { persistence: options.persistence } : {}),
   });
   const { url } = await app.start();
   return {
@@ -243,6 +243,7 @@ export function taskRecord(overrides?: Partial<TaskRecord>): TaskRecord {
     state: 'queued',
     generation: 1,
     runToken: null,
+    eventSeq: 0,
     reasoning: null,
     steps: [],
     checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },

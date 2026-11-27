@@ -177,7 +177,7 @@ export function createNativeAgent(input: {
           retryable: false,
         };
       }
-      if (!gateway || !planner || !executor) {
+      if (!gateway || !planner || !executor || !request.model) {
         return {
           ok: false,
           code: 'not_configured',
@@ -185,6 +185,10 @@ export function createNativeAgent(input: {
           retryable: false,
         };
       }
+
+      // Captured once: a property path is not narrowed across a function
+      // boundary, and the step runner below is a closure.
+      const model = request.model;
 
       const cancelled = (): AgentRunOutcome => ({
         ok: false,
@@ -375,7 +379,7 @@ export function createNativeAgent(input: {
             history: request.history ?? [],
             evidence: [...evidence.values()],
             workspaceRoot: request.workspaceRoot,
-            model: request.model,
+            model,
             signal,
             ...(request.budget ? { maxOutputTokens: request.budget.maxOutputTokens } : {}),
             ...(feedback ? { feedback } : {}),
@@ -437,7 +441,7 @@ export function createNativeAgent(input: {
           const planned = await planner.plan({
             objective: request.objective,
             history: request.history ?? [],
-            model: request.model,
+            model,
             mode,
             completedSteps: [...completed],
             maxSteps,
@@ -488,7 +492,7 @@ export function createNativeAgent(input: {
             spend();
             const assessed = await verifyObjective({
               gateway,
-              model: request.model,
+              model,
               signal: request.signal,
               objective: request.objective,
               mode,
@@ -510,7 +514,7 @@ export function createNativeAgent(input: {
               const revised = await planner.replan({
                 objective: request.objective,
                 history: request.history ?? [],
-                model: request.model,
+                model,
                 mode,
                 plan: activePlan,
                 completedSteps: [...completed],
@@ -607,7 +611,7 @@ export function createNativeAgent(input: {
               const revised = await planner.replan({
                 objective: request.objective,
                 history: request.history ?? [],
-                model: request.model,
+                model,
                 mode,
                 plan: activePlan,
                 completedSteps: [...completed],

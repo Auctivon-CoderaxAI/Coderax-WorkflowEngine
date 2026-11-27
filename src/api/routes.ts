@@ -6,10 +6,11 @@ import type {
   DataMode,
   DeliverableRequestInput,
 } from '@coderax/contracts';
-import type { ApplicationService } from '../orchestration/service.js';
-import type { RouteRegistry } from './router.js';
+import type { ApplicationService, EventStream } from '../orchestration/service.js';
+import type { RouteRegistry, SseFrame } from './router.js';
 import { problemResult } from './router.js';
 import type { ServiceFailure } from '../support/result.js';
+import { buildHandshake, type HandshakeContext } from './handshake.js';
 
 /**
  * Route handlers are wiring, not behavior.
@@ -50,36 +51,32 @@ function isTerminalPayload(value: unknown): boolean {
   );
 }
 
-function eventId(value: unknown): string {
-  if (typeof value === 'object' && value !== null) {
-    const id = (value as { eventId?: unknown }).eventId;
-    if (typeof id === 'string') return id;
-  }
-  return '';
-}
-
 /**
- * Replays retained events, then tails the live ones. The stream closes on a
- * terminal event so a client never waits for a task that already finished; a
- * disconnected client stops consuming without stopping the run.
+ * Replays the durable log from the cursor, then tails it. The first frame is an
+ * SSE comment carrying the log's metadata: the SDK drops any line that is not
+ * `data:`, so a deployed client keeps working while a newer one can read
+ * `lastSeq` and `truncated` without a new frame type in the event contract. The
+ * stream closes on a terminal event so a client never waits for a task that
+ * already finished; a disconnected client stops consuming without stopping the
+ * run.
  */
-async function* toEventStream(stream: {
-  replay: { events: unknown[] };
-  subscribe: (listener: (event: unknown) => void) => () => void;
-}): AsyncIterable<unknown> {
-  const seen = new Set<string>();
+async function* toEventStream(stream: EventStream): AsyncIterable<SseFrame> {
+  yield {
+    kind: 'comment',
+    comment: `coderax-meta ${JSON.stringify({
+      lastSeq: stream.replay.lastSeq,
+      truncated: stream.replay.truncated,
+    })}`,
+  };
+
   for (const event of stream.replay.events) {
-    seen.add(eventId(event));
-    yield event;
+    yield { kind: 'event', event };
     if (isTerminalPayload(event)) return;
   }
 
   const pending: unknown[] = [];
   let wake: (() => void) | null = null;
   const unsubscribe = stream.subscribe((event) => {
-    const id = eventId(event);
-    if (id && seen.has(id)) return;
-    if (id) seen.add(id);
     pending.push(event);
     wake?.();
   });
@@ -88,7 +85,7 @@ async function* toEventStream(stream: {
     for (;;) {
       const next = pending.shift();
       if (next !== undefined) {
-        yield next;
+        yield { kind: 'event', event: next };
         if (isTerminalPayload(next)) return;
         continue;
       }
@@ -104,7 +101,11 @@ async function* toEventStream(stream: {
   }
 }
 
-export function registerRoutes(registry: RouteRegistry, service: ApplicationService): void {
+export function registerRoutes(
+  registry: RouteRegistry,
+  service: ApplicationService,
+  handshake: HandshakeContext,
+): void {
   registry.register('getHealth', async () => ({
     kind: 'json',
     status: 200,
@@ -490,6 +491,33 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     body: await service.schedules(context.principal),
   }));
 
+  registry.register('getGameCapabilities', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: service.gameCapabilities(context.principal),
+  }));
+
+  registry.register('listGames', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.listGames(context.principal, {
+      ...(typeof context.query.cursor === 'string' ? { cursor: context.query.cursor } : {}),
+      ...(typeof context.query.limit === 'number' ? { limit: context.query.limit } : {}),
+    }),
+  }));
+
+  registry.register('createGame', async (context) => {
+    const result = await service.createGame(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('getGame', async (context) => {
+    const result = await service.getGame(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('dispatchScheduleEvent', async (context) => {
     const result = await service.scheduleEvent(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -502,10 +530,30 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('saveGameSpec', async (context) => {
+    const result = await service.saveGameSpec(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('updateSchedule', async (context) => {
     const result = await service.updateSchedule(
       context.principal,
       context.params.scheduleId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('buildGame', async (context) => {
+    const result = await service.buildGame(
+      context.principal,
+      context.params.gameId ?? '',
       context.body as never,
     );
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -523,8 +571,25 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('listGameBuilds', async (context) => {
+    const result = await service.listGameBuilds(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('pauseSchedule', async (context) => {
     const result = await service.pauseSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('restoreGameBuild', async (context) => {
+    const result = await service.restoreGameBuild(
+      context.principal,
+      context.params.gameId ?? '',
+      context.params.buildId ?? '',
+      context.body as never,
+    );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
@@ -535,8 +600,94 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('iterateGame', async (context) => {
+    const result = await service.iterateGame(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
   registry.register('cancelSchedule', async (context) => {
     const result = await service.cancelSchedule(context.principal, context.params.scheduleId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('previewGame', async (context) => {
+    const result = await service.gamePreview(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return {
+      kind: 'text',
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: result.value,
+    };
+  });
+
+  registry.register('exportGame', async (context) => {
+    const result = await service.exportGame(context.principal, context.params.gameId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('createGameSession', async (context) => {
+    const result = await service.createGameSession(
+      context.principal,
+      context.params.gameId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('listGameSessions', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.listGameSessions(context.principal),
+  }));
+
+  registry.register('getGameSession', async (context) => {
+    const result = await service.getGameSession(context.principal, context.params.sessionId ?? '');
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('observeGameSession', async (context) => {
+    const result = await service.observeGameSession(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('controlGameSession', async (context) => {
+    const result = await service.controlGameSession(
+      context.principal,
+      context.params.sessionId ?? '',
+      context.body as never,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('gameSessionLogs', async (context) => {
+    const result = await service.gameSessionLogs(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('gameSessionVerification', async (context) => {
+    const result = await service.gameSessionVerification(
+      context.principal,
+      context.params.sessionId ?? '',
+    );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
   });
@@ -561,5 +712,19 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getHandshake', async (context) => {
+    const requested = context.query.contract;
+    const fingerprint = context.query.fingerprint;
+    return {
+      kind: 'json',
+      status: 200,
+      body: buildHandshake({
+        context: handshake,
+        ...(typeof requested === 'string' ? { requested } : {}),
+        ...(typeof fingerprint === 'string' ? { fingerprint } : {}),
+      }),
+    };
   });
 }

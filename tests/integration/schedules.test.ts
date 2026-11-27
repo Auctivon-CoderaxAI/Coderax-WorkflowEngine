@@ -501,7 +501,7 @@ test('recovery winning a stalled submission charges and appends just once', asyn
     await api.triggerSchedule(rule.scheduleId);
     const receipt = (await api.scheduleExecutions(rule.scheduleId)).executions[0];
     assert.ok(receipt);
-    assert.equal((await conversations.messages(receipt.conversationId)).filter(m => m.role === 'user').length, 1);
+    assert.equal((await conversations.messages({ ownerId: OWNER_ID, conversationId: receipt.conversationId, mode: 'cloud' }) ?? []).filter(m => m.role === 'user').length, 1);
     assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
   } finally {
     await started.close();
@@ -552,7 +552,7 @@ test('append acknowledgement loss leaves a recoverable claim without a task or c
     await started.app.dependencies.scheduler.idle();
     assert.equal((await api.task(receipt.taskId)).state, 'completed');
     assert.equal((await api.schedule(rule.scheduleId)).runsTotal, 1);
-    assert.equal((await conversations.messages(receipt.conversationId)).filter(m => m.role === 'user').length, 1);
+    assert.equal((await conversations.messages({ ownerId: OWNER_ID, conversationId: receipt.conversationId, mode: 'cloud' }) ?? []).filter(m => m.role === 'user').length, 1);
     assert.equal(started.app.service.budget({ ownerId: OWNER_ID, isOwner: true }).used.requests, 1);
   } finally { await started.close(); }
 });

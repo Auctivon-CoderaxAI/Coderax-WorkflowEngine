@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -23,6 +25,8 @@ import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
+import { createRunSupervisor } from '../execution/supervisor.js';
+import { validateRemoteEndpoint } from '../configuration/endpoint.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import { createArtifactService } from '../artifacts/service.js';
@@ -43,6 +47,11 @@ import {
 } from './container.js';
 import { buildPersistence } from './persistence.js';
 import { StartupError } from './startup-error.js';
+import { createArtifactStore } from '../artifacts/store.js';
+import { createGameStore } from '../games/store.js';
+import { createGameStudio } from '../games/studio.js';
+import { createDesignAssistant } from '../games/assistant.js';
+import { createGameSessions } from '../games/session.js';
 
 export { StartupError } from './startup-error.js';
 
@@ -100,6 +109,14 @@ function buildGateway(input: ComposeInput): ModelGateway | null {
   const baseURL = env.CODERAX_INFERENCE_BASE_URL;
   const apiKey = env.CODERAX_INFERENCE_KEY;
   if (!baseURL || !apiKey) return null;
+  // A key may only cross the network inside TLS. This is a startup gate: a
+  // deployment that would send its credential in plaintext does not start.
+  const endpoint = validateRemoteEndpoint({
+    url: baseURL,
+    name: 'CODERAX_INFERENCE_BASE_URL',
+    carriesCredential: true,
+  });
+  if (!endpoint.ok) throw new StartupError([endpoint.detail]);
   return createOpenAiCompatibleGateway({
     baseURL,
     apiKey,
@@ -193,6 +210,23 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     maxTokensPerDay: config.models.dailyTokenBudget,
   });
 
+  const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
+  const assistant = createDesignAssistant({ models, gateway, budget, clock });
+  const studio = createGameStudio({
+    store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
+    artifacts,
+    clock,
+    ids,
+    assistant,
+    maxProjects: config.games.maxProjectsPerOwner,
+  });
+  const gaming = createGameSessions({
+    artifacts,
+    clock,
+    ids,
+    maxPauseMs: config.games.maxPauseMs,
+  });
+
   const persistence = await buildPersistence({
     config,
     env,
@@ -272,16 +306,30 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     store: createBrowserStore(),
   });
   const events = createEventBus({
-    bufferSize: config.execution.eventBufferSize,
+    store: persistence.events,
+    // The task row is the fenced sequence authority; the bus never numbers an
+    // event on its own, so a superseded generation cannot append one.
+    seq: tasks,
+    pollMs: config.execution.eventPollMs,
     eventId: ids.eventId,
     iso: clock.iso,
   });
+  const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({
     lease,
     clock,
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
+    // The composition root is where supervision exists in production. An
+    // adapter that ignored its abort may still be running; its capability and
+    // workspace are revoked here even if the service already moved on.
+    onAbandoned: async ({ token }) => {
+      await supervisor.abandon({
+        token,
+        reason: 'A cancelled adapter did not stop within the grace period.',
+      });
+    },
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -428,7 +476,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     runner,
     scheduler,
     health,
+    studio,
+    sessions: gaming.sessions,
+    gaming: gaming.agent,
     browser,
+    supervisor,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -442,7 +494,21 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
 
   const registry = createRouteRegistry();
-  registerRoutes(registry, service);
+  registerRoutes(registry, service, {
+    server: { name: 'coderax-workflow-engine', version: '0.1.0', startedAt: clock.iso() },
+    limits: {
+      maxBodyBytes: ARTIFACT_BODY_LIMIT_BYTES,
+      eventBufferSize: config.execution.eventBufferSize,
+      maxConcurrentTasks: config.execution.maxConcurrentTasks,
+      // The scheduler cannot fire a slot faster than its own tick, so that is
+      // the smallest interval the engine can actually honour.
+      scheduleMinIntervalMs: config.schedules.tickMs,
+      artifactMaxBytes: config.artifacts.maxBytesPerArtifact,
+      memoryMaxValueLength: 20_000,
+    },
+    externalAgents:
+      config.engines.opencode.enabled || config.engines.freebuff.enabled,
+  });
   const missingRoutes = registry.missing();
   if (missingRoutes.length > 0) {
     throw new StartupError(

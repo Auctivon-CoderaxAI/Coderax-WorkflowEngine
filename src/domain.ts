@@ -5,6 +5,8 @@ import type {
   Budget,
   DataMode,
   EngineId,
+  GameAction,
+  GameObjective,
   IsoDateTime,
   MissedRunPolicy,
   ModelRef,
@@ -20,6 +22,22 @@ import type {
   TaskState,
   Usage,
 } from '@coderax/contracts';
+
+/**
+ * A game session runs as a durable Work task. The workload discriminator is what
+ * lets the same lease, fencing, cancellation and event machinery supervise a
+ * gaming-agent session without a second executor.
+ */
+export type TaskWorkload = 'work' | 'game';
+
+export type GameRunSpec = {
+  sessionId: string;
+  gameId: string;
+  buildId: string;
+  objective: GameObjective;
+  allowedActions: GameAction[];
+  maxTicks: number;
+};
 
 /**
  * Fast reasoning answers directly; complex reasoning decomposes, parallelises
@@ -135,11 +153,20 @@ export type TaskRecord = {
   agent: AgentId;
   engine: EngineId;
   mode: DataMode;
+  /** Absent on records written before game sessions existed: read it as 'work'. */
+  kind?: TaskWorkload;
+  game?: GameRunSpec | null;
   objective: string;
   model: ModelRef | null;
   state: TaskState;
   generation: number;
   runToken: string | null;
+  /**
+   * The highest event sequence the durable log holds for this task, absent rows
+   * read as 0. It lives on the fenced row so allocating a sequence and proving
+   * ownership are one atomic operation.
+   */
+  eventSeq: number;
   /** Resolved on the first planning pass; never guessed by a client. */
   reasoning: ReasoningMode | null;
   steps: TaskStep[];
@@ -216,53 +243,6 @@ export type NotificationRecord = {
   summary?: string;
   createdAt: IsoDateTime;
   read: boolean;
-};
-
-/**
- * Durable artifact metadata. The bytes live in a content-addressed blob and are
- * named only by `sha256`; the file name here is metadata and never a path.
- */
-export type ArtifactRecord = {
-  artifactId: string;
-  ownerId: string;
-  tenantId: string | null;
-  mode: DataMode;
-  kind: ArtifactKind;
-  filename: string;
-  /** Metadata only; never a filesystem path. Basename equals `filename`. */
-  relativePath?: string;
-  /** Normalized, case-folded path identity used only for collision checks. */
-  pathKey?: string;
-  mediaType: ArtifactMediaType;
-  bytes: number;
-  sha256: string;
-  /** Current version number. Immutable version rows live alongside. */
-  version: number;
-  /** Retained version count, including the current one. */
-  versions: number;
-  projectId: string | null;
-  conversationId: string | null;
-  taskId: string | null;
-  createdAt: IsoDateTime;
-  updatedAt: IsoDateTime;
-  expiresAt: IsoDateTime | null;
-};
-
-export type ArtifactVersionRecord = {
-  ownerId: string;
-  mode: DataMode;
-  artifactId: string;
-  version: number;
-  filename: string;
-  relativePath?: string;
-  mediaType: ArtifactMediaType;
-  /** Immutable per version, so a rollback restores the kind that version had. */
-  kind: ArtifactKind;
-  /** Size and digest of this exact version, so history is independently auditable. */
-  bytes: number;
-  sha256: string;
-  note?: string;
-  createdAt: IsoDateTime;
 };
 
 export type ScheduleRecord = {
@@ -385,6 +365,53 @@ export type ScheduleNoticeRecord = {
   summary: string;
   createdAt: IsoDateTime;
   read: boolean;
+};
+
+/**
+ * Durable artifact metadata. The bytes live in a content-addressed blob and are
+ * named only by `sha256`; the file name here is metadata and never a path.
+ */
+export type ArtifactRecord = {
+  artifactId: string;
+  ownerId: string;
+  tenantId: string | null;
+  mode: DataMode;
+  kind: ArtifactKind;
+  filename: string;
+  /** Metadata only; never a filesystem path. Basename equals `filename`. */
+  relativePath?: string;
+  /** Normalized, case-folded path identity used only for collision checks. */
+  pathKey?: string;
+  mediaType: ArtifactMediaType;
+  bytes: number;
+  sha256: string;
+  /** Current version number. Immutable version rows live alongside. */
+  version: number;
+  /** Retained version count, including the current one. */
+  versions: number;
+  projectId: string | null;
+  conversationId: string | null;
+  taskId: string | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  expiresAt: IsoDateTime | null;
+};
+
+export type ArtifactVersionRecord = {
+  ownerId: string;
+  mode: DataMode;
+  artifactId: string;
+  version: number;
+  filename: string;
+  relativePath?: string;
+  mediaType: ArtifactMediaType;
+  /** Immutable per version, so a rollback restores the kind that version had. */
+  kind: ArtifactKind;
+  /** Size and digest of this exact version, so history is independently auditable. */
+  bytes: number;
+  sha256: string;
+  note?: string;
+  createdAt: IsoDateTime;
 };
 
 export type AuditRecord = {

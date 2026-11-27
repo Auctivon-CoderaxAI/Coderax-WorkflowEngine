@@ -39,6 +39,13 @@ are clients of the same versioned API.
 | Zero-cost model gate (paid refused, daily budget) | Implemented | `src/models/catalog.ts`, `src/models/budget.ts` |
 | Secret redaction of adapter and provider text | Implemented | `src/observability/redact.ts` |
 | MongoDB lease table + index bootstrap | Implemented, selected at startup; not live-verified | `src/persistence/mongo.ts`, `src/bootstrap/compose.ts` |
+| Coderax Native agent | Implemented | `src/agents/native` |
+| Native Game Studio | Implemented | `src/games/studio.ts`: NL specs, design plans, original source, 8 genres, 12 composable mechanics, seeded levels, browser-boot verification, build history/restore, export, `docs/evidence/game-studio/` |
+| Native Game Studio — real-browser acceptance | Verified for two reference builds | `scripts/browser-acceptance.mjs`: desktop/mobile Chromium rendering, keyboard/mouse/touch, scoring, collision, win/failure, restart and audio; `docs/evidence/browser/` |
+| Native Game Studio — AI-assisted generation | **Blocked** | no verified model participation or zero-cost model credential; deterministic generation remains operational |
+| Native Gaming Agent (studio builds) | Implemented | `src/games/session.ts`: durable Work task with `kind: game`, observed state/frames, bounded controls, pause/resume, takeover, cancellation, memory, measured completion |
+| Native Gaming Agent — cloud browser | **Blocked** | no verified zero-cost browser session/observation interface; the browser acceptance controller is test code, not the agent |
+| Gaming Agent — external game environments | **Blocked** | no verified zero-cost cloud browser or DeploymentPlatformAI workload/browser interface; see `docs/games-audit.md` |
 | Coderax Native reasoning and planning | Implemented — fast/complex modes, dependency-aware plans, parallel execution, bounded replanning, evidence-based verification, approval escalation | `src/agents/native`, `tests/unit/native-reasoning.test.ts`, `tests/integration/approval.test.ts` |
 | Cloud browser surface (sessions, navigation, inspection, screenshots, inputs, tabs, files, takeover, receipts) | Implemented, fail-closed | `packages/contracts/src/browser.ts`, `src/browser`, `src/orchestration/browser.ts` |
 | Verified zero-cost cloud browser provider | **Not configured** | no provider endpoint exists here; capabilities report `not_configured` |
@@ -57,13 +64,20 @@ Coderax runs today, and `docs/pr-1-review.md` records what is preserved, what is
 simplified and what is still missing. `docs/artifacts.md` describes durable
 artifact storage, its security boundaries and how durability is verified.
 
+The game modules use the zero-cost model catalogue that exists on `main`. The
+durable artifact service, capability registry, reasoning planner, model router
+and execution supervisor exist only on open, unmerged PR branches (#2–#8); this
+change does not claim they are integrated. `docs/games-audit.md` records the
+exact dependency and the narrow ports the game code exposes for that migration.
+
 ## Quick start
 
 ```bash
 npm install
 npm run build
-npm test                          # unit, contract, integration, security, e2e
 npm test                          # unit, contract, integration, security and e2e suites
+npm run game:evidence             # regenerates the playable game evidence frames
+npm run game:browser -- --base-url <origin>   # real-Chromium acceptance; needs Playwright
 npm run openapi:check             # fails if the published contract drifted
 ```
 

@@ -1,0 +1,9 @@
+
+> coderax-workflow-engine@0.1.0 openapi:write
+> npm run build && node dist/scripts/write-openapi.js
+
+
+> coderax-workflow-engine@0.1.0 build
+> tsc -b
+
+wrote /workspace/chats/3946a9c052e008614f6f31ba/openapi.json

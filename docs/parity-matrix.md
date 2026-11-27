@@ -2,7 +2,7 @@
 
 Baseline: `Coderax@a5d237b0`, `packages/api/src/engines` and
 `packages/data-schemas/src/methods/workRun.ts`.
-Candidate: this repository at the head of `feat/workflow-engine-foundation`.
+Candidate: this repository at the head of `feat/native-game-studio-gaming-agent`.
 
 Status vocabulary:
 
@@ -35,7 +35,7 @@ Status vocabulary:
 | 19 | Persistent task records | MongoDB (conversations + messages) | `src/persistence/mongo-tables.ts` (token + terminal check in the update filter) | Preserved (fake-verified; no live DB) |
 | 20 | Persistent conversations and messages | MongoDB | `src/persistence/mongo-tables.ts` (unique conversation and message ids) | Preserved (fake-verified; no live DB) |
 | 21 | Persistent memory | conversation/agent files | `src/persistence/mongo-tables.ts` (unique owner+mode+key) | Preserved (fake-verified; no live DB) |
-| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | in-memory sequenced bus | Missing |
+| 22 | Persistent events / replay across restart | Redis (optional) + Mongo | `src/events/store.ts` (one row per event, unique `(taskId, seq)` and `eventId`, TTL retention) with the sequence allocated on the fenced task row and an SSE metadata frame | Preserved (fake-verified; no live DB, TTL expiry not exercised) |
 | 23 | Completion notifications | client polling of conversation state | notification store + endpoint, persisted with the same driver | Preserved (mark-read has no HTTP operation yet) |
 | 24 | Prompt built from the transcript | `workChat/prompt.ts` | `src/orchestration/transcript.ts` + `src/agents/native/prompt.ts` | Preserved (bounded turns; current turn excluded) |
 | 25 | Message content parts, `unfinished` / `error` flags | `workChat/persistence.ts` | plain text messages | Simplified |
@@ -64,18 +64,24 @@ Status vocabulary:
 | 48 | Versioned HTTP contract + generated OpenAPI | OpenAPI document published at runtime | `packages/contracts` + committed `openapi.json` + drift gate | Strengthened |
 | 49 | Shared typed SDK for both clients | none (hand-written helpers) | `packages/sdk` | Strengthened |
 | 50 | Startup dependency validation | none (config read at request time) | `src/bootstrap/compose.ts` refuses to start | Strengthened |
+| 51 | Native Game Studio | project lifecycle + design brief only; every build capability hard-coded false (CX-32 Partial) | `src/games/studio.ts`: deterministic spec, plan, original source/assets/levels, 8 genres, procedural audio, self-contained preview, browser-boot and measured playability, export, iterations, persistence | Changed (deliberate) — lifecycle pattern migrated, executor newly built |
+| 52 | Native Gaming Agent | no session runtime (CX-33 Blocked) | `src/games/session.ts`: durable sessions over verified, version-pinned builds, observation, bounded controls, pause/resume, takeover, cancel, memory, logs, measured completion | Changed (deliberate) |
+| 53 | Gaming Agent — external game environments | none (blocked in the registry) | none; reported `blocked` with the exact prerequisite | Not started (both) |
+| 54 | Build version history and restore | `revision`/`specRevision` only; no historical build bytes | `GET /v1/games/{gameId}/builds` plus exact-spec restore; traversal- and owner-checked | Changed (deliberate) |
+| 55 | Real-browser acceptance of generated builds | none | platformer and puzzle rendered, controlled and completed in cloud Chromium; owner-only origin returned 403 anonymous / 200 owner | Changed (new evidence) — two reference builds, Chromium only |
+| 56 | Autonomous cloud-browser gameplay | none | none; `native.gaming-agent.browser` reported blocked | Not started (both) |
 
 ## Summary
 
 | Status | Count |
 | --- | --- |
-| Preserved | 22 |
-| Strengthened | 11 |
+| Preserved | 24 |
+| Strengthened | 10 |
 | Simplified | 5 |
-| Missing | 9 |
-| Changed (deliberate) | 2 |
+| Missing | 8 |
+| Changed (deliberate) | 6 |
 | Contract only (no verified provider) | 1 |
-| Not started (both) | 0 |
+| Not started (both) | 2 |
 
 ## What this means
 
@@ -84,14 +90,16 @@ wrong: one contract, one composition root, cross-replica leases, fenced terminal
 writes, sequenced events, checkpoints, and an independent Native path.
 
 It is **not yet a functional replacement**. Every row marked Missing is a
-capability Coderax has today. Until rows 18, 22, 27–31, 34, 36, 40, 46 and 47 are
+capability Coderax has today. Until rows 18, 27–31, 34, 36, 40, 46 and 47 are
 closed, migrating a client would remove functionality, which the brief forbids.
-Scheduling (row 44) is implemented here and no longer blocks a client cut-over.
+Scheduling (row 44) is implemented here and no longer blocks a client cut-over,
+and persistent events with replay across restart (row 22) are durable as of the
+event-log branch.
 
 Dependency order for closing them:
 
-1. Persistent execution events and replay across restart (row 22), then fenced
-   conversation writes (row 18).
+1. Fenced conversation writes (row 18). Persistent events and replay across
+   restart (row 22) are durable as of this branch.
 2. Real OpenCode transport and model plan (rows 27–30), then FreeBuff (31).
 3. Native tools, MCP, RAG and plugins (rows 34, 47) — the largest single item,
    and the one that decides whether Coderax Native can replace the LibreChat
@@ -104,10 +112,22 @@ Dependency order for closing them:
 
 ## Verification status
 
-- Integrated revision: exact-head hosted verification pending.
+- `npm run verify` at this merge head: 391 tests, 377 passing, 0 failing, 14
+  skipped, OpenAPI drift clean. The skipped tests are the real-MongoDB artifact
+  suites, which need `CODERAX_TEST_MONGODB_URI`; nothing else is skipped.
+- Durable execution events are covered by store-contract, fenced-allocation,
+  replay-across-restart and SSE-metadata tests. TTL expiry, a concurrent append
+  race on two replicas and a live MongoDB are not exercised.
 - Durable stores are verified against a semantics-faithful collection fake that
   enforces unique indexes and cursor semantics. **No live MongoDB has been
   contacted**; "durable" here means the adapter and wiring are proven, not that a
   real server has stored a row.
 - No hosted CI run exists: the GitHub Actions job is blocked by account billing.
   The local run above is the only executed evidence.
+- The Game Studio branch reports 132/132 passing tests and a clean OpenAPI drift check before integration.
+- The branch reports separate MongoDB 8.0.4 durability and concurrency verification. See `docs/evidence/mongo/`.
+- Game project and build bytes remain file-backed. Cross-replica game artifact concurrency is not claimed.
+- Real Chromium acceptance was reported for the platformer and puzzle, including rendering, controls, scoring, collision, restart, audio and owner-only access.
+- See `docs/evidence/browser/` for the acceptance reports.
+- Safari, Firefox and physical mobile devices remain unverified.
+- Autonomous cloud-browser gameplay remains blocked pending a verified zero-cost provider.

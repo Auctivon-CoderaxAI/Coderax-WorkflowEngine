@@ -44,6 +44,93 @@ const EOCD = 0x06054b50;
 const CENTRAL = 0x02014b50;
 const LOCAL = 0x04034b50;
 
+/**
+ * Reads only the central-directory names. Media validation uses this so it can
+ * recognise a real OOXML container without inflating attacker-controlled
+ * entries; a zip bomb stays inert.
+ */
+export function zipEntryNames(archive: Buffer): Set<string> {
+  const names = new Set<string>();
+  let eocd = -1;
+  const lowest = Math.max(0, archive.length - 65_557);
+  for (let offset = archive.length - 22; offset >= lowest; offset -= 1) {
+    if (archive.readUInt32LE(offset) === EOCD) {
+      eocd = offset;
+      break;
+    }
+  }
+  if (eocd < 0) throw new ZipError('The archive has no central directory.');
+
+  const count = archive.readUInt16LE(eocd + 10);
+  let offset = archive.readUInt32LE(eocd + 16);
+  for (let index = 0; index < count; index += 1) {
+    if (offset + 46 > archive.length || archive.readUInt32LE(offset) !== CENTRAL) {
+      throw new ZipError('The archive central directory is malformed.');
+    }
+    const nameLength = archive.readUInt16LE(offset + 28);
+    const extraLength = archive.readUInt16LE(offset + 30);
+    const commentLength = archive.readUInt16LE(offset + 32);
+    if (offset + 46 + nameLength > archive.length) {
+      throw new ZipError('The archive entry name is truncated.');
+    }
+    names.add(archive.subarray(offset + 46, offset + 46 + nameLength).toString('utf8'));
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return names;
+}
+
+/** Reads one small entry with a decompressed-output cap, or returns null. */
+export function zipEntryText(
+  archive: Buffer,
+  wanted: string,
+  maxOutputLength = 256,
+): string | null {
+  let eocd = -1;
+  const lowest = Math.max(0, archive.length - 65_557);
+  for (let offset = archive.length - 22; offset >= lowest; offset -= 1) {
+    if (archive.readUInt32LE(offset) === EOCD) {
+      eocd = offset;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+
+  const count = archive.readUInt16LE(eocd + 10);
+  let offset = archive.readUInt32LE(eocd + 16);
+  for (let index = 0; index < count; index += 1) {
+    if (offset + 46 > archive.length || archive.readUInt32LE(offset) !== CENTRAL) return null;
+    const method = archive.readUInt16LE(offset + 10);
+    const compressedSize = archive.readUInt32LE(offset + 20);
+    const nameLength = archive.readUInt16LE(offset + 28);
+    const extraLength = archive.readUInt16LE(offset + 30);
+    const commentLength = archive.readUInt16LE(offset + 32);
+    const localOffset = archive.readUInt32LE(offset + 42);
+    if (offset + 46 + nameLength > archive.length) return null;
+    const name = archive.subarray(offset + 46, offset + 46 + nameLength).toString('utf8');
+    offset += 46 + nameLength + extraLength + commentLength;
+    if (name !== wanted) continue;
+    if (localOffset + 30 > archive.length || archive.readUInt32LE(localOffset) !== LOCAL) return null;
+    const localNameLength = archive.readUInt16LE(localOffset + 26);
+    const localExtraLength = archive.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    if (dataStart + compressedSize > archive.length) return null;
+    const raw = archive.subarray(dataStart, dataStart + compressedSize);
+    try {
+      const data =
+        method === 0
+          ? Buffer.from(raw)
+          : method === 8
+            ? inflateRawSync(raw, { maxOutputLength })
+            : null;
+      if (!data || data.length > maxOutputLength) return null;
+      return data.toString('utf8');
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 /** Reads every entry into memory. Artifacts here are at most a few megabytes. */
 export function readZip(archive: Buffer): Map<string, Buffer> {
   const entries = new Map<string, Buffer>();
@@ -69,6 +156,9 @@ export function readZip(archive: Buffer): Map<string, Buffer> {
     const extraLength = archive.readUInt16LE(offset + 30);
     const commentLength = archive.readUInt16LE(offset + 32);
     const localOffset = archive.readUInt32LE(offset + 42);
+    if (offset + 46 + nameLength > archive.length) {
+      throw new ZipError('The archive entry name is truncated.');
+    }
     const name = archive.subarray(offset + 46, offset + 46 + nameLength).toString('utf8');
 
     if (localOffset + 30 > archive.length || archive.readUInt32LE(localOffset) !== LOCAL) {

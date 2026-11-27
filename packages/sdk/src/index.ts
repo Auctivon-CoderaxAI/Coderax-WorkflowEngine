@@ -1,6 +1,13 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserCapabilities,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionList,
+  BrowserTakeoverResult,
   ArtifactContent,
   ArtifactDeleteResult,
   ArtifactDescriptor,
@@ -10,18 +17,24 @@ import {
   ArtifactPruneResult,
   ArtifactUploadResult,
   ArtifactVersionList,
-  BrowserActionResult,
-  BrowserArtifactContent,
-  BrowserCapabilities,
-  BrowserReceiptList,
-  BrowserSession,
-  BrowserSessionList,
-  BrowserTakeoverResult,
+  CapabilityHandshake,
   ChatReply,
   Conversation,
-  ConversationList,
   Deliverable,
+  ConversationList,
   ExecutionEvent,
+  GameBuild,
+  GameBuildList,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
   HealthReport,
   MemoryList,
   ModelList,
@@ -42,19 +55,26 @@ import {
   TaskStatus,
 } from '@coderax/contracts';
 import type {
-  ArtifactKind,
-  ArtifactUploadRequest,
-  ArtifactVersionRequest,
+  BuildGameRequest,
   BrowserAction,
   BrowserActionInput,
   BrowserAuthorizationRequest,
   BrowserCloseRequest,
   BrowserSessionCreateInput,
   BrowserTakeoverRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
   ChatRequest,
-  DataMode,
   DeliverableRequestInput,
+  CreateGameRequest,
+  CreateGameSessionRequest,
+  DataMode,
+  GameSessionControlRequest,
+  IterateGameRequest,
   PermissionDecisionRequest,
+  RestoreGameBuildRequest,
+  SaveGameSpecRequest,
   ScheduleCreateInput,
   ScheduleUpdateRequest,
   ScheduleEventRequest,
@@ -241,6 +261,18 @@ export class CoderaxClient {
     return this.request<HealthReport>(HealthReport, { method: 'GET', path: '/v1/health' });
   }
 
+  /**
+   * The first call a client should make. It carries the served contract, the
+   * catalogue fingerprint and the operations this build actually publishes.
+   */
+  handshake(input: { contract?: string; fingerprint?: string } = {}): Promise<CapabilityHandshake> {
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+      query: { contract: input.contract, fingerprint: input.fingerprint },
+    });
+  }
+
   readiness(): Promise<ReadinessReport> {
     return this.request<ReadinessReport>(ReadinessReport, { method: 'GET', path: '/v1/ready' });
   }
@@ -251,18 +283,6 @@ export class CoderaxClient {
 
   models(): Promise<ModelList> {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
-  }
-
-  /**
-   * Generates and durably persists a document, workbook, deck, analysis or
-   * software project. The response names stored artifacts, never workspace paths.
-   */
-  deliver(request: DeliverableRequestInput): Promise<Deliverable> {
-    return this.request<Deliverable>(Deliverable, {
-      method: 'POST',
-      path: '/v1/deliverables',
-      body: request,
-    });
   }
 
   browserCapabilities(): Promise<BrowserCapabilities> {
@@ -605,6 +625,18 @@ export class CoderaxClient {
     });
   }
 
+  /**
+   * Generates and durably persists a document, workbook, deck, analysis or
+   * software project. The response names stored artifacts, never workspace paths.
+   */
+  deliver(request: DeliverableRequestInput): Promise<Deliverable> {
+    return this.request<Deliverable>(Deliverable, {
+      method: 'POST',
+      path: '/v1/deliverables',
+      body: request,
+    });
+  }
+
   uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
@@ -680,6 +712,158 @@ export class CoderaxClient {
     });
   }
 
+  gameCapabilities(): Promise<GameCapabilityReport> {
+    return this.request<GameCapabilityReport>(GameCapabilityReport, {
+      method: 'GET',
+      path: '/v1/games/capabilities',
+    });
+  }
+
+  games(query: { cursor?: string; limit?: number } = {}): Promise<GameProjectList> {
+    return this.request<GameProjectList>(GameProjectList, {
+      method: 'GET',
+      path: '/v1/games',
+      query: { ...query },
+    });
+  }
+
+  createGame(request: CreateGameRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: '/v1/games',
+      body: request,
+    });
+  }
+
+  game(gameId: string): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}`,
+    });
+  }
+
+  saveGameSpec(gameId: string, request: SaveGameSpecRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/spec`,
+      body: request,
+    });
+  }
+
+  buildGame(gameId: string, request: BuildGameRequest = {}): Promise<GameBuild> {
+    return this.request<GameBuild>(GameBuild, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/build`,
+      body: request,
+    });
+  }
+
+  gameBuilds(gameId: string): Promise<GameBuildList> {
+    return this.request<GameBuildList>(GameBuildList, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds`,
+    });
+  }
+
+  restoreGameBuild(
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds/${encodeURIComponent(buildId)}/restore`,
+      body: request,
+    });
+  }
+
+  iterateGame(gameId: string, request: IterateGameRequest): Promise<GameIteration> {
+    return this.request<GameIteration>(GameIteration, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/iterate`,
+      body: request,
+    });
+  }
+
+  /** The playable preview is HTML, not JSON; it is checked to be the declared type. */
+  async gamePreview(gameId: string): Promise<string> {
+    const path = `/v1/games/${encodeURIComponent(gameId)}/preview`;
+    const response = await this.send({ method: 'GET', path });
+    if (!response.ok) {
+      await this.parse(GameProject, response, path);
+      throw new CoderaxContractError('the preview request failed without a problem document');
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/html')) {
+      throw new CoderaxContractError('the preview was not served as HTML');
+    }
+    return response.text();
+  }
+
+  exportGame(gameId: string): Promise<GameExport> {
+    return this.request<GameExport>(GameExport, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/export`,
+    });
+  }
+
+  createGameSession(
+    gameId: string,
+    request: CreateGameSessionRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/sessions`,
+      body: request,
+    });
+  }
+
+  gameSessions(): Promise<GameSessionList> {
+    return this.request<GameSessionList>(GameSessionList, {
+      method: 'GET',
+      path: '/v1/game-sessions',
+    });
+  }
+
+  gameSession(sessionId: string): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  observeGameSession(sessionId: string): Promise<GameObservation> {
+    return this.request<GameObservation>(GameObservation, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/observation`,
+    });
+  }
+
+  controlGameSession(
+    sessionId: string,
+    request: GameSessionControlRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/control`,
+      body: request,
+    });
+  }
+
+  gameSessionLogs(sessionId: string): Promise<GameSessionLogs> {
+    return this.request<GameSessionLogs>(GameSessionLogs, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/logs`,
+    });
+  }
+
+  gameSessionVerification(sessionId: string): Promise<GameSessionVerification> {
+    return this.request<GameSessionVerification>(GameSessionVerification, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/verification`,
+    });
+  }
+
   /** Replays and tails execution events from a sequence cursor. */
   async *events(
     taskId: string,
@@ -710,21 +894,21 @@ export class CoderaxClient {
 }
 
 export type {
-  ArtifactKind,
-  ArtifactUploadRequest,
-  ArtifactVersionRequest,
-  ChatRequest,
-  DataMode,
-  PermissionDecisionRequest,
   BrowserAction,
   BrowserActionInput,
   BrowserAuthorizationRequest,
   BrowserCloseRequest,
   BrowserSessionCreateInput,
   BrowserTakeoverRequest,
+  ChatRequest,
+  DataMode,
+  PermissionDecisionRequest,
   ScheduleCreateInput,
   ScheduleUpdateRequest,
   ScheduleEventRequest,
   ScheduleTriggerRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
   WorkSubmitRequest,
 };

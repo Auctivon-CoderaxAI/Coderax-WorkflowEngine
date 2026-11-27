@@ -38,6 +38,8 @@ function runRequest(overrides: Partial<AgentRunRequest> = {}): AgentRunRequest {
     tenantId: null,
     conversationId: 'conv',
     taskId: 'task-1',
+    workload: 'work',
+    game: null,
     objective: 'Produce the result',
     model: { providerId: 'free', modelId: 'coderax-small' },
     mode: 'cloud',

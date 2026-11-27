@@ -33,15 +33,30 @@ export function redactContent(value: string): string {
   return value;
 }
 
-export function redactToolInput(input: unknown): unknown {
-  try {
-    return JSON.parse(JSON.stringify(input, (key, value: unknown) => {
-      if (/(?:token|password|passwd|secret|api[_-]?key|authorization)$/i.test(key)) return '[redacted]';
-      return typeof value === 'string' ? redactContent(value) : value;
-    }));
-  } catch {
-    return '[redacted]';
+const SECRET_KEY = /(?:token|password|passwd|secret|api[_-]?key|apikey|authorization|credential|cookie)$/i;
+
+/**
+ * Deep-scrubs a JSON-shaped payload. Used at the event bus and at every store
+ * that persists a payload, so a new event type or a new caller cannot leak a
+ * credential by forgetting to scrub its own fields.
+ */
+export function redactValue(value: unknown, depth = 0): unknown {
+  if (depth > 8) return '[redacted]';
+  if (typeof value === 'string') return redactContent(value);
+  if (Array.isArray(value)) return value.slice(0, 1_000).map((entry) => redactValue(entry, depth + 1));
+  if (value !== null && typeof value === 'object') {
+    if (value instanceof Date) return value.toISOString();
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = SECRET_KEY.test(key) ? '[redacted]' : redactValue(entry, depth + 1);
+    }
+    return out;
   }
+  return value;
+}
+
+export function redactToolInput(input: unknown): unknown {
+  return redactValue(input);
 }
 
 /** Bounds the work a pathological string can cause. */

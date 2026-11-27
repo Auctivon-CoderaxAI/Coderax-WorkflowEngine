@@ -102,6 +102,7 @@ are not on the list.
 | `listArtifacts` | `GET /v1/artifacts` | Owner-scoped list plus quota |
 | `getArtifact` | `GET /v1/artifacts/{artifactId}` | Metadata in one mode |
 | `artifactProjectManifest` | `GET /v1/artifacts/manifest` | Version-pinned project manifest with a digest |
+| `generateDeliverable` | `POST /v1/deliverables` | Generate, verify and persist a document, workbook, deck, dataset or software project |
 | `uploadArtifactVersion` | `POST /v1/artifacts/{artifactId}/versions` | Append an immutable version |
 | `restoreArtifactVersion` | `POST /v1/artifacts/{artifactId}/restore` | Point at an older version without deleting newer ones |
 | `listArtifactVersions` | `GET /v1/artifacts/{artifactId}/versions` | Retained history |
@@ -111,9 +112,18 @@ are not on the list.
 | `pruneArtifacts` | `POST /v1/artifacts/prune` | Enforce retention now |
 
 Uploads use base64 inside the one validated JSON surface rather than a second
-transport contract. The artifact operations raise the route's body ceiling to
-16 MiB; every other operation keeps the 1 MiB default. One version is at most
-10 MiB decoded.
+transport contract. The upload and generation operations raise the route's body
+ceiling to 16 MiB; every other operation keeps the 1 MiB default. One version is
+at most 10 MiB decoded.
+
+`generateDeliverable` accepts document, spreadsheet, presentation, dataset and
+software requests. It reads the data mode from the deliverable rather than a
+second envelope field, renders into an isolated staging directory, verifies every
+file by reading it back, and only then stores the bytes through the artifact
+service. Each produced file is returned as an `ArtifactDescriptor`; a software
+project also returns the store-derived manifest and the verification report that
+records `executed: false`, so the result itself says the program was parsed and
+never run.
 
 `encoding` is always canonical, unpadded-to-padded standard base64. A client may
 send `sha256`; a mismatch rejects the upload instead of storing bytes the client
@@ -138,8 +148,26 @@ const bytes = Buffer.from(
 );
 ```
 
-For a generated tree, upload each file with its `relativePath` and the same
-`projectId`, then list by project to reconstruct the manifest:
+Generation renders a real deliverable and persists it through the same adapter, so
+the response names stored artifacts rather than workspace paths:
+
+```ts
+const generated = await client.deliver({
+  kind: 'document',
+  mode: 'cloud',
+  filename: 'quarterly-report',
+  title: 'Quarterly report',
+  blocks: [{ type: 'paragraph', text: 'Revenue grew in every region.' }],
+  formats: ['docx', 'pdf', 'markdown'],
+});
+
+// generated.artifacts: one stored descriptor per produced file.
+// generated.source: the .document.json artifact a later edit revises by id.
+// generated.verification.checks: the verification the producer actually ran.
+```
+
+A client that already has bytes uploads each file with its `relativePath` and
+the same `projectId`, then lists by project to reconstruct the manifest:
 
 ```ts
 await client.uploadArtifact({
@@ -287,11 +315,11 @@ container, so the real-database lane cannot silently disappear. Hosted execution
 is evidence only when the `verify` workflow has actually run at the exact head;
 a local green run does not imply a hosted run.
 
-At the artifact branch head, `npm run verify` passed **166/166 tests with zero
+At the artifact branch head, `npm run verify` passed **168/168 tests with zero
 skips** against a real mongod, and `openapi:check` passed. The durable restart
-test, the eleven real-Mongo concurrency/recovery tests and the failure-injection
-tests are the evidence for the claims above; no production database has been
-exercised.
+test, the eleven real-Mongo concurrency/recovery tests, the generator integration
+test, the HTTP/SDK generation contract test and the failure-injection tests are
+the evidence for the claims above; no production database has been exercised.
 
 ### Concurrency and recovery
 
@@ -351,19 +379,34 @@ source trees into a workspace folder. The stable contract for that generator is:
 5. A task result projects `relativePath ?? filename`, so a completed generation
    reports the tree it produced without a second metadata copy.
 
-The repository now ships that adapter: `src/artifacts/tree.ts`
-(`createArtifactTreeWriter`). It validates the whole batch before writing,
-rejects duplicate, case-folded and file-directory path conflicts, maps an
-existing path to `uploadArtifactVersion` rather than a second file, uploads new
-files with project/conversation/task associations, and returns the version-pinned
-manifest. `tests/unit/artifacts-tree.test.ts` persists DOCX, PDF, XLSX, PPTX and
-a multi-file source tree, versions an edit and restores the earlier version.
+The repository ships the complete persistence adapter in `src/artifacts/tree.ts`
+(`createArtifactTreeWriter`), the staging producer in `src/artifacts/toolkit.ts`
+(`createArtifactToolkit`) and the delivery use case in `src/artifacts/deliver.ts`
+(`createDeliverableService`). The toolkit renders DOCX, PDF, XLSX, PPTX, dataset
+exports and software trees in isolated staging and verifies them; the use case
+persists the verified batch through `src/artifacts/persist.ts`. The adapter
+validates the whole batch, rejects duplicate, case-folded and file-directory path
+conflicts, maps an existing path to `uploadArtifactVersion` rather than a second
+file, uploads new files with project/conversation/task associations, and returns
+the version-pinned manifest. A document revision is addressed by artifact id and
+`expectedVersion`, so a concurrent edit is refused instead of overwritten.
 
-The branch's local `Artifact` type is a generation-time shape. It maps to this
-contract at the adapter boundary; it must not become a second store, a second
-descriptor or a second quota ledger. This repository does not modify another
-branch, and the generator still needs to call this adapter or the equivalent
-HTTP operations.
+`tests/e2e/deliverables.test.ts` runs the use case against a real MongoDB: it
+generates the artifact forms, downloads their bytes, edits a document by a second
+immutable version, races two edits to prove the conflict, restores version one,
+compares the restored content byte-for-byte with the original, and asserts that a
+software deliverable still reports that its program was never executed.
+`tests/unit/deliverables.test.ts` covers the producer and tree rules without a
+database.
+
+The producer's staged file list is a generation-time shape. It maps to the
+store's descriptor at the persistence boundary; it must not become a second
+store, a second descriptor or a second quota ledger. `createArtifactToolkit` is
+the internal seam, and `POST /v1/deliverables` with the SDK's `deliver` is its
+canonical client surface. Document `base` paths and HTML output remain
+unsupported because a workspace path is not an artifact identity and HTML is not
+an accepted durable media type; a revision names an artifact id and an expected
+version instead.
 
 ## Canonical API status
 
@@ -413,12 +456,28 @@ verified.
 - Coderax Web and CoderaxCLI live in other repositories and were not accessible
   here. They can use the shared SDK's artifact methods, but no client change or
   cross-client test was made in this repository.
-- The Native agent returns text; artifacts are stored when a client or a task
-  uploads them or associates them with a task. Nothing generates files on its
-  own.
-- `npm audit --omit=dev` reports one high finding, `GHSA-mrhx-c7xc-m3w5` /
-  CVE-2023-54404, for the installed `zod 3.25.76` (patched only in 4.6.6). The
-  CVE was rejected by its CNA; exploitation needs an unbounded array schema and
-  no request-size limit, while this API is owner-only and capped at 1 MiB (16 MiB
-  on artifact routes). It is not suppressed. The Zod 4 migration is owned by the
-  quality-gate workstream and was not duplicated here.
+- The Native agent still returns text; artifacts are stored when a client or a
+  task uploads them, generates them through `POST /v1/deliverables` or
+  associates them with a task. Generation is an explicit client operation, not
+  yet an agent tool.
+- The engine and the contracts package both pin `zod ^4.6.7`, which clears the
+  earlier `zod 3.25.76` advisory; nothing is suppressed.
+- `image-size` (via `pptxgenjs`) and `uuid` (via `exceljs`) were audit findings
+  on the previous head. They are resolved by scoped overrides to patched
+  releases: `image-size@2.2.0` (`GHSA-5p2g-fcmc-qvqq`, `GHSA-w3rx-r6r6-pgpr`;
+  patched 2.0.3) and `uuid@11.1.1` (`GHSA-w5hq-g745-h8pq`; patched 11.1.1).
+  PptxGenJS 4.0.1's bundles do not reference `image-size` (image sizing uses the
+  optional `sizeof` require), and ExcelJS calls only `uuid.v4`, whose signature
+  is unchanged in 11.x. Both overrides are covered by the passing generator
+  tests.
+- ExcelJS 4.4.0 has no patched upstream release for the CVE records published
+  on 2026-11-13 (`CVE-2026-128338` through `CVE-2026-128348`, high except the
+  medium ReDoS and low formula-injection records). They are parsing- and
+  writer-side issues; this service only writes workbooks and re-reads bytes it
+  generated, and no endpoint parses an uploaded workbook. Latest stable is 4.4.0
+  (2023-10-19) and the 4.4.1 prerelease (2024-12-20) predates the records, so no
+  upstream upgrade exists. A hardened fork, `exceljs-hardened@5.1.1` (published
+  2026-11-16), carries patched versions of these advisories, but adopting a
+  different package is a dependency substitution that needs an owner decision and
+  API verification; it is not a semver-compatible change. This remains an
+  unresolved dependency risk, reported rather than waived.

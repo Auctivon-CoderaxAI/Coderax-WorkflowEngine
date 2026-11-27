@@ -194,6 +194,50 @@ test('reissue claims a new generation and refuses a live task', async () => {
   );
 });
 
+test('the event head is allocated through the current fence only', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1' }));
+
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 1);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 2);
+  // A superseded or unknown writer gets no sequence at all.
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-0' }), null);
+  assert.equal(await tasks.allocateSeq({ taskId: 'missing', token: 'run-1' }), null);
+
+  // A terminal row keeps its token, so its owner can announce the settlement.
+  await tasks.updateFenced({ taskId: 'task_1', token: 'run-1', patch: { state: 'completed' } });
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 3);
+
+  // Adoption raises the head and never lowers it.
+  await tasks.adoptSeq({ taskId: 'task_1', seq: 7 });
+  assert.equal((await tasks.get('task_1'))?.eventSeq, 7);
+  await tasks.adoptSeq({ taskId: 'task_1', seq: 4 });
+  assert.equal((await tasks.get('task_1'))?.eventSeq, 7);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), 8);
+});
+
+test('a reissued generation allocates above the log the previous one wrote', async () => {
+  const tasks = createMongoTaskRepository(createFakeCollection());
+  await tasks.create(taskRecord({ taskId: 'task_1', runToken: 'run-1' }));
+  await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' });
+  await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' });
+  await tasks.updateFenced({ taskId: 'task_1', token: 'run-1', patch: { state: 'failed' } });
+
+  const issued = await tasks.reissue({
+    taskId: 'task_1',
+    token: 'run-2',
+    now: NOW,
+    leaseExpiresAt: NOW,
+    from: ['failed'],
+  });
+  assert.equal(issued.applied, true);
+  // The head survives reissue, so a client cursor from generation 1 still means
+  // something in generation 2.
+  assert.equal(issued.applied && issued.task.eventSeq, 2);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-2' }), 3);
+  assert.equal(await tasks.allocateSeq({ taskId: 'task_1', token: 'run-1' }), null);
+});
+
 test('tasks are listed by conversation, owner and settlement', async () => {
   const tasks = createMongoTaskRepository(createFakeCollection());
   await tasks.create(taskRecord({ taskId: 'task_1', conversationId: 'conv_1', runToken: 'run-1' }));
@@ -224,14 +268,16 @@ test('conversations are created once, listed and never shared across owners', as
   const conversations = createMongoConversationRepository(input);
 
   const first = await conversations.ensure(conversation());
-  assert.equal(first.conversationId, 'conv_1');
+  assert.equal(first.ok && first.record.conversationId, 'conv_1');
   const again = await conversations.ensure(conversation({ title: 'Different title' }));
-  assert.equal(again.title, 'Persisted');
+  assert.equal(again.ok && again.record.title, 'Persisted');
 
-  await assert.rejects(
-    () => conversations.ensure(conversation({ ownerId: 'someone-else' })),
-    /identity collision/,
-  );
+  const foreign = await conversations.ensure(conversation({ ownerId: 'someone-else' }));
+  assert.deepEqual(foreign, { ok: false, reason: 'owner' });
+  const foreignMode = await conversations.ensure(conversation({ mode: 'private' }));
+  assert.deepEqual(foreignMode, { ok: false, reason: 'mode' });
+  const foreignSurface = await conversations.ensure(conversation({ isWork: false }));
+  assert.deepEqual(foreignSurface, { ok: false, reason: 'surface' });
 
   assert.equal(await conversations.get('owner-test', 'conv_1').then(Boolean), true);
   assert.equal(await conversations.get('someone-else', 'conv_1').then(Boolean), false);
@@ -257,8 +303,22 @@ test('messages are appended once, ordered, and reflected in the conversation', a
   );
 
   assert.deepEqual(
-    (await conversations.messages('conv_1')).map((entry) => entry.messageId),
+    (
+      await conversations.messages({
+        ownerId: 'owner-test',
+        conversationId: 'conv_1',
+        mode: 'cloud',
+      })
+    )?.map((entry) => entry.messageId),
     ['msg_1', 'msg_2'],
+  );
+  assert.equal(
+    await conversations.messages({
+      ownerId: 'owner-test',
+      conversationId: 'conv_1',
+      mode: 'private',
+    }),
+    null,
   );
   const record = await conversations.get('owner-test', 'conv_1');
   assert.ok(record);
