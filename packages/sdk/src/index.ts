@@ -1,6 +1,8 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  CapabilityHandshake,
+  CONTRACT_FINGERPRINT,
   BrowserActionResult,
   BrowserArtifactContent,
   BrowserCapabilities,
@@ -80,6 +82,8 @@ import type {
   ScheduleTriggerRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
+import { SDK_CONTRACT_VERSION, sdkMetadata } from './version.js';
+import { checkCompatibility, type CompatibilityReport } from './compat.js';
 
 /**
  * The one client both Coderax (web) and Coderax-CLI consume.
@@ -177,7 +181,93 @@ async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<unkno
   }
 }
 
+/**
+ * The operations this client can call, mapped to the method that calls them.
+ *
+ * A published operation without an entry here means a consumer has to hand-roll
+ * the request, which is the second contract this repository forbids. The
+ * contract test compares this map with the catalogue in both directions.
+ */
+export const SDK_OPERATION_COVERAGE: Readonly<Record<string, string>> = Object.freeze({
+  getHealth: 'health',
+  getReadiness: 'readiness',
+  getHandshake: 'handshake',
+  listAgents: 'agents',
+  listModels: 'models',
+  submitChat: 'chat',
+  submitWork: 'submitWork',
+  getTask: 'task',
+  cancelTask: 'cancel',
+  resumeTask: 'resume',
+  retryTask: 'retry',
+  streamTaskEvents: 'events',
+  listConversations: 'conversations',
+  getConversation: 'conversation',
+  listMemory: 'memory',
+  listPermissions: 'permissions',
+  decidePermission: 'decidePermission',
+  getGameCapabilities: 'gameCapabilities',
+  listGames: 'games',
+  createGame: 'createGame',
+  getGame: 'game',
+  saveGameSpec: 'saveGameSpec',
+  buildGame: 'buildGame',
+  listGameBuilds: 'gameBuilds',
+  restoreGameBuild: 'restoreGameBuild',
+  iterateGame: 'iterateGame',
+  previewGame: 'gamePreview',
+  exportGame: 'exportGame',
+  createGameSession: 'createGameSession',
+  listGameSessions: 'gameSessions',
+  getGameSession: 'gameSession',
+  observeGameSession: 'observeGameSession',
+  controlGameSession: 'controlGameSession',
+  gameSessionLogs: 'gameSessionLogs',
+  gameSessionVerification: 'gameSessionVerification',
+  browserCapabilities: 'browserCapabilities',
+  listBrowserSessions: 'browserSessions',
+  createBrowserSession: 'createBrowserSession',
+  getBrowserSession: 'browserSession',
+  browserAction: 'browserAction',
+  pauseBrowserSession: 'pauseBrowserSession',
+  resumeBrowserSession: 'resumeBrowserSession',
+  takeoverBrowserSession: 'takeoverBrowserSession',
+  closeBrowserSession: 'closeBrowserSession',
+  authorizeBrowserSession: 'authorizeBrowserSession',
+  decideBrowserAuthorization: 'decideBrowserAuthorization',
+  listBrowserReceipts: 'browserReceipts',
+  getBrowserArtifact: 'browserArtifact',
+  listNotifications: 'notifications',
+  createSchedule: 'createSchedule',
+  listSchedules: 'schedules',
+  markNotificationsRead: 'markNotificationsRead',
+  dispatchScheduleEvent: 'scheduleEvent',
+  getSchedule: 'schedule',
+  getScheduleUpcoming: 'scheduleUpcoming',
+  updateSchedule: 'updateSchedule',
+  pauseSchedule: 'pauseSchedule',
+  resumeSchedule: 'resumeSchedule',
+  cancelSchedule: 'cancelSchedule',
+  triggerSchedule: 'triggerSchedule',
+  listScheduleExecutions: 'scheduleExecutions',
+  listArtifacts: 'artifacts',
+  artifactProjectManifest: 'artifactManifest',
+  generateArtifact: 'generateArtifact',
+  uploadArtifact: 'uploadArtifact',
+  pruneArtifacts: 'pruneArtifacts',
+  getArtifact: 'artifact',
+  uploadArtifactVersion: 'uploadArtifactVersion',
+  restoreArtifactVersion: 'restoreArtifactVersion',
+  listArtifactVersions: 'artifactVersions',
+  downloadArtifact: 'downloadArtifact',
+  exportArtifact: 'exportArtifact',
+  deleteArtifact: 'deleteArtifact',
+});
+
 export class CoderaxClient {
+  /** Version metadata for the packaged client, kept in step with package.json. */
+  static readonly metadata = sdkMetadata();
+
   private readonly options: Required<Pick<CoderaxClientOptions, 'baseUrl' | 'token'>> & {
     fetchImpl: typeof fetch;
     timeoutMs: number;
@@ -258,6 +348,37 @@ export class CoderaxClient {
 
   health(): Promise<HealthReport> {
     return this.request<HealthReport>(HealthReport, { method: 'GET', path: '/v1/health' });
+  }
+
+  /**
+   * Contract negotiation. Omit `contract` to read the served version only.
+   */
+  handshake(options: { contract?: string; fingerprint?: string } = {}): Promise<CapabilityHandshake> {
+    const query: Record<string, string> = {};
+    if (options.contract !== undefined) query.contract = options.contract;
+    if (options.fingerprint !== undefined) query.fingerprint = options.fingerprint;
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+      ...(Object.keys(query).length === 0 ? {} : { query }),
+    });
+  }
+
+  /**
+   * Negotiates this build's contract version and reports every reason the server
+   * cannot serve it. Call this once at startup rather than discovering a gap on
+   * the first failed operation.
+   */
+  async compatibility(): Promise<CompatibilityReport> {
+    const handshake = await this.handshake({
+      contract: SDK_CONTRACT_VERSION,
+      // A matching version string is not proof of a matching catalogue.
+      fingerprint: CONTRACT_FINGERPRINT,
+    });
+    return checkCompatibility({
+      handshake,
+      requiredOperations: Object.keys(SDK_OPERATION_COVERAGE),
+    });
   }
 
   readiness(): Promise<ReadinessReport> {
@@ -901,3 +1022,6 @@ export type {
   ArtifactVersionRequest,
   WorkSubmitRequest,
 };
+
+export * from './version.js';
+export * from './compat.js';

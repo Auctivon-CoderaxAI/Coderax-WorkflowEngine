@@ -4,7 +4,20 @@ import type {
   ArtifactModeRequest,
   ArtifactUploadRequest,
   ArtifactVersionRequest,
+  CapabilityFlags,
+  CapabilityLimits,
+  CapabilityHandshake,
   DataMode,
+} from '@coderax/contracts';
+import {
+  API_PREFIX,
+  CHAT_STREAM_VERSION,
+  CONTRACT_FINGERPRINT,
+  CONTRACT_MAJOR,
+  CONTRACT_VERSION,
+  EVENT_SCHEMA_VERSION,
+  negotiateContract,
+  supportedContractVersions,
 } from '@coderax/contracts';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { RouteRegistry } from './router.js';
@@ -104,7 +117,21 @@ async function* toEventStream(stream: {
   }
 }
 
-export function registerRoutes(registry: RouteRegistry, service: ApplicationService): void {
+/**
+ * Facts the handshake reports about this process. They are supplied by the
+ * composition root because only it holds the configuration the limits come
+ * from; nothing here may invent a value.
+ */
+export type HandshakeInfo = {
+  server: { name: string; version: string; startedAt: string };
+  limits: CapabilityLimits;
+};
+
+export function registerRoutes(
+  registry: RouteRegistry,
+  service: ApplicationService,
+  info: HandshakeInfo,
+): void {
   registry.register('getHealth', async () => ({
     kind: 'json',
     status: 200,
@@ -116,6 +143,81 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     status: 200,
     body: await service.readiness(),
   }));
+
+  /**
+   * The handshake is built from the registry, not from the catalogue, so the
+   * operations it reports are exactly the ones a handler exists for.
+   */
+  registry.register('getHandshake', async (context) => {
+    const requested =
+      typeof context.query.contract === 'string' ? context.query.contract : undefined;
+    const fingerprint =
+      typeof context.query.fingerprint === 'string' ? context.query.fingerprint : undefined;
+    const negotiation = negotiateContract(requested, {
+      ...(fingerprint !== undefined ? { provided: fingerprint } : {}),
+      expected: CONTRACT_FINGERPRINT,
+    });
+    const registered = registry.list().map((route) => route.spec);
+    const operationIds = new Set(registered.map((spec) => spec.operationId));
+    const has = (operationId: string): boolean => operationIds.has(operationId);
+    const chatRoute = registered.find((spec) => spec.operationId === 'submitChat');
+    const agents = service.agents();
+
+    const capabilities: CapabilityFlags = {
+      health: has('getHealth') && has('getReadiness'),
+      discovery: has('listAgents') && has('listModels'),
+      chat: has('submitChat'),
+      chatStreaming: has('submitChat') && chatRoute?.stream === true,
+      work: has('submitWork') && has('getTask'),
+      workStreaming: has('streamTaskEvents'),
+      cursorReplay: has('streamTaskEvents'),
+      cancellation: has('cancelTask'),
+      resume: has('resumeTask'),
+      retry: has('retryTask'),
+      permissions: has('listPermissions') && has('decidePermission'),
+      notifications: has('listNotifications'),
+      notificationRead: has('markNotificationsRead'),
+      schedules: has('listSchedules') && has('createSchedule'),
+      artifacts: has('listArtifacts') && has('getArtifact') && has('uploadArtifact'),
+      memory: has('listMemory'),
+      memorySearch: has('searchMemory'),
+      conversations: has('listConversations') && has('getConversation'),
+      taskList: has('listTasks'),
+      idempotentSubmission: has('submitWork'),
+      browser: has('browserCapabilities') && has('listBrowserSessions'),
+      games: has('getGameCapabilities') && has('listGames'),
+      externalAgents: agents.agents.some(
+        (agent) => agent.external && agent.availability.available,
+      ),
+      paidModels: false,
+    };
+
+    const body: CapabilityHandshake = {
+      contractVersion: CONTRACT_VERSION,
+      contractMajor: CONTRACT_MAJOR,
+      eventSchemaVersion: EVENT_SCHEMA_VERSION,
+      chatStreamVersion: CHAT_STREAM_VERSION,
+      apiPrefix: API_PREFIX,
+      contractFingerprint: CONTRACT_FINGERPRINT,
+      supportedContractVersions: supportedContractVersions(),
+      ...(requested ? { requestedContractVersion: requested } : {}),
+      compatible: negotiation.compatible,
+      negotiatedContractVersion: negotiation.negotiatedContractVersion,
+      negotiation: negotiation.negotiation,
+      server: info.server,
+      operations: registered.map((spec) => ({
+        operationId: spec.operationId,
+        method: spec.method,
+        path: spec.path,
+        tags: spec.tags,
+        auth: spec.auth,
+        stream: spec.stream === true,
+      })),
+      capabilities,
+      limits: info.limits,
+    };
+    return { kind: 'json', status: 200, body };
+  });
 
   registry.register('listAgents', async () => ({
     kind: 'json',

@@ -34,16 +34,17 @@ import { createArtifactGenerator } from '../artifacts/generate.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
-import { createHttpServer } from '../api/server.js';
+import { createHttpServer, MAX_BODY_BYTES } from '../api/server.js';
 import type { HttpServer } from '../api/server.js';
 import { validateWorkspaceRoots, workspaceRoots } from '../execution/workspace.js';
+import { ENGINE_NAME, ENGINE_VERSION } from '../version.js';
 import {
   createApplicationContainer,
   createDependencyContainer,
   type ApplicationDependencies,
   type InfrastructureDependencies,
 } from './container.js';
-import { buildPersistence } from './persistence.js';
+import { buildPersistence, MEMORY_VALUE_LIMIT } from './persistence.js';
 import { StartupError } from './startup-error.js';
 import { createArtifactStore } from '../artifacts/store.js';
 import { createGameStore } from '../games/store.js';
@@ -480,7 +481,17 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   });
 
   const registry = createRouteRegistry();
-  registerRoutes(registry, service);
+  registerRoutes(registry, service, {
+    server: { name: ENGINE_NAME, version: ENGINE_VERSION, startedAt: clock.iso() },
+    limits: {
+      maxBodyBytes: MAX_BODY_BYTES,
+      eventBufferSize: config.execution.eventBufferSize,
+      maxConcurrentTasks: config.execution.maxConcurrentTasks,
+      maxConcurrentScheduledRuns: config.schedules.maxConcurrentRuns,
+      artifactMaxBytes: config.artifacts.maxBytesPerArtifact,
+      memoryMaxValueLength: MEMORY_VALUE_LIMIT,
+    },
+  });
   const missingRoutes = registry.missing();
   if (missingRoutes.length > 0) {
     throw new StartupError(

@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Router } from './router.js';
 
-const MAX_BODY_BYTES = 1_048_576;
+/** Transport default, reported in the handshake so a client can size requests. */
+export const MAX_BODY_BYTES = 1_048_576;
 
 function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {

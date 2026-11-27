@@ -22,6 +22,7 @@ import {
   RestoreGameBuildRequest,
   SaveGameSpecRequest,
 } from './games.js';
+import { CapabilityHandshake, HandshakeQuery } from './handshake.js';
 import { HealthReport, ReadinessReport } from './health.js';
 import { ModelList } from './models.js';
 import {
@@ -207,6 +208,16 @@ export const ROUTES: readonly RouteSpec[] = Object.freeze([
     tags: ['health'],
     auth: 'public',
     response: { status: 200, description: 'Readiness report', schema: ReadinessReport },
+  },
+  {
+    operationId: 'getHandshake',
+    method: 'GET',
+    path: '/v1/handshake',
+    summary: 'Contract version, negotiated version and the operations this build serves.',
+    tags: ['handshake'],
+    auth: 'owner',
+    query: HandshakeQuery,
+    response: { status: 200, description: 'Capability handshake', schema: CapabilityHandshake },
   },
   {
     operationId: 'listAgents',

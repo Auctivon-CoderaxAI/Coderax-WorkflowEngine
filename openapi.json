@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Coderax WorkflowEngine API",
-    "version": "1.1.0",
+    "version": "1.3.0",
     "description": "Authoritative HTTP surface for Coderax Native intelligence, agent orchestration and durable Work execution. Every operation is generated from the versioned route catalogue."
   },
   "servers": [
@@ -16239,6 +16239,365 @@
             }
           }
         }
+      }
+    },
+    "/v1/handshake": {
+      "get": {
+        "operationId": "getHandshake",
+        "summary": "Contract version, negotiated version and the operations this build serves.",
+        "tags": [
+          "handshake"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capability handshake",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "contractVersion": {
+                      "const": "1.3.0"
+                    },
+                    "contractMajor": {
+                      "const": 1
+                    },
+                    "eventSchemaVersion": {
+                      "const": 1
+                    },
+                    "chatStreamVersion": {
+                      "const": 1
+                    },
+                    "apiPrefix": {
+                      "const": "/v1"
+                    },
+                    "contractFingerprint": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "supportedContractVersions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      }
+                    },
+                    "requestedContractVersion": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20
+                    },
+                    "compatible": {
+                      "type": "boolean"
+                    },
+                    "negotiatedContractVersion": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20
+                    },
+                    "negotiation": {
+                      "type": "string",
+                      "enum": [
+                        "no_request",
+                        "exact",
+                        "client_supported",
+                        "client_ahead",
+                        "unsupported_major",
+                        "unparseable",
+                        "fingerprint_mismatch"
+                      ]
+                    },
+                    "server": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80
+                        },
+                        "version": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 40
+                        },
+                        "startedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "version",
+                        "startedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "operations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "operationId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "method": {
+                            "type": "string",
+                            "enum": [
+                              "GET",
+                              "POST",
+                              "PATCH"
+                            ]
+                          },
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          },
+                          "tags": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "maxLength": 60
+                            }
+                          },
+                          "auth": {
+                            "type": "string",
+                            "enum": [
+                              "owner",
+                              "public"
+                            ]
+                          },
+                          "stream": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "operationId",
+                          "method",
+                          "path",
+                          "tags",
+                          "auth",
+                          "stream"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "capabilities": {
+                      "type": "object",
+                      "properties": {
+                        "health": {
+                          "type": "boolean"
+                        },
+                        "discovery": {
+                          "type": "boolean"
+                        },
+                        "chat": {
+                          "type": "boolean"
+                        },
+                        "chatStreaming": {
+                          "type": "boolean"
+                        },
+                        "work": {
+                          "type": "boolean"
+                        },
+                        "workStreaming": {
+                          "type": "boolean"
+                        },
+                        "cursorReplay": {
+                          "type": "boolean"
+                        },
+                        "cancellation": {
+                          "type": "boolean"
+                        },
+                        "resume": {
+                          "type": "boolean"
+                        },
+                        "retry": {
+                          "type": "boolean"
+                        },
+                        "permissions": {
+                          "type": "boolean"
+                        },
+                        "notifications": {
+                          "type": "boolean"
+                        },
+                        "notificationRead": {
+                          "type": "boolean"
+                        },
+                        "schedules": {
+                          "type": "boolean"
+                        },
+                        "artifacts": {
+                          "type": "boolean"
+                        },
+                        "memory": {
+                          "type": "boolean"
+                        },
+                        "memorySearch": {
+                          "type": "boolean"
+                        },
+                        "conversations": {
+                          "type": "boolean"
+                        },
+                        "taskList": {
+                          "type": "boolean"
+                        },
+                        "idempotentSubmission": {
+                          "type": "boolean"
+                        },
+                        "browser": {
+                          "type": "boolean"
+                        },
+                        "games": {
+                          "type": "boolean"
+                        },
+                        "externalAgents": {
+                          "type": "boolean"
+                        },
+                        "paidModels": {
+                          "const": false
+                        }
+                      },
+                      "required": [
+                        "health",
+                        "discovery",
+                        "chat",
+                        "chatStreaming",
+                        "work",
+                        "workStreaming",
+                        "cursorReplay",
+                        "cancellation",
+                        "resume",
+                        "retry",
+                        "permissions",
+                        "notifications",
+                        "notificationRead",
+                        "schedules",
+                        "artifacts",
+                        "memory",
+                        "memorySearch",
+                        "conversations",
+                        "taskList",
+                        "idempotentSubmission",
+                        "browser",
+                        "games",
+                        "externalAgents",
+                        "paidModels"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "limits": {
+                      "type": "object",
+                      "properties": {
+                        "maxBodyBytes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "eventBufferSize": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "maxConcurrentTasks": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "maxConcurrentScheduledRuns": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "artifactMaxBytes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "memoryMaxValueLength": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "required": [
+                        "maxBodyBytes",
+                        "eventBufferSize",
+                        "maxConcurrentTasks",
+                        "maxConcurrentScheduledRuns",
+                        "artifactMaxBytes",
+                        "memoryMaxValueLength"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "contractVersion",
+                    "contractMajor",
+                    "eventSchemaVersion",
+                    "chatStreamVersion",
+                    "apiPrefix",
+                    "contractFingerprint",
+                    "supportedContractVersions",
+                    "compatible",
+                    "negotiatedContractVersion",
+                    "negotiation",
+                    "server",
+                    "operations",
+                    "capabilities",
+                    "limits"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "contract",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20
+            }
+          },
+          {
+            "name": "fingerprint",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          }
+        ]
       }
     },
     "/v1/health": {
