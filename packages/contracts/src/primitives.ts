@@ -77,6 +77,12 @@ export const EngineFailureCode = z.enum([
   'provider_error',
   'budget_exhausted',
   'paid_model_refused',
+  /** The run is suspended until the owner decides a scoped permission request. */
+  'approval_required',
+  /** The plan finished but its evidence did not verify the objective. */
+  'verification_failed',
+  /** The bounded autonomy budget was exhausted before the objective settled. */
+  'iteration_exhausted',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;
 

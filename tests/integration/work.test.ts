@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
-import { startTestApp, waitFor } from '../helpers.js';
+import { workRunKey } from '../../src/execution/lease.js';
+import { startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -21,12 +22,15 @@ test('Work runs to completion, persists its transcript and notifies once', async
       return status.ok && status.value.state === 'completed' ? status.value : null;
     });
 
-    assert.equal(completed.steps.length, 3);
+    // A short objective selects fast reasoning: one reasoning step plus one
+    // evidence-based verification, both counted in usage.
+    assert.equal(completed.reasoning, 'fast');
+    assert.equal(completed.steps.length, 1);
     assert.ok(completed.steps.every((step) => step.state === 'completed'));
-    // Native runs three planned steps; each step returns the gateway's text.
     assert.ok(completed.result?.summary?.startsWith('A verified result.'));
-    // Usage accumulates across the three planned steps (11/13 each).
-    assert.deepEqual(completed.usage, { inputTokens: 33, outputTokens: 39 });
+    assert.equal(completed.result?.verification?.passed, true);
+    assert.ok((completed.result?.verification?.evidence.length ?? 0) > 0);
+    assert.deepEqual(completed.usage, { inputTokens: 22, outputTokens: 26 });
 
     const conversation = await started.app.service.conversation(
       principal,
@@ -122,6 +126,19 @@ test('reported text and nested arguments are scrubbed before replay and persiste
       report({ type: 'text.replace', text: 'reply: sk-example' });
       report({ type: 'text.delta', text: '0123456789 done' });
       report({ type: 'tool.call', tool: 'test', callId: 'call', input: [{ api_key: 'sample value' }] });
+      report({
+        type: 'step.completed',
+        stepId: 'secret-step',
+        title: 'Secret step',
+        attempts: 1,
+        evidence: {
+          stepId: 'secret-step',
+          title: 'Secret step',
+          citation: 'token sk-example0123456789',
+          output: 'credential sk-example0123456789',
+          attempts: 1,
+        },
+      });
       assert.throws(() => report({ type: 'file.edit', path: 'x'.repeat(1025) }), /file.edit path/);
       report({ type: 'file.edit', path: 'x'.repeat(1024) });
       return { ok: true, summary: 'done' };
@@ -140,6 +157,10 @@ test('reported text and nested arguments are scrubbed before replay and persiste
     const conversation = await started.app.service.conversation(principal, task.value.conversationId);
     assert.ok(conversation.ok);
     assert.equal(conversation.value.messages.at(-1)?.text, 'reply: [redacted-key] done');
+    const stored = await started.app.dependencies.tasks.get(task.value.taskId);
+    const persistedEvidence = JSON.stringify(stored?.checkpoint.evidence);
+    assert.doesNotMatch(persistedEvidence, /sk-example|0123456789/);
+    assert.match(persistedEvidence, /redacted/);
   } finally {
     await started.close();
   }
@@ -277,3 +298,45 @@ test('failed transcript and notification writes do not strand a settled run', as
     await started.close();
   }
 });
+
+for (const [operation, state] of [
+  ['resumeTask', 'awaiting_approval'],
+  ['retryTask', 'failed'],
+] as const) {
+  test(`${operation} releases its claim when reissue is rejected`, async (t) => {
+    const started = await startTestApp();
+    try {
+      const { service, dependencies: deps } = started.app;
+      const task = taskRecord({ state, runToken: 'previous-generation' });
+      assert.ok((await deps.tasks.create(task)).ok);
+      const key = workRunKey(task);
+      const reissue = deps.tasks.reissue;
+      const rejectReissue: typeof reissue = async (input) => {
+        assert.equal((await deps.lease.read({ key, now: deps.clock.now() }))?.token, input.token);
+        if (operation === 'resumeTask') {
+          const cancelled = await service.cancelTask(principal, task.taskId);
+          assert.ok(cancelled.ok && cancelled.value.state === 'cancelled');
+          return reissue(input);
+        }
+        return { applied: false, reason: 'superseded' };
+      };
+      const rejected = t.mock.method(deps.tasks, 'reissue', rejectReissue);
+
+      const result = await service[operation](principal, task.taskId, task.generation);
+      assert.ok(!result.ok && result.code === 'conflict');
+      assert.equal(await deps.lease.read({ key, now: deps.clock.now() }), null);
+
+      rejected.mock.restore();
+      const next = await service.submitWork(principal, {
+        conversationId: task.conversationId,
+        objective: 'Start new Work after the rejected reissue',
+        mode: 'cloud',
+        requireApproval: true,
+      });
+      assert.ok(next.ok);
+      await deps.scheduler.idle();
+    } finally {
+      await started.close();
+    }
+  });
+}
