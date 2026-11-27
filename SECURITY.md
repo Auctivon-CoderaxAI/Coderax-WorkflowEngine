@@ -22,8 +22,42 @@ must never grow signups, memberships, billing or B2B surfaces.
 | Stale run overwriting newer state | Every terminal write is fenced by a unique `runToken`; a mismatch writes nothing |
 | Duplicate or replayed events | Events are sequenced by the bus; a duplicate id or stale sequence is reported, not applied |
 | Secret in logs or errors | Client-facing detail is user-safe; upstream payloads, stacks and absolute paths are never forwarded |
-| Denial of service by body size | Request bodies are bounded at 1 MiB and rejected with a typed problem |
+| Denial of service by body size | Request bodies are bounded per operation from the route catalogue (1 MiB ordinary, 12,032,768 bytes for an artifact upload) and answered with a typed 413 |
 | Public exposure | The engine binds loopback by default; `0.0.0.0` is a deliberate operator change, not a default |
+
+## Known dependency advisory (open, blocking release)
+
+`npm audit` reports one high advisory against the contract validator:
+
+| Field | Value |
+| --- | --- |
+| Advisory | [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5) — Zod can exhaust memory while validating oversized constrained collections |
+| Severity | High, CVSS 7.5 |
+| Affected range | `zod < 4.6.6` |
+| Patched version | `4.6.7` (a semver major; no 3.x fix exists) |
+| Installed here | `3.25.76` (the newest 3.x) |
+
+This is **not** waived. `npm run gate:audit` fails closed on it and CI runs
+that check as a required step, so a release stays blocked until it is resolved.
+
+Two options, and neither is silent:
+
+1. **Upgrade to `zod@^4.6.7`.** Attempted on 2026-11-27 and measured: the build
+   type-checks, but 57 of 178 tests fail and OpenAPI generation throws, because
+   `packages/contracts/src/json-schema.ts` reads zod 3 internals (`_def.typeName`,
+   `ZodEffects`, `checks[].kind`) that zod 4 replaced. The migration is a rewrite
+   of that converter plus a revalidation of every published schema, and it also
+   raises the validator major for every client that installs `@coderax/contracts`.
+   That is a reviewed change of its own, not a dependency bump.
+2. **Accept the risk with a compensating control, in writing.** The advisory is
+   memory exhaustion from validating an oversized constrained collection. The
+   engine validates only after a per-operation body bound (1 MiB ordinary), and
+   the artifact schema bounds its base64 field at 12,000,000 characters. That
+   bounds the input the affected code path can receive.
+
+Until the owner chooses, the advisory is reported as open and the advisory gate
+is expected to fail. Do not lower `--audit-level`, drop the check, or treat a
+non-zero audit exit as a transport error.
 
 ## Secret handling
 
