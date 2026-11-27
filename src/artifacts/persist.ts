@@ -243,14 +243,7 @@ export async function persistProduced(
     if (!written.ok) {
       return rollback(written);
     }
-    const submitted = new Set(files.map(file => file.relativePath.normalize('NFC').toLowerCase()));
-    for (const entry of written.value.manifest.files.filter(file => submitted.has(file.relativePath.normalize('NFC').toLowerCase()))) {
-      const descriptor = await input.artifacts.get(input.principal, entry.artifactId, input.mode);
-      if (!descriptor.ok) {
-        return rollback(descriptor);
-      }
-      treeDescriptors.push(descriptor.value);
-    }
+    treeDescriptors.push(...written.value.descriptors);
     project = {
       projectId: written.value.projectId,
       manifest: written.value.manifest,
