@@ -1,5 +1,4 @@
-import { constants } from 'node:fs';
-import { access } from 'node:fs/promises';
+import path from 'node:path';
 import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -11,22 +10,27 @@ import { createExternalAgentAdapter } from '../agents/adapters/external.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
+import { createBrowserService } from '../orchestration/browser.js';
+import { createBrowserStore } from '../browser/store.js';
+import type { BrowserProvider } from '../browser/types.js';
+import { buildBrowserProvider } from './browser.js';
+import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
 import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
+import { createPermissionGate } from '../permissions/gate.js';
+import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
-import { createMetricsRegistry } from '../observability/metrics.js';
-import { createJsonLogger } from '../observability/logger.js';
 import { createEventBus } from '../events/bus.js';
-import { createArtifactStorage } from '../artifacts/store.js';
 import { createTaskRunner } from '../execution/runner.js';
-import { createExecutionSupervisor } from '../execution/supervisor.js';
-import { createCapabilityBroker } from '../execution/capabilities.js';
-import { createUnavailableIsolationProvider } from '../execution/termination.js';
+import { createRunSupervisor } from '../execution/supervisor.js';
+import { validateRemoteEndpoint } from '../configuration/endpoint.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import { createArtifactService } from '../artifacts/service.js';
+import { createArtifactGenerator } from '../artifacts/generate.js';
 import { createRouteRegistry, createRouter } from '../api/router.js';
 import type { Router } from '../api/router.js';
 import { registerRoutes } from '../api/routes.js';
@@ -40,8 +44,12 @@ import {
   type InfrastructureDependencies,
 } from './container.js';
 import { buildPersistence } from './persistence.js';
-import { createRetentionService } from '../persistence/retention.js';
 import { StartupError } from './startup-error.js';
+import { createArtifactStore } from '../artifacts/store.js';
+import { createGameStore } from '../games/store.js';
+import { createGameStudio } from '../games/studio.js';
+import { createDesignAssistant } from '../games/assistant.js';
+import { createGameSessions } from '../games/session.js';
 
 export { StartupError } from './startup-error.js';
 
@@ -51,7 +59,7 @@ export type Application = {
   router: Router;
   server: HttpServer;
   /** Which lease table the validated persistence setting selected. */
-  persistence: { driver: 'memory' | 'mongo'; durable: boolean };
+  persistence: { driver: 'memory' | 'mongo' };
   /** Everything is validated before this resolves. */
   start: () => Promise<{ url: string }>;
   stop: () => Promise<void>;
@@ -63,6 +71,8 @@ export type ComposeInput = {
   /** Test and future-adapter injection; nothing here changes production defaults. */
   gateway?: ModelGateway | null;
   externals?: Partial<Record<'opencode' | 'freebuff', ExternalAgentTransport>>;
+  /** Test and future-provider injection; the default is configuration-driven. */
+  browserProvider?: BrowserProvider;
   fetchImpl?: typeof fetch;
   /**
    * Persistence injection for tests and for a host that owns its own driver. A
@@ -97,6 +107,14 @@ function buildGateway(input: ComposeInput): ModelGateway | null {
   const baseURL = env.CODERAX_INFERENCE_BASE_URL;
   const apiKey = env.CODERAX_INFERENCE_KEY;
   if (!baseURL || !apiKey) return null;
+  // A key may only cross the network inside TLS. This is a startup gate: a
+  // deployment that would send its credential in plaintext does not start.
+  const endpoint = validateRemoteEndpoint({
+    url: baseURL,
+    name: 'CODERAX_INFERENCE_BASE_URL',
+    carriesCredential: true,
+  });
+  if (!endpoint.ok) throw new StartupError([endpoint.detail]);
   return createOpenAiCompatibleGateway({
     baseURL,
     apiKey,
@@ -136,12 +154,14 @@ function modelDescriptors(input: {
 export async function composeApplication(input: ComposeInput): Promise<Application> {
   const env = input.env ?? process.env;
   const { config } = input;
+  // `loadConfig` validates this for the normal entry point. Programmatic
+  // callers must not be able to bypass the same fail-closed invariants.
+  const invariantIssues = validateInvariants(config);
+  if (invariantIssues.length > 0) {
+    throw new StartupError(invariantIssues);
+  }
   const clock = createClock();
   const ids = createIdGenerator();
-  const metrics = createMetricsRegistry({ clock });
-  const logger = config.observability.requestLogs
-    ? createJsonLogger({ clock, write: (line) => process.stdout.write(line) })
-    : undefined;
 
   let auth;
   try {
@@ -154,7 +174,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   }
 
   const gateway = buildGateway(input);
-  const native = createNativeAgent({ enabled: config.engines.native.enabled, gateway });
 
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
@@ -178,20 +197,32 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
-  const adapters: AgentAdapter[] = [native, opencode, freebuff];
-  const agents = createAgentRegistry({
-    adapters,
-    defaultAgent: config.engines.default === 'opencode'
-      ? 'opencode'
-      : config.engines.default === 'freebuff'
-        ? 'freebuff'
-        : 'coderax',
-  });
-
   const models = createModelCatalog({
     descriptors: modelDescriptors({ config, gateway }),
     route: config.models.route,
     allowPaid: false,
+  });
+
+  const budget = createBudgetLedger({
+    maxRequestsPerDay: config.models.dailyRequestBudget,
+    maxTokensPerDay: config.models.dailyTokenBudget,
+  });
+
+  const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
+  const assistant = createDesignAssistant({ models, gateway, budget, clock });
+  const studio = createGameStudio({
+    store: createGameStore({ root: path.join(config.workspaces.cloudRoot, 'games') }),
+    artifacts,
+    clock,
+    ids,
+    assistant,
+    maxProjects: config.games.maxProjectsPerOwner,
+  });
+  const gaming = createGameSessions({
+    artifacts,
+    clock,
+    ids,
+    maxPauseMs: config.games.maxPauseMs,
   });
 
   const persistence = await buildPersistence({
@@ -206,72 +237,82 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const conversations = persistence.conversations;
   const memory = persistence.memory;
   const permissions = persistence.permissions;
-  const notifications = persistence.notifications;
-  const audit = persistence.audit;
-  const checkpoints = persistence.checkpoints;
-  const idempotency = persistence.idempotency;
-  const schedules = persistence.schedules;
-  const artifacts = persistence.artifacts;
-  const artifactStorage = createArtifactStorage(workspaceRoots(config.workspaces));
-  const retention = createRetentionService({
-    clock,
-    config: config.retention,
-    notifications,
-    audit,
-    permissions,
-    checkpoints,
-    idempotency,
-    executions: persistence.executions,
-    budget: persistence.budget,
+  const permissionsGate = createPermissionGate({ permissions, clock });
+  const native = createNativeAgent({
+    enabled: config.engines.native.enabled,
+    gateway,
+    authorizer: permissionsGate,
+    limits: {
+      maxSteps: config.engines.native.maxSteps,
+      maxParallelSteps: config.engines.native.maxParallelSteps,
+      maxReplans: config.engines.native.maxReplans,
+      maxStepAttempts: config.engines.native.maxStepAttempts,
+      maxIterations: config.engines.native.maxIterations,
+    },
   });
+  const adapters: AgentAdapter[] = [native, opencode, freebuff];
+  const agents = createAgentRegistry({
+    adapters,
+    defaultAgent: config.engines.default === 'opencode'
+      ? 'opencode'
+      : config.engines.default === 'freebuff'
+        ? 'freebuff'
+        : 'coderax',
+  });
+  const notifications = persistence.notifications;
+  const schedules = persistence.schedules;
+  const scheduleNotices = persistence.scheduleNotices;
+  const audit = createAuditLog({ clock, ids });
+  const browserProvider =
+    input.browserProvider ??
+    buildBrowserProvider({
+      config,
+      env,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    });
+  const browser = createBrowserService({
+    config,
+    clock,
+    ids,
+    permissions,
+    audit,
+    provider: browserProvider,
+    store: createBrowserStore(),
+  });
+  const artifactService = createArtifactService({
+    artifacts: persistence.artifacts,
+    blobs: persistence.blobs,
+    capacity: persistence.capacity,
+    ownerId: config.auth.ownerId,
+    conversations,
+    tasks,
+    audit,
+    clock,
+    ids,
+    settings: config.artifacts,
+  });
+  const artifactGenerator = createArtifactGenerator({ artifacts: artifactService });
   const events = createEventBus({
     bufferSize: config.execution.eventBufferSize,
     eventId: ids.eventId,
     iso: clock.iso,
-    log: persistence.events,
-    retain: config.execution.eventRetain,
   });
-  const budget = createBudgetLedger({
-    store: persistence.budget,
-    maxRequestsPerDay: config.models.dailyRequestBudget,
-    maxTokensPerDay: config.models.dailyTokenBudget,
-  });
-  const quarantine = persistence.quarantine;
-  const executions = persistence.executions;
+  const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({
     lease,
     clock,
     leaseTtlMs: config.execution.leaseTtlMs,
     heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
     cleanupGraceMs: config.execution.cancelGraceMs,
-    onLeaseFailure: (kind) => metrics.recordLeaseFailure(kind),
-    onAbandoned: ({ scope, generation, workspaceRoot }) => {
-      // The adapter ignored its abort and may still be running. The supervisor
-      // normally records this hold, but the runner is the component that actually
-      // observed the abandoned adapter, so it writes the same shared row too.
-      void quarantine
-        .poison({
-          root: workspaceRoot,
-          generation,
-          taskId: scope.conversationId,
-          reason: 'A cancelled adapter did not stop within the grace period.',
-          now: clock.now().getTime(),
-        })
-        .catch(() => undefined);
+    // The composition root is where supervision exists in production. An
+    // adapter that ignored its abort may still be running; its capability and
+    // workspace are revoked here even if the service already moved on.
+    onAbandoned: async ({ token }) => {
+      await supervisor.abandon({
+        token,
+        reason: 'A cancelled adapter did not stop within the grace period.',
+      });
     },
-  });
-  const supervisor = createExecutionSupervisor({
-    clock,
-    ids,
-    executions,
-    quarantine,
-    capabilities: createCapabilityBroker(),
-    isolation: createUnavailableIsolationProvider(
-      'No deployment-platform workload-isolation provider is configured; termination of an external workload cannot be observed from this process.',
-    ),
-    containmentHoldMs: config.execution.cancelQuarantineMs,
-    shutdownGraceMs: config.execution.shutdownGraceMs,
-    heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -310,12 +351,43 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
       {
         name: 'persistence',
         required: true,
+        check: async () => ({
+          status: 'ok' as const,
+          detail:
+            persistence.driver === 'mongo'
+              ? `Tasks, conversations, memory and leases are stored in MongoDB (${config.persistence.database}).`
+              : 'Tasks, conversations, memory and leases are process-local; a restart loses them.',
+        }),
+      },
+      {
+        // Required only when the deployment selected durable persistence. A
+        // memory deployment still starts, but reports honestly that artifact
+        // writes are refused rather than pretending they would survive.
+        name: 'artifacts',
+        required: persistence.driver === 'mongo',
         check: async () => {
-          const health = await persistence.ping();
-          return {
-            status: health.ok ? ('ok' as const) : ('failed' as const),
-            detail: `${health.detail} Round trip ${health.latencyMs} ms.`,
-          };
+          if (!persistence.blobs.durable) {
+            // Consistent with the persistence probe: a memory deployment is a
+            // known non-durable configuration, reported as ok-with-limitation
+            // rather than as a fault. What matters is that it is never silent.
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
+            };
+          }
+          try {
+            await persistence.blobs.check();
+            return {
+              status: 'ok' as const,
+              detail: 'Artifact metadata and content are stored durably in MongoDB.',
+            };
+          } catch {
+            return {
+              status: 'failed' as const,
+              detail: 'Artifact storage could not be read.',
+            };
+          }
         },
       },
       {
@@ -338,107 +410,32 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
-        name: 'api',
-        required: true,
-        check: async () => ({
-          status: 'ok' as const,
-          detail: 'The HTTP transport answered this readiness request.',
-        }),
-      },
-      {
-        name: 'scheduler',
-        required: true,
-        check: async () => ({
-          status:
-            config.execution.maxConcurrentTasks > 0 ? ('ok' as const) : ('failed' as const),
-          detail: `${scheduler.active()} active, ${scheduler.pending()} pending, limit ${config.execution.maxConcurrentTasks}.`,
-        }),
-      },
-      {
-        name: 'execution.supervisor',
-        required: true,
-        check: async () => {
-          const report = await supervisor.isolation();
-          return {
-            status: report.status === 'degraded' ? ('degraded' as const) : ('ok' as const),
-            detail: report.detail,
-          };
-        },
-      },
-      {
-        name: 'models',
-        required: true,
-        check: async () => {
-          const available = models
-            .list()
-            .models.filter((descriptor) => descriptor.availability.available);
-          return available.length > 0
-            ? {
-                status: 'ok' as const,
-                detail: `${available.length} zero-cost model(s) available; allowPaid=false.`,
-              }
-            : {
-                status: 'failed' as const,
-                detail: 'No zero-cost model is available; Work cannot execute.',
-              };
-        },
-      },
-      {
-        name: 'events.durable',
-        required: true,
-        check: async () => {
-          // A read, not a flag: an event log that cannot answer would fail here
-          // even when the HTTP process itself is healthy.
-          await persistence.events.read('__readiness__', 0, 1);
-          return persistence.driver === 'mongo'
-            ? {
-                status: 'ok' as const,
-                detail: 'Execution events are stored in the durable event log.',
-              }
-            : {
-                status: 'ok' as const,
-                detail:
-                  'Execution events use the process-local log; selecting mongo makes delivery durable.',
-              };
-        },
-      },
-      {
-        name: 'artifacts.storage',
-        required: true,
-        check: async () => {
-          const roots = workspaceRoots(config.workspaces);
-          await Promise.all([
-            access(roots.private, constants.W_OK),
-            access(roots.cloud, constants.W_OK),
-          ]);
-          return {
-            status: 'ok' as const,
-            detail: 'Private and cloud artifact roots exist and are writable.',
-          };
-        },
-      },
-      {
         // Optional on purpose: an enabled external agent being down degrades the
         // report without stopping an engine that still has Native.
         name: 'agents',
         required: false,
         check: () => probeAgents({ adapters, timeoutMs: 2_000 }),
       },
-      {
-        // A quarantined workspace means an abandoned adapter may still be
-        // writing there. New work in that root is refused until it expires.
-        name: 'workspaces.quarantine',
-        required: false,
-        check: async () => {
-          const entries = await quarantine.list(clock.now().getTime());
-          return entries.length === 0
-            ? { status: 'ok' as const, detail: 'No workspace is quarantined.' }
-            : {
-                status: 'degraded' as const,
-                detail: `${entries.length} workspace root(s) quarantined after an adapter ignored cancellation.`,
-              };
-        },
-      },
+      ...(config.browsers.enabled
+        ? [
+            {
+              // Optional: no verified browser provider is required to run Work.
+              // It is reported truthfully, and an unavailable one degrades rather
+              // than blocks the engine.
+              name: 'browser',
+              required: false,
+              check: async () => {
+                const capabilities = await browser.capabilities();
+                return capabilities.operational
+                  ? {
+                      status: 'ok' as const,
+                      detail: `Browser provider ${capabilities.provider} is operational.`,
+                    }
+                  : { status: 'degraded' as const, detail: capabilities.detail };
+              },
+            },
+          ]
+        : []),
     ],
   });
 
@@ -457,21 +454,19 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     permissions,
     notifications,
     schedules,
-    artifacts,
-    artifactStorage,
+    scheduleNotices,
+    artifactService,
+    artifactGenerator,
     audit,
     events,
     runner,
     scheduler,
     health,
+    studio,
+    sessions: gaming.sessions,
+    gaming: gaming.agent,
+    browser,
     supervisor,
-    executions,
-    quarantine,
-    checkpoints,
-    idempotency,
-    retention,
-    persistencePing: persistence.ping,
-    metrics,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -482,7 +477,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const service = createApplicationService({
     ...infrastructure,
-    deploymentRevision: env.CODERAX_DEPLOYMENT_REVISION?.trim() || null,
   });
 
   const registry = createRouteRegistry();
@@ -526,48 +520,31 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     router,
     host: config.server.host,
     port: config.server.port,
-    requestId: ids.requestId,
-    metrics,
-    ...(logger ? { logger } : {}),
   });
-
-  let scheduleTimer: NodeJS.Timeout | null = null;
 
   return {
     dependencies: finalContainer.dependencies,
     service,
     router,
     server,
-    persistence: { driver: persistence.driver, durable: persistence.driver === 'mongo' },
+    persistence: { driver: persistence.driver },
     start: async () => {
+      // Rebuild quota availability from committed rows before the socket is
+      // open, so an early request cannot be admitted against stale capacity.
+      // The reconcile refuses to run while another replica's reservation is live.
+      await service.artifacts.reconcile();
       const { url } = await server.listen();
-      logger?.info('engine.started', {
-        driver: persistence.driver,
-        durable: persistence.driver === 'mongo',
-        url,
-      });
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
-      // Retention runs at startup and then on a bounded interval, so a database
-      // that has been offline for a week is trimmed without an operator.
-      await retention.run().catch(() => undefined);
-      retention.start();
-      if (config.schedules.enabled) {
-        scheduleTimer = setInterval(() => {
-          void service.tickSchedules().catch(() => undefined);
-        }, config.schedules.tickIntervalMs);
-        scheduleTimer.unref();
-      }
+      // The schedule loop belongs to the engine process, not to a request. Both
+      // Coderax and CoderaxCLI can disconnect and a due occurrence still runs.
+      service.startSchedules();
+      // Retention and abandoned reservations are enforced at startup too.
+      await service.artifacts.sweepExpiredArtifacts();
       return { url };
     },
     stop: async () => {
-      logger?.info('engine.stopping', {});
-      retention.stop();
-      if (scheduleTimer) {
-        clearInterval(scheduleTimer);
-        scheduleTimer = null;
-      }
       await service.shutdown();
       await server.close();
       await persistence.close();

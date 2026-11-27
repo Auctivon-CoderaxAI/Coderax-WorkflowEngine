@@ -1,65 +1,94 @@
+import { scheduledConversationId } from '../scheduling/identity.js';
 import type {
   AgentId,
   AgentList,
-  ArtifactContent,
-  ArtifactList,
-  ArtifactRecord,
+  BrowserAction,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserAuthorizationRequest,
+  BrowserCapabilities,
+  BrowserCloseRequest,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionCreateRequest,
+  BrowserSessionList,
+  BrowserTakeoverRequest,
+  BrowserTakeoverResult,
+  ArtifactGenerationRequest,
+  ArtifactGenerationResult,
   BudgetState,
+  BuildGameRequest,
   ChatReply,
   ChatRequest,
   Conversation,
-  ConversationDeletion,
   ConversationList,
-  ConversationListQuery,
+  CreateGameRequest,
+  CreateGameSessionRequest,
   DataMode,
-  EngineHandshake,
-  MemoryDeletion,
-  MemoryEntry,
+  GameBuildList,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionControlRequest,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
+  IterateGameRequest,
   MemoryList,
-  MemoryPutRequest,
-  MetricsReport,
   ModelList,
+  ModelRef,
   NotificationList,
-  NotificationListQuery,
   PermissionDecisionRequest,
   PermissionList,
-  PermissionScope,
-  PermissionListQuery,
-  ReceiptList,
-  ReceiptListQuery,
+  RestoreGameBuildRequest,
+  SaveGameSpecRequest,
+  PermissionRequest,
   Schedule,
   ScheduleControlResult,
   ScheduleCreateRequest,
+  ScheduleDispatch,
+  ScheduleEventRequest,
+  ScheduleEventResult,
+  ScheduleExecution,
+  ScheduleExecutionList,
   ScheduleList,
+  ScheduleTriggerRequest,
+  ScheduleUpcoming,
   ScheduleUpdateRequest,
   TaskAccepted,
   TaskControlResult,
-  TaskList,
   TaskStatus,
-  TaskListQuery,
-  TaskSummary,
+  Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import {
-  API_PREFIX,
-  CHAT_STREAM_SCHEMA_VERSION,
-  CONTRACT_VERSION,
-  ENGINE_VERSION,
-  EVENT_SCHEMA_VERSION,
-  MIN_SDK_VERSION,
-  ROUTES,
-  SDK_VERSION,
-  isTerminalState,
-  modelKey,
-} from '@coderax/contracts';
+import { isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
-import type { ArtifactRow, ScheduleRecord, TaskRecord } from '../domain.js';
+import type {
+  ConversationRecord,
+  GameRunSpec,
+  ScheduleExecutionRecord,
+  ScheduleRecord,
+  TaskEvidence,
+  TaskPatch,
+  TaskPlan,
+  TaskRecord,
+  TaskStep,
+} from '../domain.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
+import { createGameCapabilityReport } from '../games/capability.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
-import type { TaskRunner, RunOutcome } from '../execution/runner.js';
+import type { TaskRunner, RunOutcome, RunResult } from '../execution/runner.js';
+import type { RunSupervisor } from '../execution/supervisor.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
@@ -70,42 +99,25 @@ import type { MemoryStore } from '../memory/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus, Replay, Unsubscribe } from '../events/bus.js';
-import type { ExecutionSupervisor } from '../execution/supervisor.js';
-import type { ExecutionIdentity } from '../execution/identity.js';
-import type { ExecutionRepository } from '../persistence/executions.js';
-import type { QuarantineStore } from '../persistence/quarantine.js';
-import type { CheckpointStore } from '../persistence/checkpoints.js';
-import type { IdempotencyStore } from '../persistence/idempotency.js';
-import type { RetentionService } from '../persistence/retention.js';
-import type { PersistenceHealth } from '../bootstrap/persistence.js';
-import type { MetricsRegistry } from '../observability/metrics.js';
-import { createHash } from 'node:crypto';
-import { decodeCursor } from '../persistence/pagination.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
-import type { ScheduleRepository } from '../persistence/schedules.js';
-import type { ArtifactRepository, ArtifactStorage } from '../artifacts/store.js';
+import { createScheduleEngine } from '../scheduling/engine.js';
+import type { SchedulePort, ScheduleTickReport } from '../scheduling/engine.js';
+import { nextOccurrence, previewOccurrences } from '../scheduling/calendar.js';
+import { scheduleSideEffectRefusal } from '../scheduling/policy.js';
 import type { AuthService, Principal } from '../security/auth.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { ServiceResult } from '../support/result.js';
 import { fail, ok } from '../support/result.js';
-import { resolveEngineWorkspace, workspaceRoots } from '../execution/workspace.js';
+import {
+  createRunWorkspace,
+  removeRunWorkspaceIfEmpty,
+  workspaceRoots,
+} from '../execution/workspace.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { ArtifactGenerator } from '../artifacts/generate.js';
 import { buildTranscript } from './transcript.js';
-
-const WORK_SCOPES: readonly PermissionScope[] = [
-  'workspace.read',
-  'workspace.write',
-  'command.execute',
-  'network.access',
-  'memory.read',
-  'conversation.read',
-];
-
-const CHAT_SCOPES: readonly PermissionScope[] = [
-  'workspace.read',
-  'network.access',
-  'memory.read',
-  'conversation.read',
-];
+import type { BrowserService } from './browser.js';
+import { resolveReasoningMode } from '../agents/native/reason.js';
 
 export type ApplicationServiceDeps = {
   config: EngineConfig;
@@ -122,31 +134,25 @@ export type ApplicationServiceDeps = {
   permissions: PermissionStore;
   notifications: NotificationStore;
   schedules: ScheduleRepository;
-  artifacts: ArtifactRepository;
-  artifactStorage: ArtifactStorage;
+  scheduleNotices: ScheduleNoticeStore;
+  artifactService: ArtifactService;
+  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
-  supervisor: ExecutionSupervisor;
-  executions: ExecutionRepository;
-  quarantine: QuarantineStore;
-  checkpoints: CheckpointStore;
-  idempotency: IdempotencyStore;
-  retention: RetentionService;
-  persistencePing: () => Promise<PersistenceHealth>;
-  metrics: MetricsRegistry;
-  /** The deployed revision reported by the host; null when it is not recorded. */
-  deploymentRevision: string | null;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
+  browser: BrowserService;
+  supervisor: RunSupervisor;
 };
 
 export type EventStream = {
   replay: Replay;
   subscribe: (listener: (event: unknown) => void) => Unsubscribe;
   lastSeq: number;
-  /** The generation that owns the task now; older terminal events do not close. */
-  generation: number;
 };
 
 export type ApplicationService = {
@@ -154,6 +160,57 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  browserCapabilities: () => Promise<BrowserCapabilities>;
+  browserSessions: (principal: Principal) => Promise<BrowserSessionList>;
+  browserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  createBrowserSession: (
+    principal: Principal,
+    request: BrowserSessionCreateRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  browserAction: (
+    principal: Principal,
+    sessionId: string,
+    action: BrowserAction,
+  ) => Promise<ServiceResult<BrowserActionResult>>;
+  pauseBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  resumeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  takeoverBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ) => Promise<ServiceResult<BrowserTakeoverResult>>;
+  closeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserCloseRequest,
+  ) => Promise<ServiceResult<BrowserSession>>;
+  authorizeBrowserSession: (
+    principal: Principal,
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ) => Promise<ServiceResult<PermissionRequest>>;
+  decideBrowserAuthorization: (
+    principal: Principal,
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ) => Promise<ServiceResult<PermissionList>>;
+  browserReceipts: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<BrowserReceiptList>>;
+  browserArtifact: (
+    principal: Principal,
+    artifactId: string,
+  ) => Promise<ServiceResult<BrowserArtifactContent>>;
   submitWork: (
     principal: Principal,
     request: WorkSubmitRequest,
@@ -175,98 +232,143 @@ export type ApplicationService = {
     generation: number,
   ) => Promise<ServiceResult<TaskControlResult>>;
   chat: (principal: Principal, request: ChatRequest) => Promise<ServiceResult<ChatReply>>;
-  listTasks: (
-    principal: Principal,
-    query: TaskListQuery,
-  ) => Promise<ServiceResult<TaskList>>;
-  conversations: (
-    principal: Principal,
-    query: ConversationListQuery,
-  ) => Promise<ServiceResult<ConversationList>>;
+  conversations: (principal: Principal) => Promise<ConversationList>;
   conversation: (
     principal: Principal,
     conversationId: string,
   ) => Promise<ServiceResult<Conversation>>;
-  deleteConversation: (
-    principal: Principal,
-    conversationId: string,
-  ) => Promise<ServiceResult<ConversationDeletion>>;
-  memory: (
-    principal: Principal,
-    mode: DataMode,
-    query?: { limit?: number; cursor?: string },
-  ) => Promise<MemoryList>;
-  deleteMemory: (
-    principal: Principal,
-    key: string,
-    mode: DataMode,
-  ) => Promise<MemoryDeletion>;
-  permissions: (
-    principal: Principal,
-    taskId: string,
-    query?: PermissionListQuery,
-  ) => Promise<ServiceResult<PermissionList>>;
+  memory: (principal: Principal, mode: DataMode) => Promise<MemoryList>;
+  permissions: (principal: Principal, taskId: string) => Promise<ServiceResult<PermissionList>>;
   decidePermission: (
     principal: Principal,
     taskId: string,
     body: PermissionDecisionRequest,
   ) => Promise<ServiceResult<PermissionList>>;
-  notifications: (
+  notifications: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
+  /** Durable artifact storage; the only path that returns artifact bytes. */
+  artifacts: ArtifactService;
+  /** Renders a deliverable and persists it through the artifact tree adapter. */
+  generateArtifact: (
     principal: Principal,
-    query: NotificationListQuery,
-  ) => Promise<ServiceResult<NotificationList>>;
-  markNotificationsRead: (
-    principal: Principal,
-    taskIds: string[],
-  ) => Promise<NotificationList>;
-  receipts: (
-    principal: Principal,
-    taskId: string,
-    query: ReceiptListQuery,
-  ) => Promise<ServiceResult<ReceiptList>>;
-  metrics: (principal: Principal) => Promise<MetricsReport>;
-  handshake: () => EngineHandshake;
-  putMemory: (principal: Principal, request: MemoryPutRequest) => Promise<MemoryEntry>;
-  pendingPermissions: (
-    principal: Principal,
-    query?: PermissionListQuery,
-  ) => Promise<PermissionList>;
-  listSchedules: (principal: Principal) => Promise<ScheduleList>;
-  createSchedule: (
-    principal: Principal,
-    request: ScheduleCreateRequest,
-  ) => Promise<ServiceResult<Schedule>>;
-  updateSchedule: (
-    principal: Principal,
-    scheduleId: string,
-    request: ScheduleUpdateRequest,
-  ) => Promise<ServiceResult<Schedule>>;
-  schedule: (principal: Principal, scheduleId: string) => Promise<ServiceResult<Schedule>>;
-  cancelSchedule: (
-    principal: Principal,
-    scheduleId: string,
-  ) => Promise<ServiceResult<ScheduleControlResult>>;
-  tickSchedules: () => Promise<{ submitted: number; failed: number }>;
-  listArtifacts: (
-    principal: Principal,
-    taskId: string,
-  ) => Promise<ServiceResult<ArtifactList>>;
-  uploadArtifact: (
-    principal: Principal,
-    taskId: string,
-    request: { path: string; mediaType: string; contentBase64: string },
-  ) => Promise<ServiceResult<ArtifactRecord>>;
-  artifact: (principal: Principal, artifactId: string) => Promise<ServiceResult<ArtifactRecord>>;
-  artifactContent: (
-    principal: Principal,
-    artifactId: string,
-  ) => Promise<ServiceResult<ArtifactContent>>;
+    request: ArtifactGenerationRequest,
+  ) => Promise<ServiceResult<ArtifactGenerationResult>>;
   events: (
     principal: Principal,
     taskId: string,
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
-  budget: (principal: Principal) => Promise<BudgetState>;
+  budget: (principal: Principal) => BudgetState;
+  gameCapabilities: (principal: Principal) => GameCapabilityReport;
+  listGames: (
+    principal: Principal,
+    query: { cursor?: string; limit?: number },
+  ) => Promise<GameProjectList>;
+  createGame: (
+    principal: Principal,
+    request: CreateGameRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  getGame: (principal: Principal, gameId: string) => Promise<ServiceResult<GameProject>>;
+  saveGameSpec: (
+    principal: Principal,
+    gameId: string,
+    request: SaveGameSpecRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  buildGame: (
+    principal: Principal,
+    gameId: string,
+    request: BuildGameRequest,
+  ) => Promise<ServiceResult<import('@coderax/contracts').GameBuild>>;
+  listGameBuilds: (
+    principal: Principal,
+    gameId: string,
+  ) => Promise<ServiceResult<GameBuildList>>;
+  restoreGameBuild: (
+    principal: Principal,
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ) => Promise<ServiceResult<GameProject>>;
+  iterateGame: (
+    principal: Principal,
+    gameId: string,
+    request: IterateGameRequest,
+  ) => Promise<ServiceResult<GameIteration>>;
+  gamePreview: (principal: Principal, gameId: string) => Promise<ServiceResult<string>>;
+  exportGame: (principal: Principal, gameId: string) => Promise<ServiceResult<GameExport>>;
+  createGameSession: (
+    principal: Principal,
+    gameId: string,
+    request: CreateGameSessionRequest,
+  ) => Promise<ServiceResult<GameSession>>;
+  listGameSessions: (principal: Principal) => Promise<GameSessionList>;
+  getGameSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSession>>;
+  observeGameSession: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameObservation>>;
+  controlGameSession: (
+    principal: Principal,
+    sessionId: string,
+    request: GameSessionControlRequest,
+  ) => Promise<ServiceResult<GameSession>>;
+  gameSessionLogs: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSessionLogs>>;
+  gameSessionVerification: (
+    principal: Principal,
+    sessionId: string,
+  ) => Promise<ServiceResult<GameSessionVerification>>;
+  schedules: (principal: Principal) => Promise<ScheduleList>;
+  schedule: (principal: Principal, scheduleId: string) => Promise<ServiceResult<Schedule>>;
+  createSchedule: (
+    principal: Principal,
+    request: ScheduleCreateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  pauseSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  resumeSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  cancelSchedule: (
+    principal: Principal,
+    scheduleId: string,
+  ) => Promise<ServiceResult<ScheduleControlResult>>;
+  triggerSchedule: (
+    principal: Principal,
+    scheduleId: string,
+    request: ScheduleTriggerRequest,
+  ) => Promise<ServiceResult<ScheduleDispatch>>;
+  scheduleExecutions: (
+    principal: Principal,
+    scheduleId: string,
+    limit?: number,
+  ) => Promise<ServiceResult<ScheduleExecutionList>>;
+  scheduleEvent: (
+    principal: Principal,
+    request: ScheduleEventRequest,
+  ) => Promise<ServiceResult<ScheduleEventResult>>;
+  updateSchedule: (
+    principal: Principal,
+    scheduleId: string,
+    request: ScheduleUpdateRequest,
+  ) => Promise<ServiceResult<Schedule>>;
+  scheduleUpcoming: (
+    principal: Principal,
+    scheduleId: string,
+    limit?: number,
+  ) => Promise<ServiceResult<ScheduleUpcoming>>;
+  markNotificationsRead: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
+  /** The background loop that discharges schedules without a client connected. */
+  startSchedules: () => void;
+  stopSchedules: () => Promise<void>;
+  tickSchedules: () => Promise<ScheduleTickReport>;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
   shutdown: () => Promise<void>;
@@ -280,157 +382,8 @@ function scopeOf(task: TaskRecord): RunScope {
   };
 }
 
-function digestRequest(request: WorkSubmitRequest): string {
-  const canonical = JSON.stringify({
-    objective: request.objective,
-    conversationId: request.conversationId ?? null,
-    agent: request.agent ?? null,
-    model: request.model ?? null,
-    mode: request.mode,
-    budget: request.budget ?? null,
-    requireApproval: request.requireApproval,
-  });
-  return createHash('sha256').update(canonical, 'utf8').digest('hex');
-}
-
-function toSummary(task: TaskRecord): TaskSummary {
-  return {
-    taskId: task.taskId,
-    conversationId: task.conversationId,
-    objective: task.objective,
-    state: task.state,
-    agent: task.agent,
-    mode: task.mode,
-    generation: task.generation,
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
-    cancelRequested: task.cancelRequested,
-  };
-}
-
-function toSchedule(record: {
-  scheduleId: string;
-  objective: string;
-  agent: AgentId;
-  mode: DataMode;
-  model: TaskRecord['model'];
-  requireApproval: boolean;
-  state: Schedule['state'];
-  runAt: string;
-  intervalMs: number | null;
-  createdAt: string;
-  updatedAt: string;
-  nextRunAt: string | null;
-  lastTaskId: string | null;
-  lastError: string | null;
-}): Schedule {
-  return {
-    scheduleId: record.scheduleId,
-    objective: record.objective,
-    agent: record.agent,
-    mode: record.mode,
-    ...(record.model ? { model: record.model } : {}),
-    requireApproval: record.requireApproval,
-    state: record.state,
-    runAt: record.runAt,
-    ...(record.intervalMs !== null ? { intervalMs: record.intervalMs } : {}),
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt,
-    ...(record.nextRunAt ? { nextRunAt: record.nextRunAt } : {}),
-    ...(record.lastTaskId ? { lastTaskId: record.lastTaskId } : {}),
-    ...(record.lastError ? { lastError: record.lastError } : {}),
-  };
-}
-
-function toArtifact(row: {
-  artifactId: string;
-  taskId: string;
-  path: string;
-  mediaType: string;
-  bytes: number;
-  digest: string;
-  createdAt: string;
-}): ArtifactRecord {
-  return {
-    artifactId: row.artifactId,
-    taskId: row.taskId,
-    path: row.path,
-    mediaType: row.mediaType,
-    bytes: row.bytes,
-    digest: row.digest,
-    createdAt: row.createdAt,
-  };
-}
-
-/** Strict base64: a lenient decode would store bytes the client did not send. */
-function decodeBase64(value: string): Buffer | null {
-  const normalized = value.replace(/\s+/g, '');
-  if (normalized.length === 0 || normalized.length % 4 !== 0) return null;
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) return null;
-  const decoded = Buffer.from(normalized, 'base64');
-  return decoded.toString('base64') === normalized ? decoded : null;
-}
-
-function capability(state: 'available' | 'unsupported' | 'unconfigured', detail: string) {
-  return { state, detail };
-}
-
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
-  const executionsByTask = new Map<string, string>();
-
-  function checkpointFor(
-    task: TaskRecord,
-    kind: 'step' | 'settled',
-    completedSteps: string[],
-    text: string,
-  ) {
-    return {
-      checkpointId: deps.ids.checkpointId(),
-      taskId: task.taskId,
-      ownerId: task.ownerId,
-      conversationId: task.conversationId,
-      generation: task.generation,
-      completedSteps: [...completedSteps],
-      text,
-      kind,
-      createdAt: deps.clock.iso(),
-    };
-  }
-
-  async function audit(input: Parameters<AuditLog['record']>[0]): Promise<void> {
-    try {
-      await deps.audit.record(input);
-    } catch {
-      // A settled task must not be stranded by an evidence write failure; the
-      // failure is visible to health and must never be turned into a second
-      // terminal write. Acceptance still awaits the receipt below.
-    }
-  }
-
-  /**
-   * A conversation a caller names must already exist, belong to the owner, and
-   * carry the same data mode. Creating it implicitly would let a guessed id
-   * adopt a conversation, and a mode mismatch would cross the private/cloud
-   * boundary the engine exists to enforce.
-   */
-  async function existingConversation(
-    principal: Principal,
-    conversationId: string,
-    mode: DataMode,
-  ): Promise<ServiceResult<TaskRecord['conversationId']>> {
-    const record = await deps.conversations.get(principal.ownerId, conversationId);
-    if (!record) {
-      return fail('not_found', 'That conversation does not exist for this owner.');
-    }
-    if (record.mode !== mode) {
-      return fail(
-        'forbidden',
-        `That conversation belongs to ${record.mode} data and cannot be used from ${mode} data.`,
-      );
-    }
-    return ok(record.conversationId);
-  }
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -440,22 +393,75 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
    * objective is excluded because it is sent separately.
    */
   async function historyFor(
-    conversationId: string,
+    conversation: ConversationRecord,
     currentText: string,
+    adapter: AgentAdapter,
   ): Promise<AgentHistoryTurn[]> {
+    // The adapter's declared isolation is the authority, not the call site. An
+    // agent that advertises `conversations: none` never receives earlier turns,
+    // even when the owner selected it inside an existing thread.
+    if (adapter.isolation.conversations === 'none') return [];
     try {
-      const messages = await deps.conversations.messages(conversationId);
+      const messages = await deps.conversations.messages({
+        ownerId: conversation.ownerId,
+        conversationId: conversation.conversationId,
+        mode: conversation.mode,
+      });
+      if (messages === null) return [];
       return buildTranscript({ messages, currentText });
     } catch {
       return [];
     }
   }
 
+  /**
+   * Resolves the one conversation a request may use. A caller-supplied id is
+   * accepted only when the stored record has the same owner, data mode and
+   * surface; otherwise private history could enter a cloud run, or a Work run
+   * could be started inside a Chat thread. The failure is deliberately uniform
+   * so it does not reveal that a foreign conversation exists.
+   */
+  async function bindConversation(input: {
+    principal: Principal;
+    conversationId?: string;
+    mode: DataMode;
+    isWork: boolean;
+    agent: AgentId;
+    title?: string;
+  }): Promise<ServiceResult<ConversationRecord>> {
+    const now = deps.clock.iso();
+    const binding = await deps.conversations.ensure({
+      conversationId: input.conversationId ?? deps.ids.conversationId(),
+      ownerId: input.principal.ownerId,
+      tenantId: null,
+      ...(input.title ? { title: input.title } : {}),
+      mode: input.mode,
+      isWork: input.isWork,
+      agent: input.agent,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (!binding.ok) {
+      return fail(
+        'conflict',
+        'That conversation is bound to a different owner, data mode or surface; start a new conversation.',
+      );
+    }
+    if (binding.record.agent !== input.agent) {
+      await deps.conversations.updateAgent(binding.record.conversationId, input.agent);
+      return ok({ ...binding.record, agent: input.agent, updatedAt: now });
+    }
+    return ok(binding.record);
+  }
+
   function publish(
     task: TaskRecord,
     type: Parameters<EventBus['publish']>[0]['type'],
     payload?: unknown,
+    /** Present for run-origin events: a revoked generation may not publish. */
+    token?: string,
   ): void {
+    if (token !== undefined && !deps.supervisor.isLive(task.taskId, token)) return;
     deps.events.publish({
       taskId: task.taskId,
       agent: task.agent,
@@ -491,16 +497,30 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       updatedAt: task.updatedAt,
       ...(task.leaseExpiresAt ? { leaseExpiresAt: task.leaseExpiresAt } : {}),
       cancelRequested: task.cancelRequested,
+      ...(task.reasoning ? { reasoning: task.reasoning } : {}),
       steps: task.steps.map((step) => ({
         id: step.id,
         title: step.title,
         state: step.state,
+        ...(step.dependsOn ? { dependsOn: [...step.dependsOn] } : {}),
+        ...(step.attempts !== undefined ? { attempts: step.attempts } : {}),
       })),
       ...(task.result
         ? {
             result: {
               ...(task.result.summary ? { summary: task.result.summary } : {}),
               artifacts: task.result.artifacts,
+              ...(task.result.verification
+                ? {
+                    verification: {
+                      passed: task.result.verification.passed,
+                      reason: redactText(task.result.verification.reason, [], 1000),
+                      evidence: task.result.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
           }
         : {}),
@@ -516,68 +536,6 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           }
         : {}),
     };
-  }
-
-  function acceptedFor(task: TaskRecord): TaskAccepted {
-    return {
-      taskId: task.taskId,
-      conversationId: task.conversationId,
-      state: task.state,
-      generation: task.generation,
-      eventsPath: `/v1/work/${task.taskId}/events`,
-    };
-  }
-
-  /**
-   * Fires every due schedule at most once per due occurrence. The idempotency
-   * key is derived from the schedule and its due time, so a crash between
-   * submitting and recording the submission cannot create a second task.
-   */
-  async function tickSchedules(): Promise<{ submitted: number; failed: number }> {
-    const due = await deps.schedules.due(deps.clock.iso(), deps.config.schedules.tickBatch);
-    let submitted = 0;
-    let failed = 0;
-    for (const record of due) {
-      if (!record.nextRunAt) continue;
-      const result = await service.submitWork(
-        { ownerId: record.ownerId, isOwner: true },
-        {
-          objective: record.objective,
-          agent: record.agent,
-          ...(record.model ? { model: record.model } : {}),
-          mode: record.mode,
-          requireApproval: record.requireApproval,
-          ...(record.budget ? { budget: record.budget } : {}),
-          idempotencyKey: `schedule:${record.scheduleId}:${record.nextRunAt}`,
-        },
-      );
-      const updated = { ...record, updatedAt: deps.clock.iso() };
-      if (result.ok) {
-        updated.lastTaskId = result.value.taskId;
-        updated.lastError = null;
-        if (record.intervalMs !== null) {
-          updated.state = 'scheduled';
-          updated.nextRunAt = new Date(
-            deps.clock.now().getTime() + record.intervalMs,
-          ).toISOString();
-        } else {
-          updated.state = 'submitted';
-          updated.nextRunAt = null;
-        }
-        submitted += 1;
-      } else if (result.code === 'busy') {
-        // The run is still live in that conversation. Leave the schedule due so
-        // the next tick retries it; dropping it would silently break the promise.
-        updated.lastError = 'The conversation still has a live run; the schedule will retry.';
-      } else {
-        updated.state = 'failed';
-        updated.nextRunAt = null;
-        updated.lastError = result.detail.slice(0, 500);
-        failed += 1;
-      }
-      await deps.schedules.update(updated).catch(() => false);
-    }
-    return { submitted, failed };
   }
 
   function ownedTask(task: TaskRecord | null, principal: Principal): ServiceResult<TaskRecord> {
@@ -605,23 +563,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     });
   }
 
+  /** Usage is cumulative across a suspend/resume boundary, never reset by it. */
+  function mergeUsage(previous: Usage | null, next: Usage | undefined): Usage | null {
+    if (!previous && !next) return null;
+    const inputTokens = (previous?.inputTokens ?? 0) + (next?.inputTokens ?? 0);
+    const outputTokens = (previous?.outputTokens ?? 0) + (next?.outputTokens ?? 0);
+    return {
+      ...(inputTokens > 0 ? { inputTokens } : {}),
+      ...(outputTokens > 0 ? { outputTokens } : {}),
+    };
+  }
+
   async function releaseLease(task: TaskRecord, token: string): Promise<void> {
     await deps.lease
       .release({ key: workRunKey(scopeOf(task)), token })
-      .catch(() => false);
-  }
-
-  /**
-   * A reservation is released rather than settled when this attempt writes no
-   * terminal state: the request slot stays charged because the run may have
-   * reached the provider, and its unspent token allowance returns to the day.
-   */
-  async function releaseBudget(
-    task: TaskRecord,
-    options: { dispatched: boolean } = { dispatched: true },
-  ): Promise<void> {
-    await deps.budget
-      .release(`budget_${task.taskId}_${task.generation}`, options)
       .catch(() => false);
   }
 
@@ -635,18 +590,86 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     token: string,
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
-    /** `release` is for a run that ended before anything was dispatched. */
-    budget: 'settle' | 'release' = 'settle',
+    steps?: TaskRecord['steps'],
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
-      await releaseBudget(task);
       return;
     }
-    // Barrier: everything the run published is stored before the task record
-    // says the run is over, so a client cannot read a terminal task whose
-    // stream is missing the events that led to it.
-    await deps.events.flush(task.taskId).catch(() => undefined);
     const now = deps.clock.iso();
+    const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
+    const mergedUsage = mergeUsage(task.usage, generationUsage);
+    let partialSaved = false;
+
+    // Escalation is a suspended state, not a failure: the plan, its checkpoint
+    // and any partial text stay durable so an approved resume continues exactly
+    // where authorization stopped. No completion notification is emitted because
+    // nothing completed.
+    if (outcome.kind === 'failed' && outcome.code === 'approval_required') {
+      // Save partial text before another generation can start.
+      const partial = checkpoint?.text ?? '';
+      if (partial.length > 0) {
+        partialSaved = await deps.conversations
+          .appendMessage({
+            messageId: deps.ids.messageId(),
+            conversationId: task.conversationId,
+            role: 'assistant',
+            text: partial,
+            createdAt: now,
+            unfinished: true,
+            agent: task.agent,
+          })
+          .then(() => true, () => false);
+      }
+      // Persist the suspension under the old fence before releasing ownership.
+      // A restart between these operations can resume from the saved checkpoint
+      // once the old lease expires.
+      const applied = await deps.tasks.updateFenced({
+        taskId: task.taskId,
+        token,
+        guard: 'not_cancel_requested',
+        patch: {
+          state: 'awaiting_approval',
+          updatedAt: now,
+          leaseExpiresAt: null,
+          failure: {
+            code: outcome.code,
+            detail: outcome.detail,
+            retryable: false,
+          },
+          ...(checkpoint ? { checkpoint } : {}),
+          ...(steps ? { steps } : {}),
+          ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+          ...(mergedUsage ? { usage: mergedUsage } : {}),
+        },
+      });
+      if (!applied.applied && applied.reason === 'guard_rejected') {
+        // The cancellation flag won the task write after the runner stopped.
+        outcome = { kind: 'cancelled' };
+      } else {
+        try {
+          if (applied.applied) {
+            // Suspension settles this generation's usage even though the task is not
+            // terminal. The resumed generation is charged separately, so the daily
+            // ledger matches the cumulative usage the owner sees.
+            if (generationUsage) {
+              deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+            }
+            deps.audit.record({
+              actor: task.ownerId,
+              action: 'work.awaiting_approval',
+              taskId: task.taskId,
+              conversationId: task.conversationId,
+              outcome: 'accepted',
+              detail: outcome.code,
+            });
+          }
+        } finally {
+          await releaseLease(task, token);
+        }
+        return;
+      }
+    }
+
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -654,7 +677,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: now,
             result: {
               summary: outcome.summary.slice(0, 20_000),
-              artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+          artifacts: task.kind === 'game'
+            ? (outcome.artifacts ?? [])
+          : [],
+              ...(outcome.verification
+                ? {
+                    verification: {
+                      passed: outcome.verification.passed,
+                      reason: redactText(outcome.verification.reason, [], 1000),
+                      evidence: outcome.verification.evidence
+                        .slice(0, 20)
+                        .map((entry) => redactText(entry, [], 500)),
+                    },
+                  }
+                : {}),
             },
             ...(outcome.usage ? { usage: outcome.usage } : {}),
           }
@@ -670,29 +706,32 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               },
             };
 
+    const statePatch = {
+      ...patch,
+      ...(checkpoint ? { checkpoint } : {}),
+      ...(steps ? { steps } : {}),
+      ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
+      ...(mergedUsage ? { usage: mergedUsage } : {}),
+    };
     const applied = await deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
-      patch: checkpoint ? { ...patch, checkpoint } : patch,
+      patch: statePatch,
     });
     if (!applied.applied) {
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
-        deps.metrics.recordLeaseFailure('fencingFailed');
         await releaseLease(task, token);
       }
-      // This attempt ended without a terminal write, so nothing will settle its
-      // reservation; leaving it would hold tokens for the rest of the day.
-      await releaseBudget(task);
       return;
     }
 
     const settled = applied.task;
+    // Charge the usage produced by this generation, not the merged task total:
+    // the previous generation was already charged when it settled.
+    if (generationUsage) {
+      deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+    }
     try {
-      if (checkpoint) {
-        await deps.checkpoints
-          .append(checkpointFor(settled, 'settled', checkpoint.completedSteps, checkpoint.text))
-          .catch(() => undefined);
-      }
       if (outcome.kind === 'completed') {
         publish(settled, 'task.completed', {
           summary: outcome.summary.slice(0, 20_000),
@@ -708,15 +747,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
 
       const text = checkpoint?.text ?? '';
-      if (text.length > 0) {
-        // Second fence. The terminal write proves this generation owned the task
-        // at that instant; a resume can reissue a generation immediately after,
-        // so the transcript append re-checks the token instead of trusting the
-        // earlier read. A superseded run adds nothing to a newer run's history.
-        const current = await deps.tasks.get(task.taskId);
-        if (!current || current.runToken !== token) {
-          return;
-        }
+      if (text.length > 0 && !partialSaved) {
         await deps.conversations.appendMessage({
           messageId: deps.ids.messageId(),
           conversationId: task.conversationId,
@@ -729,31 +760,86 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const detail = outcome.kind === 'completed' ? outcome.summary
         : outcome.kind === 'failed' ? outcome.detail : undefined;
       await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
-      await audit({
+      deps.audit.record({
         actor: task.ownerId,
         action: `work.${outcome.kind}`,
         taskId: task.taskId,
         conversationId: task.conversationId,
         outcome: outcome.kind,
-        mode: task.mode,
         ...(outcome.kind === 'failed' ? { detail: outcome.code } : {}),
       });
-      // The terminal event must be durable before the lease can be reissued.
-      await deps.events.flush(settled.taskId).catch(() => undefined);
-      if (budget === 'release') {
-        // Nothing reached the provider, so neither the request slot nor the
-        // token allowance was spent.
-        await releaseBudget(settled, { dispatched: false });
-      } else {
-        // Settle is idempotent and owner-independent: the reservation id derives
-        // from task and generation, so a replay cannot charge twice.
-        await deps.budget
-          .settle(`budget_${settled.taskId}_${settled.generation}`, settled.usage ?? {})
-          .catch(() => false);
-      }
     } finally {
       await releaseLease(task, token);
     }
+  }
+
+  /**
+   * The gaming workload is a Native capability, not a fourth agent identity. It
+   * borrows the supervisor's lease, fencing, cancellation and event path through
+   * the same adapter port; only the run body differs.
+   */
+  function gamingAdapter(task: TaskRecord): AgentAdapter {
+    return {
+      agent: task.agent,
+      engine: 'native',
+      sideEffects: 'gated',
+      capabilities: {
+        streaming: false,
+        tools: false,
+        cancellation: true,
+        resume: true,
+        modelSelection: false,
+        durable: true,
+      },
+      isolation: {
+        workspace: 'isolated',
+        memory: 'granted',
+        credentials: 'none',
+        conversations: 'none',
+      },
+      availability: () => ({
+        available: true,
+        reason: 'ready',
+        detail: 'The Native gaming workload is ready inside the isolated runtime.',
+      }),
+      run: (request, report) => {
+        if (!request.game) {
+          return Promise.resolve({
+            ok: false as const,
+            code: 'protocol_error' as const,
+            detail: 'A game task has no session payload.',
+            retryable: false,
+          });
+        }
+        return deps.gaming.run({
+          ownerId: request.ownerId,
+          taskId: request.taskId ?? task.taskId,
+          game: request.game,
+          signal: request.signal,
+          report,
+          loadBuild: (ownerId, gameId, buildId) =>
+            deps.studio.readVerifiedBuild({ ownerId, gameId, buildId }),
+          isApproved: (taskId, scope, resource) =>
+            deps.permissions.isApproved(taskId, scope, resource),
+        });
+      },
+    };
+  }
+  // Earlier tasks have no explicit marker. Their accounting write or persisted
+  // execution steps are evidence of admission; an interrupted claim alone is not.
+  async function canRunScheduled(task: TaskRecord): Promise<boolean> {
+    const admission = task.scheduleAdmission;
+    if (!admission) {
+      if (!/^task_sched_[0-9a-f]{40}$/.test(task.taskId)) return true;
+      // Older scheduled retry tasks had no schedule pointer. Their conversation
+      // still identifies the schedule; never reissue an unproven interrupted run.
+      const schedules = await deps.schedules.listByOwner(task.ownerId);
+      const legacy = schedules.find(record => scheduledConversationId(record.scheduleId) === task.conversationId);
+      return !!legacy && legacy.state !== 'cancelled' && task.steps.length > 0;
+    }
+    const schedule = await deps.schedules.get(admission.scheduleId);
+    if (!schedule || schedule.state === 'cancelled') return false;
+    return admission.complete ?? (schedule.lastExecutionId === admission.executionId || task.steps.length > 0);
   }
 
   async function execute(taskId: string, token: string): Promise<void> {
@@ -762,139 +848,225 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
     const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
     if (!lease || !lease.live) {
-      await settle(
-        task,
-        token,
-        {
-          kind: 'failed',
-          code: 'server_unavailable',
-          detail: 'The run lost its lease before it started.',
-          retryable: true,
-        },
-        undefined,
-        'release',
-      );
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'server_unavailable',
+        detail: 'The run lost its lease before it started.',
+        retryable: true,
+      });
       return;
     }
-    if (lease.cancelRequested) {
-      await settle(task, token, { kind: 'cancelled' }, undefined, 'release');
+    if (lease.token !== token) return;
+    if (task.cancelRequested || lease.cancelRequested) {
+      await settle(task, token, { kind: 'cancelled' });
       return;
     }
 
-    const adapter = deps.agents.resolve(task.agent);
-    if (!adapter.ok) {
-      await settle(
-        task,
-        token,
-        {
+    const workload = task.kind ?? 'work';
+    let adapter: AgentAdapter;
+    let modelRef: ModelRef | null = null;
+    if (workload === 'game') {
+      adapter = gamingAdapter(task);
+    } else {
+      const resolved = deps.agents.resolve(task.agent);
+      if (!resolved.ok) {
+        await settle(task, token, {
           kind: 'failed',
           code: 'not_configured',
-          detail: adapter.detail,
+          detail: resolved.detail,
           retryable: false,
-        },
-        undefined,
-        'release',
-      );
-      return;
-    }
-
-    const model = task.model
-      ? deps.models.resolve(task.model, task.mode)
-      : deps.models.resolve(null, task.mode);
-    if (!model.ok) {
-      await settle(
-        task,
-        token,
-        {
+        });
+        return;
+      }
+      adapter = resolved.value;
+      const model = task.model
+        ? deps.models.resolve(task.model, task.mode)
+        : deps.models.resolve(null, task.mode);
+      if (!model.ok) {
+        await settle(task, token, {
           kind: 'failed',
           code: model.code === 'paid_model_refused' ? 'paid_model_refused' : 'not_configured',
           detail: model.detail,
           retryable: false,
-        },
-        undefined,
-        'release',
-      );
+        });
+        return;
+      }
+      modelRef = model.value.ref;
+    }
+
+    // One directory per task and generation. Two runs in the same mode, and two
+    // generations of the same task, therefore cannot read or overwrite each
+    // other's files, and revoking one run cannot affect another.
+    const workspace = await createRunWorkspace({
+      mode: task.mode,
+      roots: workspaceRoots(deps.config.workspaces),
+      runId: task.taskId,
+      generation: task.generation,
+    });
+    if (!workspace.ok) {
+      await settle(task, token, {
+        kind: 'failed',
+        code: 'workspace_denied',
+        detail: workspace.detail,
+        retryable: false,
+      });
       return;
     }
 
-    const workspace = await resolveEngineWorkspace({
-      mode: task.mode,
-      roots: workspaceRoots(deps.config.workspaces),
-    });
-    if (!workspace.ok) {
-      await settle(
-        task,
-        token,
-        {
-          kind: 'failed',
-          code: 'workspace_denied',
-          detail: workspace.detail,
-          retryable: false,
-        },
-        undefined,
-        'release',
-      );
-      return;
-    }
     const started = await deps.tasks.updateFenced({
       taskId,
       token,
       patch: {
         state: 'running',
+        ...(task.handoffPending && { handoffPending: false }),
         updatedAt: deps.clock.iso(),
         leaseExpiresAt: lease.expiresAt.toISOString(),
-        model: model.value.ref,
+        ...(modelRef ? { model: modelRef } : {}),
       },
     });
     if (!started.applied) return;
-    // Continue the sequence after anything a previous process already stored.
-    await deps.events.hydrate(taskId).catch(() => 0);
+    await deps.supervisor.begin({
+      taskId,
+      token,
+      generation: started.task.generation,
+      workspaceRoot: workspace.value.root,
+    });
     publish(started.task, 'task.started');
 
-    const executionId = deps.ids.executionId();
-    executionsByTask.set(taskId, executionId);
+    const controller = new AbortController();
+    controllers.set(taskId, controller);
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
+    const evidence: TaskEvidence[] = [...(started.task.checkpoint.evidence ?? [])];
+    let plan: TaskPlan | null = started.task.checkpoint.plan ?? null;
+    let iterations = started.task.checkpoint.iterations ?? 0;
     let text = '';
     let visible = text;
+    // Report patches are snapshots of mutable local arrays. Serialize them in
+    // issue order so a delayed plan.ready cannot overwrite a later completed
+    // checkpoint on a replica that applies writes out of order.
+    let writeChain: Promise<void> = Promise.resolve();
+    const persist = (patch: TaskPatch): void => {
+      const snapshot = structuredClone(patch);
+      writeChain = writeChain
+        .then(async () => {
+          await deps.tasks.updateFenced({ taskId, token, patch: snapshot });
+        })
+        .catch(() => undefined);
+    };
     const emitText = (next: string, replace = false): void => {
-      if (replace || !next.startsWith(visible)) publish(started.task, 'text.replace', { text: next });
-      else if (next !== visible) publish(started.task, 'text.delta', { text: next.slice(visible.length) });
+      if (replace || !next.startsWith(visible)) {
+        publish(started.task, 'text.replace', { text: next }, token);
+      } else if (next !== visible) {
+        publish(started.task, 'text.delta', { text: next.slice(visible.length) }, token);
+      }
       visible = next;
     };
 
     const report = (event: AgentReportEvent): void => {
-      if (executionsByTask.get(taskId) !== executionId) return;
-      if (event.type === 'step.started') {
-        const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'running';
-        else steps.push({ id: event.stepId, title: event.title, state: 'running' });
-        publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: { steps, updatedAt: deps.clock.iso() },
+      if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
+
+      // The controller is replaced by a resume; the supervisor is the durable
+      // answer to "may this generation still act". Both must agree.
+      if (!deps.supervisor.isLive(taskId, token)) return;
+
+      if (event.type === 'budget') {
+        iterations = event.iterations;
+        return;
+      }
+
+      /**
+       * A plan is persisted before its first step starts, so the owner can see
+       * the dependency graph and a resume executes the plan that was shown, not
+       * a different one produced by a second model call.
+       */
+      if (event.type === 'plan.ready') {
+        plan = event.plan;
+        const previous = new Map(steps.map((step) => [step.id, step]));
+        const next: TaskStep[] = event.plan.steps.map((step) => {
+          const existing = previous.get(step.id);
+          const state = existing?.state ?? (completed.includes(step.id) ? 'completed' : 'queued');
+          return {
+            id: step.id,
+            title: step.title,
+            state,
+            dependsOn: [...step.dependsOn],
+            ...(existing?.attempts !== undefined ? { attempts: existing.attempts } : {}),
+          };
         });
+        for (const step of steps) {
+          if (step.state === 'completed' && !next.some((entry) => entry.id === step.id)) {
+            next.unshift(step);
+          }
+        }
+        steps.length = 0;
+        steps.push(...next);
+        persist({
+          steps,
+          reasoning: event.plan.mode,
+          checkpoint: {
+            completedSteps: [...completed],
+            text: visible,
+            plan: event.plan,
+            evidence,
+            iterations,
+          },
+          updatedAt: deps.clock.iso(),
+        });
+        return;
+      }
+
+      if (event.type === 'step.started') {
+        const planned = plan?.steps.find((step) => step.id === event.stepId);
+        const existing = steps.find((step) => step.id === event.stepId);
+        if (existing) {
+          existing.state = 'running';
+          if (planned) existing.dependsOn = [...planned.dependsOn];
+        } else {
+          steps.push({
+            id: event.stepId,
+            title: event.title,
+            state: 'running',
+            ...(planned ? { dependsOn: [...planned.dependsOn] } : {}),
+          });
+        }
+        publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'step.completed') {
         const existing = steps.find((step) => step.id === event.stepId);
-        if (existing) existing.state = 'completed';
-        completed.push(event.stepId);
+        if (existing) {
+          existing.state = 'completed';
+          if (event.attempts !== undefined) existing.attempts = event.attempts;
+        }
+        if (!completed.includes(event.stepId)) completed.push(event.stepId);
+        if (event.evidence) {
+          // Evidence is persisted, so it is scrubbed before it reaches the
+          // checkpoint: the transcript path already redacts, and a durable
+          // record must not become the one place a credential survives.
+          const safeEvidence: TaskEvidence = {
+            ...event.evidence,
+            citation: redactText(event.evidence.citation, [], 500),
+            output: redactContent(event.evidence.output).slice(0, 20_000),
+          };
+          const index = evidence.findIndex((entry) => entry.stepId === event.stepId);
+          if (index === -1) evidence.push(safeEvidence);
+          else evidence[index] = safeEvidence;
+        }
         publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
-        void deps.tasks.updateFenced({
-          taskId,
-          token,
-          patch: {
-            steps,
-            checkpoint: { completedSteps: [...completed], text: visible },
-            updatedAt: deps.clock.iso(),
-          },
+        persist({
+          steps,
+          checkpoint: { completedSteps: [...completed], text: visible, plan, evidence, iterations },
+          updatedAt: deps.clock.iso(),
         });
-        void deps.checkpoints
-          .append(checkpointFor(started.task, 'step', completed, visible))
-          .catch(() => undefined);
+        return;
+      }
+      if (event.type === 'step.failed') {
+        const existing = steps.find((step) => step.id === event.stepId);
+        if (existing) existing.state = 'failed';
+        persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
       if (event.type === 'text.delta' || event.type === 'text.replace') {
@@ -911,7 +1083,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           callId: event.callId,
           tool: event.tool,
           ...(event.input === undefined ? {} : { input: redactToolInput(event.input) }),
-        });
+        }, token);
         return;
       }
       if (event.type === 'tool.result') {
@@ -920,14 +1092,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           tool: event.tool,
           ok: event.ok,
           ...(event.output === undefined ? {} : { output: redactText(event.output) }),
-        });
+        }, token);
         return;
       }
       if (event.type === 'file.edit') {
         if (typeof event.path !== 'string' || event.path.length < 1 || event.path.length > 1024) {
           throw new RangeError('file.edit path must contain 1–1024 characters.');
         }
-        publish(started.task, 'file.edit', { path: event.path });
+        publish(started.task, 'file.edit', { path: event.path }, token);
         return;
       }
       /**
@@ -939,147 +1111,117 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         requestId: event.requestId,
         tool: event.tool,
         description: redactText(event.description, [], 2000),
-      });
+      }, token);
     };
 
-    const history = await historyFor(task.conversationId, task.objective);
-    const identity: ExecutionIdentity = {
-      executionId,
-      kind: 'work',
-      taskId,
-      conversationId: task.conversationId,
-      ownerId: task.ownerId,
-      tenantId: task.tenantId,
-      agent: started.task.agent,
-      mode: task.mode,
-      generation: started.task.generation,
-      token,
-    };
-    const supervised = await deps.supervisor
-      .run({
-        identity,
-        adapter: adapter.value as AgentAdapter,
-        workspaceRoot: workspace.value.root,
-        scopes: WORK_SCOPES,
+    const history = await historyFor(
+      {
+        conversationId: task.conversationId,
+        ownerId: task.ownerId,
+        tenantId: task.tenantId,
+        mode: task.mode,
+        isWork: true,
+        agent: task.agent,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      },
+      task.objective,
+      adapter,
+    );
+
+    let result: RunResult;
+    try {
+      result = await deps.runner.run({
+        scope: scopeOf(started.task),
+        ...((task.scheduleAdmission ||
+          task.taskId.startsWith('task_sched_')) && {
+          cancellationRequested: async () =>
+            !(await canRunScheduled(task)),
+        }),
+        token,
+        adapter,
+        request: {
+          ownerId: task.ownerId,
+          tenantId: task.tenantId,
+          conversationId: task.conversationId,
+          taskId: task.taskId,
+          workload,
+          game: task.game ?? null,
+          objective: task.objective,
+          history,
+          model: modelRef,
+          mode: task.mode,
+          workspaceRoot: workspace.value.root,
+          maxSteps: deps.config.engines.native.maxSteps,
+          budget: task.budget,
+          signal: controller.signal,
+          reasoning: task.reasoning ?? 'auto',
+          completedSteps: [...started.task.checkpoint.completedSteps],
+          plan: started.task.checkpoint.plan ?? null,
+          evidence: [...(started.task.checkpoint.evidence ?? [])],
+          iterationsUsed: started.task.checkpoint.iterations ?? 0,
+        },
         report,
-        launch: async (execution) => {
-          const result = await deps.runner.run({
-            scope: scopeOf(started.task),
-            token,
-            adapter: adapter.value as AgentAdapter,
-            request: {
-              ownerId: task.ownerId,
-              tenantId: task.tenantId,
-              conversationId: task.conversationId,
-              objective: task.objective,
-              history,
-              model: model.value.ref,
-              mode: task.mode,
-              workspaceRoot: execution.workspaceRoot,
-              maxSteps: deps.config.engines.native.maxSteps,
-              budget: task.budget,
-              signal: execution.signal,
-            },
-            report: execution.report,
-            generation: started.task.generation,
-            workspaceRoot: execution.workspaceRoot,
-          });
-          return {
-            outcome: result.outcome,
-            ownershipLost: result.ownershipLost,
-            abandoned:
-              result.outcome.kind === 'cancelled' && result.outcome.abandoned === true,
-          };
-        },
-      })
-      .catch(() => null);
-    if (executionsByTask.get(taskId) === executionId) executionsByTask.delete(taskId);
+        generation: started.task.generation,
+        workspaceRoot: workspace.value.root,
+      });
+    } catch {
+      await deps.supervisor.abandon({
+        taskId,
+        token,
+        reason: 'The runner failed before termination could be verified.',
+      });
+      await settle(started.task, token, {
+        kind: 'failed',
+        code: 'provider_error',
+        detail: 'The execution supervisor could not verify the run.',
+        retryable: true,
+      });
+      return;
+    }
 
-    if (!supervised) {
+    const current = controllers.get(taskId);
+    const superseded = current !== undefined && current !== controller;
+    if (!superseded) controllers.delete(taskId);
+    await writeChain.catch(() => undefined);
+
+    const verified = result.terminated;
+    try {
+      if (superseded || result.ownershipLost) {
+        return;
+      }
+      const safeText = redactContent(text);
+      emitText(safeText);
+      const outcome = result.outcome.kind === 'completed'
+        ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
+        : result.outcome;
       await settle(
         started.task,
         token,
+        outcome,
         {
-          kind: 'failed',
-          code: 'server_unavailable',
-          detail: 'The execution supervisor could not admit or record this run.',
-          retryable: true,
+          completedSteps: completed,
+          text: safeText,
+          plan,
+          evidence,
+          iterations,
         },
-        undefined,
-        'release',
+        steps,
       );
-      return;
+    } finally {
+      // Verified termination means the adapter returned. Anything else means it
+      // may still be running, so its capability and workspace are revoked rather
+      // than left available to a generation the engine can no longer supervise.
+      if (verified) {
+        deps.supervisor.finish(taskId, token);
+      } else {
+        await deps.supervisor.abandon({
+          taskId,
+          token,
+          reason: 'The adapter did not verify termination within the cancellation grace period.',
+        });
+      }
     }
-    if (!supervised.admitted) {
-      await settle(
-        started.task,
-        token,
-        {
-          kind: 'failed',
-          code: supervised.code === 'workspace_denied' ? 'workspace_denied' : 'server_unavailable',
-          detail: supervised.detail,
-          retryable: supervised.code !== 'workspace_denied',
-        },
-        undefined,
-        'release',
-      );
-      return;
-    }
-    if (supervised.ownershipLost) {
-      // Deliberately no terminal write and no notification: this run no longer
-      // owns the task, and the new owner is the only writer of its state.
-      await releaseBudget(started.task);
-      return;
-    }
-    const safeText = redactContent(text);
-    emitText(safeText);
-    const outcome = supervised.outcome.kind === 'completed'
-      ? { ...supervised.outcome, summary: redactContent(supervised.outcome.summary) }
-      : supervised.outcome;
-    await settle(started.task, token, outcome, { completedSteps: completed, text: safeText });
-  }
-
-  const TERMINAL_EVENT = new Set([
-    'task.completed',
-    'task.failed',
-    'task.cancelled',
-    'task.interrupted',
-  ]);
-
-  /**
-   * Repairs the one contradiction a crash can leave behind: a task record that
-   * says it finished, and a stream that never received the terminal event. The
-   * client reads the stream, so the stream is completed here from the
-   * authoritative task record — never the other way around.
-   */
-  async function ensureTerminalEvent(task: TaskRecord): Promise<void> {
-    if (!isTerminalState(task.state)) return;
-    // The durable watermark, not this process's window, decides whether a
-    // terminal event already exists. After a restart the in-memory cursor is
-    // zero even though the stream is complete.
-    const last = await deps.events.hydrate(task.taskId).catch(() => deps.events.lastSeq(task.taskId));
-    const tail = await deps.events.read(task.taskId, Math.max(0, last - 1));
-    if (tail.events.some((event) => TERMINAL_EVENT.has(event.type))) return;
-    if (task.state === 'completed') {
-      publish(task, 'task.completed', {
-        ...(task.result?.summary ? { summary: task.result.summary } : {}),
-        ...(task.model ? { model: task.model } : {}),
-        ...(task.usage ? { usage: task.usage } : {}),
-      });
-    } else if (task.state === 'cancelled') {
-      publish(task, 'task.cancelled', {});
-    } else if (task.state === 'failed') {
-      publish(task, 'task.failed', {
-        code: task.failure?.code ?? 'provider_error',
-        ...(task.failure?.detail ? { detail: task.failure.detail } : {}),
-        retryable: task.failure?.retryable ?? false,
-      });
-    } else {
-      publish(task, 'task.interrupted', {
-        detail: task.failure?.detail ?? 'The run stopped before it could report a terminal event.',
-      });
-    }
-    await deps.events.flush(task.taskId).catch(() => undefined);
   }
 
   async function reconcile(task: TaskRecord): Promise<TaskRecord> {
@@ -1103,25 +1245,607 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
-        await releaseBudget(applied.task);
-        await deps.events.hydrate(applied.task.taskId).catch(() => 0);
         publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
-        await deps.events.flush(applied.task.taskId).catch(() => undefined);
         await notifyTerminal(applied.task, 'interrupted');
-        await audit({
+        deps.audit.record({
           actor: task.ownerId,
           action: 'work.interrupted',
           taskId: task.taskId,
           conversationId: task.conversationId,
           outcome: 'failed',
-          mode: task.mode,
         });
         return applied.task;
       }
     }
     return task;
+  }
+
+  async function cancelSuspended(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const applied = await deps.tasks.updateFenced({
+      taskId: task.taskId,
+      token: task.runToken ?? '',
+      patch: {
+        state: 'cancelled',
+        updatedAt: deps.clock.iso(),
+        cancelRequested: true,
+      },
+    });
+    if (applied.applied) {
+      publish(applied.task, 'task.cancelled', {});
+      await notifyTerminal(applied.task, 'cancelled');
+      deps.audit.record({
+        actor: task.ownerId,
+        action: 'work.cancelled',
+        taskId: task.taskId,
+        conversationId: task.conversationId,
+        outcome: 'cancelled',
+      });
+      return ok({
+        taskId: task.taskId,
+        state: 'cancelled',
+        generation: task.generation,
+        outcome: 'accepted',
+      });
+    }
+    return lostCancellation(task);
+  }
+
+  async function admitTask(input: {
+    principal: Principal;
+    agentId: 'coderax';
+    objective: string;
+    mode: 'cloud';
+    model: null;
+    budget: null;
+    requireApproval: boolean;
+    kind: 'game';
+    game: GameRunSpec;
+  }): Promise<ServiceResult<{
+    task: TaskRecord;
+    token: string;
+    conversationId: string;
+  }>> {
+    const now = deps.clock.iso();
+
+    const bound = await bindConversation({
+      principal: input.principal,
+      mode: input.mode,
+      isWork: true,
+      agent: input.agentId,
+      title: input.objective.slice(0, 120),
+    });
+    if (!bound.ok) return bound;
+
+    const conversationId = bound.value.conversationId;
+
+    await deps.conversations.appendMessage({
+      messageId: deps.ids.messageId(),
+      conversationId,
+      role: 'user',
+      text: input.objective,
+      createdAt: now,
+    });
+
+    const task: TaskRecord = {
+      taskId: deps.ids.taskId(),
+      ownerId: input.principal.ownerId,
+      tenantId: null,
+      conversationId,
+      agent: input.agentId,
+      engine: 'native',
+      mode: input.mode,
+      kind: input.kind,
+      game: input.game,
+      objective: input.objective,
+      model: null,
+      state: 'queued',
+      generation: 1,
+      runToken: null,
+      reasoning: null,
+      steps: [],
+      checkpoint: {
+        completedSteps: [],
+        text: '',
+        plan: null,
+        evidence: [],
+      },
+      createdAt: now,
+      updatedAt: now,
+      leaseExpiresAt: null,
+      cancelRequested: false,
+      requireApproval: input.requireApproval,
+      budget: null,
+      usage: null,
+      result: null,
+      failure: null,
+    };
+
+    const token = deps.ids.runToken();
+    const claimedAt = deps.clock.now();
+    const key = workRunKey(scopeOf(task));
+    const expiresAt = new Date(
+      claimedAt.getTime() +
+        deps.config.execution.leaseTtlMs,
+    );
+
+    const claimed = await deps.lease.claim({
+      key,
+      owner: task.ownerId,
+      token,
+      now: claimedAt,
+      expiresAt,
+    });
+
+    if (!claimed) {
+      return fail(
+        'busy',
+        'This conversation already has a live Work run.',
+      );
+    }
+
+    const created = await deps.tasks.create({
+      ...task,
+      runToken: token,
+      leaseExpiresAt: expiresAt.toISOString(),
+    });
+
+    if (!created.ok) {
+      await deps.lease.release({ key, token })
+        .catch(() => false);
+      return fail(
+        'busy',
+        'This conversation already has an active Work task.',
+      );
+    }
+
+    publish(created.task, 'task.queued');
+
+    deps.audit.record({
+      actor: input.principal.ownerId,
+      action: 'game.session.accepted',
+      taskId: task.taskId,
+      conversationId,
+      outcome: 'accepted',
+    });
+
+    return ok({
+      task: created.task,
+      token,
+      conversationId,
+    });
+  }
+  
+  async function lostCancellation(task: TaskRecord): Promise<ServiceResult<TaskControlResult>> {
+    const current = await deps.tasks.get(task.taskId);
+    const cancelled = current?.runToken === task.runToken && current?.state === 'cancelled';
+    return ok({
+      taskId: task.taskId,
+      state: current?.state ?? task.state,
+      generation: current?.generation ?? task.generation,
+      outcome: cancelled ? 'accepted' : 'superseded',
+    });
+  }
+
+
+  type SubmitOptions = { scheduleAdmission?: TaskRecord['scheduleAdmission']; eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
+
+  /**
+   * The one Work acceptance path, shared by a client request and a scheduled
+   * occurrence.
+   *
+   * A scheduled caller supplies a deterministic task id. If that task already
+   * exists the occurrence ran before, and the function refuses before reserving
+   * budget or claiming a lease. That is the idempotency boundary the schedule
+   * engine relies on, and it reuses the task repository's unique index instead of
+   * maintaining a second execution ledger.
+   */
+  async function acceptTask(
+    principal: Principal,
+    request: WorkSubmitRequest,
+    options: SubmitOptions = {},
+  ): Promise<ServiceResult<TaskAccepted>> {
+    if (options.taskId) {
+      const existing = await deps.tasks.get(options.taskId);
+      if (existing) {
+        return fail('conflict', 'That occurrence already has a Work task.');
+      }
+    }
+
+    const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
+    const adapter = deps.agents.resolve(agentId);
+    if (!adapter.ok) return adapter;
+
+    const model = deps.models.resolve(request.model, request.mode);
+    if (!model.ok) return model;
+
+    const reasoning = resolveReasoningMode({ requested: request.reasoning, objective: request.objective });
+
+    const now = deps.clock.iso();
+    // Bind before reserving: a conversation owned by another principal, bound to
+    // another data mode or opened by the other surface is refused here, without
+    // spending the daily budget or letting private history into a cloud run.
+    const target = options.conversationId ?? request.conversationId;
+    const bound = await bindConversation({
+      principal,
+      ...(target ? { conversationId: target } : {}),
+      mode: request.mode,
+      isWork: true,
+      agent: agentId,
+      title: request.objective.slice(0, 120),
+    });
+    if (!bound.ok) return bound;
+    const conversationId = bound.value.conversationId;
+
+    const reserve = () => deps.budget.reserve(principal.ownerId, deps.clock.now()).allowed;
+    if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
+      return fail(
+        'budget_exhausted',
+        'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
+      );
+    }
+    const appendObjective = () => deps.conversations.appendMessage({
+      messageId: options.taskId ? `msg_${options.taskId}` : deps.ids.messageId(),
+      conversationId,
+      role: 'user',
+      text: request.objective,
+      createdAt: now,
+    });
+
+    if (!options.taskId) await appendObjective();
+
+    const task: TaskRecord = {
+      ...(options.scheduleAdmission ? { scheduleAdmission: options.scheduleAdmission, handoffPending: true } : {}),
+      taskId: options.taskId ?? deps.ids.taskId(),
+      ownerId: principal.ownerId,
+      tenantId: null,
+      conversationId,
+      agent: agentId,
+      engine: adapter.value.engine,
+      mode: request.mode,
+      objective: request.objective,
+      model: model.value.ref,
+      state: 'queued',
+      generation: 1,
+      runToken: null,
+      reasoning,
+      steps: [],
+      checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
+      createdAt: now,
+      updatedAt: now,
+      leaseExpiresAt: null,
+      cancelRequested: false,
+      requireApproval: request.requireApproval,
+      budget: request.budget ?? null,
+      usage: null,
+      result: null,
+      failure: null,
+    };
+
+    // Claim first, then create. The lease is the cross-replica guard for "one
+    // live run per conversation", and the created task carries the unique token
+    // that authorizes its terminal write from the first instant.
+    const token = deps.ids.runToken();
+    const claimedAt = deps.clock.now();
+    const key = workRunKey({
+      ownerId: task.ownerId,
+      tenantId: task.tenantId,
+      conversationId,
+    });
+    const claimed = await deps.lease.claim({
+      key,
+      owner: task.ownerId,
+      token,
+      now: claimedAt,
+      expiresAt: new Date(claimedAt.getTime() + deps.config.execution.leaseTtlMs),
+    });
+    if (!claimed) {
+      return fail('busy', 'This conversation already has a live Work run.');
+    }
+
+    if (options.taskId) {
+      // A lost append acknowledgement can be retried with the same message ID.
+      // No task exists or budget is reserved until its objective is durable.
+      try {
+        if (!(await appendObjective())) {
+          const messages = await deps.conversations.messages({
+            ownerId: principal.ownerId,
+            conversationId,
+            mode: request.mode,
+          }) ?? [];
+          if (!messages.some(message => message.messageId === `msg_${options.taskId}`)) {
+            throw new Error('The scheduled objective was not persisted.');
+          }
+        }
+      } catch (error) {
+        await deps.lease.release({ key, token });
+        throw error;
+      }
+    }
+    const created = await deps.tasks.create({
+      ...task,
+      runToken: token,
+      leaseExpiresAt: new Date(
+        claimedAt.getTime() + deps.config.execution.leaseTtlMs,
+      ).toISOString(),
+    });
+    if (!created.ok) {
+      await deps.lease.release({ key, token }).catch(() => false);
+      return created.reason === 'conversation_busy'
+        ? fail('busy', 'This conversation already has an active Work task.')
+        : fail('conflict', 'That task identity is already in use.');
+    }
+
+    if (options.taskId) {
+      // The unique task insert elects the only writer of admission effects.
+      // The task is now visible to cancellation, but cannot execute until enqueue.
+      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      if (!reservation.allowed) {
+        await settle(created.task, token, { kind: 'failed', code: 'budget_exhausted', detail: 'The daily request budget is exhausted.', retryable: false });
+        return fail('budget_exhausted', 'The daily request budget is exhausted.');
+      }
+      let admitted: boolean;
+      try {
+        admitted = !options.eligible || await options.eligible();
+      } catch (error) {
+        reservation.release();
+        await settle(created.task, token, { kind: 'cancelled' });
+        throw error;
+      }
+      if (!admitted) {
+        reservation.release();
+        await settle(created.task, token, { kind: 'cancelled' });
+        return fail('validation_failed', 'That occurrence is no longer eligible.');
+      }
+      if (options.scheduleAdmission) {
+        let marked;
+        try {
+          marked = await deps.tasks.updateFenced({
+            taskId: task.taskId, token,
+            patch: { scheduleAdmission: { ...options.scheduleAdmission, complete: true } },
+          });
+        } catch (error) {
+          // An acknowledgement can be lost after the write committed. Only the
+          // original owner may finish this delivery or roll back its reservation.
+          const durable = await deps.tasks.get(task.taskId);
+          if (!durable?.scheduleAdmission?.complete && durable?.runToken === token) {
+            await settle(created.task, token, { kind: 'cancelled' });
+            const cancelled = await deps.tasks.get(task.taskId);
+            if (cancelled?.runToken === token && cancelled.state === 'cancelled') reservation.release();
+            throw error;
+          }
+          if (durable?.runToken !== token || durable.state !== 'queued') throw error;
+          marked = { applied: true };
+        }
+        if (!marked.applied) {
+          const durable = await deps.tasks.get(task.taskId);
+          if (durable && durable.runToken !== token) return fail('conflict', 'Another generation owns this handoff.');
+          reservation.release();
+          return fail('validation_failed', 'Scheduled Work lost ownership before enqueue.');
+        }
+      }
+    }
+
+    publish(created.task, 'task.queued');
+    deps.audit.record({
+      actor: principal.ownerId,
+      action: 'work.accepted',
+      taskId: task.taskId,
+      conversationId,
+      outcome: 'accepted',
+      detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
+    });
+
+    deps.scheduler.enqueue(() => execute(task.taskId, token));
+
+    return ok({
+      taskId: task.taskId,
+      conversationId,
+      state: 'queued',
+      generation: 1,
+      eventsPath: `/v1/work/${task.taskId}/events`,
+    });
+  }
+
+  const schedulePort: SchedulePort = {
+    dispatch: async ({ schedule, scheduleVersion, taskId, conversationId, trigger, selectedTimingRevision, occurrenceKey, executionId, accept }) => {
+      // A dispatch can race an owner edit, pause, cancellation or an event-rule
+      // change. The occurrence was selected from an exact revision, timing rule
+      // and occurrence key; a newer schedule must be re-evaluated, never
+      // submitted with the stale plan it was admitted under.
+      const current = await deps.schedules.get(schedule.scheduleId);
+      if (!current) {
+        return { ok: false, reason: 'refused', detail: 'That schedule no longer exists.' };
+      }
+      if (current.state === 'cancelled') {
+        return { ok: false, reason: 'refused', detail: 'That schedule is cancelled.' };
+      }
+      const eligible = (record: ScheduleRecord | null) => !!record && record.state !== 'cancelled' &&
+        (trigger === 'manual' || trigger === 'retry' ||
+          (record.state === 'active' && (record.timingRevision ?? 0) === selectedTimingRevision &&
+            (trigger !== 'schedule' || record.nextRunAt === occurrenceKey)));
+      if (!eligible(current)) return { ok: false, reason: 'refused', detail: 'That occurrence is no longer eligible.' };
+      if (current.version !== scheduleVersion) {
+        return {
+          ok: false,
+          reason: 'refused',
+          detail: 'The schedule changed while this occurrence was being prepared.',
+        };
+      }
+      const adapter = deps.agents.resolve(current.agent);
+      if (!adapter.ok) {
+        return { ok: false, reason: 'refused', detail: adapter.detail };
+      }
+      if (scheduleSideEffectRefusal(adapter.value.sideEffects)) {
+        // Defense in depth: a schedule created before this guard existed must
+        // not start an ungated run after an upgrade.
+        return {
+          ok: false,
+          reason: 'refused',
+          detail: 'This agent is not gateable by owner approval and cannot run from a schedule.',
+        };
+      }
+      const accepted = await acceptTask(
+        { ownerId: current.ownerId, isOwner: true },
+        {
+          objective: current.objective,
+          agent: current.agent,
+          ...(current.model ? { model: current.model } : {}),
+          mode: current.mode,
+          ...(current.limits.budget ? { budget: current.limits.budget } : {}),
+          // A schedule never widens autonomy: every side effect still needs a
+          // scoped owner decision from the permission store.
+          requireApproval: true,
+          conversationId,
+        },
+        { taskId, conversationId, scheduleAdmission: { scheduleId: current.scheduleId, executionId, complete: false }, eligible: () => accept(eligible) },
+      );
+      if (accepted.ok) return { ok: true };
+      if (accepted.code === 'busy') {
+        return { ok: false, reason: 'busy', detail: accepted.detail };
+      }
+      if (accepted.code === 'budget_exhausted') {
+        return { ok: false, reason: 'budget', detail: accepted.detail };
+      }
+      if (accepted.code === 'conflict') {
+        return { ok: false, reason: 'duplicate', detail: accepted.detail };
+      }
+      return { ok: false, reason: 'refused', detail: accepted.detail };
+    },
+
+    recoverHandoff: async (receipt, admit) => {
+      if (!receipt.taskId) return;
+      const task = await deps.tasks.get(receipt.taskId);
+      const admission = task?.scheduleAdmission;
+      if (!task?.handoffPending || !admission || admission.executionId !== receipt.executionId ||
+          (task.state !== 'queued' && task.state !== 'interrupted')) return;
+      const key = workRunKey(scopeOf(task));
+      const now = deps.clock.now();
+      const expiresAt = new Date(now.getTime() + deps.config.execution.leaseTtlMs);
+      const token = deps.ids.runToken();
+      if (!await deps.lease.claim({ key, owner: task.ownerId, token, now, expiresAt })) return;
+      const claim = await deps.schedules.getExecution(receipt.executionId);
+      if (!claim || (claim.state !== 'claimed' && claim.state !== 'dispatched') ||
+          claim.taskId !== task.taskId || claim.claimGeneration !== receipt.claimGeneration) {
+        await releaseLease(task, token);
+        return;
+      }
+      const owned = await deps.tasks.takeHandoff(task.taskId, task.generation, token, expiresAt.toISOString());
+      if (!owned) { await releaseLease(task, token); return; }
+      const current = await deps.schedules.get(receipt.scheduleId);
+      // admissionStarted proves the insert won and reserved its request. A stop
+      // before that point has no durable acceptance to deliver.
+      const admitted = owned.scheduleAdmission?.complete || (claim.admissionStarted &&
+        (current?.lastExecutionId === receipt.executionId || await admit()));
+      if (!admitted || owned.cancelRequested || !current || current.state === 'cancelled') {
+        await settle(owned, token, { kind: 'cancelled' });
+        return;
+      }
+      const marked = await deps.tasks.updateFenced({ taskId: task.taskId, token,
+        patch: { scheduleAdmission: { ...admission, complete: true } } });
+      if (marked.applied) deps.scheduler.enqueue(() => execute(task.taskId, token));
+    },
+    claimScheduledRetry: (taskId, generation) => deps.tasks.claimScheduledRetry(taskId, generation),
+    taskSnapshot: async (taskId) => {
+      const task = await deps.tasks.get(taskId);
+      if (!task) return null;
+      const reconciled = await reconcile(task);
+      return {
+        ...(task.scheduleAdmission && { admissionPending:
+          !(task.scheduleAdmission.complete ??
+            ((await deps.schedules.get(task.scheduleAdmission.scheduleId))?.lastExecutionId === task.scheduleAdmission.executionId || task.steps.length > 0)) }),
+        generation: reconciled.generation,
+
+     state: reconciled.state,
+        summary: reconciled.result?.summary ?? null,
+        failure: reconciled.failure
+          ? {
+              code: reconciled.failure.code,
+              retryable: reconciled.failure.retryable !== false,
+            }
+          : null,
+      };
+    },
+  };
+
+  const scheduleEngine = createScheduleEngine({
+    store: deps.schedules,
+    notices: deps.scheduleNotices,
+    port: schedulePort,
+    settings: deps.config.schedules,
+    clock: deps.clock,
+    ids: deps.ids,
+  });
+
+  function toSchedule(record: ScheduleRecord): Schedule {
+    return {
+      scheduleId: record.scheduleId,
+      name: record.name,
+      objective: record.objective,
+      agent: record.agent,
+      mode: record.mode,
+      model: record.model,
+      timing: record.timing,
+      condition: record.condition,
+      retry: record.retry,
+      priority: record.priority,
+      limits: record.limits,
+      requireApproval: true,
+      missedRunPolicy: record.missedRunPolicy,
+      state: record.state,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      nextRunAt: record.nextRunAt,
+      lastRunAt: record.lastRunAt,
+      lastExecutionId: record.lastExecutionId,
+      runsTotal: record.runsTotal,
+      consecutiveFailures: record.consecutiveFailures,
+      version: record.version,
+      pausedAt: record.pausedAt,
+      cancelledAt: record.cancelledAt,
+      cancelReason: record.cancelReason,
+    };
+  }
+
+  function toExecution(record: ScheduleExecutionRecord): ScheduleExecution {
+    return {
+      executionId: record.executionId,
+      scheduleId: record.scheduleId,
+      occurrenceKey: record.occurrenceKey,
+      trigger: record.trigger,
+      scheduledFor: record.scheduledFor,
+      state: record.state,
+      attempt: record.attempt,
+      maxAttempts: record.maxAttempts,
+      taskId: record.taskId,
+      conversationId: record.conversationId,
+      priority: record.priority,
+      detail: record.detail,
+      nextAttemptAt: record.nextAttemptAt,
+      condition: record.condition,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      finishedAt: record.finishedAt,
+    };
+  }
+
+  async function ownedSchedule(
+    scheduleId: string,
+    principal: Principal,
+  ): Promise<ServiceResult<ScheduleRecord>> {
+    const record = await deps.schedules.get(scheduleId);
+    if (!record || record.ownerId !== principal.ownerId) {
+      return fail('not_found', 'That schedule does not exist for this owner.');
+    }
+    return ok(record);
+  }
+
+  function control(
+    record: ScheduleRecord,
+    outcome: ScheduleControlResult['outcome'],
+  ): ScheduleControlResult {
+    return { scheduleId: record.scheduleId, state: record.state, outcome };
   }
 
   const service: ApplicationService = {
@@ -1130,260 +1854,74 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
-    submitWork: async (principal, request) => {
-      const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
-      const adapter = deps.agents.resolve(agentId);
-      if (!adapter.ok) return adapter;
+    browserCapabilities: () => deps.browser.capabilities(),
+    browserSessions: (principal) => deps.browser.list(principal.ownerId),
+    browserSession: (principal, sessionId) =>
+      deps.browser.get(principal.ownerId, sessionId),
+    createBrowserSession: (principal, request) =>
+      deps.browser.create(principal.ownerId, request),
+    browserAction: (principal, sessionId, action) =>
+      deps.browser.act(principal.ownerId, sessionId, action),
+    pauseBrowserSession: (principal, sessionId) =>
+      deps.browser.pause(principal.ownerId, sessionId),
+    resumeBrowserSession: (principal, sessionId) =>
+      deps.browser.resume(principal.ownerId, sessionId),
+    takeoverBrowserSession: (principal, sessionId, request) =>
+      deps.browser.takeover(principal.ownerId, sessionId, request),
+    closeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.close(principal.ownerId, sessionId, request),
+    authorizeBrowserSession: (principal, sessionId, request) =>
+      deps.browser.authorize(principal.ownerId, sessionId, request),
+    decideBrowserAuthorization: (principal, sessionId, request) =>
+      deps.browser.decide(principal.ownerId, sessionId, request),
+    browserReceipts: (principal, sessionId) =>
+      deps.browser.receipts(principal.ownerId, sessionId),
+    browserArtifact: (principal, artifactId) =>
+      deps.browser.artifact(principal.ownerId, artifactId),
 
-      const model = deps.models.resolve(request.model, request.mode);
-      if (!model.ok) return model;
+    submitWork: (principal, request) => acceptTask(principal, request),
 
-      const idempotencyKey = request.idempotencyKey;
-      const requestHash = digestRequest(request);
-      const reservedAt = deps.clock.now();
-      const idempotencyExpiry = new Date(
-        reservedAt.getTime() + deps.config.retention.idempotencyMs,
-      ).toISOString();
-
-      const releaseReservation = async (): Promise<void> => {
-        if (!idempotencyKey) return;
-        await deps.idempotency
-          .release({ ownerId: principal.ownerId, key: idempotencyKey })
-          .catch(() => undefined);
-      };
-
-      if (idempotencyKey) {
-        const reservation = await deps.idempotency.reserve({
-          ownerId: principal.ownerId,
-          key: idempotencyKey,
-          requestHash,
-          now: reservedAt.toISOString(),
-          expiresAt: idempotencyExpiry,
-        });
-        if (reservation.kind === 'replay') return ok(reservation.response);
-        if (reservation.kind === 'conflict') {
-          return fail(
-            'conflict',
-            'That idempotency key was already used for a different Work submission.',
-          );
-        }
-        if (reservation.kind === 'pending') {
-          return fail(
-            'conflict',
-            'A submission with that idempotency key is still in progress; retry it.',
-            true,
-          );
-        }
-      }
-
-      if (request.conversationId) {
-        const existing = await existingConversation(
-          principal,
-          request.conversationId,
-          request.mode,
-        );
-        if (!existing.ok) {
-          await releaseReservation();
-          return existing;
-        }
-      }
-
-      const now = deps.clock.iso();
-      const conversationId = request.conversationId ?? deps.ids.conversationId();
-
-      const task: TaskRecord = {
-        taskId: deps.ids.taskId(),
-        ownerId: principal.ownerId,
-        tenantId: null,
-        conversationId,
-        agent: agentId,
-        engine: adapter.value.engine,
-        mode: request.mode,
-        objective: request.objective,
-        model: model.value.ref,
-        state: 'queued',
-        generation: 1,
-        runToken: null,
-        steps: [],
-        checkpoint: { completedSteps: [], text: '' },
-        createdAt: now,
-        updatedAt: now,
-        leaseExpiresAt: null,
-        cancelRequested: false,
-        requireApproval: request.requireApproval,
-        budget: request.budget ?? null,
-        usage: null,
-        result: null,
-        failure: null,
-      };
-
-      // Claim first, then create. The lease is the cross-replica guard for "one
-      // live run per conversation", and the created task carries the unique
-      // token that authorizes its terminal write from the first instant.
-      const token = deps.ids.runToken();
-      const claimedAt = deps.clock.now();
-      const key = workRunKey({
-        ownerId: task.ownerId,
-        tenantId: task.tenantId,
-        conversationId,
-      });
-      const claimed = await deps.lease.claim({
-        key,
-        owner: task.ownerId,
-        token,
-        now: claimedAt,
-        expiresAt: new Date(claimedAt.getTime() + deps.config.execution.leaseTtlMs),
-      });
-      if (!claimed) {
-        await releaseReservation();
-        return fail('busy', 'This conversation already has a live Work run.');
-      }
-
-      // Re-check after claiming: a concurrent submission may have won the same
-      // idempotency key on another conversation. It is answered before the
-      // budget is charged or a transcript is written.
-      if (request.idempotencyKey) {
-        const raced = await deps.tasks.findByIdempotencyKey(
-          principal.ownerId,
-          request.idempotencyKey,
-        );
-        if (raced) {
-          await deps.lease.release({ key, token }).catch(() => false);
-          return ok(acceptedFor(raced));
-        }
-      }
-
-      // Deterministic per task generation: a retried admission cannot reserve a
-      // second slot, and every replica settles the same id.
-      const budgetReservationId = `budget_${task.taskId}_${task.generation}`;
-      const reservation = await deps.budget.reserve({
-        ownerId: principal.ownerId,
-        at: deps.clock.now(),
-        inputTokens:
-          request.budget?.maxInputTokens ?? deps.config.models.reservationInputTokens,
-        outputTokens:
-          request.budget?.maxOutputTokens ?? deps.config.models.reservationOutputTokens,
-        reservationId: budgetReservationId,
-      });
-      if (!reservation.allowed) {
-        await deps.lease.release({ key, token }).catch(() => false);
-        await releaseReservation();
-        return fail('budget_exhausted', reservation.detail);
-      }
-
-      const created = await deps.tasks.create(
-        {
-          ...task,
-          runToken: token,
-          leaseExpiresAt: new Date(
-            claimedAt.getTime() + deps.config.execution.leaseTtlMs,
-          ).toISOString(),
-        },
-        request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : undefined,
-      );
-      if (!created.ok) {
-        await deps.lease.release({ key, token }).catch(() => false);
-        await releaseReservation();
-        await deps.budget.release(budgetReservationId);
-        if (created.reason === 'idempotent') {
-          return ok(acceptedFor(created.task));
-        }
-        return fail(
-          'busy',
-          created.reason === 'conversation_busy'
-            ? 'This conversation already has an active Work task.'
-            : 'That task identity is already in use.',
-        );
-      }
-
-      // The task exists before the transcript is written, so a concurrent replay
-      // that loses the idempotency race cannot leave a second user message. If
-      // the transcript write fails, the accepted task is failed rather than
-      // stranded as queued with no run scheduled.
-      try {
-        await deps.conversations.ensure({
-          conversationId,
-          ownerId: principal.ownerId,
-          tenantId: null,
-          title: request.objective.slice(0, 120),
-          mode: request.mode,
-          isWork: true,
-          agent: agentId,
-          createdAt: now,
-          updatedAt: now,
-        });
-        await deps.conversations.appendMessage({
-          messageId: deps.ids.messageId(),
-          conversationId,
-          role: 'user',
-          text: request.objective,
-          createdAt: now,
-        });
-      } catch {
-        await deps.tasks.updateFenced({
-          taskId: task.taskId,
-          token,
-          patch: {
-            state: 'failed',
-            updatedAt: deps.clock.iso(),
-            failure: {
-              code: 'server_unavailable',
-              detail: 'The task transcript could not be recorded.',
-              retryable: true,
-            },
-          },
-        });
-        await deps.lease.release({ key, token }).catch(() => false);
-        await deps.budget.release(budgetReservationId);
-        return fail('internal_error', 'The task transcript could not be recorded.');
-      }
-      await deps.events.hydrate(created.task.taskId).catch(() => 0);
-
-      publish(created.task, 'task.queued');
-      await audit({
-        actor: principal.ownerId,
-        action: 'work.accepted',
-        taskId: task.taskId,
-        conversationId,
-        outcome: 'accepted',
-        mode: task.mode,
-        detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
-      });
-
-      const accepted: TaskAccepted = {
-        taskId: task.taskId,
-        conversationId,
-        state: 'queued',
-        generation: 1,
-        eventsPath: `/v1/work/${task.taskId}/events`,
-      };
-      if (idempotencyKey) {
-        await deps.idempotency
-          .complete({
-            ownerId: principal.ownerId,
-            key: idempotencyKey,
-            response: accepted,
-            now: deps.clock.iso(),
-            expiresAt: new Date(
-              deps.clock.now().getTime() + deps.config.retention.idempotencyMs,
-            ).toISOString(),
-          })
-          .catch(() => undefined);
-      }
-
-      deps.scheduler.enqueue(() => execute(task.taskId, token));
-
-      return ok(accepted);
-    },
 
     task: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      const reconciled = await reconcile(found.value);
-      // A client that observes a terminal state must be able to replay the
-      // terminal event immediately: repair the stream before answering.
-      await ensureTerminalEvent(reconciled);
-      return ok(toStatus(reconciled));
+      const task = await reconcile(found.value);
+      if (task.state === 'awaiting_approval') {
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
+        // A durable suspension is ready to expose only after its run no longer
+        // holds the lease. An owner who sees it can immediately claim a resume.
+        if (lease?.live && lease.token === task.runToken) {
+          return ok(toStatus({
+            ...task,
+            state: 'running',
+            failure: null,
+            leaseExpiresAt: lease.expiresAt.toISOString(),
+          }));
+        }
+      }
+      const status = toStatus(task);
+      // Result artifacts are read from the artifact service rather than copied
+      // into the fenced task row. The task remains the authority on state; the
+      // artifact store is the authority on files, and a download can be made
+      // from exactly the descriptors reported here.
+      const listed = await deps.artifactService.list(principal, {
+        mode: task.mode,
+        taskId: task.taskId,
+        limit: 100,
+      });
+      if (listed.ok && listed.value.artifacts.length > 0) {
+        status.result = {
+          ...(status.result ?? {}),
+          artifacts: listed.value.artifacts.map((artifact) => ({
+            // A generated source tree keeps its directory-relative path; a flat
+            // artifact falls back to its file name. Neither is a host path.
+            path: artifact.relativePath ?? artifact.filename,
+            bytes: artifact.bytes,
+            digest: artifact.sha256,
+          })),
+        };
+      }
+      return ok(status);
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -1399,22 +1937,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         });
       }
 
+      // Once suspended, the task can be cancelled even without a live lease.
+      if (task.state === 'awaiting_approval') return cancelSuspended(task);
+
       const outcome = await deps.lease.cancel({
         key: workRunKey(scopeOf(task)),
         now: deps.clock.now(),
       });
       if (outcome === 'none') {
+        const current = await deps.tasks.get(taskId);
+        if (current?.runToken === task.runToken && current?.state === 'awaiting_approval') {
+          return cancelSuspended(current);
+        }
         return fail('not_found', 'No live run exists for that task.');
       }
 
       if (outcome === 'requested') {
-        await deps.tasks.updateFenced({
+        const applied = await deps.tasks.updateFenced({
           taskId: task.taskId,
           token: task.runToken ?? '',
+          guard: 'not_awaiting_approval',
           patch: { cancelRequested: true, updatedAt: deps.clock.iso() },
         });
-        const executionId = executionsByTask.get(task.taskId);
-        if (executionId) deps.supervisor.cancel(executionId, reason);
+        if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+        if (!applied.applied) return lostCancellation(task);
+        controllers.get(task.taskId)?.abort();
         return ok({
           taskId: task.taskId,
           state: task.state,
@@ -1426,6 +1973,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const applied = await deps.tasks.updateFenced({
         taskId: task.taskId,
         token: task.runToken ?? '',
+        guard: 'not_awaiting_approval',
         patch: {
           state: 'interrupted',
           updatedAt: deps.clock.iso(),
@@ -1437,20 +1985,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           },
         },
       });
-      if (!applied.applied) {
-        return ok({
-          taskId: task.taskId,
-          state: (await deps.tasks.get(task.taskId))?.state ?? task.state,
-          generation: task.generation,
-          outcome: 'superseded',
-        });
-      }
-      await releaseBudget(applied.task);
-      await deps.events.hydrate(applied.task.taskId).catch(() => 0);
+      if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
+      if (!applied.applied) return lostCancellation(task);
       publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
-      await deps.events.flush(applied.task.taskId).catch(() => undefined);
       await notifyTerminal(applied.task, 'interrupted');
       return ok({
         taskId: task.taskId,
@@ -1480,6 +2019,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'already_terminal',
         });
       }
+      if (!(await canRunScheduled(task))) {
+        return fail('conflict', 'Scheduled Work was not admitted or its schedule was cancelled.');
+      }
       const token = deps.ids.runToken();
       const now = deps.clock.now();
       const claimed = await deps.lease.claim({
@@ -1491,35 +2033,21 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
-      // A resume is a new admitted attempt, so it takes a shared request slot
-      // before the generation is reissued. The id is deterministic, so a replay
-      // of this control request cannot reserve twice.
-      const budgetReservationId = `budget_${taskId}_${task.generation + 1}`;
-      const budgetReservation = await deps.budget.reserve({
-        ownerId: task.ownerId,
-        at: now,
-        inputTokens: task.budget?.maxInputTokens ?? deps.config.models.reservationInputTokens,
-        outputTokens: task.budget?.maxOutputTokens ?? deps.config.models.reservationOutputTokens,
-        reservationId: budgetReservationId,
-      });
-      if (!budgetReservation.allowed) {
-        await deps.lease.release({ key: workRunKey(scopeOf(task)), token }).catch(() => false);
-        return fail('budget_exhausted', budgetReservation.detail);
-      }
-
       const applied = await deps.tasks.reissue({
         taskId,
         token,
         now: deps.clock.iso(),
         leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+        // A concurrent cancel may land between the read above and this write.
+        // Only the two suspending states may be revived; a cancelled task stays
+        // cancelled.
+        from: ['interrupted', 'awaiting_approval'],
       });
       if (!applied.applied) {
-        await deps.lease.release({ key: workRunKey(scopeOf(task)), token }).catch(() => false);
-        await deps.budget.release(budgetReservationId);
+        await releaseLease(task, token);
         return fail('conflict', 'That task cannot be resumed.');
       }
-      await deps.events.hydrate(taskId).catch(() => 0);
-      publish(applied.task, 'task.queued');
+      publish(applied.task, 'task.queued', {});
       publish(applied.task, 'text.replace', { text: '' });
       deps.scheduler.enqueue(() => execute(taskId, token));
       return ok({
@@ -1550,51 +2078,51 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'already_terminal',
         });
       }
+      if (!(await canRunScheduled(task))) {
+        return fail('conflict', 'Scheduled Work was not admitted or its schedule was cancelled.');
+      }
       const token = deps.ids.runToken();
       const now = deps.clock.now();
-      const claimed = await deps.lease.claim({
-        key: workRunKey(scopeOf(task)),
-        owner: task.ownerId,
-        token,
-        now,
-        expiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs),
-      });
-      if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
-
-      const budgetReservationId = `budget_${taskId}_${task.generation + 1}`;
-      const budgetReservation = await deps.budget.reserve({
-        ownerId: task.ownerId,
-        at: now,
-        inputTokens: task.budget?.maxInputTokens ?? deps.config.models.reservationInputTokens,
-        outputTokens: task.budget?.maxOutputTokens ?? deps.config.models.reservationOutputTokens,
-        reservationId: budgetReservationId,
-      });
-      if (!budgetReservation.allowed) {
-        await deps.lease.release({ key: workRunKey(scopeOf(task)), token }).catch(() => false);
-        return fail('budget_exhausted', budgetReservation.detail);
+      if (task.failure?.code === 'budget_exhausted') {
+        return fail('budget_exhausted', 'This task was refused before admission; submit a new request.');
       }
+      const reservation = deps.budget.reserve(principal.ownerId, now);
+      if (!reservation.allowed) return fail('budget_exhausted', 'The daily request budget is exhausted.');
+      let accepted = false;
+      try {
+        const claimed = await deps.lease.claim({
+          key: workRunKey(scopeOf(task)),
+          owner: task.ownerId,
+          token,
+          now,
+          expiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs),
+        });
+        if (!claimed) return fail('busy', 'This conversation already has a live Work run.');
 
-      const applied = await deps.tasks.reissue({
-        taskId,
-        token,
-        now: deps.clock.iso(),
-        leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
-      });
-      if (!applied.applied) {
-        await deps.lease.release({ key: workRunKey(scopeOf(task)), token }).catch(() => false);
-        await deps.budget.release(budgetReservationId);
-        return fail('conflict', 'That task cannot be retried.');
+        const applied = await deps.tasks.reissue({
+          taskId,
+          token,
+          now: deps.clock.iso(),
+          leaseExpiresAt: new Date(now.getTime() + deps.config.execution.leaseTtlMs).toISOString(),
+          from: ['failed', 'interrupted'],
+        });
+        if (!applied.applied) {
+          await releaseLease(task, token);
+          return fail('conflict', 'That task cannot be retried.');
+        }
+        accepted = true;
+        publish(applied.task, 'task.queued', {});
+        publish(applied.task, 'text.replace', { text: '' });
+        deps.scheduler.enqueue(() => execute(taskId, token));
+        return ok({
+          taskId,
+          state: 'queued',
+          generation: applied.task.generation,
+          outcome: 'accepted',
+        });
+      } finally {
+        if (!accepted) reservation.release();
       }
-      await deps.events.hydrate(taskId).catch(() => 0);
-      publish(applied.task, 'task.queued');
-      publish(applied.task, 'text.replace', { text: '' });
-      deps.scheduler.enqueue(() => execute(taskId, token));
-      return ok({
-        taskId,
-        state: 'queued',
-        generation: applied.task.generation,
-        outcome: 'accepted',
-      });
     },
 
     chat: async (principal, request) => {
@@ -1603,51 +2131,34 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(request.model, request.mode);
       if (!model.ok) return model;
 
-      const executionId = deps.ids.executionId();
-      const reservationId = `budget_${executionId}`;
-      const reservation = await deps.budget.reserve({
-        ownerId: principal.ownerId,
-        at: deps.clock.now(),
-        // A chat turn has no caller-declared ceiling, so it holds the configured
-        // per-request allowance until it settles. A zero-token reservation would
-        // let every replica spend the same remaining allowance at once.
-        inputTokens: deps.config.models.reservationInputTokens,
-        outputTokens: deps.config.models.reservationOutputTokens,
-        reservationId,
-      });
+      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
-        return fail('budget_exhausted', reservation.detail);
+        return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
-      const workspace = await resolveEngineWorkspace({
+      // A chat turn is a run too, so it gets its own empty directory instead of
+      // the shared mode root. It is removed afterwards when it produced nothing.
+      const workspace = await createRunWorkspace({
         mode: request.mode,
         roots: workspaceRoots(deps.config.workspaces),
+        runId: deps.ids.runToken(),
+        generation: 0,
       });
-      if (!workspace.ok) {
-        await deps.budget.release(reservationId);
-        return workspace;
-      }
-
-      if (request.conversationId) {
-        const existing = await existingConversation(
-          principal,
-          request.conversationId,
-          request.mode,
-        );
-        if (!existing.ok) return existing;
-      }
+      if (!workspace.ok) return workspace;
 
       const now = deps.clock.iso();
-      const conversationId = request.conversationId ?? deps.ids.conversationId();
-      const conversation = await deps.conversations.ensure({
-        conversationId,
-        ownerId: principal.ownerId,
-        tenantId: null,
+      const bound = await bindConversation({
+        principal,
+        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
         mode: request.mode,
         isWork: false,
         agent: request.agent,
-        createdAt: now,
-        updatedAt: now,
       });
+      if (!bound.ok) {
+        await removeRunWorkspaceIfEmpty(workspace.value.root);
+        return bound;
+      }
+      const conversation = bound.value;
+      const conversationId = conversation.conversationId;
       await deps.conversations.appendMessage({
         messageId: deps.ids.messageId(),
         conversationId,
@@ -1656,92 +2167,56 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         createdAt: now,
       });
 
-      const history = await historyFor(conversationId, request.message);
-      const identity: ExecutionIdentity = {
-        executionId,
-        kind: 'chat',
-        taskId: null,
-        conversationId,
-        ownerId: principal.ownerId,
-        tenantId: conversation.tenantId,
-        agent: request.agent,
-        mode: request.mode,
-        generation: 0,
-        token: null,
-      };
-      const supervised = await deps.supervisor
-        .run({
-          identity,
-          adapter: adapter.value,
-          workspaceRoot: workspace.value.root,
-          scopes: CHAT_SCOPES,
-          launch: async (execution) => {
-            const result = await adapter.value.run(
-              {
-                ownerId: principal.ownerId,
-                tenantId: conversation.tenantId,
-                conversationId,
-                objective: request.message,
-                history,
-                model: model.value.ref,
-                mode: request.mode,
-                workspaceRoot: execution.workspaceRoot,
-                maxSteps: 1,
-                budget: null,
-                signal: execution.signal,
-              },
-              execution.report,
-            );
-            return {
-              outcome: result.ok
-                ? {
-                    kind: 'completed' as const,
-                    summary: result.summary,
-                    ...(result.usage ? { usage: result.usage } : {}),
-                  }
-                : result.code === 'cancelled'
-                  ? { kind: 'cancelled' as const }
-                  : {
-                      kind: 'failed' as const,
-                      code: result.code,
-                      detail: result.detail,
-                      retryable: result.retryable,
-                    },
-            };
+      const history = await historyFor(conversation, request.message, adapter.value);
+      const controller = new AbortController();
+      let outcome: Awaited<ReturnType<AgentAdapter['run']>>;
+      try {
+        outcome = await adapter.value.run(
+          {
+            ownerId: principal.ownerId,
+            tenantId: conversation.tenantId,
+            conversationId,
+            workload: 'work',
+            game: null,
+            objective: request.message,
+            history,
+            model: model.value.ref,
+            mode: request.mode,
+            workspaceRoot: workspace.value.root,
+            maxSteps: 1,
+            budget: null,
+            signal: controller.signal,
+            reasoning: 'fast',
+            completedSteps: [],
+            plan: null,
           },
-        })
-        .catch(() => null);
-      if (!supervised || !supervised.admitted) {
-        await deps.budget.release(reservationId, { dispatched: false });
+          () => undefined,
+        );
+      } finally {
+        await removeRunWorkspaceIfEmpty(workspace.value.root);
+      }
+      if (!outcome.ok) {
         return fail(
-          'engine_unavailable',
-          supervised ? supervised.detail : 'The execution supervisor could not admit this chat turn.',
-          true,
+          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
+          outcome.detail,
+          outcome.retryable,
         );
       }
-      const outcome = supervised.outcome;
-      if (outcome.kind !== 'completed') {
-        await deps.budget.release(reservationId, { dispatched: true });
-        return fail(
-          outcome.kind === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          outcome.kind === 'cancelled' ? 'The chat turn was cancelled.' : outcome.detail,
-          outcome.kind === 'failed' ? outcome.retryable : true,
-        );
-      }
-      await deps.budget.settle(reservationId, outcome.usage ?? {});
+      const reply = redactContent(outcome.summary);
+      deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       const messageId = deps.ids.messageId();
       await deps.conversations.appendMessage({
         messageId,
         conversationId,
         role: 'assistant',
-        text: outcome.summary,
+        text: reply,
         createdAt: deps.clock.iso(),
         agent: request.agent,
       });
       return ok({
         conversationId,
         messageId,
-        text: outcome.summary,
+        text: reply,
         agent: request.agent,
         model: model.value.ref,
         ...(outcome.usage ? { usage: outcome.usage } : {}),
@@ -1749,44 +2224,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    listTasks: async (principal, query) => {
-      if (query.cursor && !decodeCursor(query.cursor)) {
-        return fail('validation_failed', 'The pagination cursor is invalid.');
-      }
-      const page = await deps.tasks.listPage({
-        ownerId: principal.ownerId,
-        ...(query.limit === undefined ? {} : { limit: query.limit }),
-        ...(query.cursor ? { cursor: query.cursor } : {}),
-        ...(query.state ? { state: query.state } : {}),
-        ...(query.conversationId ? { conversationId: query.conversationId } : {}),
-        ...(query.agent ? { agent: query.agent } : {}),
-        ...(query.mode ? { mode: query.mode } : {}),
-      });
-      return ok({
-        tasks: page.tasks.map(toSummary),
-        total: page.total,
-        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-      });
-    },
-
-    conversations: async (principal, query) => {
-      if (query.cursor && !decodeCursor(query.cursor)) {
-        return fail('validation_failed', 'The pagination cursor is invalid.');
-      }
-      const page = await deps.conversations.listPage({
-        ownerId: principal.ownerId,
-        ...(query.limit === undefined ? {} : { limit: query.limit }),
-        ...(query.cursor ? { cursor: query.cursor } : {}),
-        ...(query.mode ? { mode: query.mode } : {}),
-        ...(query.agent ? { agent: query.agent } : {}),
-        ...(query.isWork === undefined ? {} : { isWork: query.isWork === 'true' }),
-      });
-      return ok({
-        conversations: page.conversations,
-        total: page.total,
-        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-      });
-    },
+    conversations: (principal) => deps.conversations.list(principal.ownerId),
 
     conversation: async (principal, conversationId) => {
       const record = await deps.conversations.get(principal.ownerId, conversationId);
@@ -1794,78 +2232,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return ok(await deps.conversations.toContract(record));
     },
 
-    deleteConversation: async (principal, conversationId) => {
-      const record = await deps.conversations.get(principal.ownerId, conversationId);
-      if (!record) return fail('not_found', 'That conversation does not exist for this owner.');
-      const tasks = await deps.tasks.listByConversation(conversationId);
-      if (tasks.some((task) => task.ownerId === principal.ownerId && !isTerminalState(task.state))) {
-        return fail(
-          'conflict',
-          'That conversation still has a live Work task; cancel it before deleting the conversation.',
-        );
-      }
-      const ownedTaskIds = tasks
-        .filter((task) => task.ownerId === principal.ownerId)
-        .map((task) => task.taskId);
-      const removed = await deps.conversations.delete(principal.ownerId, conversationId);
-      if (!removed.deleted) {
-        return fail('not_found', 'That conversation does not exist for this owner.');
-      }
-      const tasksDeleted = await deps.tasks.deleteByConversation(
-        principal.ownerId,
-        conversationId,
-      );
-      await deps.notifications
-        .deleteByConversation(principal.ownerId, conversationId)
-        .catch(() => 0);
-      await deps.permissions.deleteByTaskIds(ownedTaskIds).catch(() => 0);
-      await deps.checkpoints.deleteByTaskIds(ownedTaskIds).catch(() => 0);
-      await deps.events.deleteTasks(ownedTaskIds).catch(() => 0);
-      await deps.audit.deleteByTaskIds(ownedTaskIds).catch(() => 0);
-      await deps.idempotency
-        .deleteByConversation(principal.ownerId, conversationId)
-        .catch(() => 0);
-      await audit({
-        actor: principal.ownerId,
-        action: 'conversation.deleted',
-        conversationId,
-        outcome: 'accepted',
-        mode: record.mode,
-        detail: `messages=${removed.messages} tasks=${tasksDeleted}`,
-      });
-      return ok({
-        conversationId,
-        deleted: true,
-        messagesDeleted: removed.messages,
-        tasksDeleted,
-      });
-    },
+    memory: (principal, mode) => deps.memory.list({ ownerId: principal.ownerId, mode }),
 
-    memory: (principal, mode, query = {}) =>
-      deps.memory.list({
-        ownerId: principal.ownerId,
-        mode,
-        ...(query.limit === undefined ? {} : { limit: query.limit }),
-        ...(query.cursor ? { cursor: query.cursor } : {}),
-      }),
-
-    deleteMemory: async (principal, key, mode) => {
-      const trimmed = key.trim();
-      const deleted = await deps.memory.delete({
-        ownerId: principal.ownerId,
-        mode,
-        key: trimmed,
-      });
-      return { key: trimmed, mode, deleted };
-    },
-
-    permissions: async (principal, taskId, query) => {
+    permissions: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      if (query?.cursor && !decodeCursor(query.cursor)) {
-        return fail('validation_failed', 'The pagination cursor is invalid.');
-      }
-      return ok(await deps.permissions.list(principal.ownerId, taskId, query));
+      return ok(await deps.permissions.list(principal.ownerId, taskId));
     },
 
     decidePermission: async (principal, taskId, body) => {
@@ -1880,386 +2252,619 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    notifications: async (principal, query) => {
-      if (query.cursor && !decodeCursor(query.cursor)) {
-        return fail('validation_failed', 'The pagination cursor is invalid.');
-      }
-      return ok(
-        await deps.notifications.list({
-          ownerId: principal.ownerId,
-          ...(query.limit === undefined ? {} : { limit: query.limit }),
-          ...(query.cursor ? { cursor: query.cursor } : {}),
-          ...(query.unreadOnly === undefined ? {} : { unreadOnly: query.unreadOnly === 'true' }),
-        }),
-      );
-    },
-
-    markNotificationsRead: async (principal, taskIds) => {
-      await deps.notifications.markRead(principal.ownerId, taskIds);
-      return deps.notifications.list({ ownerId: principal.ownerId });
-    },
-
-    receipts: async (principal, taskId, query) => {
-      const found = ownedTask(await deps.tasks.get(taskId), principal);
-      if (!found.ok) return found;
-      if (query.cursor && !decodeCursor(query.cursor)) {
-        return fail('validation_failed', 'The pagination cursor is invalid.');
-      }
-      return ok(
-        await deps.audit.list({
-          actor: principal.ownerId,
-          taskId,
-          ...(query.limit === undefined ? {} : { limit: query.limit }),
-          ...(query.cursor ? { cursor: query.cursor } : {}),
-        }),
-      );
-    },
-
-    metrics: async (principal) => {
-      const [byState, auditPage, persistence] = await Promise.all([
-        deps.tasks.countByState(),
-        deps.audit.list({ actor: principal.ownerId, limit: 1 }),
-        deps.persistencePing().catch(() => ({
-          driver: deps.config.persistence.driver,
-          durable: deps.config.persistence.driver === 'mongo',
-          ok: false,
-          latencyMs: 0,
-          detail: 'The persistence ping did not complete.',
-        })),
+    notifications: async (principal, includeSchedules = true) => {
+      if (!includeSchedules) return deps.notifications.list(principal.ownerId);
+      const [work, schedule] = await Promise.all([
+        deps.notifications.list(principal.ownerId),
+        deps.scheduleNotices.list(principal.ownerId, deps.config.schedules.historyLimit),
       ]);
-      const counters = deps.metrics.counters();
-      const total = Object.values(byState).reduce((sum, count) => sum + count, 0);
+      // One owner-facing list and one unread count. A schedule can fail before a
+      // Work task exists, so its notices are a second record kind, not a second
+      // notification endpoint.
       return {
-        startedAt: deps.metrics.startedAt,
-        uptimeMs: deps.metrics.uptimeMs(),
-        requests: counters.requests,
-        queue: {
-          active: deps.scheduler.active(),
-          pending: deps.scheduler.pending(),
-          maxConcurrent: deps.config.execution.maxConcurrentTasks,
-        },
-        tasks: { total, byState },
-        events: { dropped: deps.events.dropped() },
-        leases: counters.leases,
-        audit: { receipts: auditPage.total },
-        persistence: {
-          driver: persistence.driver === 'mongo' ? 'mongo' : 'in_memory',
-          durable: persistence.durable,
-          ok: persistence.ok,
-          latencyMs: persistence.latencyMs,
-          checkedAt: deps.clock.iso(),
-          detail: persistence.detail,
-        },
+        notifications: work.notifications,
+        schedules: schedule.notifications,
+        unread: work.unread + schedule.unread,
       };
     },
 
-    handshake: () => ({
-      engineName: 'coderax-workflow-engine',
-      engineVersion: ENGINE_VERSION,
-      contractVersion: CONTRACT_VERSION,
-      eventSchemaVersion: EVENT_SCHEMA_VERSION,
-      chatStreamSchemaVersion: CHAT_STREAM_SCHEMA_VERSION,
-      minSdkVersion: MIN_SDK_VERSION,
-      sdkVersion: SDK_VERSION,
-      apiPrefix: API_PREFIX,
-      ...(deps.deploymentRevision ? { deploymentRevision: deps.deploymentRevision } : {}),
-      capabilities: {
-        chat: capability('available', 'One Chat turn with the explicitly selected agent.'),
-        chatStreaming: capability('available', 'Typed SSE frames; JSON remains available.'),
-        work: capability('available', 'Durable Work tasks with fenced settlement.'),
-        durableEvents: capability(
-          'available',
-          `Execution events are persisted and replayable in the ${deps.config.persistence.driver} store.`,
-        ),
-        eventReplay: capability('available', 'Replay and tail from a per-task sequence cursor.'),
-        scheduling: capability(
-          'available',
-          `Durable schedules are stored in the ${deps.config.persistence.driver} store.`,
-        ),
-        artifacts: capability('available', 'Owner-scoped bytes with sha256 verification.'),
-        permissions: capability(
-          'available',
-          `Scoped approvals are stored in the ${deps.config.persistence.driver} store.`,
-        ),
-        memory: capability('available', 'Exact owner- and mode-partitioned key/value memory.'),
-        rag: capability('unsupported', 'No embedding provider or vector retrieval is configured.'),
-        multimodal: capability('unsupported', 'No image or audio input is implemented.'),
-        multiAgent: capability(
-          'unsupported',
-          'One explicitly selected agent per task; there is no multi-agent collaboration.',
-        ),
-        idempotency: capability('available', 'Owner-scoped submission keys replay one task.'),
-        reasoningPlanner: capability(
-          'available',
-          'Deterministic native step planner; no model-driven planner is wired here yet.',
-        ),
-        modelRouter: capability(
-          'available',
-          `Configured zero-cost route with allowPaid=false; ${deps.config.models.route.length} candidate(s).`,
-        ),
-        executionSupervisor: capability(
-          'available',
-          'Attempts are admitted through one supervisor with durable execution identity, scoped capability revocation and termination evidence; unverified termination quarantines the workspace in the shared store.',
-        ),
-      },
-      operations: ROUTES.map((route) => ({
-        operationId: route.operationId,
-        method: route.method,
-        path: route.path,
-        tags: [...route.tags],
-        auth: route.auth,
-        stream: route.stream === true,
-      })),
-    }),
-
-    putMemory: async (principal, request) => {
-      await deps.memory.put({
-        ownerId: principal.ownerId,
-        tenantId: null,
-        mode: request.mode,
-        key: request.key,
-        value: request.value,
-      });
-      return {
-        key: request.key,
-        value: request.value,
-        mode: request.mode,
-        updatedAt: deps.clock.iso(),
-      };
+    markNotificationsRead: async (principal, includeSchedules = true) => {
+      const work = await deps.notifications.list(principal.ownerId);
+      for (const notification of work.notifications) {
+        if (!notification.read) {
+          await deps.notifications.markRead(principal.ownerId, notification.taskId);
+        }
+      }
+      if (includeSchedules) await deps.scheduleNotices.markAllRead(principal.ownerId);
+      return service.notifications(principal, includeSchedules);
     },
 
-    pendingPermissions: (principal, query = {}) =>
-      deps.permissions.listPending(principal.ownerId, query),
+    artifacts: deps.artifactService,
 
-    listSchedules: async (principal) => ({
-      schedules: (await deps.schedules.list(principal.ownerId)).map(toSchedule),
-    }),
-
-    createSchedule: async (principal, request) => {
-      const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
-      const adapter = deps.agents.resolve(agentId);
-      if (!adapter.ok) return adapter;
-      const model = deps.models.resolve(request.model ?? null, request.mode);
-      if (!model.ok) return model;
-      const now = deps.clock.iso();
-      // Normalise an offset date so due-time comparisons are against the same
-      // UTC representation the clock and the durable store use.
-      const runAt = new Date(request.runAt).toISOString();
-      const record: ScheduleRecord = {
-        scheduleId: deps.ids.scheduleId(),
-        ownerId: principal.ownerId,
-        objective: request.objective,
-        agent: agentId,
-        mode: request.mode,
-        model: model.value.ref,
-        requireApproval: request.requireApproval,
-        budget: request.budget ?? null,
-        state: 'scheduled',
-        runAt,
-        intervalMs: request.intervalMs ?? null,
-        createdAt: now,
-        updatedAt: now,
-        nextRunAt: runAt,
-        lastTaskId: null,
-        lastError: null,
-      };
-      const created = await deps.schedules.create(record);
-      if (!created.ok) {
-        return fail('conflict', 'The maximum number of active schedules is reached.');
-      }
-      return ok(toSchedule(record));
-    },
-
-    updateSchedule: async (principal, scheduleId, request) => {
-      const record = await deps.schedules.get(principal.ownerId, scheduleId);
-      if (!record) return fail('not_found', 'That schedule does not exist for this owner.');
-      // A schedule that already dispatched or was cancelled has an immutable
-      // history: editing it would rewrite what the owner authorized in the past.
-      if (record.state !== 'scheduled') {
-        return fail(
-          'conflict',
-          'Only a schedule that has not run and was not cancelled can be edited.',
-        );
-      }
-      const runAt =
-        request.runAt === undefined
-          ? record.runAt
-          : new Date(request.runAt).toISOString();
-      const nextRunAt = request.runAt === undefined ? record.nextRunAt : runAt;
-      const updated: ScheduleRecord = {
-        ...record,
-        objective: request.objective ?? record.objective,
-        requireApproval: request.requireApproval ?? record.requireApproval,
-        runAt,
-        intervalMs:
-          request.intervalMs === undefined ? record.intervalMs : request.intervalMs,
-        nextRunAt,
-        updatedAt: deps.clock.iso(),
-      };
-      const applied = await deps.schedules.update(updated);
-      if (!applied) {
-        return fail('conflict', 'That schedule changed before it could be updated.');
-      }
-      return ok(toSchedule(updated));
-    },
-
-    schedule: async (principal, scheduleId) => {
-      const record = await deps.schedules.get(principal.ownerId, scheduleId);
-      return record
-        ? ok(toSchedule(record))
-        : fail('not_found', 'That schedule does not exist for this owner.');
-    },
-
-    cancelSchedule: async (principal, scheduleId) => {
-      const record = await deps.schedules.get(principal.ownerId, scheduleId);
-      if (!record) return fail('not_found', 'That schedule does not exist for this owner.');
-      if (record.state !== 'scheduled') {
-        return ok({ scheduleId, state: record.state, outcome: 'already_terminal' });
-      }
-      const updated: ScheduleRecord = {
-        ...record,
-        state: 'cancelled',
-        nextRunAt: null,
-        updatedAt: deps.clock.iso(),
-      };
-      const applied = await deps.schedules.update(updated);
-      if (!applied) {
-        return fail('conflict', 'That schedule changed before it could be cancelled.');
-      }
-      return ok({ scheduleId, state: 'cancelled', outcome: 'accepted' });
-    },
-
-    tickSchedules,
-
-    listArtifacts: async (principal, taskId) => {
-      const found = ownedTask(await deps.tasks.get(taskId), principal);
-      if (!found.ok) return found;
-      return ok({
-        artifacts: (await deps.artifacts.list(principal.ownerId, taskId)).map(toArtifact),
-      });
-    },
-
-    uploadArtifact: async (principal, taskId, request) => {
-      const found = ownedTask(await deps.tasks.get(taskId), principal);
-      if (!found.ok) return found;
-      const content = decodeBase64(request.contentBase64);
-      if (!content) {
-        return fail('validation_failed', 'The artifact content is not valid base64.');
-      }
-      if (content.length > deps.config.artifacts.maxBytes) {
-        return fail(
-          'validation_failed',
-          `An artifact may contain at most ${deps.config.artifacts.maxBytes} bytes.`,
-        );
-      }
-      const artifactId = deps.ids.artifactId();
-      let stored: { bytes: number; digest: string };
-      try {
-        stored = await deps.artifactStorage.write({
-          mode: found.value.mode,
-          artifactId,
-          content,
-        });
-      } catch {
-        return fail('internal_error', 'The artifact bytes could not be stored.');
-      }
-      const row: ArtifactRow = {
-        artifactId,
-        ownerId: principal.ownerId,
-        taskId,
-        path: request.path,
-        mediaType: request.mediaType,
-        bytes: stored.bytes,
-        digest: stored.digest,
-        mode: found.value.mode,
-        createdAt: deps.clock.iso(),
-      };
-      try {
-        await deps.artifacts.insert(row);
-      } catch {
-        await deps.artifactStorage
-          .remove({ mode: found.value.mode, artifactId })
-          .catch(() => undefined);
-        return fail('internal_error', 'The artifact could not be recorded.');
-      }
-      return ok(toArtifact(row));
-    },
-
-    artifact: async (principal, artifactId) => {
-      const row = await deps.artifacts.get(principal.ownerId, artifactId);
-      return row
-        ? ok(toArtifact(row))
-        : fail('not_found', 'That artifact does not exist for this owner.');
-    },
-
-    artifactContent: async (principal, artifactId) => {
-      const row = await deps.artifacts.get(principal.ownerId, artifactId);
-      if (!row) return fail('not_found', 'That artifact does not exist for this owner.');
-      try {
-        const content = await deps.artifactStorage.read({
-          mode: row.mode,
-          artifactId: row.artifactId,
-          digest: row.digest,
-        });
-        return ok({
-          artifactId: row.artifactId,
-          mediaType: row.mediaType,
-          bytes: row.bytes,
-          digest: row.digest,
-          contentBase64: content.toString('base64'),
-        });
-      } catch {
-        return fail('not_found', 'The artifact bytes are unavailable.');
-      }
-    },
+    generateArtifact: (principal, request) =>
+      deps.artifactGenerator.generate(principal, {
+        projectId: request.projectId,
+        request: request.deliverable,
+        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
+        ...(request.taskId ? { taskId: request.taskId } : {}),
+        ...(request.retentionDays !== undefined
+          ? { retentionDays: request.retentionDays }
+          : {}),
+      }),
 
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
-      await ensureTerminalEvent(found.value);
-      // The durable read is what makes a reconnect after a restart replay the
-      // events the previous process wrote, not just this process's window.
       return ok({
-        replay: await deps.events.read(taskId, after),
+        replay: deps.events.replay(taskId, after),
         subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
         lastSeq: deps.events.lastSeq(taskId),
-        generation: found.value.generation,
       });
     },
 
-    budget: async (principal) => {
-      const now = deps.clock.now();
-      const used = await deps.budget.snapshot(principal.ownerId, now);
+    budget: (principal) => {
+      const used = deps.budget.snapshot(principal.ownerId, deps.clock.now());
       const budget = {
         maxRequests: deps.config.models.dailyRequestBudget,
         maxInputTokens: deps.config.models.dailyTokenBudget,
         maxOutputTokens: deps.config.models.dailyTokenBudget,
       };
-      const resets = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
-      );
       return {
         budget,
         used: {
           requests: used.requests,
           usage: { inputTokens: used.inputTokens, outputTokens: used.outputTokens },
         },
-        remaining: {
-          requests: Math.max(0, budget.maxRequests - used.requests),
-          inputTokens: Math.max(0, budget.maxInputTokens - used.inputTokens),
-          outputTokens: Math.max(0, budget.maxOutputTokens - used.outputTokens),
-        },
+        remaining: { requests: Math.max(0, budget.maxRequests - used.requests) },
         exhausted: used.requests >= budget.maxRequests,
-        period: 'day',
-        resetsAt: resets.toISOString(),
       };
     },
 
+    gameCapabilities: () => {
+      const modelReady = deps.models
+        .list()
+        .models.some((model) => model.availability.available);
+      return createGameCapabilityReport({
+        now: deps.clock.iso(),
+        studioEnabled: deps.config.games.enabled,
+        agentEnabled: deps.config.games.enabled && deps.config.games.agentEnabled,
+        sandboxReady: deps.config.games.enabled,
+        modelAssisted: modelReady && deps.studio.modelAssisted,
+        studioMessage: deps.config.games.enabled
+          ? 'Builds are generated and verified in the cloud engine; no owner device runs a game or a model.'
+          : 'Native Game Studio is disabled in this deployment.',
+        agentMessage:
+          deps.config.games.enabled && deps.config.games.agentEnabled
+            ? `Sessions run in the engine's isolated runtime with a ${deps.config.games.maxSessionTicks} tick ceiling; nothing executes on the owner device.`
+            : 'Native Gaming Agent is disabled in this deployment.',
+      });
+    },
+
+    listGames: async (principal, query) =>
+      deps.studio.list(principal.ownerId, {
+        limit: query.limit ?? 20,
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+      }),
+
+    createGame: async (principal, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.create(principal.ownerId, request);
+    },
+
+    getGame: async (principal, gameId) => deps.studio.get(principal.ownerId, gameId),
+
+    saveGameSpec: async (principal, gameId, request) =>
+      deps.studio.saveSpec({
+        ownerId: principal.ownerId,
+        gameId,
+        spec: request.spec,
+        expectedRevision: request.expectedRevision,
+      }),
+    buildGame: async (principal, gameId, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.build({
+        ownerId: principal.ownerId,
+        gameId,
+        ...(request.expectedSpecRevision !== undefined
+          ? { expectedSpecRevision: request.expectedSpecRevision }
+          : {}),
+      });
+    },
+
+    listGameBuilds: async (principal, gameId) =>
+      deps.studio.listBuilds(principal.ownerId, gameId),
+
+    restoreGameBuild: async (principal, gameId, buildId, request) => {
+      if (!deps.config.games.enabled) {
+        return fail('engine_not_configured', 'Native Game Studio is disabled in this deployment.');
+      }
+      return deps.studio.restore({
+        ownerId: principal.ownerId,
+        gameId,
+        buildId,
+        expectedRevision: request.expectedRevision,
+      });
+    },
+
+    iterateGame: async (principal, gameId, request) =>
+      deps.studio.iterate({
+        ownerId: principal.ownerId,
+        gameId,
+        instruction: request.instruction,
+        expectedRevision: request.expectedRevision,
+      }),
+
+    gamePreview: async (principal, gameId) => deps.studio.preview(principal.ownerId, gameId),
+
+    exportGame: async (principal, gameId) => deps.studio.export(principal.ownerId, gameId),
+
+    createGameSession: async (principal, gameId, request) => {
+      if (!deps.config.games.enabled || !deps.config.games.agentEnabled) {
+        return fail('engine_not_configured', 'Native Gaming Agent is disabled in this deployment.');
+      }
+      if (request.maxTicks > deps.config.games.maxSessionTicks) {
+        return fail(
+          'validation_failed',
+          `The tick budget exceeds this deployment's ceiling of ${deps.config.games.maxSessionTicks}.`,
+        );
+      }
+      const project = await deps.studio.get(principal.ownerId, gameId);
+      if (!project.ok) return project;
+      if (!project.value.spec || !project.value.build) {
+        return fail('conflict', 'Build and verify this game before starting a session.');
+      }
+      const buildId = request.buildId ?? project.value.build.buildId;
+      const loaded = await deps.studio.readVerifiedBuild({
+        ownerId: principal.ownerId,
+        gameId,
+        buildId,
+      });
+      if (!loaded.ok) return loaded;
+      const created = await deps.sessions.create({
+        ownerId: principal.ownerId,
+        project: { gameId, spec: project.value.spec },
+        build: loaded.value.build,
+        request,
+      });
+      if (!created.ok) return created;
+      const session = created.value;
+      const admitted = await admitTask({
+        principal,
+        agentId: 'coderax',
+        objective: `Play ${project.value.name}: ${request.objective.kind}`,
+        mode: 'cloud',
+        model: null,
+        budget: null,
+        requireApproval: false,
+        kind: 'game',
+        game: {
+          sessionId: session.sessionId,
+          gameId,
+          buildId,
+          objective: request.objective,
+          allowedActions: request.allowedActions,
+          maxTicks: request.maxTicks,
+        },
+      });
+      if (!admitted.ok) {
+        await deps.sessions.fail(session.sessionId, admitted.code, admitted.detail);
+        return admitted;
+      }
+      const grant = await deps.permissions.request({
+        ownerId: principal.ownerId,
+        taskId: admitted.value.task.taskId,
+        agent: 'coderax',
+        scope: 'command.execute',
+        description: `Bounded control of game session ${session.sessionId}.`,
+        resource: `game-session:${session.sessionId}`,
+        ttlMs: 60 * 60_000,
+      });
+      const decided = await deps.permissions.decide({
+        ownerId: principal.ownerId,
+        taskId: admitted.value.task.taskId,
+        requestId: grant.requestId,
+        decision: 'approved',
+        reason: 'Owner authorized the session when creating it.',
+      });
+      if (!decided.ok) {
+        await deps.sessions.fail(session.sessionId, decided.code, decided.detail);
+        return decided;
+      }
+      await deps.sessions.attachTask(session.sessionId, admitted.value.task.taskId, 1);
+      deps.scheduler.enqueue(() => execute(admitted.value.task.taskId, admitted.value.token));
+      return deps.sessions.get(principal.ownerId, session.sessionId);
+    },
+
+    listGameSessions: async (principal) => deps.sessions.list(principal.ownerId),
+
+    getGameSession: async (principal, sessionId) => {
+      const found = await deps.sessions.get(principal.ownerId, sessionId);
+      if (!found.ok) return found;
+      const taskId = found.value.taskId;
+      if (!taskId) return found;
+      const task = await deps.tasks.get(taskId);
+      return ok({ ...found.value, generation: task?.generation ?? found.value.generation });
+    },
+
+    observeGameSession: async (principal, sessionId) =>
+      deps.sessions.observation(principal.ownerId, sessionId),
+
+    controlGameSession: async (principal, sessionId, request) => {
+      const controlled = await deps.sessions.control({
+        ownerId: principal.ownerId,
+        sessionId,
+        request,
+      });
+      if (!controlled.ok) return controlled;
+      const taskId = controlled.value.taskId;
+      if (request.action === 'cancel' && taskId) {
+        await service
+          .cancelTask(principal, taskId, request.reason)
+          .catch(() => undefined);
+      }
+      return controlled;
+    },
+
+    gameSessionLogs: async (principal, sessionId) =>
+      deps.sessions.logs(principal.ownerId, sessionId),
+
+    gameSessionVerification: async (principal, sessionId) =>
+      deps.sessions.verification(principal.ownerId, sessionId),
+    schedules: async (principal) => ({
+      schedules: (await deps.schedules.listByOwner(principal.ownerId)).map(toSchedule),
+    }),
+
+    schedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      return ok(toSchedule(found.value));
+    },
+
+    createSchedule: async (principal, request) => {
+      const agentId: AgentId = request.agent ?? deps.agents.defaultAgent;
+      const adapter = deps.agents.resolve(agentId);
+      if (!adapter.ok) return adapter;
+      const sideEffectRefusal = scheduleSideEffectRefusal(adapter.value.sideEffects);
+      if (sideEffectRefusal) {
+        // Nobody is watching a scheduled occurrence. An adapter this engine
+        // cannot gate per action would let a recurrence act without a scoped
+        // owner decision, so scheduling refuses it instead of pretending the
+        // task-level approval flag protects it.
+        return fail('validation_failed', sideEffectRefusal);
+      }
+      const model = deps.models.resolve(request.model, request.mode);
+      if (!model.ok) return model;
+
+      const now = deps.clock.now();
+      if (
+        request.timing.kind === 'once' &&
+        new Date(request.timing.at).getTime() <= now.getTime()
+      ) {
+        return fail('validation_failed', 'A one-time schedule must be in the future.');
+      }
+      const first = nextOccurrence(request.timing, now, now);
+      if (request.timing.kind !== 'event' && !first) {
+        return fail('validation_failed', 'No occurrence could be computed for that timing rule.');
+      }
+
+      const nowIso = now.toISOString();
+      const record: ScheduleRecord = {
+        scheduleId: deps.ids.scheduleId(),
+        ownerId: principal.ownerId,
+        name: request.name,
+        objective: request.objective,
+        agent: agentId,
+        model: model.value.ref,
+        mode: request.mode,
+        timing: request.timing,
+        condition: request.condition,
+        retry: request.retry,
+        priority: request.priority,
+        limits: request.limits,
+        requireApproval: true,
+        missedRunPolicy: request.missedRunPolicy,
+        state: request.enabled ? 'active' : 'paused',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        nextRunAt: request.enabled && first ? first.toISOString() : null,
+        lastRunAt: null,
+        lastExecutionId: null,
+        runsTotal: 0,
+        consecutiveFailures: 0,
+        version: 0,
+        pausedAt: request.enabled ? null : nowIso,
+        cancelledAt: null,
+        cancelReason: null,
+      };
+      const created = await deps.schedules.create(record);
+      if (!created.ok) {
+        return fail('conflict', 'That schedule identity is already in use.');
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.created',
+        outcome: 'accepted',
+        detail: `schedule=${record.scheduleId} priority=${record.priority}`,
+      });
+      return ok(toSchedule(created.schedule));
+    },
+
+    pauseSchedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      if (record.state === 'cancelled' || record.state === 'exhausted') {
+        return ok(control(record, 'already_terminal'));
+      }
+      if (record.state === 'paused') return ok(control(record, 'unchanged'));
+      const applied = await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          timingRevision: record.version + 1,
+          state: 'paused',
+          nextRunAt: null,
+          pausedAt: deps.clock.iso(),
+          updatedAt: deps.clock.iso(),
+        },
+      });
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.paused',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(control(applied.schedule ?? record, applied.applied ? 'accepted' : 'unchanged'));
+    },
+
+    resumeSchedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      if (record.state === 'cancelled' || record.state === 'exhausted') {
+        return ok(control(record, 'already_terminal'));
+      }
+      if (record.state === 'active') return ok(control(record, 'unchanged'));
+
+      const now = deps.clock.now();
+      const next = nextOccurrence(record.timing, now, new Date(record.createdAt));
+      if (record.timing.kind !== 'event' && !next) {
+        return fail(
+          'validation_failed',
+          'That schedule has no future occurrence; create a new one instead of resuming it.',
+        );
+      }
+      const applied = await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          timingRevision: record.version + 1,
+          state: 'active',
+          nextRunAt: next ? next.toISOString() : null,
+          pausedAt: null,
+          updatedAt: deps.clock.iso(),
+        },
+      });
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.resumed',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(control(applied.schedule ?? record, applied.applied ? 'accepted' : 'unchanged'));
+    },
+
+    cancelSchedule: async (principal, scheduleId) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      const alreadyCancelled = record.state === 'cancelled';
+
+      const now = deps.clock.iso();
+      const applied = alreadyCancelled ? { applied: true, schedule: record } : await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          state: 'cancelled',
+          nextRunAt: null,
+          cancelledAt: now,
+          cancelReason: 'The owner cancelled the schedule.',
+          updatedAt: now,
+        },
+      });
+      if (!applied.applied) {
+        // A concurrent tick changed the record. Never acknowledge a
+        // cancellation that did not commit: report the current state so the
+        // client can retry against the new version.
+        const latest = await deps.schedules.get(scheduleId);
+        if (!latest) return fail('not_found', 'That schedule no longer exists.');
+        if (latest.state === 'cancelled') return service.cancelSchedule(principal, scheduleId);
+        return fail('conflict', 'The schedule changed while it was being cancelled; retry.');
+      }
+      const cancelled = applied.schedule ?? record;
+
+      // A live run is stopped through the durable lease, not by writing its task
+      // record here: only the generation that holds the token may settle it.
+      const executions = await deps.schedules.listPending(scheduleId);
+      for (const execution of executions) {
+        if (isTerminalExecution(execution.state)) continue;
+        if (execution.state === 'retry_wait' || execution.state === 'claimed') {
+          // A claimed receipt may already have a live task: dispatch writes the
+          // receipt first and the task second. Cancel the task through the
+          // durable lease before terminalizing the receipt, otherwise a run the
+          // owner cancelled keeps executing with no receipt to reconcile.
+          if (execution.taskId) {
+            await service.cancelTask(principal, execution.taskId, 'The schedule was cancelled.');
+          }
+          await deps.schedules.updateExecution({
+            executionId: execution.executionId,
+            from: ['retry_wait', 'claimed'],
+            patch: {
+              state: 'cancelled',
+              detail: 'The schedule was cancelled.',
+              updatedAt: now,
+              finishedAt: now,
+            },
+          });
+          continue;
+        }
+        if (execution.state === 'dispatched' && execution.taskId) {
+          await service.cancelTask(principal, execution.taskId, 'The schedule was cancelled.');
+        }
+      }
+
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.cancelled',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(control(cancelled, alreadyCancelled ? 'already_terminal' : 'accepted'));
+    },
+
+    triggerSchedule: async (principal, scheduleId, request) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      if (found.value.state === 'cancelled') {
+        return fail('conflict', 'That schedule is cancelled.');
+      }
+      const key = request.idempotencyKey ?? deps.ids.executionId();
+      const dispatch = await scheduleEngine.trigger({
+        schedule: found.value,
+        occurrenceKey: `manual:${key}`,
+        trigger: 'manual',
+      });
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.triggered',
+        outcome: dispatch.state === 'refused' ? 'refused' : 'accepted',
+        detail: `schedule=${scheduleId} execution=${dispatch.executionId}`,
+      });
+      return ok(dispatch);
+    },
+
+    scheduleExecutions: async (principal, scheduleId, limit) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const bounded = Math.min(
+        Math.max(1, limit ?? deps.config.schedules.historyLimit),
+        500,
+      );
+      const records = await deps.schedules.listExecutions(scheduleId, bounded);
+      return ok({ executions: records.map(toExecution) });
+    },
+
+    scheduleEvent: async (principal, request) => {
+      const active = await deps.schedules.listActive();
+      const matching = active.filter(
+        (record) =>
+          record.ownerId === principal.ownerId &&
+          record.timing.kind === 'event' &&
+          record.timing.event === request.event,
+      );
+      const dispatched: ScheduleDispatch[] = [];
+      for (const record of matching) {
+        dispatched.push(
+          await scheduleEngine.trigger({
+            schedule: record,
+            occurrenceKey: `event:${request.event}:${request.idempotencyKey}`,
+            trigger: 'event',
+          }),
+        );
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.event',
+        outcome: 'accepted',
+        detail: `event=${request.event} schedules=${dispatched.length}`,
+      });
+      return ok({ event: request.event, dispatched });
+    },
+
+    updateSchedule: async (principal, scheduleId, request) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      const record = found.value;
+      if (record.state === 'cancelled' || record.state === 'exhausted') {
+        return fail('conflict', 'A terminal schedule cannot be edited.');
+      }
+
+      const now = deps.clock.now();
+      const timing = request.timing ?? record.timing;
+      if (timing.kind === 'once' && new Date(timing.at).getTime() <= now.getTime()) {
+        return fail('validation_failed', 'A one-time schedule must be in the future.');
+      }
+
+      const enabled = request.enabled ?? record.state === 'active';
+      const timingChanged = request.timing !== undefined;
+      const enabledChanged = enabled !== (record.state === 'active');
+      let nextRunAt = record.nextRunAt;
+      if (!enabled) {
+        nextRunAt = null;
+      } else if (timingChanged || enabledChanged || nextRunAt === null) {
+        const next = nextOccurrence(timing, now, new Date(record.createdAt));
+        if (timing.kind !== 'event' && !next) {
+          return fail(
+            'validation_failed',
+            'That timing rule has no future occurrence; the schedule was not changed.',
+          );
+        }
+        nextRunAt = next ? next.toISOString() : null;
+      }
+
+      const nowIso = now.toISOString();
+      const applied = await deps.schedules.update({
+        scheduleId,
+        expectedVersion: record.version,
+        patch: {
+          name: request.name ?? record.name,
+          timing,
+          ...(timingChanged || enabledChanged ? { timingRevision: record.version + 1 } : {}),
+          condition: request.condition ?? record.condition,
+          retry: request.retry ?? record.retry,
+          priority: request.priority ?? record.priority,
+          limits: request.limits ? { ...record.limits, ...request.limits } : record.limits,
+          missedRunPolicy: request.missedRunPolicy ?? record.missedRunPolicy,
+          state: enabled ? 'active' : 'paused',
+          nextRunAt,
+          pausedAt: enabled ? null : (record.pausedAt ?? nowIso),
+          updatedAt: nowIso,
+        },
+      });
+      if (!applied.applied || !applied.schedule) {
+        return fail('conflict', 'The schedule changed while this edit was applied; retry.');
+      }
+      deps.audit.record({
+        actor: principal.ownerId,
+        action: 'schedule.updated',
+        outcome: 'accepted',
+        detail: `schedule=${scheduleId}`,
+      });
+      return ok(toSchedule(applied.schedule));
+    },
+
+    scheduleUpcoming: async (principal, scheduleId, limit) => {
+      const found = await ownedSchedule(scheduleId, principal);
+      if (!found.ok) return found;
+      if (found.value.state === 'cancelled' || found.value.state === 'exhausted') {
+        return ok({ scheduleId, occurrences: [] });
+      }
+      const bounded = Math.min(Math.max(1, limit ?? 5), 20);
+      return ok({
+        scheduleId,
+        occurrences: previewOccurrences(found.value, deps.clock.now(), bounded),
+      });
+    },
+
+    startSchedules: () => scheduleEngine.start(),
+    stopSchedules: () => scheduleEngine.stop(),
+    tickSchedules: () => scheduleEngine.tick(),
+
     recoverInterrupted: async () => {
-      // Retire attempts whose owning process stopped heartbeating before the
-      // task sweep, so an old execution cannot look live and its workspace is
-      // durably quarantined on every replica.
-      await deps.supervisor.retireStale(deps.config.execution.leaseTtlMs);
       const unsettled = await deps.tasks.listUnsettled();
       let interrupted = 0;
       for (const task of unsettled) {
@@ -2273,16 +2878,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     },
 
     shutdown: async () => {
-      // Stop admitting, abort every supervised attempt with the `shutdown` cause
-      // (not `cancelled`), and give them a bounded window to unwind. Unsettled
-      // tasks are reconciled on the next startup.
-      await deps.supervisor.shutdown();
+      await scheduleEngine.stop();
       deps.scheduler.stop();
+      for (const controller of controllers.values()) controller.abort();
       controllers.clear();
-      executionsByTask.clear();
-      // Flush before the process releases the database, so a shutdown does not
-      // lose the tail of a run that already reported it.
-      await deps.events.close().catch(() => undefined);
+      // Wait for the runner's grace bound to turn every aborted run into a
+      // settled outcome, then revoke whatever is still registered. The second
+      // step is the verified part: no capability survives shutdown.
+      await Promise.race([
+        deps.scheduler.idle(),
+        new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, deps.config.execution.cancelGraceMs + 1_000);
+          timer.unref();
+        }),
+      ]);
+      await deps.supervisor.shutdown();
+      // Release cloud browsers rather than letting them run until their TTL.
+      await deps.browser.shutdown();
     },
   };
 

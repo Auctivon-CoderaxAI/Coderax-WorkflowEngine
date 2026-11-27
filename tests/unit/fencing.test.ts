@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createMongoTaskRepository } from '../../src/persistence/mongo-tables.js';
+import { createFakeCollection } from '../fakes/mongo.js';
 import { createTaskRepository } from '../../src/persistence/tasks.js';
 import { taskRecord } from '../helpers.js';
 
@@ -22,6 +24,20 @@ test('a task is written only by the generation that owns it', async () => {
   assert.deepEqual(byB, { applied: false, reason: 'superseded' });
 });
 
+test('a resume cannot revive a task cancelled after the resume read', async () => {
+  const tasks = createTaskRepository();
+  await tasks.create(taskRecord({ state: 'cancelled', runToken: 'token-old', generation: 1 }));
+
+  const revived = await tasks.reissue({
+    taskId: 'task_test',
+    token: 'token-new',
+    now: new Date().toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+    from: ['interrupted', 'awaiting_approval'],
+  });
+  assert.deepEqual(revived, { applied: false, reason: 'superseded' });
+});
+
 test('an expired generation cannot overwrite the state a newer generation owns', async () => {
   const tasks = createTaskRepository();
   await tasks.create(taskRecord({ state: 'interrupted', runToken: 'token-old', generation: 1 }));
@@ -31,6 +47,7 @@ test('an expired generation cannot overwrite the state a newer generation owns',
     token: 'token-new',
     now: new Date().toISOString(),
     leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+    from: ['interrupted'],
   });
   assert.equal(reissued.applied, true);
   assert.equal(reissued.applied && reissued.task.generation, 2);
@@ -88,4 +105,23 @@ test('one active task per conversation is enforced', async () => {
   });
   const third = await tasks.create(taskRecord({ taskId: 'task-3', runToken: 'token-3' }));
   assert.equal(third.ok, true);
+});
+
+test('a failed generation can be reissued or claimed for scheduled retry, never both', async () => {
+  for (const tasks of [createTaskRepository(), createMongoTaskRepository(createFakeCollection())]) {
+    for (const schedulerFirst of [false, true]) {
+      const task = taskRecord({ taskId: String(schedulerFirst), conversationId: String(schedulerFirst), generation: 1, state: 'failed' });
+      await tasks.create(task);
+      const claim = () => tasks.claimScheduledRetry(task.taskId, 1);
+      const reissue = () => tasks.reissue({ taskId: task.taskId, now: task.updatedAt, leaseExpiresAt: task.updatedAt, token: 'new', from: ['failed'] });
+      if (schedulerFirst) {
+        assert.equal(await claim(), true);
+        assert.equal((await reissue()).applied, false);
+        assert.equal(await claim(), true);
+      } else {
+        assert.equal((await reissue()).applied, true);
+        assert.equal(await claim(), false);
+      }
+    }
+  }
 });

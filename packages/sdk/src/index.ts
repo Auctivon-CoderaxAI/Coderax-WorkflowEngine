@@ -1,54 +1,86 @@
 import type { z } from 'zod';
 import {
   AgentList,
+  BrowserActionResult,
+  BrowserArtifactContent,
+  BrowserCapabilities,
+  BrowserReceiptList,
+  BrowserSession,
+  BrowserSessionList,
+  BrowserTakeoverResult,
   ArtifactContent,
-  BudgetState,
-  MetricsReport,
-  ArtifactList,
-  ArtifactRecord,
-  ArtifactUploadRequest,
+  ArtifactDeleteResult,
+  ArtifactDescriptor,
+  ArtifactDescriptorList,
+  ArtifactExport,
+  ArtifactGenerationResult,
+  ArtifactProjectManifest,
+  ArtifactPruneResult,
+  ArtifactUploadResult,
+  ArtifactVersionList,
   ChatReply,
-  ChatStreamFrame,
   Conversation,
-  ConversationDeletion,
   ConversationList,
   EngineHandshake,
   ExecutionEvent,
+  GameBuild,
+  GameBuildList,
+  GameCapabilityReport,
+  GameExport,
+  GameIteration,
+  GameObservation,
+  GameProject,
+  GameProjectList,
+  GameSession,
+  GameSessionList,
+  GameSessionLogs,
+  GameSessionVerification,
   HealthReport,
-  MemoryDeletion,
-  MemoryEntry,
   MemoryList,
   ModelList,
   NotificationList,
   PermissionList,
+  PermissionRequest,
   Problem,
-  ReceiptList,
   ReadinessReport,
   Schedule,
   ScheduleControlResult,
-  ScheduleCreateRequest,
+  ScheduleDispatch,
+  ScheduleEventResult,
+  ScheduleExecutionList,
   ScheduleList,
-  ScheduleUpdateRequest,
+  ScheduleUpcoming,
   TaskAccepted,
   TaskControlResult,
-  TaskList,
   TaskStatus,
 } from '@coderax/contracts';
 import type {
+  BuildGameRequest,
+  BrowserAction,
+  BrowserActionInput,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateInput,
+  BrowserTakeoverRequest,
+  ArtifactGenerationRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
   ChatRequest,
+  CreateGameRequest,
+  CreateGameSessionRequest,
   DataMode,
-  MemoryPutRequest,
-  NotificationListQuery,
-  NotificationReadRequest,
+  GameSessionControlRequest,
+  IterateGameRequest,
   PermissionDecisionRequest,
-  PermissionListQuery,
-  ReceiptListQuery,
-  TaskState,
+  RestoreGameBuildRequest,
+  SaveGameSpecRequest,
+  ScheduleCreateInput,
+  ScheduleUpdateRequest,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import { CoderaxApiError, CoderaxContractError } from './errors.js';
-import { parseSseFrames } from './stream.js';
-import { assertCompatible } from './version.js';
 
 /**
  * The one client both Coderax (web) and Coderax-CLI consume.
@@ -60,29 +92,34 @@ import { assertCompatible } from './version.js';
  * places the token in a URL or an error message.
  */
 
-export { CoderaxApiError, CoderaxCompatibilityError, CoderaxContractError } from './errors.js';
-export {
-  SDK_CONTRACT_VERSION,
-  SDK_ENGINE_CONTRACT,
-  SDK_EVENT_SCHEMA_VERSION,
-  SDK_VERSION,
-  SDK_VERSION_METADATA,
-  assertCompatible,
-  checkCompatibility,
-} from './version.js';
-export { parseSse, parseSseFrames } from './stream.js';
-export { SDK_COVERAGE, SDK_MANIFEST, SDK_STREAM_METHODS } from './manifest.js';
-export type { CompatibilityReport } from './version.js';
-export type { ParsedSseFrame } from './stream.js';
-export type {
-  ChatRequest,
-  DataMode,
-  MemoryPutRequest,
-  NotificationReadRequest,
-  PermissionDecisionRequest,
-  TaskState,
-  WorkSubmitRequest,
-} from '@coderax/contracts';
+export class CoderaxApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+  readonly requestId: string | undefined;
+  readonly retryable: boolean;
+
+  constructor(input: {
+    code: string;
+    message: string;
+    status: number;
+    requestId?: string;
+    retryable?: boolean;
+  }) {
+    super(input.message);
+    this.name = 'CoderaxApiError';
+    this.code = input.code;
+    this.status = input.status;
+    this.requestId = input.requestId;
+    this.retryable = input.retryable ?? false;
+  }
+}
+
+export class CoderaxContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CoderaxContractError';
+  }
+}
 
 export type CoderaxClientOptions = {
   baseUrl: string;
@@ -92,13 +129,11 @@ export type CoderaxClientOptions = {
 };
 
 type RequestInput = {
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PATCH';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   signal?: AbortSignal;
-  /** Extra headers, used for `Idempotency-Key` on Work submission. */
-  headers?: Record<string, string>;
 };
 
 function joinUrl(baseUrl: string, path: string, query?: RequestInput['query']): string {
@@ -111,6 +146,36 @@ function joinUrl(baseUrl: string, path: string, query?: RequestInput['query']): 
     throw new CoderaxContractError(`route ${path} resolves outside the configured origin`);
   }
   return url.toString();
+}
+
+async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, '\n');
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary !== -1) {
+      const frame = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const data = frame
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n');
+      if (data.length > 0) {
+        try {
+          yield JSON.parse(data);
+        } catch {
+          throw new CoderaxContractError('an event frame was not valid JSON');
+        }
+      }
+      boundary = buffer.indexOf('\n\n');
+    }
+  }
 }
 
 export class CoderaxClient {
@@ -142,7 +207,6 @@ export class CoderaxClient {
         method: input.method,
         headers: {
           ...this.headers(),
-          ...(input.headers ?? {}),
           ...(input.body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
@@ -201,17 +265,11 @@ export class CoderaxClient {
     return this.request<ReadinessReport>(ReadinessReport, { method: 'GET', path: '/v1/ready' });
   }
 
-  /** The raw handshake. Use `negotiate()` to refuse an incompatible engine. */
   handshake(): Promise<EngineHandshake> {
     return this.request<EngineHandshake>(EngineHandshake, {
       method: 'GET',
       path: '/v1/handshake',
     });
-  }
-
-  /** Fetches the handshake and throws unless this SDK can parse it. */
-  async negotiate(): Promise<EngineHandshake> {
-    return assertCompatible(await this.handshake());
   }
 
   agents(): Promise<AgentList> {
@@ -222,6 +280,115 @@ export class CoderaxClient {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
   }
 
+  browserCapabilities(): Promise<BrowserCapabilities> {
+    return this.request<BrowserCapabilities>(BrowserCapabilities, {
+      method: 'GET',
+      path: '/v1/browser/capabilities',
+    });
+  }
+
+  browserSessions(): Promise<BrowserSessionList> {
+    return this.request<BrowserSessionList>(BrowserSessionList, {
+      method: 'GET',
+      path: '/v1/browser/sessions',
+    });
+  }
+
+  browserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  createBrowserSession(request: BrowserSessionCreateInput): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: '/v1/browser/sessions',
+      body: request,
+    });
+  }
+
+  browserAction(sessionId: string, action: BrowserActionInput): Promise<BrowserActionResult> {
+    return this.request<BrowserActionResult>(BrowserActionResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/actions`,
+      body: action,
+    });
+  }
+
+  pauseBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/pause`,
+    });
+  }
+
+  resumeBrowserSession(sessionId: string): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/resume`,
+    });
+  }
+
+  takeoverBrowserSession(
+    sessionId: string,
+    request: BrowserTakeoverRequest,
+  ): Promise<BrowserTakeoverResult> {
+    return this.request<BrowserTakeoverResult>(BrowserTakeoverResult, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/takeover`,
+      body: request,
+    });
+  }
+
+  closeBrowserSession(
+    sessionId: string,
+    request: BrowserCloseRequest = {},
+  ): Promise<BrowserSession> {
+    return this.request<BrowserSession>(BrowserSession, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/close`,
+      body: request,
+    });
+  }
+
+  authorizeBrowserSession(
+    sessionId: string,
+    request: BrowserAuthorizationRequest,
+  ): Promise<PermissionRequest> {
+    return this.request<PermissionRequest>(PermissionRequest, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize`,
+      body: request,
+    });
+  }
+
+  decideBrowserAuthorization(
+    sessionId: string,
+    request: PermissionDecisionRequest,
+  ): Promise<PermissionList> {
+    return this.request<PermissionList>(PermissionList, {
+      method: 'POST',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/authorize/decision`,
+      body: request,
+    });
+  }
+
+  browserReceipts(sessionId: string): Promise<BrowserReceiptList> {
+    return this.request<BrowserReceiptList>(BrowserReceiptList, {
+      method: 'GET',
+      path: `/v1/browser/sessions/${encodeURIComponent(sessionId)}/receipts`,
+    });
+  }
+
+  browserArtifact(artifactId: string): Promise<BrowserArtifactContent> {
+    return this.request<BrowserArtifactContent>(BrowserArtifactContent, {
+      method: 'GET',
+      path: `/v1/browser/artifacts/${encodeURIComponent(artifactId)}`,
+    });
+  }
+
   chat(request: ChatRequest): Promise<ChatReply> {
     return this.request<ChatReply>(ChatReply, {
       method: 'POST',
@@ -230,55 +397,11 @@ export class CoderaxClient {
     });
   }
 
-  /**
-   * The same Chat turn over the shared SSE transport. Each frame is validated
-   * against the published `ChatStreamFrame` schema, so a deployment that streams
-   * a shape the contract does not describe fails here instead of in a renderer.
-   */
-  async *chatStream(
-    request: ChatRequest,
-    options: { signal?: AbortSignal } = {},
-  ): AsyncGenerator<ChatStreamFrame> {
-    const path = '/v1/chat';
-    const response = await this.options.fetchImpl(joinUrl(this.options.baseUrl, path), {
-      method: 'POST',
-      headers: {
-        ...this.headers('text/event-stream'),
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      redirect: 'error',
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
-    if (!response.ok || !response.body) {
-      await this.parse(ChatReply, response, path);
-      throw new CoderaxContractError('the chat stream had no body');
-    }
-    for await (const frame of parseSseFrames(response.body)) {
-      const parsed = ChatStreamFrame.safeParse(frame.data);
-      if (!parsed.success) {
-        throw new CoderaxContractError('a chat frame did not match the published schema');
-      }
-      yield parsed.data;
-    }
-  }
-
-  /**
-   * Submits durable Work. Reusing an idempotency key with the same request
-   * replays the original task; reusing it with a different request is refused.
-   * The key is sent as a header so it is never part of a logged URL.
-   */
-  submitWork(
-    request: WorkSubmitRequest,
-    options: { idempotencyKey?: string } = {},
-  ): Promise<TaskAccepted> {
+  submitWork(request: WorkSubmitRequest): Promise<TaskAccepted> {
     return this.request<TaskAccepted>(TaskAccepted, {
       method: 'POST',
       path: '/v1/work',
       body: request,
-      ...(options.idempotencyKey
-        ? { headers: { 'idempotency-key': options.idempotencyKey } }
-        : {}),
     });
   }
 
@@ -286,31 +409,6 @@ export class CoderaxClient {
     return this.request<TaskStatus>(TaskStatus, {
       method: 'GET',
       path: `/v1/work/${encodeURIComponent(taskId)}`,
-    });
-  }
-
-  /** The owner-scoped task read model, newest first. */
-  tasks(
-    options: {
-      limit?: number;
-      cursor?: string;
-      state?: TaskState;
-      mode?: DataMode;
-      agent?: string;
-      conversationId?: string;
-    } = {},
-  ): Promise<TaskList> {
-    return this.request<TaskList>(TaskList, {
-      method: 'GET',
-      path: '/v1/tasks',
-      query: {
-        limit: options.limit,
-        cursor: options.cursor,
-        state: options.state,
-        mode: options.mode,
-        agent: options.agent,
-        conversationId: options.conversationId,
-      },
     });
   }
 
@@ -338,32 +436,10 @@ export class CoderaxClient {
     });
   }
 
-  conversations(
-    options: {
-      mode?: DataMode;
-      isWork?: boolean;
-      agent?: string;
-      limit?: number;
-      cursor?: string;
-    } = {},
-  ): Promise<ConversationList> {
+  conversations(): Promise<ConversationList> {
     return this.request<ConversationList>(ConversationList, {
       method: 'GET',
       path: '/v1/conversations',
-      query: {
-        mode: options.mode,
-        isWork: options.isWork === undefined ? undefined : String(options.isWork),
-        agent: options.agent,
-        limit: options.limit,
-        cursor: options.cursor,
-      },
-    });
-  }
-
-  deleteConversation(conversationId: string): Promise<ConversationDeletion> {
-    return this.request<ConversationDeletion>(ConversationDeletion, {
-      method: 'DELETE',
-      path: `/v1/conversations/${encodeURIComponent(conversationId)}`,
     });
   }
 
@@ -374,46 +450,18 @@ export class CoderaxClient {
     });
   }
 
-  memory(
-    mode: DataMode = 'private',
-    options: { limit?: number; cursor?: string } = {},
-  ): Promise<MemoryList> {
+  memory(mode: DataMode = 'private'): Promise<MemoryList> {
     return this.request<MemoryList>(MemoryList, {
       method: 'GET',
       path: '/v1/memory',
-      query: { mode, limit: options.limit, cursor: options.cursor },
-    });
-  }
-
-  deleteMemory(key: string, mode: DataMode = 'private'): Promise<MemoryDeletion> {
-    return this.request<MemoryDeletion>(MemoryDeletion, {
-      method: 'DELETE',
-      path: `/v1/memory/${encodeURIComponent(key)}`,
       query: { mode },
     });
   }
 
-  putMemory(request: MemoryPutRequest): Promise<MemoryEntry> {
-    return this.request<MemoryEntry>(MemoryEntry, {
-      method: 'POST',
-      path: '/v1/memory',
-      body: request,
-    });
-  }
-
-  permissions(taskId: string, query: PermissionListQuery = {}): Promise<PermissionList> {
+  permissions(taskId: string): Promise<PermissionList> {
     return this.request<PermissionList>(PermissionList, {
       method: 'GET',
       path: `/v1/work/${encodeURIComponent(taskId)}/permissions`,
-      query,
-    });
-  }
-
-  pendingPermissions(query: PermissionListQuery = {}): Promise<PermissionList> {
-    return this.request<PermissionList>(PermissionList, {
-      method: 'GET',
-      path: '/v1/permissions',
-      query,
     });
   }
 
@@ -428,50 +476,77 @@ export class CoderaxClient {
     });
   }
 
-  notifications(query: NotificationListQuery = {}): Promise<NotificationList> {
+  notifications(): Promise<NotificationList> {
     return this.request<NotificationList>(NotificationList, {
       method: 'GET',
       path: '/v1/notifications',
-      query,
+      query: { includeSchedules: 'true' },
     });
   }
 
-  budget(): Promise<BudgetState> {
-    return this.request<BudgetState>(BudgetState, { method: 'GET', path: '/v1/budget' });
-  }
-
-  metrics(): Promise<MetricsReport> {
-    return this.request<MetricsReport>(MetricsReport, { method: 'GET', path: '/v1/metrics' });
-  }
-
-  receipts(taskId: string, query: ReceiptListQuery = {}): Promise<ReceiptList> {
-    return this.request<ReceiptList>(ReceiptList, {
-      method: 'GET',
-      path: `/v1/work/${encodeURIComponent(taskId)}/receipts`,
-      query,
-    });
-  }
-
-  /** Clears the blue dot for the named terminal tasks. */
-  markNotificationsRead(taskIds: string[]): Promise<NotificationList> {
-    return this.request<NotificationList>(NotificationList, {
+  createSchedule(request: ScheduleCreateInput): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
       method: 'POST',
-      path: '/v1/notifications/read',
-      body: { taskIds } satisfies NotificationReadRequest,
+      path: '/v1/schedules',
+      body: request,
     });
   }
 
   schedules(): Promise<ScheduleList> {
-    return this.request<ScheduleList>(ScheduleList, {
+    return this.request<ScheduleList>(ScheduleList, { method: 'GET', path: '/v1/schedules' });
+  }
+
+  schedule(scheduleId: string): Promise<Schedule> {
+    return this.request<Schedule>(Schedule, {
       method: 'GET',
-      path: '/v1/schedules',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
     });
   }
 
-  createSchedule(request: ScheduleCreateRequest): Promise<Schedule> {
-    return this.request<Schedule>(Schedule, {
+  pauseSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
       method: 'POST',
-      path: '/v1/schedules',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/pause`,
+    });
+  }
+
+  resumeSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/resume`,
+    });
+  }
+
+  cancelSchedule(scheduleId: string): Promise<ScheduleControlResult> {
+    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+    });
+  }
+
+  triggerSchedule(
+    scheduleId: string,
+    request: ScheduleTriggerRequest = {},
+  ): Promise<ScheduleDispatch> {
+    return this.request<ScheduleDispatch>(ScheduleDispatch, {
+      method: 'POST',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/trigger`,
+      body: request,
+    });
+  }
+
+  scheduleExecutions(scheduleId: string, limit?: number): Promise<ScheduleExecutionList> {
+    return this.request<ScheduleExecutionList>(ScheduleExecutionList, {
+      method: 'GET',
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/executions`,
+      query: { limit },
+    });
+  }
+
+  scheduleEvent(request: ScheduleEventRequest): Promise<ScheduleEventResult> {
+    return this.request<ScheduleEventResult>(ScheduleEventResult, {
+      method: 'POST',
+      path: '/v1/schedule-events',
       body: request,
     });
   }
@@ -484,74 +559,318 @@ export class CoderaxClient {
     });
   }
 
-  schedule(scheduleId: string): Promise<Schedule> {
-    return this.request<Schedule>(Schedule, {
+  scheduleUpcoming(scheduleId: string, limit?: number): Promise<ScheduleUpcoming> {
+    return this.request<ScheduleUpcoming>(ScheduleUpcoming, {
       method: 'GET',
-      path: `/v1/schedules/${encodeURIComponent(scheduleId)}`,
+      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/upcoming`,
+      query: { limit },
     });
   }
 
-  cancelSchedule(scheduleId: string): Promise<ScheduleControlResult> {
-    return this.request<ScheduleControlResult>(ScheduleControlResult, {
+  markNotificationsRead(): Promise<NotificationList> {
+    return this.request<NotificationList>(NotificationList, {
       method: 'POST',
-      path: `/v1/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+      path: '/v1/notifications/read',
+      query: { includeSchedules: 'true' },
     });
   }
 
-  artifacts(taskId: string): Promise<ArtifactList> {
-    return this.request<ArtifactList>(ArtifactList, {
+  /** Durable artifacts in one data-mode partition, with the storage quota. */
+  artifacts(
+    query: {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<ArtifactDescriptorList> {
+    return this.request<ArtifactDescriptorList>(ArtifactDescriptorList, {
       method: 'GET',
-      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
+      path: '/v1/artifacts',
+      query,
     });
   }
 
-  uploadArtifact(taskId: string, request: ArtifactUploadRequest): Promise<ArtifactRecord> {
-    return this.request<ArtifactRecord>(ArtifactRecord, {
-      method: 'POST',
-      path: `/v1/work/${encodeURIComponent(taskId)}/artifacts`,
-      body: request,
-    });
-  }
-
-  artifact(artifactId: string): Promise<ArtifactRecord> {
-    return this.request<ArtifactRecord>(ArtifactRecord, {
+  artifact(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactDescriptor> {
+    return this.request<ArtifactDescriptor>(ArtifactDescriptor, {
       method: 'GET',
       path: `/v1/artifacts/${encodeURIComponent(artifactId)}`,
+      query: { mode },
     });
   }
 
-  artifactContent(artifactId: string): Promise<ArtifactContent> {
-    return this.request<ArtifactContent>(ArtifactContent, {
+  artifactVersions(artifactId: string, mode: DataMode = 'private'): Promise<ArtifactVersionList> {
+    return this.request<ArtifactVersionList>(ArtifactVersionList, {
       method: 'GET',
-      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      query: { mode },
+    });
+  }
+
+  artifactManifest(
+    projectId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactProjectManifest> {
+    return this.request<ArtifactProjectManifest>(ArtifactProjectManifest, {
+      method: 'GET',
+      path: '/v1/artifacts/manifest',
+      query: { projectId, mode },
     });
   }
 
   /**
-   * Opens the durable Work stream. The returned generator replays from the
-   * cursor and then tails live events; `truncated` reports that the retained
-   * window no longer contains the requested cursor, and `lastSeq` is the engine's
-   * last assigned sequence at open. A consumer resumes with the last `seq` it
-   * applied, either as `after` or as `lastEventId`.
+   * Renders a deliverable and persists it as a durable project tree. The
+   * response is the manifest, so every file can then be downloaded by artifact
+   * id and immutable version.
    */
-  async openEvents(
+  generateArtifact(request: ArtifactGenerationRequest): Promise<ArtifactGenerationResult> {
+    return this.request<ArtifactGenerationResult>(ArtifactGenerationResult, {
+      method: 'POST',
+      path: '/v1/artifacts/generate',
+      body: request,
+    });
+  }
+
+  uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: '/v1/artifacts',
+      body: request,
+    });
+  }
+
+  uploadArtifactVersion(
+    artifactId: string,
+    request: ArtifactVersionRequest,
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/versions`,
+      body: request,
+    });
+  }
+
+  restoreArtifactVersion(
+    artifactId: string,
+    request: { mode?: DataMode; version: number; expectedVersion: number },
+  ): Promise<ArtifactUploadResult> {
+    return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/restore`,
+      body: {
+        mode: request.mode ?? 'private',
+        version: request.version,
+        expectedVersion: request.expectedVersion,
+      },
+    });
+  }
+
+  downloadArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactContent> {
+    return this.request<ArtifactContent>(ArtifactContent, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  exportArtifact(
+    artifactId: string,
+    options: { mode?: DataMode; version?: number } = {},
+  ): Promise<ArtifactExport> {
+    return this.request<ArtifactExport>(ArtifactExport, {
+      method: 'GET',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
+      query: { mode: options.mode ?? 'private', version: options.version },
+    });
+  }
+
+  deleteArtifact(
+    artifactId: string,
+    mode: DataMode = 'private',
+  ): Promise<ArtifactDeleteResult> {
+    return this.request<ArtifactDeleteResult>(ArtifactDeleteResult, {
+      method: 'POST',
+      path: `/v1/artifacts/${encodeURIComponent(artifactId)}/delete`,
+      body: { mode },
+    });
+  }
+
+  pruneArtifacts(mode: DataMode = 'private'): Promise<ArtifactPruneResult> {
+    return this.request<ArtifactPruneResult>(ArtifactPruneResult, {
+      method: 'POST',
+      path: '/v1/artifacts/prune',
+      body: { mode },
+    });
+  }
+
+  gameCapabilities(): Promise<GameCapabilityReport> {
+    return this.request<GameCapabilityReport>(GameCapabilityReport, {
+      method: 'GET',
+      path: '/v1/games/capabilities',
+    });
+  }
+
+  games(query: { cursor?: string; limit?: number } = {}): Promise<GameProjectList> {
+    return this.request<GameProjectList>(GameProjectList, {
+      method: 'GET',
+      path: '/v1/games',
+      query: { ...query },
+    });
+  }
+
+  createGame(request: CreateGameRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: '/v1/games',
+      body: request,
+    });
+  }
+
+  game(gameId: string): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}`,
+    });
+  }
+
+  saveGameSpec(gameId: string, request: SaveGameSpecRequest): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/spec`,
+      body: request,
+    });
+  }
+
+  buildGame(gameId: string, request: BuildGameRequest = {}): Promise<GameBuild> {
+    return this.request<GameBuild>(GameBuild, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/build`,
+      body: request,
+    });
+  }
+
+  gameBuilds(gameId: string): Promise<GameBuildList> {
+    return this.request<GameBuildList>(GameBuildList, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds`,
+    });
+  }
+
+  restoreGameBuild(
+    gameId: string,
+    buildId: string,
+    request: RestoreGameBuildRequest,
+  ): Promise<GameProject> {
+    return this.request<GameProject>(GameProject, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/builds/${encodeURIComponent(buildId)}/restore`,
+      body: request,
+    });
+  }
+
+  iterateGame(gameId: string, request: IterateGameRequest): Promise<GameIteration> {
+    return this.request<GameIteration>(GameIteration, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/iterate`,
+      body: request,
+    });
+  }
+
+  /** The playable preview is HTML, not JSON; it is checked to be the declared type. */
+  async gamePreview(gameId: string): Promise<string> {
+    const path = `/v1/games/${encodeURIComponent(gameId)}/preview`;
+    const response = await this.send({ method: 'GET', path });
+    if (!response.ok) {
+      await this.parse(GameProject, response, path);
+      throw new CoderaxContractError('the preview request failed without a problem document');
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/html')) {
+      throw new CoderaxContractError('the preview was not served as HTML');
+    }
+    return response.text();
+  }
+
+  exportGame(gameId: string): Promise<GameExport> {
+    return this.request<GameExport>(GameExport, {
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(gameId)}/export`,
+    });
+  }
+
+  createGameSession(
+    gameId: string,
+    request: CreateGameSessionRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/games/${encodeURIComponent(gameId)}/sessions`,
+      body: request,
+    });
+  }
+
+  gameSessions(): Promise<GameSessionList> {
+    return this.request<GameSessionList>(GameSessionList, {
+      method: 'GET',
+      path: '/v1/game-sessions',
+    });
+  }
+
+  gameSession(sessionId: string): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}`,
+    });
+  }
+
+  observeGameSession(sessionId: string): Promise<GameObservation> {
+    return this.request<GameObservation>(GameObservation, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/observation`,
+    });
+  }
+
+  controlGameSession(
+    sessionId: string,
+    request: GameSessionControlRequest,
+  ): Promise<GameSession> {
+    return this.request<GameSession>(GameSession, {
+      method: 'POST',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/control`,
+      body: request,
+    });
+  }
+
+  gameSessionLogs(sessionId: string): Promise<GameSessionLogs> {
+    return this.request<GameSessionLogs>(GameSessionLogs, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/logs`,
+    });
+  }
+
+  gameSessionVerification(sessionId: string): Promise<GameSessionVerification> {
+    return this.request<GameSessionVerification>(GameSessionVerification, {
+      method: 'GET',
+      path: `/v1/game-sessions/${encodeURIComponent(sessionId)}/verification`,
+    });
+  }
+
+  /** Replays and tails execution events from a sequence cursor. */
+  async *events(
     taskId: string,
-    options: { after?: number; lastEventId?: number; signal?: AbortSignal } = {},
-  ): Promise<{
-    truncated: boolean;
-    lastSeq: number;
-    events: AsyncGenerator<ExecutionEvent>;
-  }> {
+    options: { after?: number; signal?: AbortSignal } = {},
+  ): AsyncGenerator<ExecutionEvent> {
     const path = `/v1/work/${encodeURIComponent(taskId)}/events`;
-    const cursor = options.after ?? options.lastEventId;
     const response = await this.options.fetchImpl(
       joinUrl(this.options.baseUrl, path, { after: options.after }),
       {
         method: 'GET',
-        headers: {
-          ...this.headers('text/event-stream'),
-          ...(cursor === undefined ? {} : { 'last-event-id': String(cursor) }),
-        },
+        headers: this.headers('text/event-stream'),
         redirect: 'error',
         ...(options.signal ? { signal: options.signal } : {}),
       },
@@ -560,33 +879,33 @@ export class CoderaxClient {
       await this.parse(ExecutionEvent, response, path);
       throw new CoderaxContractError('the event stream had no body');
     }
-    const truncated = response.headers.get('x-coderax-truncated') === 'true';
-    const headerSeq = Number(response.headers.get('x-coderax-last-seq') ?? '0');
-    const body = response.body;
-    async function* iterate(): AsyncGenerator<ExecutionEvent> {
-      for await (const frame of parseSseFrames(body)) {
-        const parsed = ExecutionEvent.safeParse(frame.data);
-        if (!parsed.success) {
-          throw new CoderaxContractError('an event did not match the published event schema');
-        }
-        yield parsed.data;
+    for await (const frame of parseSse(response.body)) {
+      const parsed = ExecutionEvent.safeParse(frame);
+      if (!parsed.success) {
+        throw new CoderaxContractError('an event did not match the published event schema');
       }
-    }
-    return {
-      truncated,
-      lastSeq: Number.isFinite(headerSeq) ? headerSeq : 0,
-      events: iterate(),
-    };
-  }
-
-  /** Replays and tails execution events from a sequence cursor. */
-  async *events(
-    taskId: string,
-    options: { after?: number; lastEventId?: number; signal?: AbortSignal } = {},
-  ): AsyncGenerator<ExecutionEvent> {
-    const stream = await this.openEvents(taskId, options);
-    for await (const event of stream.events) {
-      yield event;
+      yield parsed.data;
     }
   }
 }
+
+export type {
+  BrowserAction,
+  BrowserActionInput,
+  BrowserAuthorizationRequest,
+  BrowserCloseRequest,
+  BrowserSessionCreateInput,
+  BrowserTakeoverRequest,
+  ChatRequest,
+  DataMode,
+  PermissionDecisionRequest,
+  ScheduleCreateInput,
+  ScheduleUpdateRequest,
+  ScheduleEventRequest,
+  ScheduleTriggerRequest,
+  ArtifactGenerationRequest,
+  ArtifactKind,
+  ArtifactUploadRequest,
+  ArtifactVersionRequest,
+  WorkSubmitRequest,
+};

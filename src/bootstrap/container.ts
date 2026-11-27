@@ -8,25 +8,22 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
-import type { ScheduleRepository } from '../persistence/schedules.js';
-import type { ArtifactRepository, ArtifactStorage } from '../artifacts/store.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
+import type { RunSupervisor } from '../execution/supervisor.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
-import type { QuarantineStore } from '../persistence/quarantine.js';
-import type { ExecutionRepository } from '../persistence/executions.js';
-import type { ExecutionSupervisor } from '../execution/supervisor.js';
-import type { CheckpointStore } from '../persistence/checkpoints.js';
-import type { IdempotencyStore } from '../persistence/idempotency.js';
-import type { RetentionService } from '../persistence/retention.js';
-import type { PersistenceHealth } from './persistence.js';
-import type { MetricsRegistry } from '../observability/metrics.js';
 import type { ApplicationService } from '../orchestration/service.js';
+import type { BrowserService } from '../orchestration/browser.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { ArtifactGenerator } from '../artifacts/generate.js';
 import type { Router } from '../api/router.js';
+import type { GameStudio } from '../games/studio.js';
+import type { GameSessionService, GamingAgent } from '../games/session.js';
 
 /**
  * Dependencies are named, not positional.
@@ -51,21 +48,19 @@ export type InfrastructureDependencies = {
   permissions: PermissionStore;
   notifications: NotificationStore;
   schedules: ScheduleRepository;
-  artifacts: ArtifactRepository;
-  artifactStorage: ArtifactStorage;
+  scheduleNotices: ScheduleNoticeStore;
+  artifactService: ArtifactService;
+  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
   scheduler: TaskScheduler;
   health: HealthService;
-  supervisor: ExecutionSupervisor;
-  executions: ExecutionRepository;
-  quarantine: QuarantineStore;
-  checkpoints: CheckpointStore;
-  idempotency: IdempotencyStore;
-  retention: RetentionService;
-  persistencePing: () => Promise<PersistenceHealth>;
-  metrics: MetricsRegistry;
+  studio: GameStudio;
+  sessions: GameSessionService;
+  gaming: GamingAgent;
+  browser: BrowserService;
+  supervisor: RunSupervisor;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -83,21 +78,19 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'permissions',
   'notifications',
   'schedules',
-  'artifacts',
-  'artifactStorage',
+  'scheduleNotices',
+  'artifactService',
+  'artifactGenerator',
   'audit',
   'events',
   'runner',
   'scheduler',
   'health',
+  'studio',
+  'sessions',
+  'gaming',
+  'browser',
   'supervisor',
-  'executions',
-  'quarantine',
-  'checkpoints',
-  'idempotency',
-  'retention',
-  'persistencePing',
-  'metrics',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

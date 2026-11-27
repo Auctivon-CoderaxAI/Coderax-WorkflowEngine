@@ -4,7 +4,6 @@ import {
   AgentId,
   ConversationId,
   DataMode,
-  IdempotencyKey,
   IsoDateTime,
   MessageId,
   ModelRef,
@@ -54,10 +53,11 @@ export const WorkSubmitRequest = z
     /** Refuse the run rather than wait when a tool needs an owner decision. */
     requireApproval: z.boolean().default(true),
     /**
-     * A repeated submission with the same key returns the task the first one
-     * created. The key is scoped to the owner, so two owners can never collide.
+     * `auto` lets Native choose from the objective's structure. `fast` plans and
+     * executes directly; `complex` decomposes, parallelises and replans within
+     * the configured bounds. The resolved mode is reported on the task.
      */
-    idempotencyKey: IdempotencyKey.optional(),
+    reasoning: z.enum(['auto', 'fast', 'complex']).optional(),
   })
   .strict();
 export type WorkSubmitRequest = z.infer<typeof WorkSubmitRequest>;
@@ -85,13 +85,33 @@ export const TaskStatus = z
     updatedAt: IsoDateTime,
     leaseExpiresAt: IsoDateTime.optional(),
     cancelRequested: z.boolean(),
+    /** The resolved reasoning mode, published once the plan exists. */
+    reasoning: z.enum(['fast', 'complex']).optional(),
     steps: z.array(
-      z.object({ id: z.string().min(1).max(80), title: z.string().max(200), state: TaskState }).strict(),
+      z
+        .object({
+          id: z.string().min(1).max(80),
+          title: z.string().max(200),
+          state: TaskState,
+          /** Dependencies make the execution plan observable, not implied. */
+          dependsOn: z.array(z.string().min(1).max(80)).max(64).optional(),
+          attempts: z.number().int().nonnegative().optional(),
+        })
+        .strict(),
     ),
     result: z
       .object({
         summary: z.string().max(20_000).optional(),
         artifacts: z.array(Artifact),
+        /** Present only when the objective was assessed against evidence. */
+        verification: z
+          .object({
+            passed: z.boolean(),
+            reason: z.string().max(1000),
+            evidence: z.array(z.string().max(500)).max(20),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
@@ -172,52 +192,15 @@ export const ConversationSummary = z
     title: z.string().max(300).optional(),
     isWork: z.boolean(),
     agent: AgentId,
-    /** The data partition this conversation belongs to; clients never mix them. */
-    mode: DataMode,
-    createdAt: IsoDateTime,
     updatedAt: IsoDateTime,
   })
   .strict();
 export type ConversationSummary = z.infer<typeof ConversationSummary>;
 
 export const ConversationList = z
-  .object({
-    conversations: z.array(ConversationSummary),
-    /** Rows matching the filter, independent of the current page. */
-    total: z.number().int().nonnegative(),
-    nextCursor: z.string().min(1).max(1024).optional(),
-  })
+  .object({ conversations: z.array(ConversationSummary) })
   .strict();
 export type ConversationList = z.infer<typeof ConversationList>;
-
-export const ConversationListQuery = z
-  .object({
-    mode: DataMode.optional(),
-    isWork: z.enum(['true', 'false']).optional(),
-    agent: AgentId.optional(),
-    limit: z.coerce.number().int().min(1).max(200).optional(),
-    cursor: z.string().min(1).max(1024).optional(),
-  })
-  .strict();
-export type ConversationListQuery = z.infer<typeof ConversationListQuery>;
-
-/**
- * Authorized deletion of one conversation and its cascade.
- *
- * There is no automatic retention for conversations, transcripts or tasks; this
- * is the only path that removes them, and it requires an owner decision.
- */
-export const ConversationDeletion = z
-  .object({
-    conversationId: ConversationId,
-    deleted: z.boolean(),
-    messagesDeleted: z.number().int().nonnegative(),
-    tasksDeleted: z.number().int().nonnegative(),
-  })
-  .strict();
-export type ConversationDeletion = z.infer<typeof ConversationDeletion>;
-
-export const ConversationDeleteParams = z.object({ conversationId: ConversationId }).strict();
 
 export const MemoryEntry = z
   .object({
@@ -229,84 +212,5 @@ export const MemoryEntry = z
   .strict();
 export type MemoryEntry = z.infer<typeof MemoryEntry>;
 
-export const MemoryList = z
-  .object({
-    entries: z.array(MemoryEntry),
-    nextCursor: z.string().min(1).max(1024).optional(),
-  })
-  .strict();
+export const MemoryList = z.object({ entries: z.array(MemoryEntry) }).strict();
 export type MemoryList = z.infer<typeof MemoryList>;
-
-/**
- * Writing memory over HTTP is explicit and owner-scoped. It is not retrieval:
- * the returned entry is exact key/value storage in one data mode, and the
- * handshake reports retrieval augmentation as unavailable.
- */
-export const MemoryPutRequest = z
-  .object({
-    key: z.string().trim().min(1).max(200),
-    value: z.string().max(20_000),
-    mode: DataMode.default('private'),
-  })
-  .strict();
-export type MemoryPutRequest = z.infer<typeof MemoryPutRequest>;
-
-export const MemoryListQuery = z
-  .object({
-    mode: DataMode.optional(),
-    limit: z.coerce.number().int().min(1).max(500).optional(),
-    cursor: z.string().min(1).max(1024).optional(),
-  })
-  .strict();
-export type MemoryListQuery = z.infer<typeof MemoryListQuery>;
-
-export const MemoryKeyParams = z.object({ key: z.string().trim().min(1).max(200) }).strict();
-
-export const MemoryDeletion = z
-  .object({
-    key: z.string().min(1).max(200),
-    mode: DataMode,
-    deleted: z.boolean(),
-  })
-  .strict();
-export type MemoryDeletion = z.infer<typeof MemoryDeletion>;
-
-/** The task read model. It is a projection, not a second task record. */
-export const TaskSummary = z
-  .object({
-    taskId: TaskId,
-    conversationId: ConversationId,
-    objective: z.string().min(1).max(200_000),
-    state: TaskState,
-    agent: AgentId,
-    mode: DataMode,
-    generation: z.number().int().nonnegative(),
-    createdAt: IsoDateTime,
-    updatedAt: IsoDateTime,
-    cancelRequested: z.boolean(),
-  })
-  .strict();
-export type TaskSummary = z.infer<typeof TaskSummary>;
-
-export const TaskList = z
-  .object({
-    tasks: z.array(TaskSummary),
-    /** Rows matching the filter, independent of the current page. */
-    total: z.number().int().nonnegative(),
-    nextCursor: z.string().min(1).max(1024).optional(),
-  })
-  .strict();
-export type TaskList = z.infer<typeof TaskList>;
-
-/** Owner-scoped Work discovery: one filter set, one ordering, one cursor. */
-export const TaskListQuery = z
-  .object({
-    state: TaskState.optional(),
-    mode: DataMode.optional(),
-    agent: AgentId.optional(),
-    conversationId: ConversationId.optional(),
-    limit: z.coerce.number().int().min(1).max(200).optional(),
-    cursor: z.string().min(1).max(1024).optional(),
-  })
-  .strict();
-export type TaskListQuery = z.infer<typeof TaskListQuery>;

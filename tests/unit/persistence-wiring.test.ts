@@ -38,7 +38,7 @@ test('the default persistence driver is memory', async () => {
       env: ENV,
       gateway: fakeGateway(),
     });
-    assert.deepEqual(app.persistence, { driver: 'memory', durable: false });
+    assert.deepEqual(app.persistence, { driver: 'memory' });
     await app.stop();
   } finally {
     workspace.cleanup();
@@ -55,7 +55,7 @@ test('selecting mongo persists a task, its transcript and its notification acros
       gateway: fakeGateway(),
       persistence: { database },
     });
-    assert.deepEqual(first.persistence, { driver: 'mongo', durable: true });
+    assert.deepEqual(first.persistence, { driver: 'mongo' });
 
     // Every store was bootstrapped with its own indexes at startup.
     assert.ok(
@@ -111,12 +111,10 @@ test('selecting mongo persists a task, its transcript and its notification acros
         assert.equal(conversation.value.messages[0]?.text, 'Persist this task');
       }
 
-      const notifications = await second.service.notifications(principal, {});
-      assert.equal(notifications.ok, true);
-      assert.ok(notifications.ok);
-      assert.equal(notifications.value.unread, 1);
-      assert.equal(notifications.value.notifications[0]?.taskId, taskId);
-      assert.equal(notifications.value.notifications[0]?.state, 'completed');
+      const notifications = await second.service.notifications(principal);
+      assert.equal(notifications.unread, 1);
+      assert.equal(notifications.notifications[0]?.taskId, taskId);
+      assert.equal(notifications.notifications[0]?.state, 'completed');
 
       // The lease was released on settlement, so nothing is left claiming the run.
       assert.equal(database.collections.get('work_runs')?.documents.length, 0);
@@ -171,7 +169,7 @@ test('the connection string is read from the configured variable name', async ()
       },
     });
     assert.deepEqual(seen, [{ uri: 'mongodb://127.0.0.1:27017', database: 'engine_test' }]);
-    assert.deepEqual(app.persistence, { driver: 'mongo', durable: true });
+    assert.deepEqual(app.persistence, { driver: 'mongo' });
     assert.ok(database.collections.has('test_work_runs'));
     assert.ok(database.collections.has('test_tasks'));
     await app.stop();

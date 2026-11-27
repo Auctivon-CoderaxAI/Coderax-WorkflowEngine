@@ -7,6 +7,7 @@ import {
   RequestId,
   TaskId,
 } from './primitives.js';
+import { ScheduleNotice } from './schedules.js';
 
 /**
  * A permission request is the only way an agent obtains something it was not
@@ -21,6 +22,8 @@ export const PermissionScope = z.enum([
   'memory.read',
   'conversation.read',
   'credential.use',
+  'browser.control',
+  'browser.transfer',
 ]);
 export type PermissionScope = z.infer<typeof PermissionScope>;
 
@@ -43,23 +46,9 @@ export const PermissionRequest = z
 export type PermissionRequest = z.infer<typeof PermissionRequest>;
 
 export const PermissionList = z
-  .object({
-    requests: z.array(PermissionRequest),
-    /** Rows matching the filter, independent of the current page. */
-    total: z.number().int().nonnegative(),
-    nextCursor: z.string().min(1).max(1024).optional(),
-  })
+  .object({ requests: z.array(PermissionRequest) })
   .strict();
 export type PermissionList = z.infer<typeof PermissionList>;
-
-export const PermissionListQuery = z
-  .object({
-    decision: z.enum(['pending', 'approved', 'denied']).optional(),
-    limit: z.coerce.number().int().min(1).max(200).optional(),
-    cursor: z.string().min(1).max(1024).optional(),
-  })
-  .strict();
-export type PermissionListQuery = z.infer<typeof PermissionListQuery>;
 
 export const PermissionDecisionRequest = z
   .object({
@@ -88,36 +77,18 @@ export const CompletionNotification = z
   .strict();
 export type CompletionNotification = z.infer<typeof CompletionNotification>;
 
-export const NotificationList = z
+export const NotificationResponse = z
   .object({
     notifications: z.array(CompletionNotification),
-    /** Total unread for this owner, independent of the current page. */
+    /**
+     * Schedule notices share this endpoint and this unread count. A schedule can
+     * fail before a Work task exists, so it cannot be represented as a
+     * CompletionNotification; it is not a second notification authority, just a
+     * second record kind behind the same owner-facing surface.
+     */
+    schedules: z.array(ScheduleNotice).optional(),
     unread: z.number().int().nonnegative(),
-    /** Rows matching the filter, independent of the current page. */
-    total: z.number().int().nonnegative(),
-    nextCursor: z.string().min(1).max(1024).optional(),
   })
   .strict();
+export const NotificationList = NotificationResponse.extend({ schedules: z.array(ScheduleNotice).default([]) });
 export type NotificationList = z.infer<typeof NotificationList>;
-
-export const NotificationListQuery = z
-  .object({
-    unreadOnly: z.enum(['true', 'false']).optional(),
-    limit: z.coerce.number().int().min(1).max(200).optional(),
-    cursor: z.string().min(1).max(1024).optional(),
-  })
-  .strict();
-export type NotificationListQuery = z.infer<typeof NotificationListQuery>;
-
-/**
- * Clearing the blue dot. Marking read is scoped to named task ids and the store
- * only touches rows owned by the authenticated owner, so a client cannot clear
- * another owner's notifications by guessing an id.
- *
- * Shape reserved by `feat/durable-events-integration`; the consolidation keeps
- * it unchanged so that branch's client work merges without a second contract.
- */
-export const NotificationReadRequest = z
-  .object({ taskIds: z.array(TaskId).min(1).max(100) })
-  .strict();
-export type NotificationReadRequest = z.infer<typeof NotificationReadRequest>;

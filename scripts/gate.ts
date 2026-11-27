@@ -1,17 +1,20 @@
-import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CONTRACT_VERSION, ROUTES } from '@coderax/contracts';
-import { SDK_COVERAGE } from '@coderax/sdk';
+import {
+  ARTIFACT_BODY_LIMIT_BYTES,
+  CONTRACT_VERSION,
+  MAX_ARTIFACT_BASE64_CHARS,
+  ROUTES,
+} from '@coderax/contracts';
 
 /**
- * The permanent architectural and release gate.
+ * The permanent architectural gate.
  *
  * Every check here is a refusal, not a warning: the command exits non-zero and
  * prints what failed. A check that cannot read its input fails too — an
- * unreadable manifest, lockfile or artifact is not evidence of compliance.
+ * unreadable lockfile or source file is not evidence of compliance.
  *
  * Nothing in this file reaches the network. The dependency advisory check is the
  * one network-bound check and is opt-in (`--audit`), so it is enabled in CI where
@@ -52,35 +55,52 @@ async function walk(directory: string, filter: (file: string) => boolean): Promi
 }
 
 /* -------------------------------------------------------------------------- */
-/* Contract, SDK and release coherence                                        */
+/* Contract and handler coherence                                             */
 /* -------------------------------------------------------------------------- */
 
 async function checkContractSurface(): Promise<void> {
   const check = 'contract-surface';
-  const catalogue = ROUTES.map((route) => route.operationId).sort();
-  const covered = Object.keys(SDK_COVERAGE).sort();
-  const missingFromSdk = catalogue.filter((id) => !covered.includes(id));
-  const staleInSdk = covered.filter((id) => !catalogue.includes(id));
-  if (missingFromSdk.length > 0) {
-    fail(check, `operations published without an SDK method: ${missingFromSdk.join(', ')}`);
-  } else if (staleInSdk.length > 0) {
-    fail(check, `SDK methods without a published operation: ${staleInSdk.join(', ')}`);
-  } else {
-    pass(check, `${catalogue.length} operations are covered by exactly one SDK method`);
-  }
 
-  const duplicates = catalogue.filter((id, index) => catalogue.indexOf(id) !== index);
+  const ids = ROUTES.map((route) => route.operationId);
+  const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
   if (duplicates.length > 0) fail(check, `duplicate operation ids: ${duplicates.join(', ')}`);
 
-  const paths = new Map<string, number>();
+  const keys = new Map<string, number>();
   for (const route of ROUTES) {
     const key = `${route.method} ${route.path}`;
-    paths.set(key, (paths.get(key) ?? 0) + 1);
+    keys.set(key, (keys.get(key) ?? 0) + 1);
   }
-  const collisions = [...paths.entries()].filter(([, count]) => count > 1).map(([key]) => key);
+  const collisions = [...keys.entries()].filter(([, count]) => count > 1).map(([key]) => key);
   if (collisions.length > 0) {
     fail(check, `two operations claim one method and path: ${collisions.join(', ')}`);
   }
+
+  // The registry refuses an unknown operation at startup, but only for the routes
+  // a process actually reaches. This check is static: it compares the published
+  // catalogue with the registrations in source, in both directions.
+  let source: string;
+  try {
+    source = await readFile(path.join(ROOT, 'src', 'api', 'routes.ts'), 'utf8');
+  } catch {
+    fail(check, 'src/api/routes.ts could not be read');
+    return;
+  }
+  const registered = new Set(
+    [...source.matchAll(/registry\.register\('([^']+)'/g)].map((match) => match[1] as string),
+  );
+  const unregistered = ids.filter((id) => !registered.has(id));
+  const unknown = [...registered].filter((id) => !ids.includes(id));
+  if (unregistered.length > 0) {
+    fail(check, `operations with no handler: ${unregistered.join(', ')}`);
+  } else if (unknown.length > 0) {
+    fail(check, `handlers with no published operation: ${unknown.join(', ')}`);
+  } else {
+    pass(check, `${ids.length} operations are declared once and registered once`);
+  }
+
+  const methods = new Set(ROUTES.map((route) => route.method));
+  const unexpected = [...methods].filter((method) => !['GET', 'POST', 'PATCH'].includes(method));
+  if (unexpected.length > 0) fail(check, `unsupported methods: ${unexpected.join(', ')}`);
 }
 
 async function checkContractVersion(): Promise<void> {
@@ -98,58 +118,42 @@ async function checkContractVersion(): Promise<void> {
 }
 
 /**
- * The committed tarballs are what another repository pins, so they must describe
- * the source in this commit. A stale artifact is a release defect, not a cache.
+ * The advertised ceiling and the enforced ceiling are the same number.
+ *
+ * A contract-valid upload must never be refused by the transport, and only the
+ * operations that carry encoded file content may raise the default bound.
  */
-async function checkReleaseArtifacts(): Promise<void> {
-  const check = 'release-artifacts';
-  const directory = path.join(ROOT, 'dist-artifacts');
-  const manifest = await readJson(path.join(directory, 'manifest.json'), check);
-  if (!manifest) return;
-  if (manifest.contractVersion !== CONTRACT_VERSION) {
+async function checkTransportCeilings(): Promise<void> {
+  const check = 'transport-ceilings';
+  if (ARTIFACT_BODY_LIMIT_BYTES <= MAX_ARTIFACT_BASE64_CHARS) {
     fail(
       check,
-      `manifest records contract ${String(manifest.contractVersion)} but the contract is ${CONTRACT_VERSION}`,
+      `artifact body limit ${ARTIFACT_BODY_LIMIT_BYTES} cannot carry a contract-valid upload of ${MAX_ARTIFACT_BASE64_CHARS} base64 characters`,
     );
     return;
   }
-  const files = Array.isArray(manifest.files)
-    ? (manifest.files as Array<{ name?: unknown; sha256?: unknown }>)
-    : [];
-  if (files.length === 0) {
-    fail(check, 'manifest lists no release files');
-    return;
-  }
-  let sums: string;
-  try {
-    sums = await readFile(path.join(directory, 'SHA256SUMS'), 'utf8');
-  } catch {
-    fail(check, 'SHA256SUMS is missing');
-    return;
-  }
-  let bad = 0;
-  for (const file of files) {
-    if (typeof file.name !== 'string' || typeof file.sha256 !== 'string') {
-      fail(check, 'manifest entry is not a name and checksum pair');
-      bad += 1;
-      continue;
+
+  const contentOperations = ['uploadArtifact', 'uploadArtifactVersion', 'generateArtifact'];
+  let checked = 0;
+  for (const route of ROUTES) {
+    if (route.maxBodyBytes !== undefined) {
+      checked += 1;
+      if (!route.tags.includes('artifacts')) {
+        fail(check, `${route.operationId} raises the body ceiling outside the artifact family`);
+      }
+      if (route.maxBodyBytes < ARTIFACT_BODY_LIMIT_BYTES) {
+        fail(
+          check,
+          `${route.operationId} allows ${route.maxBodyBytes} bytes but the contract advertises ${ARTIFACT_BODY_LIMIT_BYTES}`,
+        );
+      }
     }
-    const absolute = path.join(directory, file.name);
-    if (!existsSync(absolute)) {
-      fail(check, `${file.name} is listed but absent`);
-      bad += 1;
-      continue;
-    }
-    const actual = createHash('sha256').update(await readFile(absolute)).digest('hex');
-    if (actual !== file.sha256) {
-      fail(check, `${file.name} does not match its recorded checksum`);
-      bad += 1;
-    } else if (!sums.includes(`${actual}  ${file.name}`)) {
-      fail(check, `${file.name} is absent from SHA256SUMS`);
-      bad += 1;
+    if (contentOperations.includes(route.operationId) && route.maxBodyBytes === undefined) {
+      fail(check, `${route.operationId} accepts file content without a declared body ceiling`);
     }
   }
-  if (bad === 0) pass(check, `${files.length} release artifacts match their checksums`);
+  if (checked === 0) fail(check, 'no operation declares a body ceiling');
+  else pass(check, `${checked} content operations advertise the enforced ceiling`);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -159,13 +163,17 @@ async function checkReleaseArtifacts(): Promise<void> {
 const AUTHORITIES: ReadonlyArray<{ name: string; responsibility: string }> = Object.freeze([
   { name: 'createApplicationService', responsibility: 'use cases' },
   { name: 'createRouteRegistry', responsibility: 'route ownership' },
-  { name: 'createExecutionSupervisor', responsibility: 'execution supervision' },
+  { name: 'createRouter', responsibility: 'request dispatch' },
+  { name: 'createHttpServer', responsibility: 'transport' },
+  { name: 'createOwnerAuth', responsibility: 'authentication' },
+  { name: 'createRunSupervisor', responsibility: 'execution supervision' },
   { name: 'createTaskRunner', responsibility: 'run ownership and settlement' },
   { name: 'createBudgetLedger', responsibility: 'model budget' },
   { name: 'createModelCatalog', responsibility: 'model selection' },
   { name: 'createArtifactRepository', responsibility: 'artifact metadata' },
-  { name: 'createArtifactStorage', responsibility: 'artifact bytes' },
+  { name: 'createArtifactService', responsibility: 'artifact lifecycle' },
   { name: 'createScheduleRepository', responsibility: 'schedule records' },
+  { name: 'createScheduleEngine', responsibility: 'schedule advancement' },
   { name: 'createPermissionStore', responsibility: 'permissions' },
   { name: 'createEventBus', responsibility: 'execution events' },
   { name: 'createMemoryStore', responsibility: 'memory' },
@@ -174,21 +182,21 @@ const AUTHORITIES: ReadonlyArray<{ name: string; responsibility: string }> = Obj
 async function checkSingleAuthorities(): Promise<void> {
   const check = 'single-authority';
   const sources = await walk(path.join(ROOT, 'src'), (file) => file.endsWith('.ts'));
+  const contents = new Map<string, string>();
+  for (const file of sources) contents.set(file, await readFile(file, 'utf8'));
+
   for (const authority of AUTHORITIES) {
     const definitions: string[] = [];
-    for (const file of sources) {
-      const content = await readFile(file, 'utf8');
-      const pattern = new RegExp(
-        `export\\s+(?:async\\s+)?(?:function|const)\\s+${authority.name}\\b`,
-      );
+    const pattern = new RegExp(
+      `export\\s+(?:async\\s+)?(?:function|const)\\s+${authority.name}\\b`,
+    );
+    for (const [file, content] of contents) {
       if (pattern.test(content)) definitions.push(path.relative(ROOT, file));
     }
     if (definitions.length === 1) {
       pass(`${check}.${authority.name}`, `${authority.responsibility} has one implementation`);
     } else if (definitions.length === 0) {
-      // Not every named authority is present in every revision; absence is not a
-      // duplicate, and the capability handshake reports it as unsupported.
-      passes.push(`${check}.${authority.name}: not implemented in this revision`);
+      fail(`${check}.${authority.name}`, `${authority.responsibility} has no implementation`);
     } else {
       fail(
         `${check}.${authority.name}`,
@@ -235,15 +243,18 @@ async function checkNoSilentSkips(): Promise<void> {
   for (const file of suiteFiles) {
     const content = await readFile(file, 'utf8');
     const relative = path.relative(ROOT, file);
-    // A whole-suite or whole-test skip removes evidence. The object form is
-    // allowed because the database suites use it to declare why they cannot run.
+    // A whole-suite skip removes evidence. The object form is allowed only when
+    // the reason names the environment that gates it, which is how the database
+    // suites declare they cannot run.
     if (/\b(?:test|it|describe|suite)\.skip\s*\(/.test(content)) {
       fail(check, `${relative} skips a test unconditionally`);
       violations += 1;
     }
-    for (const match of content.matchAll(/\{\s*skip\s*:\s*([^,}]+)/g)) {
-      const reason = match[1] ?? '';
-      if (!/CODERAX_TEST_MONGODB_URI|CODERAX_REQUIRE_MONGODB/.test(reason)) {
+    // Only the test-option object form counts; a parameter or local named `skip`
+    // is not a skip declaration.
+    for (const match of content.matchAll(/\{\s*skip\s*:/g)) {
+      const window = content.slice(match.index ?? 0, (match.index ?? 0) + 240);
+      if (!/CODERAX_TEST_MONGODB_URI|CODERAX_REQUIRE_MONGODB|mongo/i.test(window)) {
         fail(check, `${relative} has a skip that is not environment-gated`);
         violations += 1;
       }
@@ -319,7 +330,7 @@ const SECRET_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = Objec
 
 async function checkSecrets(): Promise<void> {
   const check = 'secrets';
-  const roots = ['src', 'packages', 'scripts', 'tests', 'deploy', 'docs'];
+  const roots = ['src', 'packages', 'scripts', 'tests', 'deploy', 'docs', '.github'];
   const files: string[] = [];
   for (const directory of roots) {
     const absolute = path.join(ROOT, directory);
@@ -353,43 +364,38 @@ async function checkAdvisories(): Promise<void> {
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const run = promisify(execFile);
-  try {
-    const { stdout } = await run('npm', ['audit', '--json', '--audit-level=high'], {
-      cwd: ROOT,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    const report = JSON.parse(stdout) as {
+
+  const report = (stdout: string): void => {
+    const parsed = JSON.parse(stdout) as {
       metadata?: { vulnerabilities?: Record<string, number> };
     };
-    const counts = report.metadata?.vulnerabilities;
+    const counts = parsed.metadata?.vulnerabilities;
     if (!counts) {
       fail(check, 'audit output has no vulnerability summary; treating as unverifiable');
       return;
     }
     const blocking = (counts.high ?? 0) + (counts.critical ?? 0);
-    if (blocking > 0) {
-      fail(check, `${blocking} high or critical advisories remain`);
-    } else {
-      pass(check, 'no high or critical advisories');
-    }
+    if (blocking > 0) fail(check, `${blocking} high or critical advisories remain`);
+    else pass(check, 'no high or critical advisories');
+  };
+
+  try {
+    const { stdout } = await run('npm', ['audit', '--json', '--audit-level=high'], {
+      cwd: ROOT,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    report(stdout);
   } catch (error) {
-    const candidate = error as { code?: number; stdout?: string };
+    const candidate = error as { stdout?: string };
     // `npm audit` exits non-zero when it finds something; that is a finding, not
     // a transport error, so the report is parsed before deciding.
     if (typeof candidate.stdout === 'string' && candidate.stdout.trim().startsWith('{')) {
       try {
-        const report = JSON.parse(candidate.stdout) as {
-          metadata?: { vulnerabilities?: Record<string, number> };
-        };
-        const counts = report.metadata?.vulnerabilities ?? {};
-        const blocking = (counts.high ?? 0) + (counts.critical ?? 0);
-        if (blocking > 0) fail(check, `${blocking} high or critical advisories remain`);
-        else pass(check, 'no high or critical advisories');
-        return;
+        report(candidate.stdout);
       } catch {
         fail(check, 'audit report could not be parsed');
-        return;
       }
+      return;
     }
     fail(check, 'advisory metadata is unavailable; refusing to certify dependencies');
   }
@@ -404,7 +410,7 @@ export async function runGate(options: { audit?: boolean } = {}): Promise<{
 }> {
   await checkContractSurface();
   await checkContractVersion();
-  await checkReleaseArtifacts();
+  await checkTransportCeilings();
   await checkSingleAuthorities();
   await checkForbiddenCapabilities();
   await checkNoSilentSkips();

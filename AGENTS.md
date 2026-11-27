@@ -16,7 +16,10 @@ repository is bound by that charter:
   no purchased CI minutes, no trials.
 - Substantive compute is cloud-hosted. The owner's PC and WSL never run inference,
   agents, development workloads or databases for this system.
-- No public repository visibility and no public-facing endpoint.
+- Public source-repository visibility is authorized to enable free GitHub-hosted
+  Actions. The Coderax application is owner-only and has no public-facing
+  endpoint; credentials, conversations, memory, artifacts and personal data stay
+  private. Do not change repository visibility without an explicit owner decision.
 - No silent paid routing and no silent substitution between agents.
 - No placeholder or mocked capability presented as a working feature.
 
@@ -42,19 +45,18 @@ the exact pushed head. Do not weaken a gate to land work; fix the change.
 `npm run verify` is the acceptance gate. It runs:
 
 1. `npm run build` — TypeScript project references across contracts, SDK and engine.
-2. `npm run gate` — the permanent architectural and release gate: contract/SDK
+2. `npm run gate` — the permanent architectural gate: contract and handler
    parity, one implementation per authority, zero-cost and isolation rules,
-   unconditional skips, reproducible dependencies, credential patterns, and the
-   committed release artifacts against their recorded checksums.
+   unconditional skips, reproducible dependencies, credential patterns, and
+   advertised transport ceilings against the contract's own maxima.
 3. `node --test "dist/tests/**/*.test.js"` — unit, contract, integration, security
    and end-to-end suites.
 4. `npm run openapi:check` — fails if `openapi.json` differs from the contracts.
 
-`npm run verify` never writes `dist-artifacts`. Regenerating the tarballs is a
-release step (`npm run sdk:pack`) that must be committed with the source change
-that caused it, so a stale artifact is detectable. `npm run gate:audit` adds the
-network-bound dependency advisory check, which fails closed when metadata is
-unavailable; CI runs it as a separate required step.
+`npm run verify` never rewrites a generated file: `openapi.json` is checked, not
+regenerated, so drift is a failure rather than a silent update. `npm run gate:audit`
+adds the network-bound dependency advisory check, which fails closed when metadata
+is unavailable; CI runs it as a separate required step.
 
 Paste the command and its actual result into the pull request's Testing section. A
 component passing its own unit tests is not sufficient: the UI-to-API-to-engine

@@ -4,26 +4,14 @@ import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
+import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { PermissionStore } from '../permissions/store.js';
-import type { ScheduleRepository } from '../persistence/schedules.js';
-import type { ArtifactRepository } from '../artifacts/store.js';
-import type { AuditLog } from '../observability/audit.js';
-import type { CheckpointStore } from '../persistence/checkpoints.js';
-import type { IdempotencyStore } from '../persistence/idempotency.js';
-import type { EventLog } from '../events/log.js';
-import type { ExecutionRepository } from '../persistence/executions.js';
-import type { QuarantineStore } from '../persistence/quarantine.js';
-import type { BudgetStore } from '../persistence/budgets.js';
-import { createExecutionRepository } from '../persistence/executions.js';
-import { createMongoExecutionRepository, ensureExecutionIndexes } from '../persistence/mongo-executions.js';
+import { createPermissionStore } from '../permissions/store.js';
 import {
-  createInMemoryQuarantineTable,
-  createQuarantineStore,
-} from '../persistence/quarantine.js';
-import { createMongoQuarantineTable, ensureQuarantineIndexes } from '../persistence/mongo-quarantine.js';
-import { createMemoryBudgetStore } from '../persistence/budgets.js';
-import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/mongo-budgets.js';
+  createMongoPermissionStore,
+  ensurePermissionIndexes,
+} from '../persistence/mongo-permissions.js';
 import { createLeaseStore, createInMemoryWorkRunTable } from '../persistence/work-runs.js';
 import { createMongoWorkRunTable, ensureWorkRunIndexes } from '../persistence/mongo.js';
 import type { MongoCollectionLike } from '../persistence/mongo.js';
@@ -32,33 +20,31 @@ import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect
 import { createTaskRepository } from '../persistence/tasks.js';
 import { createConversationRepository } from '../persistence/conversations.js';
 import { createNotificationStore } from '../persistence/notifications.js';
+import {
+  createScheduleNoticeStore,
+  createScheduleRepository,
+} from '../persistence/schedules.js';
+import {
+  createMongoScheduleNoticeStore,
+  createMongoScheduleRepository,
+  ensureScheduleIndexes,
+} from '../persistence/mongo-schedules.js';
 import { createMemoryStore } from '../memory/store.js';
-import { createMemoryEventLog } from '../events/log.js';
-import { createMongoEventLog, ensureEventIndexes } from '../persistence/mongo-events.js';
-import { createPermissionStore } from '../permissions/store.js';
-import { createPermissionTable } from '../persistence/permissions.js';
-import { createAuditLog } from '../observability/audit.js';
-import { createMongoAuditLog, ensureAuditIndexes } from '../persistence/mongo-audit.js';
+import { createArtifactRepository } from '../persistence/artifacts.js';
+import type { ArtifactRepository } from '../persistence/artifacts.js';
+import { createInMemoryBlobStore } from '../persistence/blobs.js';
+import type { BlobStore } from '../persistence/blobs.js';
 import {
-  createCheckpointStore,
-  createMongoCheckpointStore,
-  ensureCheckpointIndexes,
-} from '../persistence/checkpoints.js';
-import {
-  createIdempotencyStore,
-  createMongoIdempotencyStore,
-  ensureIdempotencyIndexes,
-} from '../persistence/idempotency.js';
-import { createScheduleRepository } from '../persistence/schedules.js';
-import { createArtifactRepository } from '../artifacts/store.js';
+  createInMemoryCapacityStore,
+  createMongoCapacityStore,
+  ensureCapacityIndexes,
+} from '../persistence/capacity.js';
+import type { CapacityStore } from '../persistence/capacity.js';
 import {
   createMongoArtifactRepository,
-  createMongoPermissionTable,
-  createMongoScheduleRepository,
+  createMongoBlobStore,
   ensureArtifactIndexes,
-  ensurePermissionIndexes,
-  ensureScheduleIndexes,
-} from '../persistence/mongo-records.js';
+} from '../persistence/mongo-artifacts.js';
 import {
   createMongoConversationRepository,
   createMongoMemoryStore,
@@ -71,37 +57,25 @@ import {
 } from '../persistence/mongo-tables.js';
 import { StartupError } from './startup-error.js';
 
-export type PersistenceHealth = {
-  driver: 'memory' | 'mongo';
-  /** False for the process-local driver: it works, but a restart erases it. */
-  durable: boolean;
-  ok: boolean;
-  latencyMs: number;
-  detail: string;
-};
-
 export type PersistenceStores = {
   driver: 'memory' | 'mongo';
   lease: LeaseStore;
   tasks: TaskRepository;
   conversations: ConversationRepository;
   memory: MemoryStore;
-  notifications: NotificationStore;
   permissions: PermissionStore;
+  notifications: NotificationStore;
   schedules: ScheduleRepository;
+  scheduleNotices: ScheduleNoticeStore;
+  /** Artifact descriptors and immutable version rows. */
   artifacts: ArtifactRepository;
-  audit: AuditLog;
-  checkpoints: CheckpointStore;
-  idempotency: IdempotencyStore;
-  /** Durable execution events; the payload side of the event stream. */
-  events: EventLog;
-  /** Attempt-level identities, termination evidence and stale retirement. */
-  executions: ExecutionRepository;
-  /** Shared workspace holds that outlive the process that created them. */
-  quarantine: QuarantineStore;
-  /** Zero-cost reservation counters, shared by every replica. */
-  budget: BudgetStore;
-  ping: () => Promise<PersistenceHealth>;
+  /**
+   * Content-addressed bytes. The memory driver reports `durable: false`, and the
+   * artifact service refuses uploads through it rather than losing them later.
+   */
+  blobs: BlobStore;
+  /** Atomic quota admission and expiring reservations. */
+  capacity: CapacityStore;
   close: () => Promise<void>;
 };
 
@@ -150,52 +124,31 @@ async function openDatabase(input: PersistenceInput): Promise<MongoDatabase> {
 /**
  * Builds every store from the validated persistence setting.
  *
- * `memory` is a single process and forgets tasks, transcripts, memory,
- * notifications, permissions, schedules, artifacts, receipts and idempotency
- * records on restart. `mongo` is the production path; selecting it without a
- * reachable, indexable database is a startup failure, never a silent downgrade.
+ * `memory` is a single process and forgets tasks, transcripts, memory and
+ * notifications on restart. `mongo` is the production path; selecting it without
+ * a reachable, indexable database is a startup failure, never a silent downgrade.
  * The stores are returned together so the composition root cannot mix a durable
  * lease with a process-local task record, which would make fencing meaningless
- * after a restart, or a durable task with a permission that vanishes on restart.
+ * after a restart.
  */
 export async function buildPersistence(input: PersistenceInput): Promise<PersistenceStores> {
-  const { config, clock, ids } = input;
+  const { config, clock } = input;
   const settings = config.persistence;
 
   if (settings.driver === 'memory') {
-    const ping = async (): Promise<PersistenceHealth> => ({
-      driver: 'memory',
-      durable: false,
-      ok: true,
-      latencyMs: 0,
-      detail:
-        'Process-local stores are active; a restart loses tasks, transcripts, events, receipts, memory, notifications, permissions, schedules and idempotency records.',
-    });
     return {
       driver: 'memory',
       lease: createLeaseStore(createInMemoryWorkRunTable()),
       tasks: createTaskRepository(),
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
+      permissions: createPermissionStore({ clock, ids: input.ids }),
       notifications: createNotificationStore(),
-      permissions: createPermissionStore({
-        clock,
-        ids,
-        table: createPermissionTable(),
-      }),
       schedules: createScheduleRepository(),
+      scheduleNotices: createScheduleNoticeStore(),
       artifacts: createArtifactRepository(),
-      audit: createAuditLog({ clock, ids }),
-      checkpoints: createCheckpointStore(),
-      idempotency: createIdempotencyStore(),
-      events: createMemoryEventLog(),
-      executions: createExecutionRepository(),
-      quarantine: createQuarantineStore({
-        table: createInMemoryQuarantineTable(),
-        ttlMs: config.execution.cancelQuarantineMs,
-      }),
-      budget: createMemoryBudgetStore(),
-      ping,
+      blobs: createInMemoryBlobStore(),
+      capacity: createInMemoryCapacityStore(),
       close: NO_CLOSE,
     };
   }
@@ -203,41 +156,46 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const database = await openDatabase(input);
   const workRuns: MongoCollectionLike = database.collection(collectionName(config, 'work_runs'));
   const tasks = database.collection(collectionName(config, 'tasks'));
-  const idempotency = database.collection(collectionName(config, 'idempotency'));
   const conversations = database.collection(collectionName(config, 'conversations'));
   const messages = database.collection(collectionName(config, 'messages'));
   const memory = database.collection(collectionName(config, 'memory'));
-  const notifications = database.collection(collectionName(config, 'notifications'));
   const permissions = database.collection(collectionName(config, 'permissions'));
+  const notifications = database.collection(collectionName(config, 'notifications'));
   const schedules = database.collection(collectionName(config, 'schedules'));
+  const scheduleExecutions = database.collection(collectionName(config, 'schedule_executions'));
+  const scheduleNotices = database.collection(collectionName(config, 'schedule_notices'));
   const artifacts = database.collection(collectionName(config, 'artifacts'));
-  const audit = database.collection(collectionName(config, 'audit_receipts'));
-  const checkpoints = database.collection(collectionName(config, 'checkpoints'));
-  const events = database.collection(collectionName(config, 'events'));
-  const eventHeads = database.collection(collectionName(config, 'event_heads'));
-  const executions = database.collection(collectionName(config, 'executions'));
-  const quarantine = database.collection(collectionName(config, 'quarantine'));
-  const budgetDays = database.collection(collectionName(config, 'budget_days'));
-  const budgetReservations = database.collection(
-    collectionName(config, 'budget_reservations'),
+  const artifactVersions = database.collection(collectionName(config, 'artifact_versions'));
+  const artifactBlobs = database.collection(collectionName(config, 'artifact_blobs'));
+  const artifactChunks = database.collection(collectionName(config, 'artifact_chunks'));
+  const artifactCapacity = database.collection(collectionName(config, 'artifact_capacity'));
+  const artifactReservations = database.collection(
+    collectionName(config, 'artifact_reservations'),
   );
+  const artifactCollections = {
+    artifacts,
+    versions: artifactVersions,
+    blobs: artifactBlobs,
+    chunks: artifactChunks,
+  };
 
   try {
     await ensureWorkRunIndexes(workRuns);
     await ensureTaskIndexes(tasks);
-    await ensureIdempotencyIndexes(idempotency);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
-    await ensureNotificationIndexes(notifications);
     await ensurePermissionIndexes(permissions);
-    await ensureScheduleIndexes(schedules);
-    await ensureArtifactIndexes(artifacts);
-    await ensureAuditIndexes(audit);
-    await ensureCheckpointIndexes(checkpoints);
-    await ensureEventIndexes({ events, heads: eventHeads });
-    await ensureExecutionIndexes(executions);
-    await ensureQuarantineIndexes(quarantine);
-    await ensureBudgetIndexes({ days: budgetDays, reservations: budgetReservations });
+    await ensureNotificationIndexes(notifications);
+    await ensureScheduleIndexes({
+      schedules,
+      executions: scheduleExecutions,
+      notices: scheduleNotices,
+    });
+    await ensureArtifactIndexes(artifactCollections);
+    await ensureCapacityIndexes({
+      capacity: artifactCapacity,
+      reservations: artifactReservations,
+    });
   } catch (error) {
     await database.close().catch(() => undefined);
     throw new StartupError([
@@ -245,57 +203,37 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     ]);
   }
 
-  const ping = async (): Promise<PersistenceHealth> => {
-    const started = Date.now();
-    try {
-      await database.ping();
-      return {
-        driver: 'mongo',
-        durable: true,
-        ok: true,
-        latencyMs: Date.now() - started,
-        detail: `MongoDB ${settings.database} answered a ping.`,
-      };
-    } catch {
-      return {
-        driver: 'mongo',
-        durable: true,
-        ok: false,
-        latencyMs: Date.now() - started,
-        detail: `MongoDB ${settings.database} did not answer a ping.`,
-      };
-    }
-  };
-
   return {
     driver: 'mongo',
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
-    tasks: createMongoTaskRepository(tasks, idempotency),
+    tasks: createMongoTaskRepository(tasks),
     conversations: createMongoConversationRepository({ conversations, messages }),
     memory: createMongoMemoryStore({
       collection: memory,
       clock,
       maxValueLength: MEMORY_VALUE_LIMIT,
     }),
-    notifications: createMongoNotificationStore(notifications),
-    permissions: createPermissionStore({
+    permissions: createMongoPermissionStore({
+      collection: permissions,
       clock,
-      ids,
-      table: createMongoPermissionTable(permissions),
+      ids: input.ids,
     }),
-    schedules: createMongoScheduleRepository(schedules),
-    artifacts: createMongoArtifactRepository(artifacts),
-    audit: createMongoAuditLog({ collection: audit, clock, ids }),
-    checkpoints: createMongoCheckpointStore(checkpoints),
-    idempotency: createMongoIdempotencyStore(idempotency),
-    events: createMongoEventLog({ events, heads: eventHeads }),
-    executions: createMongoExecutionRepository(executions),
-    quarantine: createQuarantineStore({
-      table: createMongoQuarantineTable(quarantine),
-      ttlMs: config.execution.cancelQuarantineMs,
+    notifications: createMongoNotificationStore(notifications),
+    schedules: createMongoScheduleRepository({
+      schedules,
+      executions: scheduleExecutions,
     }),
-    budget: createMongoBudgetStore({ days: budgetDays, reservations: budgetReservations }),
-    ping,
+    scheduleNotices: createMongoScheduleNoticeStore(scheduleNotices),
+    artifacts: createMongoArtifactRepository(artifactCollections),
+    blobs: createMongoBlobStore({
+      collections: { blobs: artifactBlobs, chunks: artifactChunks },
+      clock,
+      chunkBytes: config.artifacts.chunkBytes,
+    }),
+    capacity: createMongoCapacityStore({
+      capacity: artifactCapacity,
+      reservations: artifactReservations,
+    }),
     close: database.close,
   };
 }

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
-import { startTestApp, waitFor } from '../helpers.js';
+import { workRunKey } from '../../src/execution/lease.js';
+import { startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -21,12 +22,15 @@ test('Work runs to completion, persists its transcript and notifies once', async
       return status.ok && status.value.state === 'completed' ? status.value : null;
     });
 
-    assert.equal(completed.steps.length, 3);
+    // A short objective selects fast reasoning: one reasoning step plus one
+    // evidence-based verification, both counted in usage.
+    assert.equal(completed.reasoning, 'fast');
+    assert.equal(completed.steps.length, 1);
     assert.ok(completed.steps.every((step) => step.state === 'completed'));
-    // Native runs three planned steps; each step returns the gateway's text.
     assert.ok(completed.result?.summary?.startsWith('A verified result.'));
-    // Usage accumulates across the three planned steps (11/13 each).
-    assert.deepEqual(completed.usage, { inputTokens: 33, outputTokens: 39 });
+    assert.equal(completed.result?.verification?.passed, true);
+    assert.ok((completed.result?.verification?.evidence.length ?? 0) > 0);
+    assert.deepEqual(completed.usage, { inputTokens: 22, outputTokens: 26 });
 
     const conversation = await started.app.service.conversation(
       principal,
@@ -39,11 +43,9 @@ test('Work runs to completion, persists its transcript and notifies once', async
       assert.equal(conversation.value.messages[1]?.role, 'assistant');
     }
 
-    const notifications = await started.app.service.notifications(principal, {});
-    assert.equal(notifications.ok, true);
-    assert.ok(notifications.ok);
-    assert.equal(notifications.value.unread, 1);
-    assert.equal(notifications.value.notifications[0]?.state, 'completed');
+    const notifications = await started.app.service.notifications(principal);
+    assert.equal(notifications.unread, 1);
+    assert.equal(notifications.notifications[0]?.state, 'completed');
 
     const events = started.app.dependencies.events.replay(submitted.value.taskId, 0);
     const types = events.events.map((event) => event.type);
@@ -51,7 +53,7 @@ test('Work runs to completion, persists its transcript and notifies once', async
     assert.equal(types.at(-1), 'task.completed');
     assert.ok(types.includes('text.delta'));
 
-    const receipts = (await started.app.dependencies.audit.list()).receipts;
+    const receipts = started.app.dependencies.audit.list();
     assert.ok(receipts.some((entry) => entry.action === 'work.accepted'));
     assert.ok(receipts.some((entry) => entry.action === 'work.completed'));
   } finally {
@@ -124,6 +126,19 @@ test('reported text and nested arguments are scrubbed before replay and persiste
       report({ type: 'text.replace', text: 'reply: sk-example' });
       report({ type: 'text.delta', text: '0123456789 done' });
       report({ type: 'tool.call', tool: 'test', callId: 'call', input: [{ api_key: 'sample value' }] });
+      report({
+        type: 'step.completed',
+        stepId: 'secret-step',
+        title: 'Secret step',
+        attempts: 1,
+        evidence: {
+          stepId: 'secret-step',
+          title: 'Secret step',
+          citation: 'token sk-example0123456789',
+          output: 'credential sk-example0123456789',
+          attempts: 1,
+        },
+      });
       assert.throws(() => report({ type: 'file.edit', path: 'x'.repeat(1025) }), /file.edit path/);
       report({ type: 'file.edit', path: 'x'.repeat(1024) });
       return { ok: true, summary: 'done' };
@@ -142,6 +157,10 @@ test('reported text and nested arguments are scrubbed before replay and persiste
     const conversation = await started.app.service.conversation(principal, task.value.conversationId);
     assert.ok(conversation.ok);
     assert.equal(conversation.value.messages.at(-1)?.text, 'reply: [redacted-key] done');
+    const stored = await started.app.dependencies.tasks.get(task.value.taskId);
+    const persistedEvidence = JSON.stringify(stored?.checkpoint.evidence);
+    assert.doesNotMatch(persistedEvidence, /sk-example|0123456789/);
+    assert.match(persistedEvidence, /redacted/);
   } finally {
     await started.close();
   }
@@ -271,7 +290,7 @@ test('failed transcript and notification writes do not strand a settled run', as
     assert.ok(task.ok);
     await deps.scheduler.idle();
     assert.ok(publishedBeforeAppend && notificationAttempted);
-    assert.ok((await deps.audit.list()).receipts.some(entry => entry.action === 'work.completed'));
+    assert.ok(deps.audit.list().some(entry => entry.action === 'work.completed'));
     deps.conversations.appendMessage = append;
     assert.ok((await submit(task.value.conversationId)).ok);
     await deps.scheduler.idle();
@@ -280,92 +299,62 @@ test('failed transcript and notification writes do not strand a settled run', as
   }
 });
 
-test('submission holds a token reservation, not just a request slot', async () => {
-  const started = await startTestApp({
-    config: {
-      models: {
-        route: [{ providerId: 'free', modelId: 'coderax-small' }],
-        dailyRequestBudget: 1_000,
-        dailyTokenBudget: 24_000,
-        reservationInputTokens: 16_000,
-        reservationOutputTokens: 8_000,
-      },
-    },
+for (const [operation, state] of [
+  ['resumeTask', 'awaiting_approval'],
+  ['retryTask', 'failed'],
+] as const) {
+  test(`${operation} releases its claim when reissue is rejected`, async (t) => {
+    const started = await startTestApp();
+    try {
+      const { service, dependencies: deps } = started.app;
+      const task = taskRecord({ state, runToken: 'previous-generation' });
+      assert.ok((await deps.tasks.create(task)).ok);
+      const key = workRunKey(task);
+      const reissue = deps.tasks.reissue;
+      const rejectReissue: typeof reissue = async (input) => {
+        assert.equal((await deps.lease.read({ key, now: deps.clock.now() }))?.token, input.token);
+        if (operation === 'resumeTask') {
+          const cancelled = await service.cancelTask(principal, task.taskId);
+          assert.ok(cancelled.ok && cancelled.value.state === 'cancelled');
+          return reissue(input);
+        }
+        return { applied: false, reason: 'superseded' };
+      };
+      const rejected = t.mock.method(deps.tasks, 'reissue', rejectReissue);
+
+      const result = await service[operation](principal, task.taskId, task.generation);
+      assert.ok(!result.ok && result.code === 'conflict');
+      assert.equal(await deps.lease.read({ key, now: deps.clock.now() }), null);
+
+      rejected.mock.restore();
+      const next = await service.submitWork(principal, {
+        conversationId: task.conversationId,
+        objective: 'Start new Work after the rejected reissue',
+        mode: 'cloud',
+        requireApproval: true,
+      });
+      assert.ok(next.ok);
+      await deps.scheduler.idle();
+    } finally {
+      await started.close();
+    }
   });
-  try {
-    // Two replicas would each read the same remaining allowance if a request
-    // reserved zero tokens; one shared store must admit only one of them.
-    const submissions = await Promise.all([
-      started.app.service.submitWork(principal, {
-        objective: 'Token contender A',
-        mode: 'cloud',
-        requireApproval: false,
-      }),
-      started.app.service.submitWork(principal, {
-        objective: 'Token contender B',
-        mode: 'cloud',
-        requireApproval: false,
-      }),
-    ]);
-    const accepted = submissions.filter((entry) => entry.ok);
-    const refused = submissions.filter((entry) => !entry.ok);
-    assert.equal(accepted.length, 1, 'the token reservation admits one request');
-    assert.equal(refused.length, 1);
-    const lost = refused[0];
-    assert.ok(lost && !lost.ok);
-    if (!lost || lost.ok) return;
-    assert.equal(lost.code, 'budget_exhausted');
-    assert.equal(
-      lost.detail,
-      'The daily zero-cost token budget cannot cover this request.',
-    );
+}
 
-    // Settlement refunds the unused allowance, so the day reflects actual use.
-    const budget = await waitFor(async () => {
-      const state = await started.app.service.budget(principal);
-      return state.used.usage.inputTokens === 33 ? state : null;
-    });
-    assert.equal(budget.used.requests, 1);
-    assert.deepEqual(budget.used.usage, { inputTokens: 33, outputTokens: 39 });
-  } finally {
-    await started.close();
-  }
-});
-
-test('a run refused before dispatch returns its reservation', async () => {
+test('retry rejects a budget refusal and refunds a failed reissue', async () => {
   const started = await startTestApp();
   try {
-    const deps = started.app.dependencies;
-    // Hold the cloud root so the supervisor refuses admission. The task fails,
-    // but no adapter was called, so neither the request slot nor the reserved
-    // token allowance may be charged to the day.
-    await deps.quarantine.poison({
-      root: started.workspace.cloudRoot,
-      generation: 1,
-      taskId: 'task_refused',
-      reason: 'test hold',
-      now: Date.now(),
-    });
-    const submitted = await started.app.service.submitWork(principal, {
-      objective: 'Refused run',
-      mode: 'cloud',
-      requireApproval: false,
-    });
-    assert.equal(submitted.ok, true);
-    if (!submitted.ok) return;
-
-    const failed = await waitFor(async () => {
-      const status = await started.app.service.task(principal, submitted.value.taskId);
-      return status.ok && status.value.state === 'failed' ? status.value : null;
-    });
-    assert.equal(failed.failure?.code, 'workspace_denied');
-
-    const budget = await waitFor(async () => {
-      const state = await started.app.service.budget(principal);
-      return state.used.requests === 0 ? state : null;
-    });
-    assert.deepEqual(budget.used.usage, { inputTokens: 0, outputTokens: 0 });
-  } finally {
-    await started.close();
-  }
+    const { tasks } = started.app.dependencies;
+    const service = started.app.service;
+    const refused = taskRecord({ state: 'failed', failure: { code: 'budget_exhausted', detail: 'Budget', retryable: false } });
+    await tasks.create(refused);
+    const result = await service.retryTask(principal, refused.taskId, refused.generation);
+    assert.equal(!result.ok && result.code, 'budget_exhausted');
+    const failed = { ...refused, taskId: 'task_other', failure: null };
+    await tasks.create(failed);
+    tasks.reissue = async () => ({ applied: false, reason: 'superseded' });
+    const conflict = await service.retryTask(principal, failed.taskId, failed.generation);
+    assert.equal(!conflict.ok && conflict.code, 'conflict');
+    assert.equal(service.budget(principal).used.requests, 0);
+  } finally { await started.close(); }
 });

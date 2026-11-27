@@ -10,29 +10,13 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./client": {
-      "types": "./dist/client.d.ts",
-      "default": "./dist/client.js"
-    },
-    "./version": {
-      "types": "./dist/version.d.ts",
-      "default": "./dist/version.js"
-    },
-    "./stream": {
-      "types": "./dist/stream.d.ts",
-      "default": "./dist/stream.js"
-    },
-    "./manifest": {
-      "types": "./dist/manifest.d.ts",
-      "default": "./dist/manifest.js"
     }
   },
   "scripts": {
     "build": "tsc -b"
   },
   "dependencies": {
-    "@coderax/contracts": "1.1.0",
-    "zod": "^3.25.67"
+    "@coderax/contracts": "*",
+    "zod": "^4.6.7"
   }
 }

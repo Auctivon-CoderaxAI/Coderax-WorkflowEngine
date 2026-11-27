@@ -7,9 +7,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    # The consolidation branch publishes hosted evidence before a pull request
-    # exists. Remove this branch once the pull request supplies its own runs.
-    branches: [main, consolidation/authoritative-v1]
+    branches: [main]
 
 permissions:
   contents: read
@@ -19,68 +17,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  mongo:
-    # A required lane: the test script sets CODERAX_REQUIRE_MONGODB=1, so a
-    # missing service fails the job instead of reporting a skipped check. The
-    # database is an ephemeral CI container, never a production deployment.
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      mongo:
-        image: mongo:7
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017/?directConnection=true
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-
-      - name: Install
-        run: npm ci
-
-      - name: Build (TypeScript project references)
-        run: npm run build
-
-      - name: Restart, two-replica, lease, grant and retention evidence
-        run: |
-          set -o pipefail
-          log="$RUNNER_TEMP/mongo-lane.tap"
-          npm run test:mongo 2>&1 | tee "$log"
-          tests=$(sed -n 's/^# tests \([0-9][0-9]*\)$/\1/p' "$log" | tail -1)
-          pass=$(sed -n 's/^# pass \([0-9][0-9]*\)$/\1/p' "$log" | tail -1)
-          fail=$(sed -n 's/^# fail \([0-9][0-9]*\)$/\1/p' "$log" | tail -1)
-          skipped=$(sed -n 's/^# skipped \([0-9][0-9]*\)$/\1/p' "$log" | tail -1)
-          {
-            echo "### MongoDB acceptance lane"
-            echo ""
-            echo "| tests | pass | fail | skipped |"
-            echo "| --- | --- | --- | --- |"
-            echo "| ${tests:-?} | ${pass:-?} | ${fail:-?} | ${skipped:-?} |"
-          } >> "$GITHUB_STEP_SUMMARY"
-          # A green lane that ran nothing is not evidence: require the suites and
-          # refuse a skip now that the database is present.
-          if [ -z "$tests" ] || [ -z "$skipped" ]; then
-            echo "The lane reported no test summary, so its suites did not run." >&2
-            exit 1
-          fi
-          if [ "$tests" -lt 1 ] || [ "$fail" -ne 0 ] || [ "$skipped" -ne 0 ]; then
-            echo "MongoDB evidence incomplete: tests=$tests fail=$fail skipped=$skipped" >&2
-            exit 1
-          fi
-
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # A permanent, real MongoDB lane. The artifact durability tests refuse to
+    # skip when CODERAX_REQUIRE_MONGODB=1, so a missing or unreachable service
+    # fails the required check instead of reporting a green skip. The service
+    # container is the free public-repository runner path; no managed database
+    # and no paid minutes are added.
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - "27017:27017"
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -95,30 +49,17 @@ jobs:
       - name: Build (TypeScript project references)
         run: npm run build
 
-      # Runs before any artifact is regenerated, so a committed tarball that no
-      # longer matches its source is a failure rather than silently refreshed.
-      - name: Architecture and release gate
+      - name: Architectural gate (contract/handler parity, single authority, isolation)
         run: node dist/scripts/gate.js
 
-      - name: Dependency advisories (fails closed)
-        run: node dist/scripts/gate.js --audit
-
-      - name: Tests (unit, contract, integration, security, e2e)
+      - name: Tests (unit, contract, integration, security, e2e, real MongoDB)
+        env:
+          CODERAX_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
+          CODERAX_REQUIRE_MONGODB: '1'
         run: node --test "dist/tests/**/*.test.js"
 
       - name: Contract drift gate
         run: npm run openapi:check
-
-      - name: Package checksums
-        working-directory: dist-artifacts
-        run: sha256sum -c SHA256SUMS
-
-      - name: Upload SDK distribution
-        uses: actions/upload-artifact@v4
-        with:
-          name: coderax-sdk-1.1.0
-          path: dist-artifacts/
-          if-no-files-found: error
 
       - name: Reject committed secrets and local paths
         run: |

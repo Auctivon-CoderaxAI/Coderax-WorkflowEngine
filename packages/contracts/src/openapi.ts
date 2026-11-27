@@ -1,6 +1,6 @@
 import { Problem } from './errors.js';
 import { toJsonSchema } from './json-schema.js';
-import { CONTRACT_VERSION, ENGINE_VERSION, EVENT_SCHEMA_VERSION, MIN_SDK_VERSION } from './primitives.js';
+import { CONTRACT_VERSION } from './primitives.js';
 import { ROUTES, type RouteSpec } from './routes.js';
 
 /**
@@ -28,10 +28,6 @@ export type OpenApiDocument = {
     schemas: Record<string, unknown>;
   };
   paths: Record<string, Record<string, OpenApiOperation>>;
-  'x-contract-version': string;
-  'x-event-schema-version': number;
-  'x-engine-version': string;
-  'x-min-sdk-version': string;
 };
 
 const ERROR_RESPONSE = {
@@ -70,11 +66,15 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
   const paths: Record<string, Record<string, OpenApiOperation>> = {};
   const schemas: Record<string, unknown> = { Problem: toJsonSchema(Problem) };
 
-  // Sorted by operation id so the document depends on the catalogue, not on the
-  // order a process happened to register its handlers.
-  for (const route of [...routes].sort((left, right) =>
-    left.operationId.localeCompare(right.operationId),
-  )) {
+  // The document is a function of the catalogue, not of registration order. The
+  // registry can register a valid subset in any order; the served document must
+  // still equal the published one byte for byte.
+  const ordered = [...routes].sort(
+    (left, right) =>
+      left.path.localeCompare(right.path) || left.method.localeCompare(right.method),
+  );
+
+  for (const route of ordered) {
     const operation: OpenApiOperation = {
       operationId: route.operationId,
       summary: route.summary,
@@ -84,23 +84,14 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
         [String(route.response.status)]: route.stream
           ? {
               description: route.response.description,
-              content: {
-                'text/event-stream': {
-                  schema: toJsonSchema(route.frames ?? route.response.schema),
-                },
-                ...(route.negotiated
-                  ? {
-                      'application/json': {
-                        schema: toJsonSchema(route.response.schema),
-                      },
-                    }
-                  : {}),
-              },
+              content: { 'text/event-stream': { schema: { type: 'string' } } },
             }
           : {
               description: route.response.description,
               content: {
-                'application/json': { schema: toJsonSchema(route.response.schema) },
+                [route.response.contentType ?? 'application/json']: {
+                  schema: toJsonSchema(route.response.schema),
+                },
               },
             },
         '4XX': ERROR_RESPONSE,
@@ -141,9 +132,5 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
       schemas,
     },
     paths,
-    'x-contract-version': CONTRACT_VERSION,
-    'x-event-schema-version': EVENT_SCHEMA_VERSION,
-    'x-engine-version': ENGINE_VERSION,
-    'x-min-sdk-version': MIN_SDK_VERSION,
   };
 }

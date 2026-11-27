@@ -8,34 +8,6 @@ import { z } from 'zod';
 export const CONTRACT_VERSION = '1.1.0' as const;
 export const API_PREFIX = '/v1' as const;
 export const EVENT_SCHEMA_VERSION = 1 as const;
-export const ENGINE_VERSION = '0.2.0' as const;
-export const SDK_VERSION = '1.1.0' as const;
-/** The oldest SDK that understands this contract. */
-export const MIN_SDK_VERSION = '1.1.0' as const;
-
-export const CONTRACT_MAJOR = Number(CONTRACT_VERSION.split('.')[0]) as 1;
-
-/**
- * Compatibility is a major match plus the engine being at least as new as the
- * client was built for. A client never guesses: it fetches the handshake and
- * calls this before issuing a request.
- */
-export function isCompatibleContract(engineVersion: string, clientMinimum: string): boolean {
-  const engine = engineVersion.split('.').map((part) => Number(part));
-  const client = clientMinimum.split('.').map((part) => Number(part));
-  if (engine.length !== 3 || client.length !== 3) return false;
-  if (engine.some((part) => !Number.isInteger(part)) || client.some((part) => !Number.isInteger(part))) {
-    return false;
-  }
-  if (engine[0] !== client[0]) return false;
-  for (let index = 0; index < 3; index += 1) {
-    const left = engine[index] ?? 0;
-    const right = client[index] ?? 0;
-    if (left > right) return true;
-    if (left < right) return false;
-  }
-  return true;
-}
 
 function identifier(label: string, max = 128) {
   return z.string().trim().min(1).max(max).describe(label);
@@ -53,23 +25,33 @@ export type ConversationId = z.infer<typeof ConversationId>;
 export const TaskId = identifier('task identifier');
 export type TaskId = z.infer<typeof TaskId>;
 
+export const MessageId = identifier('message identifier');
+export type MessageId = z.infer<typeof MessageId>;
+
+export const BrowserSessionId = identifier('browser session identifier');
+export type BrowserSessionId = z.infer<typeof BrowserSessionId>;
+
+export const BrowserArtifactId = identifier('browser artifact identifier');
+export type BrowserArtifactId = z.infer<typeof BrowserArtifactId>;
+
 export const ScheduleId = identifier('schedule identifier');
 export type ScheduleId = z.infer<typeof ScheduleId>;
+
+export const ExecutionId = identifier('schedule execution identifier');
+export type ExecutionId = z.infer<typeof ExecutionId>;
 
 export const ArtifactId = identifier('artifact identifier');
 export type ArtifactId = z.infer<typeof ArtifactId>;
 
-/** An owner-scoped key that makes a repeated submission return the same task. */
-export const IdempotencyKey = z
-  .string()
-  .trim()
-  .min(8)
-  .max(200)
-  .regex(/^[A-Za-z0-9_.:-]+$/, 'an idempotency key is URL-safe');
-export type IdempotencyKey = z.infer<typeof IdempotencyKey>;
+export const ProjectId = identifier('project identifier');
+export type ProjectId = z.infer<typeof ProjectId>;
 
-export const MessageId = identifier('message identifier');
-export type MessageId = z.infer<typeof MessageId>;
+/** Content addresses are lowercase hex so two clients cannot disagree on case. */
+export const Sha256 = z
+  .string()
+  .regex(/^[a-f0-9]{64}$/, 'sha256 must be 64 lowercase hexadecimal characters')
+  .describe('SHA-256 content hash');
+export type Sha256 = z.infer<typeof Sha256>;
 
 export const RequestId = identifier('request correlation identifier');
 export type RequestId = z.infer<typeof RequestId>;
@@ -114,6 +96,12 @@ export const EngineFailureCode = z.enum([
   'provider_error',
   'budget_exhausted',
   'paid_model_refused',
+  /** The run is suspended until the owner decides a scoped permission request. */
+  'approval_required',
+  /** The plan finished but its evidence did not verify the objective. */
+  'verification_failed',
+  /** The bounded autonomy budget was exhausted before the objective settled. */
+  'iteration_exhausted',
 ]);
 export type EngineFailureCode = z.infer<typeof EngineFailureCode>;
 

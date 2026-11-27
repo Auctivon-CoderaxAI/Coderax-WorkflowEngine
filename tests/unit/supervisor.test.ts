@@ -1,200 +1,226 @@
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
-import { createCapabilityBroker } from '../../src/execution/capabilities.js';
-import type { ExecutionIdentity } from '../../src/execution/identity.js';
-import { createExecutionSupervisor } from '../../src/execution/supervisor.js';
-import { createUnavailableIsolationProvider } from '../../src/execution/termination.js';
-import { createExecutionRepository } from '../../src/persistence/executions.js';
-import {
-  createInMemoryQuarantineTable,
-  createQuarantineStore,
-} from '../../src/persistence/quarantine.js';
-import { createIdGenerator } from '../../src/support/clock.js';
+import { createRunSupervisor } from '../../src/execution/supervisor.js';
+import { createRunWorkspace, quarantineRunWorkspace } from '../../src/execution/workspace.js';
 
-const NOW = new Date('2026-11-26T12:00:00.000Z');
-
-function identity(executionId: string, generation = 1): ExecutionIdentity {
+function roots(): { root: string; privateRoot: string; cloudRoot: string; cleanup: () => void } {
+  const root = mkdtempSync(path.join(tmpdir(), 'coderax-supervisor-'));
+  const privateRoot = path.join(root, 'private');
+  const cloudRoot = path.join(root, 'cloud');
+  mkdirSync(privateRoot);
+  mkdirSync(cloudRoot);
   return {
-    executionId,
-    kind: 'work',
-    taskId: 'task_supervisor',
-    conversationId: 'conv_supervisor',
-    ownerId: 'owner-test',
-    tenantId: null,
-    agent: 'coderax',
-    mode: 'cloud',
-    generation,
-    token: 'run_token',
+    root,
+    privateRoot,
+    cloudRoot,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
 
-function createSupervisor(
-  shared: {
-    executions?: ReturnType<typeof createExecutionRepository>;
-    quarantine?: ReturnType<typeof createQuarantineStore>;
-  } = {},
-) {
-  const clock = { now: () => NOW, iso: () => NOW.toISOString() };
-  const executions = shared.executions ?? createExecutionRepository();
-  const quarantine =
-    shared.quarantine ??
-    createQuarantineStore({
-      table: createInMemoryQuarantineTable(),
-      ttlMs: 1_000,
+test('a run workspace is private, inside its mode and unique per generation', async () => {
+  const workspace = roots();
+  try {
+    const first = await createRunWorkspace({
+      mode: 'cloud',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_abc',
+      generation: 1,
     });
-  const supervisor = createExecutionSupervisor({
-    clock,
-    ids: createIdGenerator(),
-    executions,
-    quarantine,
-    capabilities: createCapabilityBroker(),
-    isolation: createUnavailableIsolationProvider('No workload isolation in this test.'),
-    containmentHoldMs: 1_000,
-    shutdownGraceMs: 50,
-    heartbeatIntervalMs: 60_000,
-  });
-  return { supervisor, executions, quarantine };
-}
-
-test('an execution identity is admitted once, even if the same attempt is retried', async () => {
-  const { supervisor } = createSupervisor();
-  let launches = 0;
-  const run = () =>
-    supervisor.run({
-      identity: identity('exec_once'),
-      adapter: { agent: 'coderax' },
-      workspaceRoot: '/srv/cloud',
-      scopes: ['workspace.write'],
-      launch: async () => {
-        launches += 1;
-        return { outcome: { kind: 'completed' as const, summary: 'done' } };
-      },
+    const second = await createRunWorkspace({
+      mode: 'cloud',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_abc',
+      generation: 2,
     });
-  const first = await run();
-  const second = await run();
-  assert.equal(first.admitted, true);
-  assert.equal(second.admitted, false);
-  assert.equal(second.admitted === false && second.code, 'execution_duplicate');
-  assert.equal(launches, 1, 'a duplicate identity must not reach the adapter');
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    if (!first.ok || !second.ok) return;
+
+    assert.notEqual(first.value.root, second.value.root);
+    assert.ok(first.value.root.startsWith(workspace.cloudRoot));
+    assert.ok(first.value.root.includes('task_abc-g1'));
+    assert.equal(statSync(first.value.root).mode & 0o777, 0o700);
+    assert.equal(existsSync(first.value.root), true);
+  } finally {
+    workspace.cleanup();
+  }
 });
 
-test('an abandoned execution holds its root on every supervisor that shares the store', async () => {
-  const first = createSupervisor();
-  // A second process: its own supervisor maps, the same durable stores.
-  const second = createSupervisor({
-    executions: first.executions,
-    quarantine: first.quarantine,
-  });
-  const abandoned = await first.supervisor.run({
-    identity: identity('exec_abandoned'),
-    adapter: { agent: 'coderax' },
-    workspaceRoot: '/srv/cloud',
-    scopes: ['workspace.write'],
-    launch: async () => ({
-      outcome: { kind: 'cancelled' as const, abandoned: true },
-      abandoned: true,
-    }),
-  });
-  assert.equal(abandoned.admitted, true);
-  assert.equal(abandoned.admitted && abandoned.termination.kind, 'unverified');
-  assert.equal(abandoned.admitted && abandoned.workspaceHeld, true);
-
-  // The second supervisor is a different process with its own maps; only the
-  // shared quarantine row can refuse the root.
-  const refused = await second.supervisor.run({
-    identity: identity('exec_replacement'),
-    adapter: { agent: 'coderax' },
-    workspaceRoot: '/srv/cloud',
-    scopes: ['workspace.write'],
-    launch: async () => {
-      throw new Error('the adapter must not run in a held workspace');
-    },
-  });
-  assert.equal(refused.admitted, false);
-  assert.equal(refused.admitted === false && refused.code, 'workspace_denied');
-
-  await second.quarantine.release('/srv/cloud');
-  const admitted = await second.supervisor.run({
-    identity: identity('exec_after_release'),
-    adapter: { agent: 'coderax' },
-    workspaceRoot: '/srv/cloud',
-    scopes: ['workspace.write'],
-    launch: async () => ({ outcome: { kind: 'completed' as const, summary: 'ok' } }),
-  });
-  assert.equal(admitted.admitted, true);
-});
-
-test('a stale attempt is retired and its workspace is quarantined durably', async () => {
-  const { supervisor, executions, quarantine } = createSupervisor();
-  await executions.create({
-    ...identity('exec_stale'),
-    workspaceRoot: '/srv/private',
-    phase: 'starting',
-    cause: null,
-    startedAt: '2026-11-26T11:00:00.000Z',
-    lastHeartbeatAt: '2026-11-26T11:00:00.000Z',
-    finishedAt: null,
-    termination: null,
-    capabilityRevokedAt: null,
-    processUseCount: 0,
-  });
-  assert.equal(await supervisor.retireStale(1_000), 1);
-  const record = await executions.get('exec_stale');
-  assert.equal(record?.cause, 'interrupted');
-  assert.equal(record?.termination?.status, 'unverified');
-  const held = await quarantine.find('/srv/private', NOW.getTime());
-  assert.equal(held?.reason, 'process_stopped_heartbeating');
-});
-
-test('a completed external workload does not hold the shared root without a provider', async () => {
-  const { supervisor, quarantine } = createSupervisor();
-  const run = (executionId: string) =>
-    supervisor.run({
-      identity: {
-        ...identity(executionId),
-        kind: 'chat',
-        taskId: null,
-        conversationId: 'conv_external',
-        generation: 0,
-        token: null,
-      },
-      adapter: { agent: 'opencode', workload: 'external' },
-      workspaceRoot: '/srv/cloud',
-      scopes: ['workspace.write'],
-      launch: async () => ({ outcome: { kind: 'completed' as const, summary: 'ok' } }),
-    });
-
-  const first = await run('exec_external_a');
-  assert.equal(first.admitted, true);
-  // The engine still refuses to claim what it cannot observe...
-  assert.equal(first.admitted && first.termination.kind, 'unverified');
-  // ...but a local hold cannot contain a remote process, so it does not lock
-  // the shared root every later run depends on.
-  assert.equal(first.admitted && first.workspaceHeld, false);
-  assert.equal(await quarantine.find('/srv/cloud', NOW.getTime()), null);
-
-  const second = await run('exec_external_b');
-  assert.equal(second.admitted, true, 'an unverified remote result must not lock the shared root');
-});
-
-test('an unobservable child process still holds the root without a provider', async () => {
-  const { supervisor, quarantine } = createSupervisor();
-  const result = await supervisor.run({
-    identity: identity('exec_spawned'),
-    adapter: { agent: 'coderax', workload: 'in-process' },
-    workspaceRoot: '/srv/cloud',
-    scopes: ['workspace.write', 'command.execute'],
-    launch: async (execution) => {
-      execution.guard.recordUse({
-        scope: 'command.execute',
-        resource: '/srv/cloud',
-        spawnsProcesses: true,
+test('a run identity cannot traverse outside its mode', async () => {
+  const workspace = roots();
+  try {
+    for (const runId of ['../private', 'a/b', '.', '']) {
+      const result = await createRunWorkspace({
+        mode: 'cloud',
+        roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+        runId,
+        generation: 1,
       });
-      return { outcome: { kind: 'completed' as const, summary: 'done' } };
-    },
-  });
-  assert.equal(result.admitted, true);
-  assert.equal(result.admitted && result.termination.kind, 'unverified');
-  assert.equal(result.admitted && result.workspaceHeld, true);
-  assert.ok(await quarantine.find('/srv/cloud', NOW.getTime()));
+      assert.equal(result.ok, false, runId);
+    }
+    assert.equal(existsSync(path.join(workspace.root, 'private', 'g1')), false);
+  } finally {
+    workspace.cleanup();
+  }
+});
+
+test('the supervisor revokes a finished run without touching its workspace', async () => {
+  const workspace = roots();
+  try {
+    const run = await createRunWorkspace({
+      mode: 'cloud',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_finished',
+      generation: 1,
+    });
+    assert.equal(run.ok, true);
+    if (!run.ok) return;
+
+    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    await supervisor.begin({
+      taskId: 'task_finished',
+      token: 'token-1',
+      generation: 1,
+      workspaceRoot: run.value.root,
+    });
+    assert.equal(supervisor.isLive('task_finished', 'token-1'), true);
+
+    supervisor.finish('task_finished', 'token-1');
+    assert.equal(supervisor.isLive('task_finished', 'token-1'), false);
+    assert.equal(supervisor.live().length, 0);
+    assert.equal(existsSync(run.value.root), true);
+  } finally {
+    workspace.cleanup();
+  }
+});
+
+test('abandoning a run revokes its capability and renames its workspace', async () => {
+  const workspace = roots();
+  try {
+    const run = await createRunWorkspace({
+      mode: 'cloud',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_abandoned',
+      generation: 3,
+    });
+    assert.equal(run.ok, true);
+    if (!run.ok) return;
+
+    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    await supervisor.begin({
+      taskId: 'task_abandoned',
+      token: 'token-2',
+      generation: 3,
+      workspaceRoot: run.value.root,
+    });
+
+    assert.equal(await supervisor.abandon({ token: 'token-2' }), true);
+    assert.equal(supervisor.isLive('task_abandoned', 'token-2'), false);
+    assert.equal(existsSync(run.value.root), false);
+    // A second revoke is a no-op, never a second rename.
+    assert.equal(await supervisor.abandon({ token: 'token-2' }), false);
+  } finally {
+    workspace.cleanup();
+  }
+});
+
+test('a newer generation revokes and quarantines the previous workspace', async () => {
+  const workspace = roots();
+  try {
+    const oldRun = await createRunWorkspace({
+      mode: 'cloud',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_resumed',
+      generation: 1,
+    });
+    const newRun = await createRunWorkspace({
+      mode: 'cloud',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_resumed',
+      generation: 2,
+    });
+    assert.ok(oldRun.ok && newRun.ok);
+    if (!oldRun.ok || !newRun.ok) return;
+
+    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    await supervisor.begin({
+      taskId: 'task_resumed',
+      token: 'generation-1',
+      generation: 1,
+      workspaceRoot: oldRun.value.root,
+    });
+    await supervisor.begin({
+      taskId: 'task_resumed',
+      token: 'generation-2',
+      generation: 2,
+      workspaceRoot: newRun.value.root,
+    });
+
+    assert.equal(supervisor.isLive('task_resumed', 'generation-1'), false);
+    assert.equal(existsSync(oldRun.value.root), false);
+    assert.equal(existsSync(newRun.value.root), true);
+    assert.equal(supervisor.isLive('task_resumed', 'generation-2'), true);
+  } finally {
+    workspace.cleanup();
+  }
+});
+
+test('shutdown revokes every registered run', async () => {
+  const workspace = roots();
+  try {
+    const first = await createRunWorkspace({
+      mode: 'cloud',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_one',
+      generation: 1,
+    });
+    const second = await createRunWorkspace({
+      mode: 'private',
+      roots: { private: workspace.privateRoot, cloud: workspace.cloudRoot },
+      runId: 'task_two',
+      generation: 1,
+    });
+    assert.ok(first.ok && second.ok);
+    if (!first.ok || !second.ok) return;
+
+    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    await supervisor.begin({
+      taskId: 'task_one',
+      token: 'token-a',
+      generation: 1,
+      workspaceRoot: first.value.root,
+    });
+    await supervisor.begin({
+      taskId: 'task_two',
+      token: 'token-b',
+      generation: 1,
+      workspaceRoot: second.value.root,
+    });
+
+    const result = await supervisor.shutdown();
+    assert.equal(result.revoked, 2);
+    assert.equal(result.quarantined, 2);
+    assert.equal(supervisor.live().length, 0);
+    assert.equal(existsSync(first.value.root), false);
+    assert.equal(existsSync(second.value.root), false);
+  } finally {
+    workspace.cleanup();
+  }
+});
+
+test('quarantine refuses to rename a directory it did not create', async () => {
+  const workspace = roots();
+  try {
+    mkdirSync(path.join(workspace.cloudRoot, 'unrelated'));
+    assert.equal(
+      await quarantineRunWorkspace({ root: path.join(workspace.cloudRoot, 'unrelated') }),
+      false,
+    );
+    assert.equal(existsSync(path.join(workspace.cloudRoot, 'unrelated')), true);
+  } finally {
+    workspace.cleanup();
+  }
 });

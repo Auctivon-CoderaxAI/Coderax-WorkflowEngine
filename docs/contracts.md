@@ -31,12 +31,10 @@ the successful response; failures use the shared `Problem` body.
 | --- | --- | --- |
 | HTTP contracts | `CONTRACT_VERSION = '1.1.0'`, served at `/v1` | `primitives.ts` |
 | Execution events | `EVENT_SCHEMA_VERSION = 1` | `events.ts` |
-| Chat stream frames | `CHAT_STREAM_SCHEMA_VERSION = 1` | `chat.ts` |
-| SDK | `1.1.0`, matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
+| SDK | matches `CONTRACT_VERSION` | `packages/sdk/package.json` |
 
-The engine reports all three versions in `GET /v1/handshake`; a client calls
-`negotiate()` and refuses an incompatible deployment before issuing a request.
-`docs/api-v1.1.md` is the operative reference for this line.
+The version literal in the `/v1/health` response remains `1.0.0` so clients
+using the original v1 schema can still parse it.
 
 Rules:
 
@@ -69,10 +67,51 @@ Every event is an envelope plus a payload:
 - A consumer that has already seen an `eventId` must ignore it.
 - A consumer that receives `seq <= lastSeen` must ignore it and resync from
   `GET /v1/work/{taskId}/events?after=<lastSeen>`.
-- A bounded per-task buffer means an old cursor can be truncated; the
-  `x-coderax-truncated` response header reports it, and the client must re-read
-  task state. The SSE `id:` line is the per-task `seq`, so `Last-Event-ID`
-  resumes exactly.
+- A bounded per-task buffer means an old cursor can be truncated; the replay
+  response says so, and the client must re-read task state.
+
+## Browser operations
+
+`/v1/browser/*` is declared in the same catalogue and follows the same rules:
+
+- `browserCapabilities` reports truthful availability; a provider is operational
+  only after a versioned handshake with every feature and a free cost class.
+- Session creation takes an exact origin allowlist and always runs in cloud
+  infrastructure.
+- `browserAction` performs one navigation, inspection, screenshot, accessible
+  discovery, form, keyboard, mouse, tab, upload or download action.
+- Sensitive categories use the permission store with `browser.control` or
+  `browser.transfer`; a grant is single-use and bound to
+  `browser:<sessionId>:<category>`.
+- Screenshots, uploads and downloads are returned as artifacts whose SHA-256 is
+  computed by the engine; page observations carry `trust: "untrusted"`.
+- Receipts are a separate, bounded append-only window of what was attempted,
+  refused or performed. Retention is per session; they are not execution events
+  and do not enter a Work task stream.
+
+`docs/browser.md` documents the provider protocol, the safety model and the
+verification evidence required before the capability may be called operational.
+
+## Schedule occurrences
+
+A schedule is a durable authorization to submit Work, so its identity is part of
+the contract, not an implementation detail. Every occurrence carries an
+`occurrenceKey`; the engine stores one receipt per occurrence in the schedule
+store, and the receipt's task id is derived from the schedule, the occurrence and
+the attempt. Re-sending a manual trigger or an event with the same
+`idempotencyKey` returns the existing receipt (`duplicate: true`) instead of
+starting a second run. A `trigger` or `scheduleEvent` response therefore reports
+the authoritative execution state, including `refused` or `skipped`, rather than
+pretending every request was accepted for execution.
+
+`PATCH /v1/schedules/{scheduleId}` deliberately omits `agent`, `mode`, `model`
+and `objective`. Those fields are the execution identity the owner authorized;
+scheduling them is safe, redirecting them is not. A client that needs a different
+identity creates a new schedule, which produces a new owner decision.
+
+Schedule notices (completion, failure, missed run, refusal) are returned in the
+same `NotificationList` as Work completions, under `schedules`, and the one
+`POST /v1/notifications/read` marks both kinds. The unread count covers both.
 
 ## SDK rules
 
@@ -85,24 +124,18 @@ Every event is an envelope plus a payload:
   describe;
 - throws `CoderaxApiError` with the stable `code`, HTTP `status`, `requestId` and
   `retryable` flag from the `Problem` body;
-- never places the token in a URL or an error message;
-- covers every published operation in `SDK_COVERAGE`, checked by a test against
-  the route catalogue and against the methods that exist on the client.
+- never places the token in a URL or an error message.
 
 Do not add a second client contract, a hand-written DTO, or a divergent copy of a
-payload in either consuming repository. The immutable distribution is the pair of
-checked-in tarballs under `dist-artifacts/` with `SHA256SUMS`; see
-`docs/api-v1.1.md` for installation and checksum reproduction.
+payload in either consuming repository.
 
 ## Adding an operation
 
 1. Add the `RouteSpec` to `ROUTES`.
 2. Register a handler in `src/api/routes.ts` and delegate to the service.
-3. Extend `packages/sdk` and add the operation to `SDK_COVERAGE`.
+3. Extend `packages/sdk` if a client needs it.
 4. `npm run openapi:write` and commit `openapi.json`.
-5. Add a contract test and an HTTP case in
-   `tests/integration/http-contract.test.ts`. `npm run verify` must pass, and the
-   handshake `capabilities` state must be updated if the domain was unavailable.
+5. Add a contract test. `npm run verify` must pass.
 
 ## Drift gate
 

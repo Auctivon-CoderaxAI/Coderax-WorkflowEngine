@@ -1,92 +1,127 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { ArtifactRow } from '../domain.js';
 import type { DataMode } from '@coderax/contracts';
-import type { WorkspaceRoots } from '../execution/workspace.js';
+import type { ServiceResult } from '../support/result.js';
+import { fail, ok } from '../support/result.js';
 
 /**
- * Artifact metadata and bytes.
+ * Owner-scoped artifact storage.
  *
- * Metadata is owner-scoped and durable. Bytes live under an engine-managed
- * directory inside the mode's workspace root, addressed by the generated
- * artifact id rather than by the caller's `path` label, so no request can choose
- * a filesystem location. The digest is computed on write and re-verified on read.
+ * Artifacts are written under the mode's workspace root, addressed by a hash of
+ * the owner identity so one owner can never name another's directory, and every
+ * path is resolved and checked to stay inside that owner's tree. Digests are
+ * computed here so a task result can name the exact bytes it produced.
  */
-export type ArtifactRepository = {
-  insert: (row: ArtifactRow) => Promise<void>;
-  get: (ownerId: string, artifactId: string) => Promise<ArtifactRow | null>;
-  list: (ownerId: string, taskId: string) => Promise<ArtifactRow[]>;
+
+export type ArtifactRecord = {
+  path: string;
+  bytes: number;
+  digest: string;
 };
 
-export function createArtifactRepository(): ArtifactRepository {
-  const rows = new Map<string, ArtifactRow>();
-
-  return {
-    insert: async (row) => {
-      rows.set(row.artifactId, { ...row });
-    },
-    get: async (ownerId, artifactId) => {
-      const row = rows.get(artifactId);
-      return row && row.ownerId === ownerId ? { ...row } : null;
-    },
-    list: async (ownerId, taskId) =>
-      [...rows.values()]
-        .filter((row) => row.ownerId === ownerId && row.taskId === taskId)
-        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-        .map((row) => ({ ...row })),
-  };
-}
-
-export function digestOf(content: Buffer): string {
-  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
-}
-
-export type ArtifactStorage = {
-  write: (input: { mode: DataMode; artifactId: string; content: Buffer }) => Promise<{
-    bytes: number;
-    digest: string;
-  }>;
-  read: (input: { mode: DataMode; artifactId: string; digest: string }) => Promise<Buffer>;
-  remove: (input: { mode: DataMode; artifactId: string }) => Promise<void>;
+export type ArtifactStore = {
+  write: (input: {
+    ownerId: string;
+    mode: DataMode;
+    path: string;
+    bytes: Buffer;
+  }) => Promise<ServiceResult<ArtifactRecord>>;
+  read: (input: { ownerId: string; mode: DataMode; path: string }) => Promise<ServiceResult<Buffer>>;
+  list: (input: { ownerId: string; mode: DataMode; prefix?: string }) => Promise<ArtifactRecord[]>;
+  absolute: (input: { ownerId: string; mode: DataMode; path: string }) => string | null;
 };
 
-const ARTIFACT_DIRECTORY = '.coderax-artifacts';
+const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
 
-function directoryFor(roots: WorkspaceRoots, mode: DataMode): string {
-  return path.resolve(roots[mode], ARTIFACT_DIRECTORY);
+function ownerKey(ownerId: string): string {
+  return createHash('sha256').update(ownerId).digest('hex').slice(0, 32);
 }
 
-function fileFor(roots: WorkspaceRoots, mode: DataMode, artifactId: string): string {
-  if (!/^[A-Za-z0-9_.:-]+$/.test(artifactId)) {
-    throw new Error('artifact identity is not a safe file name');
-  }
-  const directory = directoryFor(roots, mode);
-  const candidate = path.resolve(directory, `${artifactId}.bin`);
-  if (!candidate.startsWith(directory + path.sep)) {
-    throw new Error('artifact path escaped its root');
-  }
-  return candidate;
+function safeRelative(value: string): string | null {
+  if (value.length === 0 || value.length > 300) return null;
+  if (value.includes('\\') || value.includes('\0')) return null;
+  const normalized = path.posix.normalize(value);
+  if (normalized.startsWith('..') || path.posix.isAbsolute(normalized)) return null;
+  return normalized;
 }
 
-export function createArtifactStorage(roots: WorkspaceRoots): ArtifactStorage {
+export function createArtifactStore(input: { roots: Record<DataMode, string> }): ArtifactStore {
+  function ownerRoot(ownerId: string, mode: DataMode): string {
+    return path.join(input.roots[mode], 'artifacts', ownerKey(ownerId));
+  }
+
+  function resolve(input: { ownerId: string; mode: DataMode; path: string }): string | null {
+    const relative = safeRelative(input.path);
+    if (!relative) return null;
+    const root = ownerRoot(input.ownerId, input.mode);
+    const absolute = path.resolve(root, relative);
+    const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+    return absolute.startsWith(prefix) ? absolute : null;
+  }
+
   return {
-    write: async ({ mode, artifactId, content }) => {
-      const directory = directoryFor(roots, mode);
-      await mkdir(directory, { recursive: true });
-      const digest = digestOf(content);
-      await writeFile(fileFor(roots, mode, artifactId), content, { mode: 0o600 });
-      return { bytes: content.length, digest };
-    },
-    read: async ({ mode, artifactId, digest }) => {
-      const content = await readFile(fileFor(roots, mode, artifactId));
-      if (digestOf(content) !== digest) {
-        throw new Error('stored artifact does not match its recorded digest');
+    absolute: (request) => resolve(request),
+    write: async (request) => {
+      if (request.bytes.length > MAX_ARTIFACT_BYTES) {
+        return fail('validation_failed', 'The artifact exceeds the 8 MiB limit.');
       }
-      return content;
+      const absolute = resolve(request);
+      if (!absolute) return fail('validation_failed', 'The artifact path is not permitted.');
+      try {
+        await mkdir(path.dirname(absolute), { recursive: true });
+        await writeFile(absolute, request.bytes);
+      } catch {
+        return fail('internal_error', 'The artifact could not be written.');
+      }
+      return ok({
+        path: safeRelative(request.path) as string,
+        bytes: request.bytes.length,
+        digest: createHash('sha256').update(request.bytes).digest('hex'),
+      });
     },
-    remove: async ({ mode, artifactId }) => {
-      await rm(fileFor(roots, mode, artifactId), { force: true });
+    read: async (request) => {
+      const absolute = resolve(request);
+      if (!absolute) return fail('validation_failed', 'The artifact path is not permitted.');
+      try {
+        return ok(await readFile(absolute));
+      } catch {
+        return fail('not_found', 'That artifact does not exist for this owner.');
+      }
+    },
+    list: async (request) => {
+      const root = ownerRoot(request.ownerId, request.mode);
+      const prefix = request.prefix ? safeRelative(request.prefix) : '';
+      if (prefix === null) return [];
+      const base = prefix ? path.join(root, prefix) : root;
+      const records: ArtifactRecord[] = [];
+      async function walk(directory: string, relative: string): Promise<void> {
+        let entries: string[];
+        try {
+          entries = await readdir(directory);
+        } catch {
+          return;
+        }
+        for (const entry of entries.sort()) {
+          const absolute = path.join(directory, entry);
+          const next = relative ? `${relative}/${entry}` : entry;
+          const info = await stat(absolute).catch(() => null);
+          if (!info) continue;
+          if (info.isDirectory()) {
+            await walk(absolute, next);
+            continue;
+          }
+          const bytes = await readFile(absolute).catch(() => null);
+          if (!bytes) continue;
+          records.push({
+            path: next,
+            bytes: bytes.length,
+            digest: createHash('sha256').update(bytes).digest('hex'),
+          });
+        }
+      }
+      await walk(base, prefix);
+      return records;
     },
   };
 }

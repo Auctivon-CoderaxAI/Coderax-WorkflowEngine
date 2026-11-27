@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { ARTIFACT_MAX_BYTES, CONTRACT_VERSION, EngineId, ModelRef } from '@coderax/contracts';
+import {
+  CONTRACT_VERSION,
+  EngineId,
+  ModelRef,
+  type BrowserLimits,
+} from '@coderax/contracts';
 
 /**
  * Configuration is validated once, at startup, and then treated as immutable.
@@ -37,6 +42,14 @@ export const NativeConfig = z
   .object({
     enabled: z.boolean().default(true),
     maxSteps: z.number().int().min(1).max(64).default(12),
+    /** Independent steps a complex plan may run at once. */
+    maxParallelSteps: z.number().int().min(1).max(8).default(3),
+    /** Revised plans allowed after a step or verification failure. */
+    maxReplans: z.number().int().min(0).max(5).default(2),
+    /** Attempts per step, including the first; corrections stay on this model. */
+    maxStepAttempts: z.number().int().min(1).max(3).default(2),
+    /** Hard bound on model calls and file reads for one run. */
+    maxIterations: z.number().int().min(1).max(128).default(32),
   })
   .strict();
 
@@ -65,9 +78,9 @@ export const EnginesConfig = z
      * external dependency, so an unconfigured deployment still has one engine.
      */
     default: EngineId.default('native'),
-    native: NativeConfig.default({}),
-    opencode: OpenCodeConfig.default({}),
-    freebuff: FreebuffConfig.default({}),
+    native: NativeConfig.prefault({}),
+    opencode: OpenCodeConfig.prefault({}),
+    freebuff: FreebuffConfig.prefault({}),
   })
   .strict();
 
@@ -79,15 +92,6 @@ export const ModelsConfig = z
     allowPaid: z.literal(false).default(false),
     dailyRequestBudget: z.number().int().min(1).max(100_000).default(1_000),
     dailyTokenBudget: z.number().int().min(1).max(100_000_000).default(2_000_000),
-    /**
-     * Tokens one admitted request holds until it settles. A zero-token
-     * reservation is not a budget: every replica would read the same remaining
-     * allowance and spend it. These values are the request's ceiling, so the
-     * daily token cap is enforced at admission rather than reported after the
-     * spend. A task that declares its own budget uses that ceiling instead.
-     */
-    reservationInputTokens: z.number().int().min(1).max(50_000_000).default(16_000),
-    reservationOutputTokens: z.number().int().min(1).max(50_000_000).default(8_000),
   })
   .strict();
 
@@ -106,66 +110,93 @@ export const ExecutionConfig = z
     retentionMs: z.number().int().min(60_000).max(604_800_000).default(86_400_000),
     /** How long a cancelled adapter may take to stop before the run is settled. */
     cancelGraceMs: z.number().int().min(100).max(30_000).default(5_000),
-    /** Events kept per task after it settles; older ones are pruned. */
-    eventRetain: z.number().int().min(16).max(100_000).default(5_000),
-    /**
-     * How long a workspace stays off-limits after an adapter ignored its abort.
-     * The engine cannot kill in-process code, so it refuses to share the
-     * directory with it; the entry expires so a deployment recovers by itself.
-     */
-    cancelQuarantineMs: z.number().int().min(1_000).max(3_600_000).default(300_000),
-    /** How long shutdown waits for supervised attempts to unwind. */
-    shutdownGraceMs: z.number().int().min(100).max(60_000).default(5_000),
   })
   .strict();
 
-const DAY = 86_400_000;
+export const GamesConfig = z
+  .object({
+    /** Off disables both game capabilities at the route boundary. */
+    enabled: z.boolean().default(true),
+    /** The gaming agent can be disabled without disabling the studio. */
+    agentEnabled: z.boolean().default(true),
+    maxProjectsPerOwner: z.number().int().min(1).max(500).default(50),
+    /** The hard ceiling a session request may not exceed. */
+    maxSessionTicks: z.number().int().min(600).max(200_000).default(40_000),
+    /** A paused session holds its task slot for at most this long. */
+    maxPauseMs: z.number().int().min(1_000).max(3_600_000).default(900_000),
+  })
+  .strict();
+export const BrowserRemoteConfig = z
+  .object({
+    /** An HTTPS endpoint that implements the versioned browser protocol. */
+    baseURL: z.string().url().optional(),
+    /** Name of the variable holding the provider token, never the token. */
+    tokenEnv: z.string().trim().min(1).default('CODERAX_BROWSER_TOKEN'),
+    timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
+    /**
+     * The owner's attestation that this endpoint is authorized, zero-cost and
+     * cloud-hosted. Without it the adapter stays fail-closed and reports
+     * `unverified`; it cannot be set on the owner's behalf.
+     */
+    zeroCostAttested: z.boolean().default(false),
+  })
+  .strict();
 
 /**
- * Retention is a data-lifecycle setting, not a performance knob. Every window
- * is bounded and every sweep is batched, so a deployment cannot grow a table
- * without limit or delete an unbounded amount in one request.
+ * Cloud browser integration. The default is disabled with no provider, which is
+ * the only truthful state until an authorized zero-cost endpoint has been
+ * verified. No field can enable paid infrastructure.
  */
-export const RetentionConfig = z
+export const BrowserConfig = z
   .object({
-    /** Read completion notifications older than this are swept. */
-    notificationMs: z.number().int().min(3_600_000).max(365 * DAY).default(30 * DAY),
-    /** Execution receipts are operational evidence and are kept longer. */
-    auditMs: z.number().int().min(3_600_000).max(2_000 * DAY).default(90 * DAY),
-    /** Expired or decided permission requests older than this are swept. */
-    permissionMs: z.number().int().min(3_600_000).max(365 * DAY).default(7 * DAY),
-    /** Append-only checkpoint history is bounded independently of the task row. */
-    checkpointMs: z.number().int().min(3_600_000).max(365 * DAY).default(30 * DAY),
-    /** An idempotency identity is replayable for at least this long. */
-    idempotencyMs: z.number().int().min(3_600_000).max(30 * DAY).default(DAY),
-    /** Settled budget reservations are pruned a week after their day. */
-    budgetReservationMs: z.number().int().min(3_600_000).max(365 * DAY).default(7 * DAY),
-    /** Finished execution records are operational evidence and are kept longer. */
-    executionMs: z.number().int().min(3_600_000).max(2_000 * DAY).default(90 * DAY),
-    sweepIntervalMs: z.number().int().min(60_000).max(DAY).default(3_600_000),
-    /** Maximum rows one store removes per sweep batch. */
-    batchSize: z.number().int().min(1).max(5_000).default(1_000),
+    enabled: z.boolean().default(false),
+    provider: z.enum(['none', 'http']).default('none'),
+    allowPaid: z.literal(false).default(false),
+    sessionTtlMs: z.number().int().min(60_000).max(3_600_000).default(900_000),
+    maxSessionsPerOwner: z.number().int().min(1).max(16).default(3),
+    maxScreenshotBytes: z.number().int().min(1_024).max(4_194_304).default(2_097_152),
+    /** Bounded by the request body limit so an upload cannot be truncated. */
+    maxUploadBytes: z.number().int().min(1_024).max(524_288).default(524_288),
+    remote: BrowserRemoteConfig.prefault({}),
   })
   .strict();
 
-export const ScheduleConfig = z
+export const SchedulesConfig = z
   .object({
-    /** A durable schedule is only fired by a running engine tick. */
+    /** The loop is process-owned; disabling it leaves stored schedules dormant. */
     enabled: z.boolean().default(true),
-    tickIntervalMs: z.number().int().min(100).max(300_000).default(2_000),
-    /** Maximum due schedules handled in one tick, bounding a thundering herd. */
-    tickBatch: z.number().int().min(1).max(100).default(10),
+    tickMs: z.number().int().min(50).max(60_000).default(5_000),
+    /** Schedules and receipts examined per pass; bounds one tick's work. */
+    batchSize: z.number().int().min(1).max(200).default(50),
+    /** Engine-wide ceiling on concurrently dispatched scheduled runs. */
+    maxConcurrentRuns: z.number().int().min(1).max(16).default(2),
+    /** Lateness beyond this is a missed occurrence, never a fired backlog. */
+    missedGraceMs: z.number().int().min(1_000).max(86_400_000).default(300_000),
+    /** A receipt with no task younger than this may still be dispatching. */
+    dispatchTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000),
+    /** Consecutive failures that pause a schedule to stop a runaway loop. */
+    pauseAfterFailures: z.number().int().min(1).max(100).default(5),
+    /** Execution receipts returned by the history operation by default. */
+    historyLimit: z.number().int().min(1).max(500).default(100),
   })
   .strict();
 
-export const ArtifactConfig = z
+/**
+ * Durable artifact bounds. Every ceiling is a hard refusal, never a warning:
+ * an oversized upload is rejected before it is written and an owner over quota
+ * is refused rather than allowed to grow unbounded storage.
+ */
+export const ArtifactsConfig = z
   .object({
-    /**
-     * Decoded bytes accepted for one artifact. The ceiling is the contract's own
-     * base64 bound, so a configuration cannot promise more than the wire format
-     * can carry.
-     */
-    maxBytes: z.number().int().min(1).max(ARTIFACT_MAX_BYTES).default(ARTIFACT_MAX_BYTES),
+    maxBytesPerArtifact: z.number().int().min(1_024).max(10_485_760).default(8_388_608),
+    maxBytesPerOwner: z.number().int().min(1_024).max(1_073_741_824).default(268_435_456),
+    maxArtifactsPerOwner: z.number().int().min(1).max(10_000).default(1_000),
+    maxVersionsPerArtifact: z.number().int().min(1).max(100).default(20),
+    /** 0 keeps an artifact until it is deleted or a version is pruned. */
+    defaultRetentionDays: z.number().int().min(0).max(3_650).default(0),
+    maxRetentionDays: z.number().int().min(1).max(3_650).default(365),
+    /** MongoDB document limit is 16 MiB; a chunk stays comfortably below it. */
+    chunkBytes: z.number().int().min(65_536).max(4_194_304).default(1_048_576),
   })
   .strict();
 
@@ -192,35 +223,37 @@ export const PersistenceConfig = z
   })
   .strict();
 
-export const ObservabilityConfig = z
-  .object({
-    /**
-     * Emit one structured JSON line per completed request. It contains method,
-     * status, duration and the request id, never the path, body or a header.
-     */
-    requestLogs: z.boolean().default(true),
-  })
-  .strict();
-
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
-    server: ServerConfig.default({}),
+    server: ServerConfig.prefault({}),
     auth: AuthConfig,
     workspaces: WorkspacesConfig,
-    engines: EnginesConfig.default({}),
+    engines: EnginesConfig.prefault({}),
     models: ModelsConfig,
-    execution: ExecutionConfig.default({}),
-    schedules: ScheduleConfig.default({}),
-    artifacts: ArtifactConfig.default({}),
-    persistence: PersistenceConfig.default({}),
-    retention: RetentionConfig.default({}),
-    observability: ObservabilityConfig.default({}),
+    execution: ExecutionConfig.prefault({}),
+    browsers: BrowserConfig.prefault({}),
+    schedules: SchedulesConfig.prefault({}),
+    artifacts: ArtifactsConfig.prefault({}),
+    persistence: PersistenceConfig.prefault({}),
+    games: GamesConfig.prefault({}),
   })
   .strict();
 
-export type RetentionConfig = z.infer<typeof RetentionConfig>;
 export type EngineConfig = z.infer<typeof EngineConfigSchema>;
 export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
 export type PersistenceSettings = z.infer<typeof PersistenceConfig>;
+export type BrowserSettings = z.infer<typeof BrowserConfig>;
+export type BrowserRemoteSettings = z.infer<typeof BrowserRemoteConfig>;
+
+/** Derived once so the provider and the API report the same enforced limits. */
+export function browserLimits(browsers: BrowserSettings): BrowserLimits {
+  return {
+    maxSessionTtlSeconds: Math.floor(browsers.sessionTtlMs / 1000),
+    maxSessionsPerOwner: browsers.maxSessionsPerOwner,
+    maxScreenshotBytes: browsers.maxScreenshotBytes,
+    maxUploadBytes: browsers.maxUploadBytes,
+  };
+}
+export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;

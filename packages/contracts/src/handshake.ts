@@ -1,67 +1,32 @@
 import { z } from 'zod';
-import {
-  CONTRACT_VERSION,
-  ENGINE_VERSION,
-  EVENT_SCHEMA_VERSION,
-  MIN_SDK_VERSION,
-} from './primitives.js';
-import { API_PREFIX } from './primitives.js';
+import { API_PREFIX, CONTRACT_VERSION, EVENT_SCHEMA_VERSION } from './primitives.js';
+import type { RouteSpec } from './routes.js';
 
 /**
- * Version and capability negotiation.
+ * Version and operation negotiation.
  *
  * A client sends nothing: it fetches the handshake and compares the contract and
  * event versions it was built against with the ones the engine serves. The
- * operation list is generated from the same route catalogue the router registers,
- * so a client can assert it is talking to a deployment that implements every
- * operation it needs before issuing a request.
+ * operation list is projected from the same catalogue the router registers, so a
+ * client can assert that a deployment implements every operation it needs before
+ * issuing a request.
  *
- * Capabilities that exist but are not implemented are reported as `unsupported`
- * rather than omitted. A missing key and a `false` value are not the same claim.
+ * Only versions the contract actually defines are reported. Capabilities are not
+ * restated either: the operation list is the single claim the engine makes about
+ * what it can do, and a second, hand-maintained matrix could advertise a feature
+ * that has no operation behind it.
  */
-
-export const CapabilityState = z.enum(['available', 'unsupported', 'unconfigured']);
-export type CapabilityState = z.infer<typeof CapabilityState>;
-
-export const CapabilityStatus = z
-  .object({
-    state: CapabilityState,
-    detail: z.string().max(500),
-  })
-  .strict();
-export type CapabilityStatus = z.infer<typeof CapabilityStatus>;
-
-export const HandshakeCapabilities = z
-  .object({
-    chat: CapabilityStatus,
-    chatStreaming: CapabilityStatus,
-    work: CapabilityStatus,
-    durableEvents: CapabilityStatus,
-    eventReplay: CapabilityStatus,
-    scheduling: CapabilityStatus,
-    artifacts: CapabilityStatus,
-    permissions: CapabilityStatus,
-    memory: CapabilityStatus,
-    rag: CapabilityStatus,
-    multimodal: CapabilityStatus,
-    multiAgent: CapabilityStatus,
-    idempotency: CapabilityStatus,
-    reasoningPlanner: CapabilityStatus,
-    modelRouter: CapabilityStatus,
-    /** Fencing, termination and quarantine ownership for a run. */
-    executionSupervisor: CapabilityStatus,
-  })
-  .strict();
-export type HandshakeCapabilities = z.infer<typeof HandshakeCapabilities>;
 
 export const OperationDescriptor = z
   .object({
     operationId: z.string().min(1).max(80),
-    method: z.enum(['GET', 'POST', 'PATCH', 'DELETE']),
+    method: z.enum(['GET', 'POST', 'PATCH']),
     path: z.string().min(1).max(300),
     tags: z.array(z.string().min(1).max(40)),
     auth: z.enum(['owner', 'public']),
     stream: z.boolean(),
+    /** Present only for the operations allowed a raised transport ceiling. */
+    maxBodyBytes: z.number().int().positive().max(67_108_864).optional(),
   })
   .strict();
 export type OperationDescriptor = z.infer<typeof OperationDescriptor>;
@@ -69,16 +34,9 @@ export type OperationDescriptor = z.infer<typeof OperationDescriptor>;
 export const EngineHandshake = z
   .object({
     engineName: z.literal('coderax-workflow-engine'),
-    engineVersion: z.string().min(1).max(40),
     contractVersion: z.string().min(1).max(40),
     eventSchemaVersion: z.number().int().positive(),
-    chatStreamSchemaVersion: z.number().int().positive(),
-    minSdkVersion: z.string().min(1).max(40),
-    sdkVersion: z.string().min(1).max(40),
     apiPrefix: z.literal(API_PREFIX),
-    /** The deployed revision, when the host records one. Never inferred. */
-    deploymentRevision: z.string().min(1).max(200).optional(),
-    capabilities: HandshakeCapabilities,
     operations: z.array(OperationDescriptor),
   })
   .strict();
@@ -87,6 +45,27 @@ export type EngineHandshake = z.infer<typeof EngineHandshake>;
 export const HANDSHAKE_VERSIONS = Object.freeze({
   contractVersion: CONTRACT_VERSION,
   eventSchemaVersion: EVENT_SCHEMA_VERSION,
-  engineVersion: ENGINE_VERSION,
-  minSdkVersion: MIN_SDK_VERSION,
 });
+
+/**
+ * Takes the catalogue as an argument rather than importing it: `routes.ts`
+ * imports this module for the response schema, and a value import back would be a
+ * cycle. The caller passes the same `ROUTES` the router registers.
+ */
+export function buildHandshake(routes: readonly RouteSpec[]): EngineHandshake {
+  return {
+    engineName: 'coderax-workflow-engine',
+    contractVersion: CONTRACT_VERSION,
+    eventSchemaVersion: EVENT_SCHEMA_VERSION,
+    apiPrefix: API_PREFIX,
+    operations: routes.map((route) => ({
+      operationId: route.operationId,
+      method: route.method,
+      path: route.path,
+      tags: [...route.tags],
+      auth: route.auth,
+      stream: route.stream === true,
+      ...(route.maxBodyBytes === undefined ? {} : { maxBodyBytes: route.maxBodyBytes }),
+    })),
+  };
+}
