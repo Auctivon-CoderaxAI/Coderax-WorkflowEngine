@@ -10,6 +10,7 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
+  signal?: AbortSignal;
 };
 
 /**
@@ -35,6 +36,7 @@ export type RawRequest = {
   path: string;
   authorization: string | undefined;
   bodyText: string;
+  signal?: AbortSignal;
 };
 
 export type RouterResult =
@@ -235,6 +237,7 @@ export function createRouter(input: {
             query,
             body,
             requestId,
+            signal: raw.signal,
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);

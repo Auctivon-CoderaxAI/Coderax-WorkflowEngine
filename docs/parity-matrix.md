@@ -24,7 +24,7 @@ Status vocabulary:
 | 8 | One settlement per run | `run.ts` | `src/execution/runner.ts` | Preserved |
 | 9 | Stream ending without a terminal event is a failure | `run.ts` (`protocol_error`) | `runner.ts` | Preserved |
 | 10 | Bounded cancellation cleanup (5 s) | `run.ts` | `src/execution/runner.ts` `cancelGraceMs` (5 s default) | Preserved |
-| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Preserved |
+| 11 | Bounded same-engine retry, `retryable` + no cleanup, inside half the lease | `retry.ts` | `src/execution/retry.ts` | Removed — the helper had no runtime caller; owner-triggered `retry` remains on the service |
 | 12 | Workspace confinement, symlink-resolved, mode-partitioned, Windows-safe | `workspace.ts` | `src/execution/workspace.ts` | Preserved |
 | 13 | Confine a caller-supplied subdirectory | `resolveEngineWorkspace({requestedRoot})` | derives the root; no caller path | Simplified (review F9) |
 | 14 | Durable lease: expired-only claim, token fence, durable cancel, prune | `workRun.ts` + `leases.ts` | `src/persistence/work-runs.ts` + `src/execution/lease.ts` | Preserved |
@@ -112,16 +112,22 @@ Dependency order for closing them:
 
 ## Verification status
 
-- `npm run verify` at this merge head: 391 tests, 377 passing, 0 failing, 14
-  skipped, OpenAPI drift clean. The skipped tests are the real-MongoDB artifact
-  suites, which need `CODERAX_TEST_MONGODB_URI`; nothing else is skipped.
+- `npm run verify` at this merge head: 398 tests, 398 passing, 0 failing, 0
+  skipped with a real `mongod` reachable (`CODERAX_TEST_MONGODB_URI` set,
+  `CODERAX_REQUIRE_MONGODB=1`), OpenAPI drift clean. The same command without a
+  database reports 382 passing and 16 skipped, all of them MongoDB suites.
 - Durable execution events are covered by store-contract, fenced-allocation,
-  replay-across-restart and SSE-metadata tests. TTL expiry, a concurrent append
-  race on two replicas and a live MongoDB are not exercised.
-- Durable stores are verified against a semantics-faithful collection fake that
-  enforces unique indexes and cursor semantics. **No live MongoDB has been
-  contacted**; "durable" here means the adapter and wiring are proven, not that a
-  real server has stored a row.
+  replay-across-restart and SSE-metadata tests, and by a real-MongoDB suite
+  (`tests/integration/event-log-mongo.test.ts`) that proves the fenced `$inc`
+  allocation, unique-sequence refusal, two replicas appending concurrently, and
+  replay after an engine restart against a real `mongod`. TTL expiry is still not
+  executed: the retention index is asserted on the server, not its deletion
+  timing.
+- Durable stores are verified against a semantics-faithful collection fake in
+  the default offline run. The real-MongoDB suites run when
+  `CODERAX_TEST_MONGODB_URI` is set (the CI lane supplies one) and are skipped,
+  never passed, without it. The event-log suite was executed against a real
+  `mongod` 7.0.14 for this merge: 398 tests, 398 passing, nothing skipped.
 - No hosted CI run exists: the GitHub Actions job is blocked by account billing.
   The local run above is the only executed evidence.
 - The Game Studio branch reports 132/132 passing tests and a clean OpenAPI drift check before integration.

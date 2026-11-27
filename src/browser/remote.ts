@@ -256,7 +256,7 @@ export function createHttpBrowserProvider(input: {
           detail:
             'The browser provider reports a paid cost class; the zero-cost charter refuses it.',
           limits,
-          costClass: 'paid',
+          costClass: reported.costClass,
           features: reported.features,
         }),
       };

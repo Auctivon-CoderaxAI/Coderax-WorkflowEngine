@@ -4,6 +4,9 @@
   "private": true,
   "description": "Typed Coderax WorkflowEngine client: auth, chat, work, discovery, history, memory, tasks, events, permissions, notifications and health.",
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

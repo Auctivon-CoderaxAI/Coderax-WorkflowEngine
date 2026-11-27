@@ -3,56 +3,32 @@ import type { Router } from './router.js';
 
 const MAX_BODY_BYTES = 1_048_576;
 
-export class BodyTooLargeError extends Error {
-  constructor() {
-    super('request body is too large');
-    this.name = 'BodyTooLargeError';
-  }
-}
-
-/**
- * Reads a body up to the operation's ceiling.
- *
- * An over-limit body is not destroyed: the socket keeps draining so the client
- * receives the 413 it is entitled to read. Destroying mid-upload surfaces as a
- * reset on the client, which is indistinguishable from a network failure and
- * hides the contract's own error code.
- */
 function readBody(request: IncomingMessage, limit: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
-    let overflow = false;
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
-        overflow = true;
-        // Release what was buffered; the remaining bytes are read and dropped.
-        chunks.length = 0;
+        reject(new Error('request body is too large'));
+        // Do not destroy the socket before the typed 413 is written. Pause the
+        // stream here; the request handler drains or closes it after responding.
+        request.pause();
         return;
       }
       chunks.push(chunk);
     });
-    request.on('end', () => {
-      if (overflow) reject(new BodyTooLargeError());
-      else resolve(Buffer.concat(chunks).toString('utf8'));
-    });
+    request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     request.on('error', reject);
   });
 }
 
-function sendJson(
-  response: ServerResponse,
-  status: number,
-  body: unknown,
-  close = false,
-): void {
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'content-length': Buffer.byteLength(payload),
-    ...(close ? { connection: 'close' } : {}),
   });
   response.end(payload);
 }
@@ -67,6 +43,7 @@ export function createHttpServer(input: {
   host: string;
   port: number;
 }): HttpServer {
+  const streamShutdown = new AbortController();
   const server: Server = createServer((request, response) => {
     void (async () => {
       let bodyText = '';
@@ -80,30 +57,30 @@ export function createHttpServer(input: {
           bodyText = await readBody(request, limit);
         }
       } catch {
-        // The connection closes after this response because the rest of the
-        // oversized body still has to be discarded.
-        sendJson(
-          response,
-          413,
-          {
-            type: 'https://coderax.dev/problems/payload_too_large',
-            title: 'payload too large',
-            status: 413,
-            code: 'payload_too_large',
-            detail: 'The request body is too large.',
-            retryable: false,
-          },
-          true,
-        );
+        // The client may still be writing. Drain it so the response is not lost,
+        // then close the connection instead of keeping an oversized request open.
+        request.resume();
+        response.setHeader('connection', 'close');
+        sendJson(response, 413, {
+          type: 'https://coderax.dev/problems/payload_too_large',
+          title: 'payload too large',
+          status: 413,
+          code: 'payload_too_large',
+          detail: 'The request body is too large.',
+          retryable: false,
+        });
         return;
       }
 
+      const disconnected = new AbortController();
+      response.once('close', () => disconnected.abort());
       try {
         const result = await input.router.handle({
           method: request.method ?? 'GET',
           path: request.url ?? '/',
           authorization: request.headers.authorization,
           bodyText,
+          signal: AbortSignal.any([streamShutdown.signal, disconnected.signal]),
         });
 
         if (result.kind === 'json') {
@@ -128,8 +105,10 @@ export function createHttpServer(input: {
         response.writeHead(result.status, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-store',
-          connection: 'keep-alive',
+          // Closing the response must also release its connection during shutdown.
+          connection: 'close',
         });
+        response.flushHeaders();
         for await (const frame of result.events) {
           if (response.destroyed || response.writableEnded) break;
           response.write(
@@ -156,6 +135,7 @@ export function createHttpServer(input: {
     })();
   });
 
+  let closePromise: Promise<void> | null = null;
   return {
     listen: () =>
       new Promise((resolve, reject) => {
@@ -166,9 +146,17 @@ export function createHttpServer(input: {
           resolve({ url: `http://${input.host}:${port}` });
         });
       }),
-    close: () =>
-      new Promise((resolve) => {
+    close: () => {
+      if (closePromise) return closePromise;
+      closePromise = new Promise((resolve) => {
+        if (!server.listening) {
+          resolve();
+          return;
+        }
         server.close(() => resolve());
-      }),
+        streamShutdown.abort();
+      });
+      return closePromise;
+    },
   };
 }
