@@ -526,9 +526,9 @@ test('without a model route the AI-assisted row is blocked by its prerequisite',
       engines: {
         opencode: {
           enabled: true,
-          baseURL: 'https://opencode.invalid',
-          model: 'test/model',
-          passwordEnv: 'CODERAX_TEST_OPENCODE_PASSWORD',
+          baseURL: 'https://opencode.example.test',
+          model: 'free/model',
+          passwordEnv: 'OPENCODE_PASSWORD',
         },
       },
     }),

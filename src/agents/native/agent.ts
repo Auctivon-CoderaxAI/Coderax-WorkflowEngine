@@ -186,8 +186,8 @@ export function createNativeAgent(input: {
         };
       }
 
-      // The guard above proves the model is resolved; capture it so nested
-      // closures keep the narrowed type instead of re-reading a nullable field.
+      // Captured once: a property path is not narrowed across a function
+      // boundary, and the step runner below is a closure.
       const model = request.model;
 
       const cancelled = (): AgentRunOutcome => ({
@@ -441,7 +441,7 @@ export function createNativeAgent(input: {
           const planned = await planner.plan({
             objective: request.objective,
             history: request.history ?? [],
-            model: request.model,
+            model,
             mode,
             completedSteps: [...completed],
             maxSteps,
@@ -492,7 +492,7 @@ export function createNativeAgent(input: {
             spend();
             const assessed = await verifyObjective({
               gateway,
-              model: request.model,
+              model,
               signal: request.signal,
               objective: request.objective,
               mode,
@@ -514,7 +514,7 @@ export function createNativeAgent(input: {
               const revised = await planner.replan({
                 objective: request.objective,
                 history: request.history ?? [],
-                model: request.model,
+                model,
                 mode,
                 plan: activePlan,
                 completedSteps: [...completed],
@@ -611,7 +611,7 @@ export function createNativeAgent(input: {
               const revised = await planner.replan({
                 objective: request.objective,
                 history: request.history ?? [],
-                model: request.model,
+                model,
                 mode,
                 plan: activePlan,
                 completedSteps: [...completed],
