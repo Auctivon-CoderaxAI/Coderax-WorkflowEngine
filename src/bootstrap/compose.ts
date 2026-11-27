@@ -318,6 +318,34 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         },
       },
       {
+        name: 'artifacts',
+        required: persistence.driver === 'mongo',
+        check: async () => {
+          if (!persistence.blobs.durable) {
+            // Consistent with the persistence probe: a memory deployment is a
+            // known non-durable configuration, reported as ok-with-limitation
+            // rather than as a fault. What matters is that it is never silent.
+            return {
+              status: 'ok' as const,
+              detail:
+                'Artifact storage is process-local; uploads are refused until persistence.driver=mongo is configured.',
+            };
+          }
+          try {
+            await persistence.blobs.check();
+            return {
+              status: 'ok' as const,
+              detail: 'Artifact metadata and content are stored durably in MongoDB.',
+            };
+          } catch {
+            return {
+              status: 'failed' as const,
+              detail: 'Artifact storage could not be read.',
+            };
+          }
+        },
+      },
+      {
         name: 'persistence',
         required: true,
         check: async () => ({
@@ -463,10 +491,17 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     server,
     persistence: { driver: persistence.driver },
     start: async () => {
+      // Rebuild quota availability from committed rows before the socket is
+      // open, so an early request cannot be admitted against stale capacity.
+      await service.artifacts.reconcile();
       const { url } = await server.listen();
       // Startup ownership verification: a task whose lease died with a previous
       // process is retired now, so no client sees it as running forever.
       await service.recoverInterrupted();
+      // Retention and abandoned reservations are enforced at startup too, and a
+      // staging directory left by a crashed generation is removed.
+      await service.artifacts.sweepExpiredArtifacts();
+      await deliverables.sweepStaging();
       // The schedule loop belongs to the engine process, not to a request. Both
       // Coderax and CoderaxCLI can disconnect and a due occurrence still runs.
       service.startSchedules();

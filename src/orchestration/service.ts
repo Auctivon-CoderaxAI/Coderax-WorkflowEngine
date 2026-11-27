@@ -46,7 +46,12 @@ import type {
   Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import { isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
+import {
+  DeliverableRequest,
+  isTerminalExecution,
+  isTerminalState,
+  modelKey,
+} from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import type { ScheduleExecutionRecord, ScheduleRecord, TaskEvidence, TaskPatch, TaskPlan, TaskRecord, TaskStep } from '../domain.js';
 import type { TaskRepository } from '../persistence/tasks.js';
@@ -107,6 +112,26 @@ export type ApplicationServiceDeps = {
   health: HealthService;
   browser: BrowserService;
 };
+
+/**
+ * A Work objective may declare one deliverable in a fenced block. The directive is
+ * data: it is parsed against the published contract and produced by the same use
+ * case the API uses, so a headless or scheduled run stores files exactly as an
+ * explicit request does.
+ */
+export type DeliverableDirective =
+  | { present: false }
+  | { present: true; value: unknown; error?: string };
+
+export function readDeliverableDirective(objective: string): DeliverableDirective {
+  const match = /```deliverable\s*\n([\s\S]*?)```/.exec(objective);
+  if (!match) return { present: false };
+  try {
+    return { present: true, value: JSON.parse(match[1] ?? '') as unknown };
+  } catch {
+    return { present: true, value: null, error: 'The deliverable directive is not valid JSON.' };
+  }
+}
 
 export type EventStream = {
   replay: Replay;
@@ -330,6 +355,60 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return { ...(payload as Record<string, unknown>), detail: redactText(detail, [], 1000) };
   }
 
+  /**
+   * A task's status lists the artifacts stored against it, so a client finds the
+   * files it asked for through the task instead of scanning the whole catalogue.
+   * The listing is bounded like every other listing.
+   */
+  async function statusWithArtifacts(principal: Principal, task: TaskRecord): Promise<TaskStatus> {
+    const status = toStatus(task);
+    const listed = await deps.artifactService.list(principal, {
+      mode: task.mode,
+      taskId: task.taskId,
+      limit: 500,
+    });
+    if (listed.ok && listed.value.artifacts.length > 0) {
+      status.result = {
+        ...(status.result ?? { artifacts: [] }),
+        artifacts: listed.value.artifacts.map((artifact) => ({
+          path: artifact.relativePath ?? artifact.filename,
+          bytes: artifact.bytes,
+          digest: artifact.sha256,
+        })),
+      };
+    }
+    return status;
+  }
+
+  type ProducedArtifact = { path: string; bytes?: number; digest?: string };
+
+  /**
+   * Produces the deliverable a Work objective declared, if any. A malformed or
+   * mismatched directive produces nothing rather than substituting a different
+   * deliverable, and a refused generation leaves the run's own result intact.
+   */
+  async function produceDeliverable(task: TaskRecord): Promise<ProducedArtifact[]> {
+    const directive = readDeliverableDirective(task.objective);
+    if (!directive.present || directive.error) return [];
+    const parsed = DeliverableRequest.safeParse(directive.value);
+    if (!parsed.success || parsed.data.mode !== task.mode) return [];
+    const delivered = await deps.deliverables.deliver(
+      { ownerId: task.ownerId, isOwner: true },
+      parsed.data,
+      {
+        conversationId: task.conversationId,
+        taskId: task.taskId,
+        signal: new AbortController().signal,
+      },
+    );
+    if (!delivered.ok) return [];
+    return delivered.value.artifacts.map((artifact) => ({
+      path: artifact.relativePath ?? artifact.filename,
+      bytes: artifact.bytes,
+      digest: artifact.sha256,
+    }));
+  }
+
   function toStatus(task: TaskRecord): TaskStatus {
     return {
       taskId: task.taskId,
@@ -516,6 +595,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     }
 
+    const produced = outcome.kind === 'completed' ? await produceDeliverable(task) : [];
+
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -523,7 +604,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: now,
             result: {
               summary: outcome.summary.slice(0, 20_000),
-              artifacts: [] as Array<{ path: string; bytes?: number; digest?: string }>,
+              artifacts: produced,
               ...(outcome.verification
                 ? {
                     verification: {
@@ -1471,7 +1552,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         // A durable suspension is ready to expose only after its run no longer
         // holds the lease. An owner who sees it can immediately claim a resume.
         if (lease?.live && lease.token === task.runToken) {
-          return ok(toStatus({
+          return ok(await statusWithArtifacts(principal, {
             ...task,
             state: 'running',
             failure: null,
@@ -1479,7 +1560,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           }));
         }
       }
-      return ok(toStatus(task));
+      return ok(await statusWithArtifacts(principal, task));
     },
 
     cancelTask: async (principal, taskId, reason) => {

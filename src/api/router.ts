@@ -1,5 +1,5 @@
 import type { RouteSpec } from '@coderax/contracts';
-import { ROUTE_INDEX } from '@coderax/contracts';
+import { HTTP_STATUS_FOR_CODE, ROUTE_INDEX } from '@coderax/contracts';
 import { buildOpenApiDocument, type OpenApiDocument } from '@coderax/contracts';
 import type { ProblemCode } from '@coderax/contracts';
 import type { AuthService, Principal } from '../security/auth.js';
@@ -89,28 +89,9 @@ function problem(
   requestId: string,
   retryable = false,
 ): { kind: 'json'; status: number; body: unknown } {
-  const status =
-    code === 'unauthorized'
-      ? 401
-      : code === 'forbidden' || code === 'workspace_denied'
-        ? 403
-        : code === 'not_found'
-          ? 404
-          : code === 'validation_failed'
-            ? 400
-            : code === 'conflict' || code === 'busy' || code === 'permission_required' || code === 'cancelled'
-              ? 409
-              : code === 'budget_exhausted'
-                ? 429
-                : code === 'paid_model_refused'
-                  ? 402
-                  : code === 'not_ready' ||
-                      code === 'engine_unavailable' ||
-                      code === 'engine_not_configured'
-                    ? 503
-                    : code === 'protocol_error'
-                      ? 502
-                      : 500;
+  // One table, shared with the contracts, so a new problem code cannot map to a
+  // different status here than it does in the published document.
+  const status = HTTP_STATUS_FOR_CODE[code];
   return {
     kind: 'json',
     status,

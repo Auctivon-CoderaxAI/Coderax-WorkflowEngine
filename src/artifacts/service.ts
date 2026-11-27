@@ -174,6 +174,20 @@ function durabilityFailure() {
   );
 }
 
+/**
+ * The router validates a query schema but passes the raw URL values through, so a
+ * numeric query parameter arrives as a string. Coerce at the boundary rather than
+ * trusting the wire representation.
+ */
+function queryNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
 export function createArtifactService(deps: ArtifactServiceDeps): ArtifactService {
   const settings = deps.settings;
 
@@ -589,7 +603,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
           ...(query.projectId ? { projectId: query.projectId } : {}),
           ...(query.conversationId ? { conversationId: query.conversationId } : {}),
           ...(query.taskId ? { taskId: query.taskId } : {}),
-          limit: Math.min(query.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT),
+          limit: Math.min(queryNumber(query.limit) ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT),
         });
         const usage = await deps.artifacts.usage({ ownerId: principal.ownerId, mode });
         return ok({ artifacts: records.map(toDescriptor), quota: quotaFor(usage) });
@@ -931,7 +945,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const key = { ownerId: principal.ownerId, mode, artifactId };
         const artifact = await deps.artifacts.get(key);
         if (!artifact) return fail('not_found', 'That artifact does not exist for this owner.');
-        const versionNumber = query.version ?? artifact.version;
+        const versionNumber = queryNumber(query.version) ?? artifact.version;
         const version = await deps.artifacts.version({ ...key, version: versionNumber });
         if (!version) return fail('not_found', 'That artifact version does not exist.');
         const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
@@ -1043,7 +1057,7 @@ export function createArtifactService(deps: ArtifactServiceDeps): ArtifactServic
         const artifact = await deps.artifacts.get(key);
         if (!artifact) return fail('not_found', 'That artifact does not exist for this owner.');
         const rows = await deps.artifacts.versions(key);
-        const versionNumber = query.version ?? artifact.version;
+        const versionNumber = queryNumber(query.version) ?? artifact.version;
         const version = rows.find((row) => row.version === versionNumber);
         if (!version) return fail('not_found', 'That artifact version does not exist.');
         const ref = { ownerId: principal.ownerId, mode, sha256: version.sha256 };
