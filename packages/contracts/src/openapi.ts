@@ -84,7 +84,16 @@ export function buildOpenApiDocument(routes: readonly RouteSpec[] = ROUTES): Ope
         [String(route.response.status)]: route.stream
           ? {
               description: route.response.description,
-              content: { 'text/event-stream': { schema: { type: 'string' } } },
+              content: {
+                // A negotiated streaming route documents both shapes; an SSE-only
+                // route documents only the stream it actually serves.
+                ...(route.negotiated
+                  ? { 'application/json': { schema: toJsonSchema(route.response.schema) } }
+                  : {}),
+                'text/event-stream': {
+                  schema: { type: 'string', description: 'Server-sent event frames.' },
+                },
+              },
             }
           : {
               description: route.response.description,

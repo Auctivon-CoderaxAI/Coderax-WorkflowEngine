@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { ARTIFACT_BODY_LIMIT_BYTES } from '@coderax/contracts';
-import type { AgentIsolation, EngineCapabilities, ModelDescriptor } from '@coderax/contracts';
+import type { AgentIsolation, EngineCapabilities } from '@coderax/contracts';
 import { modelKey } from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import { createClock, createIdGenerator } from '../support/clock.js';
@@ -9,6 +9,7 @@ import { createNativeAgent } from '../agents/native/agent.js';
 import { createOpenAiCompatibleGateway } from '../agents/native/gateway.js';
 import type { ModelGateway } from '../agents/native/types.js';
 import { createExternalAgentAdapter } from '../agents/adapters/external.js';
+import { createOpenCodeHttpTransport } from '../agents/adapters/opencode.js';
 import type { ExternalAgentTransport } from '../agents/adapters/external.js';
 import type { AgentAdapter } from '../agents/types.js';
 import { createAgentRegistry } from '../agents/registry.js';
@@ -18,8 +19,22 @@ import type { BrowserProvider } from '../browser/types.js';
 import { buildBrowserProvider } from './browser.js';
 import { validateInvariants } from '../configuration/load.js';
 import { probeAgents } from '../agents/probe.js';
-import { createModelCatalog } from '../models/catalog.js';
 import { createBudgetLedger } from '../models/budget.js';
+import { BenchmarkFileError, loadBenchmarkScores } from '../models/benchmark.js';
+import type { BenchmarkScore } from '../models/types.js';
+import { createModelRouter } from '../models/router.js';
+import { createProviderPolicyRegistry } from '../models/policy.js';
+import { createOpenAiProvider } from '../models/providers/openai.js';
+import { createGeminiProvider } from '../models/providers/gemini.js';
+import type { ProviderAdapter, RegisteredProvider } from '../models/types.js';
+import { createKnowledgeStore } from '../knowledge/store.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
+import { createBuiltinTools } from '../tools/builtin.js';
+import { createToolRuntime } from '../tools/runtime.js';
+import type { ToolRuntime } from '../tools/types.js';
+import { attachMcpServers } from '../tools/mcp.js';
+import { loadPlugins } from '../plugins/manifest.js';
+import { createApprovalGate } from '../permissions/approval.js';
 import type { MongoConnector, MongoDatabase } from '../persistence/mongo-connect.js';
 import { createPermissionGate } from '../permissions/gate.js';
 import { createAuditLog } from '../observability/audit.js';
@@ -93,6 +108,8 @@ export type ComposeInput = {
     database?: MongoDatabase;
     connect?: MongoConnector;
   };
+  /** Measured benchmark scores for tests; production reads the configured file. */
+  benchmarks?: BenchmarkScore[];
 };
 
 const EXTERNAL_CAPABILITIES: EngineCapabilities = {
@@ -132,26 +149,121 @@ function buildGateway(input: ComposeInput): ModelGateway | null {
   });
 }
 
-function modelDescriptors(input: {
+/**
+ * Adapts a programmatic gateway to the provider port.
+ *
+ * The route is discovered locally and deliberately publishes no price: a
+ * caller-provided gateway is not evidence of a zero-cost tier, so the router
+ * still requires an operator attestation for each model it may use.
+ */
+function gatewayProvider(input: {
+  gateway: ModelGateway;
   config: EngineConfig;
-  gateway: ModelGateway | null;
-}): ModelDescriptor[] {
+}): ProviderAdapter {
+  const route = input.config.models.route;
   const vision = new Set(input.config.models.vision.map((ref) => modelKey(ref)));
-  return input.config.models.route.map((ref) => ({
-    ref,
-    label: `${ref.providerId} ${ref.modelId}`,
-    costClass: 'free' as const,
-    toolCalling: false,
-    streaming: false,
-    ...(vision.has(modelKey(ref)) ? { vision: true } : {}),
-    availability: input.gateway
-      ? { available: true, reason: 'ready' as const, detail: 'Verified zero-cost endpoint.' }
-      : {
-          available: false,
-          reason: 'not_configured' as const,
-          detail: 'No zero-cost inference endpoint is configured.',
+  return {
+    id: route[0]?.providerId ?? 'gateway',
+    kind: 'openai',
+    discover: async () =>
+      route.map((ref) => ({
+        ref,
+        label: `${ref.providerId} ${ref.modelId}`,
+        contextTokens: 32_768,
+        maxOutputTokens: 4_096,
+        capabilities: {
+          vision: vision.has(modelKey(ref)),
+          toolCalling: true,
+          reasoning: true,
+          streaming: false,
         },
-  }));
+        pricing: null,
+      })),
+    complete: async (request) => {
+      const completion = await input.gateway.complete({
+        model: request.model,
+        system: request.system,
+        prompt: request.prompt,
+        signal: request.signal,
+        ...(request.maxOutputTokens ? { maxOutputTokens: request.maxOutputTokens } : {}),
+      });
+      return {
+        text: completion.text,
+        toolCalls: [],
+        ...(completion.usage ? { usage: completion.usage } : {}),
+      };
+    },
+  };
+}
+
+/**
+ * Registers the configured providers and, when one was supplied, the
+ * programmatic gateway. A provider whose key variable is absent is not
+ * registered at all; it is never replaced by a paid endpoint.
+ */
+function buildProviders(input: {
+  config: EngineConfig;
+  env: NodeJS.ProcessEnv;
+  gateway: ModelGateway | null;
+  fetchImpl?: typeof fetch;
+}): RegisteredProvider[] {
+  const registrations: RegisteredProvider[] = [];
+  const discoveryIntervalMs = input.config.models.routing.discoveryIntervalMs;
+  const common = (id: string, baseURL: string, apiKey: string) => ({
+    id,
+    baseURL,
+    apiKey,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+
+  for (const provider of input.config.models.providers) {
+    const key = input.env[provider.apiKeyEnv];
+    if (!key) continue;
+    const adapter =
+      provider.kind === 'gemini'
+        ? createGeminiProvider(common(provider.id, provider.baseURL, key))
+        : createOpenAiProvider(common(provider.id, provider.baseURL, key));
+    registrations.push({
+      adapter,
+      settings: {
+        requestsPerMinute: provider.requestsPerMinute,
+        tokensPerMinute: provider.tokensPerMinute,
+        maxConcurrency: provider.maxConcurrency,
+        requestTimeoutMs: provider.requestTimeoutMs,
+        discoveryIntervalMs,
+      },
+    });
+  }
+
+  if (input.gateway) {
+    registrations.push({
+      adapter: gatewayProvider({ gateway: input.gateway, config: input.config }),
+      settings: {
+        requestsPerMinute: 20,
+        tokensPerMinute: 100_000,
+        maxConcurrency: 2,
+        requestTimeoutMs: 60_000,
+        discoveryIntervalMs,
+      },
+    });
+  }
+  return registrations;
+}
+
+/**
+ * Benchmark scores are optional evidence, never a default. A malformed file
+ * stops startup instead of silently ranking on invented quality data.
+ */
+function loadBenchmarkInput(input: ComposeInput): BenchmarkScore[] {
+  if (input.benchmarks) return [...input.benchmarks];
+  const file = (input.env ?? process.env).CODERAX_BENCHMARK_SCORES_FILE;
+  if (!file) return [];
+  try {
+    return loadBenchmarkScores(file);
+  } catch (error) {
+    if (error instanceof BenchmarkFileError) throw new StartupError([error.message]);
+    throw error;
+  }
 }
 
 /**
@@ -187,14 +299,36 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const gateway = buildGateway(input);
 
+  const opencodePassword = config.engines.opencode.passwordEnv
+    ? env[config.engines.opencode.passwordEnv]
+    : undefined;
+  const opencodeModelParts = config.engines.opencode.model?.split('/') ?? [];
+  const opencodeModel =
+    opencodeModelParts.length > 1
+      ? {
+          providerId: opencodeModelParts[0] ?? '',
+          modelId: opencodeModelParts.slice(1).join('/'),
+        }
+      : undefined;
+  const opencodeTransport =
+    input.externals?.opencode ??
+    (config.engines.opencode.baseURL
+      ? createOpenCodeHttpTransport({
+          baseURL: config.engines.opencode.baseURL,
+          ...(opencodePassword ? { password: opencodePassword } : {}),
+          ...(opencodeModel ? { model: opencodeModel } : {}),
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+        })
+      : null);
+
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
     engine: 'opencode',
     label: 'OpenCode Agent',
     enabled: config.engines.opencode.enabled,
-    transport: input.externals?.opencode ?? null,
+    transport: opencodeTransport,
     missingDetail:
-      'The OpenCode adapter needs an injected transport; the engine does not spawn or bundle an OpenCode server.',
+      'The OpenCode adapter needs an injected transport or engines.opencode.baseURL; the engine does not spawn or bundle an OpenCode server.',
     capabilities: EXTERNAL_CAPABILITIES,
   });
 
@@ -207,12 +341,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     missingDetail:
       'The FreeBuff adapter needs an injected SDK transport; Coderax Native does not depend on it.',
     capabilities: EXTERNAL_CAPABILITIES,
-  });
-
-  const models = createModelCatalog({
-    descriptors: modelDescriptors({ config, gateway }),
-    route: config.models.route,
-    allowPaid: false,
   });
 
   const persistence = await buildPersistence({
@@ -234,6 +362,30 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     store: persistence.budget,
   });
 
+  // One model authority: the router owns discovery, zero-cost verification,
+  // policy, provider limits, fallback and the durable reservation ledger.
+  const providers = buildProviders({
+    config,
+    env,
+    gateway,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+  });
+  const models = createModelRouter({
+    providers,
+    benchmarks: loadBenchmarkInput(input),
+    attestations: config.models.attestations,
+    preferredRoute: config.models.route,
+    budget,
+    policy: createProviderPolicyRegistry(config.models.policy),
+    ...config.models.routing,
+    now: () => clock.now(),
+  });
+  models.start();
+  // Startup verifies the route before the engine accepts a request: a
+  // deployment with no verified free model fails closed at the first submit
+  // instead of discovering availability later.
+  await models.refresh();
+
   const artifacts = createArtifactStore({ roots: workspaceRoots(config.workspaces) });
   const assistant = createDesignAssistant({ models, gateway, budget, clock });
   const studio = createGameStudio({
@@ -251,10 +403,45 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     maxPauseMs: config.games.maxPauseMs,
   });
 
+  // Tools are data plus one function, and only the ones admitted by configuration
+  // are registered. MCP servers and plugin manifests contribute more tools through
+  // the same runtime, so one authorization path covers every source.
+  const knowledge: KnowledgeStore = createKnowledgeStore({
+    clock,
+    ids,
+    embeddings: null,
+    maxDocuments: config.tools.maxKnowledgeDocuments,
+  });
+  const plugins = await loadPlugins(config.tools.pluginDirectory);
+  const mcp = await attachMcpServers([...config.tools.mcp, ...plugins.servers]);
+  const tools: ToolRuntime | null = config.tools.enabled
+    ? createToolRuntime({
+        tools: [
+          ...createBuiltinTools({
+            shellEnabled: config.tools.shellEnabled,
+            allowedCommands: config.tools.allowedCommands,
+            networkEnabled: config.tools.networkEnabled,
+            allowedHosts: config.tools.allowedHosts,
+            allowInsecureLoopback: config.tools.allowInsecureLoopback,
+            maxOutputBytes: config.tools.maxOutputBytes,
+            commandTimeoutMs: config.tools.commandTimeoutMs,
+            maxSearchFiles: config.tools.maxSearchFiles,
+            memory,
+            knowledge,
+          }),
+          ...mcp.tools,
+        ],
+        catalogueMaxChars: config.tools.catalogueMaxChars,
+      })
+    : null;
+
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
     gateway,
     authorizer: permissionsGate,
+    tools,
+    approvals: ({ ownerId, taskId }) =>
+      createApprovalGate({ permissions, clock, ownerId, taskId, agent: 'coderax' }),
     limits: {
       maxSteps: config.engines.native.maxSteps,
       maxParallelSteps: config.engines.native.maxParallelSteps,
@@ -492,6 +679,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     gaming: gaming.agent,
     browser,
     supervisor,
+    tools,
+    knowledge,
   });
   if (!container.dependencies) {
     throw new StartupError(
@@ -566,9 +755,11 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     if (stopPromise) return stopPromise;
     stopPromise = (async () => {
       service.beginShutdown();
+      models.stop();
       // Stop accepting new HTTP work immediately; in-flight requests may finish
       // while the service drains, but they cannot admit new execution.
       const serverClosed = server.close();
+      await mcp.close().catch(() => undefined);
       const drain = Promise.all([service.shutdown(), serverClosed]).then(() => persistence.close());
       let timer: NodeJS.Timeout | undefined;
       try {

@@ -230,6 +230,17 @@ export function createFakeCollection(): FakeCollection {
       documents[index] = next;
       return { ...next };
     },
+    updateMany: async (filter, update) => {
+      let matched = 0;
+      for (let index = 0; index < documents.length; index += 1) {
+        if (!matches(documents[index] as Document, filter)) continue;
+        const next = applyUpdate(documents[index] as Document, update);
+        assertUnique(next, index);
+        documents[index] = next;
+        matched += 1;
+      }
+      return { matchedCount: matched };
+    },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);
       if (index !== -1) {

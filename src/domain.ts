@@ -47,11 +47,11 @@ export type GameRunSpec = {
 export type ReasoningMode = 'fast' | 'complex';
 
 /**
- * Native may reason or read a confined workspace file. A read is the only
- * side-effecting-adjacent action it plans, and it always passes the permission
- * layer before it executes.
+ * Native may reason, read a confined workspace file, or call one registered
+ * tool. A read and a tool call are the only side-effecting actions it plans, and
+ * both always pass the permission layer before they execute.
  */
-export type PlanStepKind = 'reason' | 'read';
+export type PlanStepKind = 'reason' | 'read' | 'tool';
 
 export type TaskPlanStep = {
   id: string;
@@ -59,8 +59,13 @@ export type TaskPlanStep = {
   /** Ids of steps that must complete first. Empty means it is ready now. */
   dependsOn: string[];
   kind: PlanStepKind;
-  /** Exact workspace-relative resource for a read step; never a host path. */
+  /**
+   * Exact workspace-relative resource for a read step, or the registered tool
+   * name for a tool step. Never a host path.
+   */
   resource?: string;
+  /** Validated arguments for a tool step; the tool's own schema checks them. */
+  input?: Record<string, unknown>;
   /** What the step must prove to count as complete. */
   acceptance?: string;
 };

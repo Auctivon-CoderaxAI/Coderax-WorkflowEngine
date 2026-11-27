@@ -89,7 +89,7 @@ function isLoopbackHost(hostname: string): boolean {
 
 export function validateInvariants(config: EngineConfig): string[] {
   const issues: string[] = [];
-  const { engines, execution, models, schedules, workspaces, browsers } = config;
+  const { engines, execution, models, schedules, workspaces, browsers, tools } = config;
 
   if (config.artifacts.defaultRetentionDays > config.artifacts.maxRetentionDays) {
     issues.push("artifacts.defaultRetentionDays must not exceed artifacts.maxRetentionDays");
@@ -179,6 +179,30 @@ export function validateInvariants(config: EngineConfig): string[] {
     issues.push('browsers.allowPaid must remain false: Coderax does not use paid browser infrastructure');
   }
 
+  for (const command of tools.allowedCommands) {
+    if (/[\\/]/.test(command)) {
+      issues.push(
+        `tools.allowedCommands entry "${command}" must be a bare executable name, not a path`,
+      );
+    }
+  }
+  for (const host of tools.allowedHosts) {
+    if (/[:/\\\s]/.test(host) || host.includes('@')) {
+      issues.push(
+        `tools.allowedHosts entry "${host}" must be a hostname or .suffix, not a URL`,
+      );
+    }
+  }
+  if (tools.shellEnabled && tools.allowedCommands.length === 0) {
+    issues.push('tools.shellEnabled requires at least one tools.allowedCommands entry');
+  }
+  if (tools.networkEnabled && tools.allowedHosts.length === 0) {
+    issues.push('tools.networkEnabled requires at least one tools.allowedHosts entry');
+  }
+  if (new Set(tools.mcp.map((server) => server.name)).size !== tools.mcp.length) {
+    issues.push('tools.mcp lists a server name more than once');
+  }
+
   const seen = new Set<string>();
   for (const ref of models.route) {
     const key = `${ref.providerId}/${ref.modelId}`;
@@ -187,6 +211,31 @@ export function validateInvariants(config: EngineConfig): string[] {
   }
   if (models.allowPaid !== false) {
     issues.push('models.allowPaid must remain false: Coderax does not use paid models');
+  }
+
+  const providerIds = new Set<string>();
+  for (const provider of models.providers) {
+    if (providerIds.has(provider.id)) {
+      issues.push(`models.providers lists ${provider.id} more than once`);
+    }
+    providerIds.add(provider.id);
+  }
+  for (const attestation of models.attestations) {
+    const verifiedAt = Date.parse(attestation.verifiedAt);
+    const expiresAt = Date.parse(attestation.expiresAt);
+    const label = `${attestation.providerId}/${attestation.modelId}`;
+    if (!Number.isFinite(verifiedAt) || !Number.isFinite(expiresAt) || expiresAt <= verifiedAt) {
+      issues.push(`models.attestations for ${label} must expire after they were verified`);
+      continue;
+    }
+    // Provider terms go stale. A record that claims a longer validity than the
+    // verifier's maximum window would be refused at routing time anyway, so it
+    // is a configuration error rather than a silent downgrade.
+    if (expiresAt - verifiedAt > 90 * 24 * 60 * 60 * 1_000) {
+      issues.push(
+        `models.attestations for ${label} must not claim more than 90 days of validity`,
+      );
+    }
   }
   return issues;
 }

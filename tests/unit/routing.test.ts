@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createBudgetLedger } from '../../src/models/budget.js';
+import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 import { createCircuit } from '../../src/models/circuit.js';
 import { createModelRouter, inferRoutingMode, type ModelRouter } from '../../src/models/router.js';
 import { createProviderPolicyRegistry } from '../../src/models/policy.js';
@@ -63,7 +63,11 @@ function adapter(input: {
 }
 
 function budget(maxRequests = 100, maxTokens = 1_000_000) {
-  return createBudgetLedger({ maxRequestsPerDay: maxRequests, maxTokensPerDay: maxTokens });
+  return createBudgetLedger({
+    store: createMemoryBudgetStore(),
+    maxRequestsPerDay: maxRequests,
+    maxTokensPerDay: maxTokens,
+  });
 }
 
 function router(input: {

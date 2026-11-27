@@ -115,7 +115,7 @@ const Migration = z
     id: z.string().min(1).max(120),
     collection: z.string().min(1).max(120),
     operation: z.literal('createIndex'),
-    keys: z.record(z.union([z.literal(1), z.literal(-1)])),
+    keys: z.record(z.string(), z.union([z.literal(1), z.literal(-1)])),
     unique: z.boolean(),
     name: z.string().min(1).max(120),
     required: z.boolean(),

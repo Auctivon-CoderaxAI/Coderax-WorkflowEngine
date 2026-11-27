@@ -66,6 +66,11 @@ export type MongoCollectionLike = {
     update: MongoUpdate,
     options: { upsert: boolean },
   ) => Promise<{ matchedCount?: number; upsertedCount?: number }>;
+  updateMany: (
+    filter: MongoFilter,
+    update: MongoUpdate,
+    options: { upsert: boolean },
+  ) => Promise<{ matchedCount?: number }>;
   deleteOne: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
   deleteMany: (filter: MongoFilter) => Promise<{ deletedCount: number }>;
   countDocuments: (filter: MongoFilter) => Promise<number>;

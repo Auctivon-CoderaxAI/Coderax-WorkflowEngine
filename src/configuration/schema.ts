@@ -362,6 +362,56 @@ export const PersistenceConfig = z
   })
   .strict();
 
+const McpServerSetting = z.discriminatedUnion('transport', [
+  z
+    .object({
+      name: z.string().trim().min(1).max(60),
+      transport: z.literal('http'),
+      url: z.string().trim().url().max(1024),
+      /** Header name -> environment variable name; the value is never in config. */
+      headersEnv: z.record(z.string(), z.string().min(1).max(200)).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      name: z.string().trim().min(1).max(60),
+      transport: z.literal('stdio'),
+      command: z.string().trim().min(1).max(200),
+      args: z.array(z.string().max(500)).max(40).default([]),
+      /** Environment variable names copied from the parent process. */
+      envFrom: z.array(z.string().min(1).max(200)).max(40).default([]),
+    })
+    .strict(),
+]);
+
+/**
+ * Tool execution bounds.
+ *
+ * Shell and network are off by default and every capability is a closed
+ * allowlist. A tool that is not admitted here is not registered at all, so a
+ * model cannot discover a capability the deployment did not choose.
+ */
+export const ToolsConfig = z
+  .object({
+    enabled: z.boolean().default(true),
+    shellEnabled: z.boolean().default(false),
+    /** Bare executable names; a path separator is a configuration error. */
+    allowedCommands: z.array(z.string().trim().min(1).max(64)).max(40).default([]),
+    networkEnabled: z.boolean().default(false),
+    /** Hostnames or `.suffix` entries; a scheme or path is a configuration error. */
+    allowedHosts: z.array(z.string().trim().min(1).max(253)).max(100).default([]),
+    allowInsecureLoopback: z.boolean().default(false),
+    maxOutputBytes: z.number().int().min(256).max(200_000).default(20_000),
+    commandTimeoutMs: z.number().int().min(1_000).max(120_000).default(20_000),
+    maxSearchFiles: z.number().int().min(1).max(5_000).default(500),
+    catalogueMaxChars: z.number().int().min(1_000).max(60_000).default(12_000),
+    maxKnowledgeDocuments: z.number().int().min(1).max(10_000).default(500),
+    /** Directory of plugin manifests; absent means no plugin directory. */
+    pluginDirectory: z.string().trim().min(1).max(1024).nullable().default(null),
+    mcp: z.array(McpServerSetting).max(20).default([]),
+  })
+  .strict();
+
 export const EngineConfigSchema = z
   .object({
     contractVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
@@ -376,6 +426,7 @@ export const EngineConfigSchema = z
     artifacts: ArtifactsConfig.prefault({}),
     persistence: PersistenceConfig.prefault({}),
     games: GamesConfig.prefault({}),
+    tools: ToolsConfig.prefault({}),
   })
   .strict();
 
@@ -384,6 +435,7 @@ export type AuthSettings = z.infer<typeof AuthConfig>;
 export type ServerSettings = z.infer<typeof ServerConfig>;
 export type PersistenceSettings = z.infer<typeof PersistenceConfig>;
 export type ArtifactsSettings = z.infer<typeof ArtifactsConfig>;
+export type ToolsSettings = z.infer<typeof ToolsConfig>;
 
 export type BrowserSettings = z.infer<typeof BrowserConfig>;
 export type BrowserRemoteSettings = z.infer<typeof BrowserRemoteConfig>;

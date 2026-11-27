@@ -64,11 +64,6 @@ export const AUTHORITIES: Readonly<Record<string, Authority>> = Object.freeze({
     branch: 'feat/durable-events-integration',
     contract: 'src/events/bus.ts (EventBus)',
   },
-  event_log: {
-    owner: 'Durable Events',
-    branch: 'feat/durable-events-integration',
-    contract: 'src/events/log.ts (EventLog)',
-  },
   media_service: {
     owner: 'Multimodal Intelligence',
     branch: 'feat/multimodal-creative-intelligence',

@@ -165,12 +165,22 @@ test('SEC-5: overlapping, nested and symlinked workspace roots are refused', asy
     assert.equal(nestedResult.ok, false);
 
     const link = path.join(workspace.root, 'cloud-link');
-    symlinkSync(workspace.privateRoot, link, 'dir');
-    const symlinkResult = await validateWorkspaceRoots({
-      private: workspace.privateRoot,
-      cloud: link,
-    });
-    assert.equal(symlinkResult.ok, false);
+    let linked = false;
+    try {
+      symlinkSync(workspace.privateRoot, link, 'dir');
+      linked = true;
+    } catch (error) {
+      // Windows refuses symlink creation without a privilege; the nested-root
+      // case above still proves the overlap check. Linux CI exercises this path.
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+    }
+    if (linked) {
+      const symlinkResult = await validateWorkspaceRoots({
+        private: workspace.privateRoot,
+        cloud: link,
+      });
+      assert.equal(symlinkResult.ok, false);
+    }
 
     const disjoint = await validateWorkspaceRoots({
       private: workspace.privateRoot,

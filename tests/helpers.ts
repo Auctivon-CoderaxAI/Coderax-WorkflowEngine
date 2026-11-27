@@ -57,14 +57,48 @@ export function testProviderPolicy(
   };
 }
 
+/**
+ * The fixture's provider policy. A test-injected gateway is the owner's own
+ * endpoint: it stores nothing, trains on nothing and is reached with an
+ * owner-managed credential, which is exactly what a private grant requires.
+ * Unit-level policy tests still build their own records; this is the app fixture.
+ */
+export function testOwnerPolicy(providerId = 'free'): ProviderPolicy {
+  return testProviderPolicy(providerId, {
+    retention: 'none',
+    credentials: 'owner-managed',
+    grants: PROCESSING_OPERATIONS.flatMap((operation) => [
+      { operation, mode: 'cloud' as const, location: 'owner-region' as const },
+      { operation, mode: 'private' as const, location: 'owner-region' as const },
+    ]),
+  });
+}
+
 export function baseConfig(workspace: TestWorkspace, overrides?: Record<string, unknown>): EngineConfig {
+  const { models: modelOverrides, ...rest } = overrides ?? {};
   return EngineConfigSchema.parse({
     server: { host: '127.0.0.1', port: 0 },
     auth: { ownerId: OWNER_ID },
     workspaces: { privateRoot: workspace.privateRoot, cloudRoot: workspace.cloudRoot },
-    models: { route: [{ providerId: 'free', modelId: 'coderax-small' }] },
+    ...rest,
+    models: {
+      route: [{ providerId: 'free', modelId: 'coderax-small' }],
+      // The router verifies zero cost and owner policy before it calls out. A
+      // fixture that injects a gateway declares the same evidence a deployment
+      // must: an unexpired attestation and an approved provider policy.
+      attestations: [
+        {
+          providerId: 'free',
+          modelId: 'coderax-small',
+          evidenceUrl: 'https://provider.example/free-tier',
+          verifiedAt: '2026-11-20T00:00:00.000Z',
+          expiresAt: '2027-02-01T00:00:00.000Z',
+        },
+      ],
+      policy: [testOwnerPolicy()],
+      ...((modelOverrides as Record<string, unknown> | undefined) ?? {}),
+    },
     execution: { leaseTtlMs: 3_000, heartbeatIntervalMs: 500 },
-    ...(overrides ?? {}),
   });
 }
 

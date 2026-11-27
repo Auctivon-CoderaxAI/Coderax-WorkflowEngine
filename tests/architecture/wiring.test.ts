@@ -52,7 +52,7 @@ test('the composed application exposes one route table, one model router and one
     const models = deps.models.list();
     assert.equal(models.allowPaid, false);
     assert.ok(models.route.length > 0);
-    const resolved = deps.models.resolve(null, 'cloud');
+    const resolved = deps.models.resolve(null, 'cloud', { operation: 'work' });
     assert.equal(resolved.ok, true);
 
     const agents = deps.agents.list().agents;
@@ -60,7 +60,7 @@ test('the composed application exposes one route table, one model router and one
     assert.equal(deps.agents.defaultAgent, 'coderax');
 
     // The configured route is the only route; no fallback catalogue appears.
-    assert.deepEqual(deps.models.route('cloud'), models.route);
+    assert.deepEqual(deps.models.route(), models.route);
   } finally {
     await started.close();
   }

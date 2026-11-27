@@ -40,9 +40,14 @@ import type {
   IterateGameRequest,
   MediaIntakeRequest,
   MediaIntakeResult,
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
   MemoryList,
   ModelList,
   ModelRef,
+  ToolList,
   NotificationList,
   PermissionDecisionRequest,
   PermissionList,
@@ -101,7 +106,9 @@ import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
 import { intakeMedia, mediaDataUrl } from '../media/intake.js';
-import type { ModelCatalog } from '../models/catalog.js';
+import type { ModelRouter } from '../models/router.js';
+import type { ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
 import type { BudgetLedger } from '../models/budget.js';
 import { holdBudget } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
@@ -135,7 +142,9 @@ export type ApplicationServiceDeps = {
   ids: IdGenerator;
   auth: AuthService;
   agents: AgentRegistry;
-  models: ModelCatalog;
+  models: ModelRouter;
+  tools: ToolRuntime | null;
+  knowledge: KnowledgeStore;
   budget: BudgetLedger;
   lease: LeaseStore;
   tasks: TaskRepository;
@@ -191,6 +200,19 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  /** Registered tools with their scopes and approval policy. */
+  tools: () => ToolList;
+  ingestKnowledge: (
+    principal: Principal,
+    request: KnowledgeIngestRequest,
+  ) => Promise<ServiceResult<KnowledgeIngestResult>>;
+  knowledge: (principal: Principal, mode: DataMode) => Promise<KnowledgeList>;
+  searchKnowledge: (
+    principal: Principal,
+    query: string,
+    k: number,
+    mode: DataMode,
+  ) => Promise<KnowledgeSearchResult>;
   browserCapabilities: () => Promise<BrowserCapabilities>;
   browserSessions: (principal: Principal) => Promise<BrowserSessionList>;
   browserSession: (
@@ -1021,8 +1043,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
       adapter = resolved.value;
       const model = task.model
-        ? deps.models.resolve(task.model, task.mode)
-        : deps.models.resolve(null, task.mode);
+        ? deps.models.resolve(task.model, task.mode, { operation: 'work' })
+        : deps.models.resolve(null, task.mode, { operation: 'work' });
       if (!model.ok) {
         await settle(task, token, {
           kind: 'failed',
@@ -1695,7 +1717,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const adapter = deps.agents.resolve(agentId);
     if (!adapter.ok) return adapter;
 
-    const model = deps.models.resolve(request.model, request.mode);
+    const model = deps.models.resolve(request.model, request.mode, { operation: 'work' });
     if (!model.ok) return model;
 
     const reasoning = resolveReasoningMode({ requested: request.reasoning, objective: request.objective });
@@ -2104,6 +2126,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
+    tools: () => ({ tools: deps.tools ? deps.tools.list() : [] }),
+
+    ingestKnowledge: (principal, request) =>
+      deps.knowledge.ingest({
+        ownerId: principal.ownerId,
+        mode: request.mode,
+        title: request.title,
+        text: request.text,
+      }),
+
+    knowledge: (principal, mode) =>
+      deps.knowledge.list({ ownerId: principal.ownerId, mode }),
+
+    searchKnowledge: (principal, query, k, mode) =>
+      deps.knowledge.search({ ownerId: principal.ownerId, mode, query, k }),
+
     browserCapabilities: () => deps.browser.capabilities(),
     browserSessions: (principal) => deps.browser.list(principal.ownerId),
     browserSession: (principal, sessionId) =>
@@ -2386,7 +2424,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       const model = deps.models.resolve(
         request.model,
         request.mode,
-        media.length > 0 ? { requireVision: true } : {},
+        media.length > 0
+          ? { operation: 'chat', requireVision: true }
+          : { operation: 'chat' },
       );
       if (!model.ok) return model;
 
@@ -2568,6 +2608,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
+      // A terminal task must always have a terminal event; if the writer died
+      // before publishing it, complete the log from the authoritative record.
+      await ensureTerminalEvent(found.value);
       const replay = await deps.events.replay(taskId, after);
       // Tail strictly after what was replayed; a poll re-reads the log from that
       // cursor, so an event that lands between the read and the subscription is
@@ -2813,7 +2856,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         // task-level approval flag protects it.
         return fail('validation_failed', sideEffectRefusal);
       }
-      const model = deps.models.resolve(request.model, request.mode);
+      const model = deps.models.resolve(request.model, request.mode, { operation: 'work' });
       if (!model.ok) return model;
 
       const now = deps.clock.now();

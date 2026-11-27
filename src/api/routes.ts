@@ -129,6 +129,49 @@ export function registerRoutes(
     body: service.models(),
   }));
 
+  registry.register('listTools', async () => ({
+    kind: 'json',
+    status: 200,
+    body: service.tools(),
+  }));
+
+  registry.register('ingestKnowledge', async (context) => {
+    const result = await service.ingestKnowledge(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('listKnowledge', async (context) => {
+    const mode: DataMode = context.query.mode === 'cloud' ? 'cloud' : 'private';
+    return { kind: 'json', status: 200, body: await service.knowledge(context.principal, mode) };
+  });
+
+  registry.register('searchKnowledge', async (context) => {
+    const query = context.query as { q: string; k?: number; mode?: string };
+    const mode: DataMode = query.mode === 'cloud' ? 'cloud' : 'private';
+    return {
+      kind: 'json',
+      status: 200,
+      body: await service.searchKnowledge(
+        context.principal,
+        query.q,
+        typeof query.k === 'number' ? query.k : 4,
+        mode,
+      ),
+    };
+  });
+
+/**
+ * Chat frames follow the published `ChatFrame` contract: the assistant text,
+ * then the reply the JSON body would have carried. A failure happens before the
+ * stream opens, so it is still a normal Problem response and no client has to
+ * parse an error out of an event.
+ */
+async function* chatFrames<T extends { text: string }>(reply: T): AsyncIterable<SseFrame> {
+  yield { kind: 'event', event: { type: 'chat.delta', text: reply.text } };
+  yield { kind: 'event', event: { type: 'chat.completed', reply } };
+}
+
   registry.register('intakeMedia', async (context) => {
     const result = await service.intakeMedia(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
@@ -138,6 +181,9 @@ export function registerRoutes(
   registry.register('submitChat', async (context) => {
     const result = await service.chat(context.principal, context.body as never);
     if (!result.ok) return fromFailure(result, context.requestId);
+    if (context.accept.toLowerCase().includes('text/event-stream')) {
+      return { kind: 'sse', status: 200, events: chatFrames(result.value) };
+    }
     return { kind: 'json', status: 200, body: result.value };
   });
 

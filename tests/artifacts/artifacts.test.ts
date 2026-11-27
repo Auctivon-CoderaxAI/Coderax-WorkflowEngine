@@ -15,7 +15,10 @@ type PackResult = {
 };
 
 function pack(workspace: string): PackResult {
-  const output = execFileSync('npm', ['pack', '--dry-run', '--json'], {
+  // Windows only exposes `npm.cmd`, which Node runs through a shell.
+  const windows = process.platform === 'win32';
+  const output = execFileSync(windows ? 'npm.cmd' : 'npm', ['pack', '--dry-run', '--json'], {
+    ...(windows ? { shell: true } : {}),
     cwd: path.join(root, 'packages', workspace),
     encoding: 'utf8',
     env: { ...process.env, npm_config_update_notifier: 'false' },

@@ -20,6 +20,7 @@ import type {
   StepActionFailure,
   StepEvidence,
 } from './types.js';
+import type { ApprovalGate, ToolRuntime } from '../../tools/types.js';
 import { createNativePlanner, validatePlan } from './plan.js';
 import { createNativeExecutor } from './actions.js';
 import { planWaves } from './schedule.js';
@@ -104,26 +105,47 @@ function mergeReplannedPlan(input: {
   };
 }
 
+/**
+ * The approval gate for one run. A tool call is authorized against the durable
+ * permission store for the exact task, binding and invocation, so a resumed run
+ * finds the owner's decision instead of asking again.
+ */
+export type ApprovalGateFactory = (input: {
+  ownerId: string;
+  taskId: string | null;
+}) => ApprovalGate;
+
 export function createNativeAgent(input: {
   enabled: boolean;
   gateway: ModelGateway | null;
   planner?: Planner;
   executor?: ActionExecutor;
   authorizer?: ActionAuthorizer;
+  /** Registered tools Native may plan; absent means it has no tool executor. */
+  tools?: ToolRuntime | null;
+  approvals?: ApprovalGateFactory | null;
   limits?: Partial<NativeLimits>;
   unavailableDetail?: string;
 }): AgentAdapter {
   const limits = normalizeLimits(input.limits);
   const gateway = input.gateway;
+  const tools = input.tools ?? null;
+  const approvals = input.approvals ?? null;
   const planner =
     input.planner ??
-    (gateway ? createNativePlanner({ gateway, maxSteps: limits.maxSteps }) : null);
+    (gateway
+      ? createNativePlanner({
+          gateway,
+          maxSteps: limits.maxSteps,
+          ...(tools ? { tools: tools.catalogue() } : {}),
+        })
+      : null);
   const executor = input.executor ?? (gateway ? createNativeExecutor(gateway) : null);
   const authorizer = input.authorizer ?? denyScoped;
 
   const capabilities: EngineCapabilities = {
     streaming: true,
-    tools: false,
+    tools: tools !== null && approvals !== null,
     cancellation: true,
     resume: true,
     modelSelection: true,
@@ -150,8 +172,9 @@ export function createNativeAgent(input: {
     agent: 'coderax',
     engine: 'native',
     capabilities,
-    // Native only produces text in this tree; it exposes no side-effecting tool.
-    sideEffects: 'none',
+    // Every tool Native can reach is gated by the durable permission store; with
+    // no tool runtime it produces text only.
+    sideEffects: tools !== null && approvals !== null ? 'gated' : 'none',
     isolation: {
       workspace: 'isolated',
       memory: 'granted',
@@ -318,6 +341,103 @@ export function createNativeAgent(input: {
       ): Promise<StepRunResult> => {
         if (signal.aborted) return { kind: 'cancelled' };
         if (completed.has(step.id)) return { kind: 'completed' };
+
+        if (step.kind === 'tool') {
+          const tool = tools && step.resource ? tools.get(step.resource) : null;
+          if (!tools || !approvals || !tool) {
+            return {
+              kind: 'failed',
+              failure: {
+                code: 'unsupported',
+                detail: 'That tool is not registered for this run.',
+                retryable: false,
+              },
+            };
+          }
+          const callId = `${request.taskId ?? 'chat'}:${step.id}`;
+          report({
+            type: 'tool.call',
+            callId,
+            tool: tool.name,
+            ...(step.input ? { input: step.input } : {}),
+          });
+          const outcome = await tools.call({
+            name: tool.name,
+            arguments: step.input ?? {},
+            context: {
+              ownerId: request.ownerId,
+              taskId: request.taskId ?? null,
+              agent: 'coderax',
+              mode: request.mode,
+              workspaceRoot: request.workspaceRoot,
+              signal,
+              callId,
+            },
+            gate: approvals({ ownerId: request.ownerId, taskId: request.taskId ?? null }),
+          });
+          report({
+            type: 'tool.result',
+            callId,
+            tool: tool.name,
+            ok: outcome.result.ok,
+            output: outcome.result.ok
+              ? outcome.result.output.slice(0, 2_000)
+              : outcome.result.detail.slice(0, 500),
+          });
+          if (signal.aborted) return { kind: 'cancelled' };
+          if (outcome.approval === 'pending') {
+            const requestId = outcome.requestId ?? '';
+            report({
+              type: 'approval.required',
+              requestId,
+              tool: tool.name,
+              description:
+                outcome.result.ok === false
+                  ? outcome.result.detail
+                  : `Approve ${tool.name}.`,
+            });
+            return { kind: 'approval', requestId };
+          }
+          if (!outcome.result.ok) {
+            return {
+              kind: 'failed',
+              failure: {
+                code:
+                  outcome.result.code === 'cancelled'
+                    ? 'workspace_denied'
+                    : outcome.result.code === 'permission_required' ||
+                        outcome.result.code === 'approval_unavailable'
+                      ? 'workspace_denied'
+                      : 'invalid_output',
+                detail: outcome.result.detail,
+                retryable: false,
+              },
+            };
+          }
+          const entry: StepEvidence = {
+            stepId: step.id,
+            title: step.title,
+            output: outcome.result.output.slice(0, MAX_STEP_RESULT),
+            citation: `Ran ${tool.name}.`.slice(0, 500),
+            attempts: 1,
+          };
+          evidence.set(step.id, entry);
+          completed.add(step.id);
+          report({
+            type: 'text.delta',
+            text: `${emittedSections === 0 ? '' : '\n\n'}${tool.name}: ${entry.output.slice(0, 2_000)}`,
+          });
+          emittedSections += 1;
+          report({
+            type: 'step.completed',
+            stepId: step.id,
+            title: step.title,
+            attempts: 1,
+            evidence: entry,
+            iterations,
+          });
+          return { kind: 'completed' };
+        }
 
         const scope: PermissionScope | null = step.kind === 'read' ? 'workspace.read' : null;
         const resource =

@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { validateCommand } from '../../src/security/shell.js';
+import { createBuiltinTools } from '../../src/tools/builtin.js';
+import { createToolRuntime } from '../../src/tools/runtime.js';
+import type { ToolContext } from '../../src/tools/types.js';
 
 test('only bare, allow-listed commands that exist are accepted', async () => {
   assert.equal((await validateCommand({ command: 'node', args: [], allowedCommands: ['node'] })).ok, true);
@@ -44,17 +50,44 @@ test('commands that exist only to dispatch another program are always refused', 
   assert.match(result.ok === false ? result.detail : '', /launches another program/);
 });
 
-test('control characters are refused and accepted argv is returned unchanged', async () => {
+test('control characters and command injection syntax stay literal, never interpreted', async () => {
   const control = await validateCommand({ command: 'node', args: ['a\u0000b'], allowedCommands: ['node'] });
   assert.equal(control.ok, false);
 
-  const accepted = await validateCommand({
-    command: 'node',
-    args: ['script.js', '--title=hello', 'literal; echo injected'],
-    allowedCommands: ['node'],
-  });
-  assert.equal(accepted.ok, true);
-  if (accepted.ok) {
-    assert.deepEqual(accepted.args, ['script.js', '--title=hello', 'literal; echo injected']);
+  const root = mkdtempSync(path.join(tmpdir(), 'coderax-shell-'));
+  try {
+    const tools = createToolRuntime({
+      tools: createBuiltinTools({
+        shellEnabled: true,
+        allowedCommands: ['printf'],
+        networkEnabled: false,
+        allowedHosts: [],
+        maxOutputBytes: 10_000,
+        commandTimeoutMs: 5_000,
+        maxSearchFiles: 10,
+        memory: null,
+        knowledge: null,
+      }),
+    });
+    const context: ToolContext = {
+      ownerId: 'owner',
+      taskId: 'task',
+      agent: 'coderax',
+      mode: 'cloud',
+      workspaceRoot: root,
+      signal: new AbortController().signal,
+      callId: 'call-shell',
+    };
+    const outcome = await tools.call({
+      name: 'shell.run',
+      arguments: { command: 'printf', args: ['%s', 'literal; echo injected'] },
+      context,
+      gate: { ensure: async () => ({ decision: 'granted' }) },
+    });
+    assert.equal(outcome.result.ok, true);
+    // The metacharacters are one argv entry because `shell: false` is used.
+    assert.ok(outcome.result.ok && outcome.result.output.endsWith('literal; echo injected'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

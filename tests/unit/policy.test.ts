@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { DataMode } from '@coderax/contracts';
-import { createBudgetLedger } from '../../src/models/budget.js';
+import { createBudgetLedger, createMemoryBudgetStore } from '../../src/models/budget.js';
 import {
   createProviderPolicyRegistry,
   PROCESSING_OPERATIONS,
@@ -112,7 +112,11 @@ function router(input: {
   return createModelRouter({
     providers: input.adapters.map((entry) => ({ adapter: entry, settings: SETTINGS })),
     policy: input.policy ?? createProviderPolicyRegistry(input.policies),
-    budget: createBudgetLedger({ maxRequestsPerDay: 100, maxTokensPerDay: 1_000_000 }),
+    budget: createBudgetLedger({
+      store: createMemoryBudgetStore(),
+      maxRequestsPerDay: 100,
+      maxTokensPerDay: 1_000_000,
+    }),
     maxFallbacks: 2,
     maxCandidates: 4,
     failureThreshold: 10,

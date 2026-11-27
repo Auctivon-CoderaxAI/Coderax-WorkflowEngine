@@ -22,6 +22,7 @@ function request(signal: AbortSignal): AgentRunRequest {
     game: null,
     objective: 'stop',
     model: { providerId: 'free', modelId: 'coderax-small' },
+    reasoning: 'auto',
     mode: 'cloud',
     workspaceRoot: '/tmp',
     maxSteps: 1,

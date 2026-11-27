@@ -2,7 +2,7 @@ import type { EngineConfig } from '../configuration/schema.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { AuthService } from '../security/auth.js';
 import type { AgentRegistry } from '../agents/registry.js';
-import type { ModelCatalog } from '../models/catalog.js';
+import type { ModelRouter } from '../models/router.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
@@ -24,6 +24,8 @@ import type { DeliverableService } from '../artifacts/deliver.js';
 import type { Router } from '../api/router.js';
 import type { GameStudio } from '../games/studio.js';
 import type { GameSessionService, GamingAgent } from '../games/session.js';
+import type { ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
 
 /**
  * Dependencies are named, not positional.
@@ -39,7 +41,7 @@ export type InfrastructureDependencies = {
   ids: IdGenerator;
   auth: AuthService;
   agents: AgentRegistry;
-  models: ModelCatalog;
+  models: ModelRouter;
   budget: BudgetLedger;
   lease: LeaseStore;
   tasks: TaskRepository;
@@ -61,6 +63,9 @@ export type InfrastructureDependencies = {
   gaming: GamingAgent;
   browser: BrowserService;
   supervisor: RunSupervisor;
+  /** Registered tools, or null when the deployment disabled them. */
+  tools: ToolRuntime | null;
+  knowledge: KnowledgeStore;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -91,6 +96,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'gaming',
   'browser',
   'supervisor',
+  'tools',
+  'knowledge',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

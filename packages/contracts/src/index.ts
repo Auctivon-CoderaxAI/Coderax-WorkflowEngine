@@ -12,6 +12,7 @@ export * from './deliverables.js';
 export * from './schedules.js';
 export * from './events.js';
 export * from './permissions.js';
+export * from './intelligence.js';
 export * from './games.js';
 export * from './browser.js';
 export * from './routes.js';

@@ -177,6 +177,7 @@ const CONSTRUCTIONS: ReadonlyArray<{
 
 /** The runtime network seams: inference, explicit tools and MCP transports. */
 const EGRESS_ALLOWED = [
+  'src/security/network.ts',
   'src/agents/native/gateway.ts',
   'src/models/providers/',
   'src/mcp/',

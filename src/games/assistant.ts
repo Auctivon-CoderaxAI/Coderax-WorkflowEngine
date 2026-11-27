@@ -1,4 +1,4 @@
-import type { ModelCatalog } from '../models/catalog.js';
+import type { ModelRouter } from '../models/router.js';
 import type { BudgetLedger } from '../models/budget.js';
 import type { ModelGateway } from '../agents/native/types.js';
 import type { Clock } from '../support/clock.js';
@@ -14,7 +14,7 @@ import type { DesignAssistant } from './studio.js';
  * sees code generation or verification: those are deterministic and measured.
  */
 export function createDesignAssistant(input: {
-  models: ModelCatalog;
+  models: ModelRouter;
   gateway: ModelGateway | null;
   budget: BudgetLedger;
   clock: Clock;
@@ -26,7 +26,7 @@ export function createDesignAssistant(input: {
     available,
     narrate: async ({ ownerId, spec }) => {
       if (!input.gateway) return null;
-      const resolved = input.models.resolve(null, 'cloud');
+      const resolved = input.models.resolve(null, 'cloud', { operation: 'chat' });
       if (!resolved.ok) return null;
       const reserved = await input.budget.reserve({
         ownerId,

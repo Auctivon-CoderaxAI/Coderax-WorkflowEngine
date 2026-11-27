@@ -40,9 +40,15 @@ test('a run workspace is private, inside its mode and unique per generation', as
     if (!first.ok || !second.ok) return;
 
     assert.notEqual(first.value.root, second.value.root);
-    assert.ok(first.value.root.startsWith(workspace.cloudRoot));
+    // Compare against the resolved confinement: on Windows the real path can
+    // expand a short name (`NADERA~1`) differently from the temporary root.
+    assert.ok(first.value.root.startsWith(first.value.parent));
     assert.ok(first.value.root.includes('task_abc-g1'));
-    assert.equal(statSync(first.value.root).mode & 0o777, 0o700);
+    // Windows ignores POSIX mode bits on directories; the confinement is
+    // enforced by path checks and the capability, not by chmod.
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(first.value.root).mode & 0o777, 0o700);
+    }
     assert.equal(existsSync(first.value.root), true);
   } finally {
     workspace.cleanup();

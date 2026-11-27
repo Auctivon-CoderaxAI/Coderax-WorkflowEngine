@@ -17,6 +17,10 @@ import type { MongoCollectionLike } from './mongo.js';
 type PermissionDocument = PermissionRequest & {
   ownerId: string;
   expiresAtMs: number;
+  callId?: string;
+  binding?: string;
+  policy?: 'once' | 'always';
+  consumed?: boolean;
 };
 
 function toRequest(document: Record<string, unknown>): PermissionRequest {
@@ -72,6 +76,10 @@ export async function ensurePermissionIndexes(collection: MongoCollectionLike): 
     { taskId: 1, scope: 1, resource: 1 },
     { name: 'permission_resource' },
   );
+  await collection.createIndex(
+    { taskId: 1, binding: 1, decision: 1 },
+    { name: 'permission_binding' },
+  );
 }
 
 export function createMongoPermissionStore(input: {
@@ -89,7 +97,7 @@ export function createMongoPermissionStore(input: {
   }
 
   return {
-    request: async ({ ownerId, taskId, agent, scope, description, resource, ttlMs }) => {
+    request: async ({ ownerId, taskId, agent, scope, description, resource, callId, binding, policy, ttlMs }) => {
       const now = input.clock.now();
       const ttl = ttlMs ?? input.defaultTtlMs ?? 15 * 60_000;
       const record: PermissionDocument = {
@@ -104,9 +112,13 @@ export function createMongoPermissionStore(input: {
         expiresAtMs: now.getTime() + ttl,
         decision: 'pending',
         ownerId,
+        ...(callId ? { callId } : {}),
+        ...(binding ? { binding } : {}),
+        ...(policy ? { policy } : {}),
+        consumed: false,
       };
       await input.collection.insertOne({ ...record });
-      const { ownerId: _owner, expiresAtMs: _expiry, ...contract } = record;
+      const { ownerId: _owner, expiresAtMs: _expiry, callId: _call, binding: _bind, policy: _policy, consumed: _used, ...contract } = record;
       return contract;
     },
 
@@ -144,6 +156,7 @@ export function createMongoPermissionStore(input: {
         scope,
         resource,
         decision: 'approved',
+        consumed: { $ne: true },
         expiresAtMs: { $gt: input.clock.now().getTime() },
       });
       return document !== null;
@@ -152,6 +165,78 @@ export function createMongoPermissionStore(input: {
     hasPending: async (taskId) => {
       const document = await input.collection.findOne({ taskId, decision: 'pending' });
       return document !== null;
+    },
+
+    lookup: async ({ ownerId, taskId, scope, resource, binding, callId, requestId, consume }) => {
+      const now = input.clock.now().getTime();
+      const base = {
+        ownerId,
+        taskId,
+        scope,
+        resource,
+        $or: [{ binding }, { binding: { $exists: false } }],
+      };
+      if (requestId) {
+        const named = await input.collection.findOne({ ...base, requestId });
+        if (!named) return null;
+        const document = named as Record<string, unknown>;
+        if (Number(document.expiresAtMs ?? 0) <= now) return null;
+        if (document.decision === 'denied') return { decision: 'denied', requestId };
+        if (document.decision === 'pending') return { decision: 'pending', requestId };
+        if (document.consumed === true) return null;
+        if (consume) {
+          const claimed = await input.collection.updateOne(
+            { requestId, ownerId, taskId, consumed: { $ne: true }, decision: 'approved' },
+            { $set: { consumed: true } },
+            { upsert: false },
+          );
+          if ((claimed.matchedCount ?? 0) !== 1) return null;
+        }
+        return { decision: 'granted', requestId };
+      }
+      const approved = await input.collection.findOne({
+        ...base,
+        decision: 'approved',
+        consumed: { $ne: true },
+        expiresAtMs: { $gt: now },
+        $and: [{ $or: [{ callId }, { callId: { $exists: false } }, { policy: 'once' }] }],
+      });
+      if (approved) {
+        const document = approved as Record<string, unknown>;
+        const id = String(document.requestId ?? '');
+        if (consume && id !== '') {
+          const claimed = await input.collection.updateOne(
+            { requestId: id, consumed: { $ne: true }, decision: 'approved' },
+            { $set: { consumed: true } },
+            { upsert: false },
+          );
+          if ((claimed.matchedCount ?? 0) !== 1) return null;
+        }
+        return { decision: 'granted', ...(id !== '' ? { requestId: id } : {}) };
+      }
+      const pending = await input.collection.findOne({
+        ...base,
+        decision: 'pending',
+        expiresAtMs: { $gt: now },
+      });
+      if (pending) {
+        const id = String((pending as Record<string, unknown>).requestId ?? '');
+        return { decision: 'pending', ...(id !== '' ? { requestId: id } : {}) };
+      }
+      const denied = await input.collection.findOne({ ...base, decision: 'denied' });
+      if (denied) {
+        const id = String((denied as Record<string, unknown>).requestId ?? '');
+        return { decision: 'denied', ...(id !== '' ? { requestId: id } : {}) };
+      }
+      return null;
+    },
+
+    cancelTask: async (ownerId, taskId) => {
+      await input.collection.updateMany(
+        { ownerId, taskId, decision: 'pending' },
+        { $set: { decision: 'denied', decidedAt: input.clock.iso() } },
+        { upsert: false },
+      );
     },
   };
 }

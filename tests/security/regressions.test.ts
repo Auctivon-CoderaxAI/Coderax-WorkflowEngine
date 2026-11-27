@@ -358,9 +358,15 @@ regression('F9', 'workspace roots are resolved through symlinks and must not ove
     );
 
     const linked = path.join(root, 'linked-cloud');
-    symlinkSync(privateRoot, linked);
-    const symlinked = await validateWorkspaceRoots({ private: privateRoot, cloud: linked });
-    assert.equal(symlinked.ok, false);
+    try {
+      symlinkSync(privateRoot, linked);
+      const symlinked = await validateWorkspaceRoots({ private: privateRoot, cloud: linked });
+      assert.equal(symlinked.ok, false);
+    } catch (error) {
+      // Windows refuses symlink creation without a privilege; Linux CI covers
+      // the symlink resolution path and the nested-root case above still runs.
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
