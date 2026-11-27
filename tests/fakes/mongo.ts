@@ -9,7 +9,12 @@ import type { MongoDatabase } from '../../src/persistence/mongo-connect.js';
 type Document = Record<string, unknown>;
 type Index = {
   keys: Record<string, 1 | -1>;
-  options?: { unique?: boolean; name?: string; partialFilterExpression?: MongoFilter };
+  options?: {
+    unique?: boolean;
+    name?: string;
+    partialFilterExpression?: MongoFilter;
+    expireAfterSeconds?: number;
+  };
 };
 
 /** Reads a dotted path; an array segment yields the values of its elements. */
@@ -30,16 +35,20 @@ function readPath(document: Document, path: string): unknown {
 }
 
 /**
- * Comparison operators follow MongoDB's type bracketing: a range comparison
- * matches only when both sides are Dates or both are strings. ISO-8601 UTC
- * strings therefore compare chronologically, and a null field never matches a
- * string range.
+ * Ordering covers the three comparable shapes the stores use: dates for leases
+ * and retention, numbers for event sequences, and strings for identifiers. A
+ * numeric comparison that fell back to string order would put sequence 10 before
+ * 9, which is exactly the bug a durable log cannot afford.
  */
 function compare(left: unknown, right: unknown): number | null {
-  if (left instanceof Date && right instanceof Date) return left.getTime() - right.getTime();
-  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  if (left instanceof Date && right instanceof Date) {
+    return Math.sign(left.getTime() - right.getTime());
+  }
+  if (typeof left === 'number' && typeof right === 'number') {
+    return Math.sign(left - right);
+  }
   if (typeof left === 'string' && typeof right === 'string') {
-    return left < right ? -1 : left > right ? 1 : 0;
+    return Math.sign(left.localeCompare(right));
   }
   return null;
 }
@@ -61,6 +70,8 @@ function matches(document: Document, filter: MongoFilter): boolean {
           if (operator === '$lt' && order >= 0) return false;
           if (operator === '$gte' && order < 0) return false;
           if (operator === '$gt' && order <= 0) return false;
+        } else if (operator === '$type') {
+          if (operand === 'string' && typeof value !== 'string') return false;
         } else if (operator === '$exists') {
           if ((value !== undefined) !== (operand === true)) return false;
         } else if (operator === '$type') {
@@ -68,7 +79,7 @@ function matches(document: Document, filter: MongoFilter): boolean {
         } else if (operator === '$in') {
           if (!(operand as unknown[]).includes(value)) return false;
         } else if (operator === '$nin') {
-          if ((operand as unknown[]).includes(value)) return false;
+          if ((Array.isArray(value) ? value : [value]).some(item => (operand as unknown[]).includes(item))) return false;
         } else if (operator === '$ne') {
           if (value === operand) return false;
         } else {
@@ -87,6 +98,7 @@ function indexValue(document: Document, keys: Record<string, 1 | -1>): string {
   return JSON.stringify(Object.keys(keys).map((field) => document[field] ?? null));
 }
 
+/** `$inc`, `$push` and `$pull` are how quota counters and blob leases move. */
 function applyUpdate(document: Document, update: MongoUpdate): Document {
   const next = { ...document, ...(update.$set ?? {}) };
   for (const [field, amount] of Object.entries(update.$inc ?? {})) {
@@ -111,6 +123,12 @@ function applyUpdate(document: Document, update: MongoUpdate): Document {
       return entry !== condition;
     });
   }
+  for (const [field, value] of Object.entries(update.$max ?? {})) {
+    const current = next[field];
+    if (current === undefined || (compare(current, value) ?? 1) < 0) {
+      next[field] = value;
+    }
+  }
   return next;
 }
 
@@ -127,9 +145,10 @@ export type FakeCollection = MongoCollectionLike & {
 
 /**
  * A collection fake that enforces what the stores rely on: a cursor that sorts
- * and limits, atomic single-document updates, and the unique indexes the stores
- * declare (a duplicate insert raises 11000). It is a test double for the driver,
- * not for the repositories, so the same fake proves the wiring and the semantics.
+ * and limits, atomic single-document updates including `$inc` and `$max`, numeric
+ * comparisons, and the unique indexes the stores declare (a duplicate insert
+ * raises 11000). It is a test double for the driver, not for the repositories, so
+ * the same fake proves the wiring and the semantics.
  */
 export function createFakeCollection(): FakeCollection {
   const documents: Document[] = [];
@@ -162,11 +181,8 @@ export function createFakeCollection(): FakeCollection {
       sort: (spec) => {
         const [field, direction] = Object.entries(spec)[0] ?? ['key', 1];
         result = [...result].sort((left, right) => {
-          const a = left[field];
-          const b = right[field];
-          const leftValue = a instanceof Date ? a.getTime() : String(a);
-          const rightValue = b instanceof Date ? b.getTime() : String(b);
-          return leftValue < rightValue ? -direction : leftValue > rightValue ? direction : 0;
+          const order = compare(left[field], right[field]) ?? 0;
+          return order * direction;
         });
         return self;
       },
@@ -202,11 +218,10 @@ export function createFakeCollection(): FakeCollection {
       }
       const index = firstIndex(filter);
       if (index === -1) return null;
-      const next = { ...documents[index], ...update.$set };
+      const next = applyUpdate(documents[index] as Document, update);
       assertUnique(next, index);
       documents[index] = next;
-      documents[index] = applyUpdate(documents[index], update);
-      return { ...documents[index] };
+      return { ...next };
     },
     updateOne: async (filter, update, options) => {
       const index = firstIndex(filter);
@@ -237,6 +252,17 @@ export function createFakeCollection(): FakeCollection {
       documents.push(...kept);
       return { deletedCount };
     },
+    countDocuments: async filter => documents.filter(row => matches(row, filter)).length,
+    aggregate: pipeline => ({
+      toArray: async () => {
+        const [match, group] = pipeline;
+        if (!match?.$match || JSON.stringify(group) !== JSON.stringify({ $group: { _id: null, bytes: { $sum: '$bytes' } } })) {
+          throw new Error('Unsupported aggregate pipeline');
+        }
+        const rows = documents.filter(row => matches(row, match.$match as MongoFilter));
+        return [{ bytes: rows.reduce((sum, row) => sum + Number(row.bytes), 0) }];
+      },
+    }),
     find: cursor,
   };
 }

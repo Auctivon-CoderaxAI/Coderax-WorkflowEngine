@@ -1,4 +1,11 @@
-import type { ModelRef, PermissionScope, Usage } from '@coderax/contracts';
+import type {
+  ArtifactDescriptor,
+  DeliverableRequestInput,
+  EngineFailureCode,
+  ModelRef,
+  PermissionScope,
+  Usage,
+} from '@coderax/contracts';
 import type { AgentHistoryTurn } from '../types.js';
 import type {
   PlanStepKind,
@@ -152,3 +159,22 @@ export type NativeLimits = {
   maxStepAttempts: number;
   maxIterations: number;
 };
+
+/**
+ * The deliverable use case, seen from the agent.
+ *
+ * The port keeps `src/agents` free of staging, persistence and permission
+ * wiring: the composition root supplies the durable-backed implementation. A
+ * generated deliverable is persisted with the task's association, so the task
+ * result finds it through the artifact service rather than through this value.
+ */
+export type DeliverableTool = (input: {
+  request: DeliverableRequestInput;
+  ownerId: string;
+  taskId?: string;
+  conversationId: string;
+  signal: AbortSignal;
+}) => Promise<
+  | { ok: true; descriptors: ArtifactDescriptor[]; summary: string }
+  | { ok: false; code: EngineFailureCode; detail: string }
+>;

@@ -14,8 +14,6 @@ import type {
   BrowserSessionList,
   BrowserTakeoverRequest,
   BrowserTakeoverResult,
-  ArtifactGenerationRequest,
-  ArtifactGenerationResult,
   BudgetState,
   BuildGameRequest,
   ChatReply,
@@ -25,6 +23,8 @@ import type {
   CreateGameRequest,
   CreateGameSessionRequest,
   DataMode,
+  Deliverable,
+  DeliverableRequestInput,
   GameBuildList,
   GameCapabilityReport,
   GameExport,
@@ -67,7 +67,13 @@ import type {
   Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
-import { engineForAgent, isTerminalExecution, isTerminalState, modelKey } from '@coderax/contracts';
+import {
+  DeliverableRequest,
+  engineForAgent,
+  isTerminalExecution,
+  isTerminalState,
+  modelKey,
+} from '@coderax/contracts';
 import type { EngineConfig } from '../configuration/schema.js';
 import type {
   ConversationRecord,
@@ -97,6 +103,7 @@ import { redactContent, redactText, redactToolInput } from '../observability/red
 import { intakeMedia, mediaDataUrl } from '../media/intake.js';
 import type { ModelCatalog } from '../models/catalog.js';
 import type { BudgetLedger } from '../models/budget.js';
+import { holdBudget } from '../models/budget.js';
 import type { PermissionStore } from '../permissions/store.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { AuditLog } from '../observability/audit.js';
@@ -116,9 +123,9 @@ import {
   removeRunWorkspaceIfEmpty,
   workspaceRoots,
 } from '../execution/workspace.js';
-import type { ArtifactService } from '../artifacts/service.js';
-import type { ArtifactGenerator } from '../artifacts/generate.js';
 import { buildTranscript } from './transcript.js';
+import type { ArtifactService } from '../artifacts/service.js';
+import type { DeliverableService } from '../artifacts/deliver.js';
 import type { BrowserService } from './browser.js';
 import { resolveReasoningMode } from '../agents/native/reason.js';
 
@@ -136,10 +143,10 @@ export type ApplicationServiceDeps = {
   memory: MemoryStore;
   permissions: PermissionStore;
   notifications: NotificationStore;
+  artifactService: ArtifactService;
+  deliverables: DeliverableService;
   schedules: ScheduleRepository;
   scheduleNotices: ScheduleNoticeStore;
-  artifactService: ArtifactService;
-  artifactGenerator: ArtifactGenerator;
   audit: AuditLog;
   events: EventBus;
   runner: TaskRunner;
@@ -152,10 +159,31 @@ export type ApplicationServiceDeps = {
   supervisor: RunSupervisor;
 };
 
+/**
+ * A Work objective may declare one deliverable in a fenced block. The directive is
+ * data: it is parsed against the published contract and produced by the same use
+ * case the API uses, so a headless or scheduled run stores files exactly as an
+ * explicit request does.
+ */
+export type DeliverableDirective =
+  | { present: false }
+  | { present: true; value: unknown; error?: string };
+
+export function readDeliverableDirective(objective: string): DeliverableDirective {
+  const match = /```deliverable\s*\n([\s\S]*?)^```/m.exec(objective);
+  if (!match) return { present: false };
+  try {
+    return { present: true, value: JSON.parse(match[1] ?? '') as unknown };
+  } catch {
+    return { present: true, value: null, error: 'The deliverable directive is not valid JSON.' };
+  }
+}
+
 export type EventStream = {
+  /** The first page at the caller's cursor, with the durable log's own metadata. */
   replay: Replay;
+  /** Tails strictly after the last replayed event, so the hand-off loses nothing. */
   subscribe: (listener: (event: unknown) => void) => Unsubscribe;
-  lastSeq: number;
 };
 
 export type ApplicationService = {
@@ -255,17 +283,21 @@ export type ApplicationService = {
   notifications: (principal: Principal, includeSchedules?: boolean) => Promise<NotificationList>;
   /** Durable artifact storage; the only path that returns artifact bytes. */
   artifacts: ArtifactService;
-  /** Renders a deliverable and persists it through the artifact tree adapter. */
-  generateArtifact: (
+  /**
+   * Generate, verify and durably persist a deliverable. The files it returns are
+   * artifact descriptors owned by `artifacts`, not paths in a workspace.
+   */
+  deliver: (
     principal: Principal,
-    request: ArtifactGenerationRequest,
-  ) => Promise<ServiceResult<ArtifactGenerationResult>>;
+    request: DeliverableRequestInput,
+    options?: { conversationId?: string; taskId?: string; signal?: AbortSignal },
+  ) => Promise<ServiceResult<Deliverable>>;
   events: (
     principal: Principal,
     taskId: string,
     after: number,
   ) => Promise<ServiceResult<EventStream>>;
-  budget: (principal: Principal) => BudgetState;
+  budget: (principal: Principal) => Promise<BudgetState>;
   gameCapabilities: (principal: Principal) => GameCapabilityReport;
   listGames: (
     principal: Principal,
@@ -379,6 +411,9 @@ export type ApplicationService = {
   tickSchedules: () => Promise<ScheduleTickReport>;
   /** Startup ownership verification: retires runs whose lease is gone. */
   recoverInterrupted: () => Promise<{ interrupted: number }>;
+  /** Stop admitting new execution work before the listener is closed. */
+  beginShutdown: () => void;
+  /** Abort active work, drain the scheduler and settle its writes. */
   shutdown: () => Promise<void>;
 };
 
@@ -392,6 +427,13 @@ function scopeOf(task: TaskRecord): RunScope {
 
 export function createApplicationService(deps: ApplicationServiceDeps): ApplicationService {
   const controllers = new Map<string, AbortController>();
+  const admissions = new Set<Promise<unknown>>();
+  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | null = null;
+
+  function unavailable(): ServiceResult<never> {
+    return fail('not_ready', 'The engine is shutting down.');
+  }
 
   /**
    * Earlier turns for this conversation, read from the store rather than from
@@ -462,16 +504,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     return ok(binding.record);
   }
 
-  function publish(
+  /**
+   * Appends one event to the durable log for the generation that owns the task.
+   * Callers that can be told about a failure await it, so a settlement never
+   * announces state the stream has not recorded. A refused append means this
+   * generation no longer holds the fence, and writing nothing is the outcome.
+   */
+  async function publish(
     task: TaskRecord,
     type: Parameters<EventBus['publish']>[0]['type'],
     payload?: unknown,
     /** Present for run-origin events: a revoked generation may not publish. */
     token?: string,
-  ): void {
+  ): Promise<void> {
     if (token !== undefined && !deps.supervisor.isLive(task.taskId, token)) return;
-    deps.events.publish({
+    await deps.events.publish({
       taskId: task.taskId,
+      runToken: task.runToken ?? '',
       agent: task.agent,
       generation: task.generation,
       type,
@@ -490,6 +539,53 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return payload;
     }
     return { ...(payload as Record<string, unknown>), detail: redactText(detail, [], 1000) };
+  }
+
+  /**
+   * A task's status lists the artifacts stored against it, so a client finds the
+   * files it asked for through the task instead of scanning the whole catalogue.
+   * The listing is bounded like every other listing.
+   */
+  async function statusWithArtifacts(principal: Principal, task: TaskRecord): Promise<TaskStatus> {
+    const status = toStatus(task);
+    const listed = await deps.artifactService.list(principal, {
+      mode: task.mode,
+      taskId: task.taskId,
+      limit: 500,
+    });
+    if (listed.ok && status.result && task.kind !== 'game') {
+      status.result = {
+        ...(status.result ?? { artifacts: [] }),
+        artifacts: listed.value.artifacts.map((artifact) => ({
+          path: artifact.relativePath ?? artifact.filename,
+          bytes: artifact.bytes,
+          digest: artifact.sha256,
+        })),
+      };
+    }
+    return status;
+  }
+
+  /**
+   * Produces the deliverable a Work objective declared, if any. A malformed or
+   * mismatched directive produces nothing rather than substituting a different
+   * deliverable, and a refused generation leaves the run's own result intact.
+   */
+  async function produceDeliverable(task: TaskRecord, signal: AbortSignal, authorizePersistence: () => Promise<boolean>): Promise<void> {
+    const directive = readDeliverableDirective(task.objective);
+    if (!directive.present || directive.error) return;
+    const parsed = DeliverableRequest.safeParse(directive.value);
+    if (!parsed.success || parsed.data.mode !== task.mode) return;
+    await deps.deliverables.deliver(
+      { ownerId: task.ownerId, isOwner: true },
+      parsed.data,
+      {
+        conversationId: task.conversationId,
+        taskId: task.taskId,
+        signal,
+        authorizePersistence,
+      },
+    );
   }
 
   function toStatus(task: TaskRecord): TaskStatus {
@@ -599,11 +695,14 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     outcome: RunOutcome,
     checkpoint?: TaskRecord['checkpoint'],
     steps?: TaskRecord['steps'],
+    signal?: AbortSignal,
+    lostOwnership?: () => boolean,
   ): Promise<void> {
     if (outcome.kind === 'interrupted') {
       return;
     }
     const now = deps.clock.iso();
+    const failureDetail = outcome.kind === 'failed' ? redactText(outcome.detail, [], 1000) : undefined;
     const generationUsage = 'usage' in outcome ? outcome.usage : undefined;
     const mergedUsage = mergeUsage(task.usage, generationUsage);
     let partialSaved = false;
@@ -641,7 +740,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           leaseExpiresAt: null,
           failure: {
             code: outcome.code,
-            detail: outcome.detail,
+            detail: failureDetail,
             retryable: false,
           },
           ...(checkpoint ? { checkpoint } : {}),
@@ -660,7 +759,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             // terminal. The resumed generation is charged separately, so the daily
             // ledger matches the cumulative usage the owner sees.
             if (generationUsage) {
-              deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+              await deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
             }
             deps.audit.record({
               actor: task.ownerId,
@@ -678,6 +777,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       }
     }
 
+    if (outcome.kind === 'completed' && signal?.aborted) outcome = { kind: 'cancelled' };
+
     const patch =
       outcome.kind === 'completed'
         ? {
@@ -685,9 +786,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             updatedAt: now,
             result: {
               summary: outcome.summary.slice(0, 20_000),
-          artifacts: task.kind === 'game'
-            ? (outcome.artifacts ?? [])
-          : [],
+              artifacts: task.kind === 'game' ? (outcome.artifacts ?? []) : [],
               ...(outcome.verification
                 ? {
                     verification: {
@@ -709,7 +808,8 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
               updatedAt: now,
               failure: {
                 code: outcome.code,
-                detail: outcome.detail,
+                // Provider text is redacted before it is stored, not only on read.
+                detail: failureDetail,
                 retryable: outcome.retryable,
               },
             };
@@ -721,12 +821,31 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       ...(checkpoint?.plan ? { reasoning: checkpoint.plan.mode } : {}),
       ...(mergedUsage ? { usage: mergedUsage } : {}),
     };
-    const applied = await deps.tasks.updateFenced({
+    const commit = () => deps.tasks.updateFenced({
       taskId: task.taskId,
       token,
       patch: statePatch,
+      ...(outcome.kind === 'completed' ? { guard: 'not_cancel_requested' as const } : {}),
     });
+    let decision: ReturnType<typeof commit> | undefined;
+    if (outcome.kind === 'completed' && signal) {
+      // Only a completed generation is immutable. Authorize publication at the
+      // last boundary before storage, after generation and validation finish.
+      await produceDeliverable(task, signal, async () => {
+        if (lostOwnership?.() || signal.aborted) return false;
+        return (await (decision ??= commit())).applied;
+      }).catch(() => undefined);
+      if (!decision && lostOwnership?.()) return;
+      if (!decision && signal.aborted) {
+        return settle(task, token, { kind: 'cancelled' }, checkpoint, steps);
+      }
+    }
+    const applied = await (decision ?? commit());
     if (!applied.applied) {
+      if (applied.reason === 'guard_rejected' && outcome.kind === 'completed') {
+        await settle(task, token, { kind: 'cancelled' }, checkpoint, steps);
+        return;
+      }
       if (applied.reason === 'terminal' || applied.reason === 'superseded') {
         await releaseLease(task, token);
       }
@@ -737,20 +856,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     // Charge the usage produced by this generation, not the merged task total:
     // the previous generation was already charged when it settled.
     if (generationUsage) {
-      deps.budget.consume(task.ownerId, generationUsage, new Date(now));
+      await deps.budget.recordUsage(task.ownerId, generationUsage, new Date(now));
     }
     try {
       if (outcome.kind === 'completed') {
-        publish(settled, 'task.completed', {
+        await publish(settled, 'task.completed', {
           summary: outcome.summary.slice(0, 20_000),
           ...(task.model ? { model: task.model } : {}),
           ...(outcome.usage ? { usage: outcome.usage } : {}),
         });
       } else if (outcome.kind === 'cancelled') {
-        publish(settled, 'task.cancelled', {});
+        await publish(settled, 'task.cancelled', {});
       } else {
-        publish(settled, 'task.failed', {
-          code: outcome.code, detail: outcome.detail, retryable: outcome.retryable,
+        await publish(settled, 'task.failed', {
+          code: outcome.code, detail: failureDetail, retryable: outcome.retryable,
         });
       }
 
@@ -765,8 +884,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           agent: task.agent,
         }).catch(() => undefined);
       }
-      const detail = outcome.kind === 'completed' ? outcome.summary
-        : outcome.kind === 'failed' ? outcome.detail : undefined;
+      const detail = outcome.kind === 'completed' ? outcome.summary : failureDetail;
       await notifyTerminal(settled, outcome.kind, detail).catch(() => undefined);
       deps.audit.record({
         actor: task.ownerId,
@@ -848,6 +966,16 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const schedule = await deps.schedules.get(admission.scheduleId);
     if (!schedule || schedule.state === 'cancelled') return false;
     return admission.complete ?? (schedule.lastExecutionId === admission.executionId || task.steps.length > 0);
+  }
+
+  async function rejectUnscheduledRun(task: TaskRecord, token: string): Promise<ServiceResult<never>> {
+    await settle(task, token, {
+      kind: 'failed',
+      code: 'server_unavailable',
+      detail: 'The engine shut down before the run could be scheduled.',
+      retryable: true,
+    });
+    return unavailable();
   }
 
   async function execute(taskId: string, token: string): Promise<void> {
@@ -939,10 +1067,38 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       generation: started.task.generation,
       workspaceRoot: workspace.value.root,
     });
-    publish(started.task, 'task.started');
+    await publish(started.task, 'task.started');
 
     const controller = new AbortController();
     controllers.set(taskId, controller);
+
+    /**
+     * A report arrives synchronously but the append is asynchronous. Chaining the
+     * appends preserves the order the adapter produced, and `drain` makes the run
+     * wait for the log before it settles, so a replay can never show a settlement
+     * whose deltas were not written.
+     */
+    let emitted: Promise<void> = Promise.resolve();
+    let emitFailure: { error: unknown } | null = null;
+    const emit = (
+      type: Parameters<EventBus['publish']>[0]['type'],
+      payload?: unknown,
+    ): void => {
+      emitted = emitted
+        .then(() => publish(started.task, type, payload, token))
+        .then(
+          () => undefined,
+          (error: unknown) => {
+            emitFailure ??= { error };
+          },
+        );
+    };
+    const drain = async (): Promise<void> => {
+      await emitted;
+      const failed = emitFailure;
+      emitFailure = null;
+      if (failed) throw failed.error;
+    };
 
     const steps = [...started.task.steps];
     const completed: string[] = [...started.task.checkpoint.completedSteps];
@@ -965,9 +1121,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     };
     const emitText = (next: string, replace = false): void => {
       if (replace || !next.startsWith(visible)) {
-        publish(started.task, 'text.replace', { text: next }, token);
+        emit('text.replace', { text: next });
       } else if (next !== visible) {
-        publish(started.task, 'text.delta', { text: next.slice(visible.length) }, token);
+        emit('text.delta', { text: next.slice(visible.length) });
       }
       visible = next;
     };
@@ -1039,7 +1195,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
             ...(planned ? { dependsOn: [...planned.dependsOn] } : {}),
           });
         }
-        publish(started.task, 'step.started', { stepId: event.stepId, title: event.title });
+        emit('step.started', { stepId: event.stepId, title: event.title });
         persist({ steps, updatedAt: deps.clock.iso() });
         return;
       }
@@ -1063,7 +1219,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           if (index === -1) evidence.push(safeEvidence);
           else evidence[index] = safeEvidence;
         }
-        publish(started.task, 'step.completed', { stepId: event.stepId, title: event.title });
+        emit('step.completed', { stepId: event.stepId, title: event.title });
         persist({
           steps,
           checkpoint: { completedSteps: [...completed], text: visible, plan, evidence, iterations },
@@ -1087,27 +1243,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         return;
       }
       if (event.type === 'tool.call') {
-        publish(started.task, 'tool.call', {
+        emit('tool.call', {
           callId: event.callId,
           tool: event.tool,
           ...(event.input === undefined ? {} : { input: redactToolInput(event.input) }),
-        }, token);
+        });
         return;
       }
       if (event.type === 'tool.result') {
-        publish(started.task, 'tool.result', {
+        emit('tool.result', {
           callId: event.callId,
           tool: event.tool,
           ok: event.ok,
           ...(event.output === undefined ? {} : { output: redactText(event.output) }),
-        }, token);
+        });
         return;
       }
       if (event.type === 'file.edit') {
         if (typeof event.path !== 'string' || event.path.length < 1 || event.path.length > 1024) {
           throw new RangeError('file.edit path must contain 1–1024 characters.');
         }
-        publish(started.task, 'file.edit', { path: event.path }, token);
+        emit('file.edit', { path: event.path });
         return;
       }
       /**
@@ -1115,11 +1271,11 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
        * authority that can approve a resource, and the adapter must have created
        * that request before reporting it.
        */
-      publish(started.task, 'approval.required', {
+      emit('approval.required', {
         requestId: event.requestId,
         tool: event.tool,
         description: redactText(event.description, [], 2000),
-      }, token);
+      });
     };
 
     const history = await historyFor(
@@ -1137,9 +1293,60 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       adapter,
     );
 
-    let result: RunResult;
+    let finishing = false;
+    const finish = async (result: RunResult, signal: AbortSignal, lostOwnership: () => boolean): Promise<void> => {
+      finishing = true;
+      const current = controllers.get(taskId);
+      const superseded = current !== undefined && current !== controller;
+      await writeChain.catch(() => undefined);
+
+      const verified = result.terminated;
+      try {
+        if (superseded || result.ownershipLost) {
+          return;
+        }
+        const safeText = redactContent(text);
+        emitText(safeText);
+        await drain();
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(started.task)), now: deps.clock.now() });
+        if (lostOwnership() || !lease?.live || lease.token !== token) return;
+        const outcome = result.outcome.kind === 'completed'
+          ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
+          : result.outcome;
+        await settle(
+          started.task,
+          token,
+          outcome,
+          {
+            completedSteps: completed,
+            text: safeText,
+            plan,
+            evidence,
+            iterations,
+          },
+          steps,
+          signal,
+          lostOwnership,
+        );
+      } finally {
+        if (controllers.get(taskId) === controller) controllers.delete(taskId);
+        // Verified termination means the adapter returned. Anything else means it
+        // may still be running, so its capability and workspace are revoked rather
+        // than left available to a generation the engine can no longer supervise.
+        if (verified) {
+          deps.supervisor.finish(taskId, token);
+        } else {
+          await deps.supervisor.abandon({
+            taskId,
+            token,
+            reason: 'The adapter did not verify termination within the cancellation grace period.',
+          });
+        }
+      }
+    };
     try {
-      result = await deps.runner.run({
+      await deps.runner.run({
+        onSettled: finish,
         scope: scopeOf(started.task),
         ...((task.scheduleAdmission ||
           task.taskId.startsWith('task_sched_')) && {
@@ -1173,62 +1380,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         generation: started.task.generation,
         workspaceRoot: workspace.value.root,
       });
-    } catch {
+    } catch (error) {
+      if (finishing) throw error;
       await deps.supervisor.abandon({
         taskId,
         token,
         reason: 'The runner failed before termination could be verified.',
       });
-      await settle(started.task, token, {
-        kind: 'failed',
-        code: 'provider_error',
-        detail: 'The execution supervisor could not verify the run.',
-        retryable: true,
-      });
-      return;
-    }
-
-    const current = controllers.get(taskId);
-    const superseded = current !== undefined && current !== controller;
-    if (!superseded) controllers.delete(taskId);
-    await writeChain.catch(() => undefined);
-
-    const verified = result.terminated;
-    try {
-      if (superseded || result.ownershipLost) {
-        return;
-      }
-      const safeText = redactContent(text);
-      emitText(safeText);
-      const outcome = result.outcome.kind === 'completed'
-        ? { ...result.outcome, summary: redactContent(result.outcome.summary) }
-        : result.outcome;
-      await settle(
-        started.task,
-        token,
-        outcome,
-        {
-          completedSteps: completed,
-          text: safeText,
-          plan,
-          evidence,
-          iterations,
-        },
-        steps,
-      );
-    } finally {
-      // Verified termination means the adapter returned. Anything else means it
-      // may still be running, so its capability and workspace are revoked rather
-      // than left available to a generation the engine can no longer supervise.
-      if (verified) {
-        deps.supervisor.finish(taskId, token);
-      } else {
-        await deps.supervisor.abandon({
-          taskId,
-          token,
-          reason: 'The adapter did not verify termination within the cancellation grace period.',
+      try {
+        await settle(started.task, token, {
+          kind: 'failed', code: 'provider_error',
+          detail: 'The execution supervisor could not verify the run.', retryable: true,
         });
+      } finally {
+        if (controllers.get(taskId) === controller) controllers.delete(taskId);
       }
+      return;
     }
   }
 
@@ -1253,7 +1420,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         },
       });
       if (applied.applied) {
-        publish(applied.task, 'task.interrupted', {
+        await publish(applied.task, 'task.interrupted', {
           detail: 'Execution ownership was lost; the task is safe to resume.',
         });
         await notifyTerminal(applied.task, 'interrupted');
@@ -1281,7 +1448,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       },
     });
     if (applied.applied) {
-      publish(applied.task, 'task.cancelled', {});
+      await publish(applied.task, 'task.cancelled', {});
       await notifyTerminal(applied.task, 'cancelled');
       deps.audit.record({
         actor: task.ownerId,
@@ -1351,6 +1518,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       state: 'queued',
       generation: 1,
       runToken: null,
+      eventSeq: 0,
       reasoning: null,
       steps: [],
       checkpoint: {
@@ -1408,7 +1576,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       );
     }
 
-    publish(created.task, 'task.queued');
+    await publish(created.task, 'task.queued');
 
     deps.audit.record({
       actor: input.principal.ownerId,
@@ -1435,6 +1603,23 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       outcome: cancelled ? 'accepted' : 'superseded',
     });
   }
+
+  function trackAdmission<Args extends unknown[], Reply>(
+    admit: (...args: Args) => Promise<ServiceResult<Reply>>,
+  ): (...args: Args) => Promise<ServiceResult<Reply>> {
+    return async (...args) => {
+      if (shuttingDown) return unavailable();
+      // Register before admission can call any collaborator.
+      const admission = Promise.resolve().then(() => admit(...args));
+      admissions.add(admission);
+      try {
+        return await admission;
+      } finally {
+        admissions.delete(admission);
+      }
+    };
+  }
+
 
 
   type SubmitOptions = { scheduleAdmission?: TaskRecord['scheduleAdmission']; eligible?: () => Promise<boolean>; taskId?: string; conversationId?: string };
@@ -1486,8 +1671,13 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (!bound.ok) return bound;
     const conversationId = bound.value.conversationId;
 
-    const reserve = () => deps.budget.reserve(principal.ownerId, deps.clock.now()).allowed;
-    if (!(options.taskId ? deps.budget.available(principal.ownerId, deps.clock.now()) : reserve())) {
+    const reserve = async () => {
+      const held = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
+      if (!held.allowed) return false;
+      await held.commit();
+      return true;
+    };
+    if (!(options.taskId ? await deps.budget.available(principal.ownerId, deps.clock.now()) : await reserve())) {
       return fail(
         'budget_exhausted',
         'The daily zero-cost request budget is exhausted; the task was refused rather than queued on a paid path.',
@@ -1517,6 +1707,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       state: 'queued',
       generation: 1,
       runToken: null,
+      eventSeq: 0,
       reasoning,
       steps: [],
       checkpoint: { completedSteps: [], text: '', plan: null, evidence: [] },
@@ -1588,7 +1779,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     if (options.taskId) {
       // The unique task insert elects the only writer of admission effects.
       // The task is now visible to cancellation, but cannot execute until enqueue.
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         await settle(created.task, token, { kind: 'failed', code: 'budget_exhausted', detail: 'The daily request budget is exhausted.', retryable: false });
         return fail('budget_exhausted', 'The daily request budget is exhausted.');
@@ -1597,12 +1788,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       try {
         admitted = !options.eligible || await options.eligible();
       } catch (error) {
-        reservation.release();
+        await reservation.release();
         await settle(created.task, token, { kind: 'cancelled' });
         throw error;
       }
       if (!admitted) {
-        reservation.release();
+        await reservation.release();
         await settle(created.task, token, { kind: 'cancelled' });
         return fail('validation_failed', 'That occurrence is no longer eligible.');
       }
@@ -1620,7 +1811,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           if (!durable?.scheduleAdmission?.complete && durable?.runToken === token) {
             await settle(created.task, token, { kind: 'cancelled' });
             const cancelled = await deps.tasks.get(task.taskId);
-            if (cancelled?.runToken === token && cancelled.state === 'cancelled') reservation.release();
+            if (cancelled?.runToken === token && cancelled.state === 'cancelled') await reservation.release();
             throw error;
           }
           if (durable?.runToken !== token || durable.state !== 'queued') throw error;
@@ -1628,14 +1819,18 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         }
         if (!marked.applied) {
           const durable = await deps.tasks.get(task.taskId);
-          if (durable && durable.runToken !== token) return fail('conflict', 'Another generation owns this handoff.');
-          reservation.release();
+          if (durable && durable.runToken !== token) {
+            await reservation.commit();
+            return fail('conflict', 'Another generation owns this handoff.');
+          }
+          await reservation.release();
           return fail('validation_failed', 'Scheduled Work lost ownership before enqueue.');
         }
       }
+      await reservation.commit();
     }
 
-    publish(created.task, 'task.queued');
+    await publish(created.task, 'task.queued');
     deps.audit.record({
       actor: principal.ownerId,
       action: 'work.accepted',
@@ -1645,7 +1840,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       detail: `agent=${agentId} model=${modelKey(model.value.ref)}`,
     });
 
-    deps.scheduler.enqueue(() => execute(task.taskId, token));
+    if (!deps.scheduler.enqueue(() => execute(task.taskId, token))) {
+      return rejectUnscheduledRun(created.task, token);
+    }
 
     return ok({
       taskId: task.taskId,
@@ -1887,19 +2084,27 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     browserArtifact: (principal, artifactId) =>
       deps.browser.artifact(principal.ownerId, artifactId),
 
-    submitWork: (principal, request) => acceptTask(principal, request),
+    submitWork: trackAdmission<[Principal, WorkSubmitRequest], TaskAccepted>(
+      (principal, request) => acceptTask(principal, request),
+    ),
 
 
     task: async (principal, taskId) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = await reconcile(found.value);
+      if (task.state === 'completed' && readDeliverableDirective(task.objective).present) {
+        const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
+        if (lease?.live && lease.token === task.runToken) {
+          return ok(toStatus({ ...task, state: 'running', result: null, leaseExpiresAt: lease.expiresAt.toISOString() }));
+        }
+      }
       if (task.state === 'awaiting_approval') {
         const lease = await deps.lease.read({ key: workRunKey(scopeOf(task)), now: deps.clock.now() });
         // A durable suspension is ready to expose only after its run no longer
         // holds the lease. An owner who sees it can immediately claim a resume.
         if (lease?.live && lease.token === task.runToken) {
-          return ok(toStatus({
+          return ok(await statusWithArtifacts(principal, {
             ...task,
             state: 'running',
             failure: null,
@@ -1907,29 +2112,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           }));
         }
       }
-      const status = toStatus(task);
-      // Result artifacts are read from the artifact service rather than copied
-      // into the fenced task row. The task remains the authority on state; the
-      // artifact store is the authority on files, and a download can be made
-      // from exactly the descriptors reported here.
-      const listed = await deps.artifactService.list(principal, {
-        mode: task.mode,
-        taskId: task.taskId,
-        limit: 100,
-      });
-      if (listed.ok && listed.value.artifacts.length > 0) {
-        status.result = {
-          ...(status.result ?? {}),
-          artifacts: listed.value.artifacts.map((artifact) => ({
-            // A generated source tree keeps its directory-relative path; a flat
-            // artifact falls back to its file name. Neither is a host path.
-            path: artifact.relativePath ?? artifact.filename,
-            bytes: artifact.bytes,
-            digest: artifact.sha256,
-          })),
-        };
-      }
-      return ok(status);
+      return ok(await statusWithArtifacts(principal, task));
     },
 
     cancelTask: async (principal, taskId, reason) => {
@@ -1995,7 +2178,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
       if (!applied.applied && applied.reason === 'guard_rejected') return cancelSuspended(task);
       if (!applied.applied) return lostCancellation(task);
-      publish(applied.task, 'task.interrupted', {
+      await publish(applied.task, 'task.interrupted', {
         detail: 'The run had already stopped; it was retired as interrupted.',
       });
       await notifyTerminal(applied.task, 'interrupted');
@@ -2007,7 +2190,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       });
     },
 
-    resumeTask: async (principal, taskId, generation) => {
+    resumeTask: trackAdmission<[Principal, string, number], TaskControlResult>(async (principal, taskId, generation) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = await reconcile(found.value);
@@ -2055,18 +2238,20 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         await releaseLease(task, token);
         return fail('conflict', 'That task cannot be resumed.');
       }
-      publish(applied.task, 'task.queued', {});
-      publish(applied.task, 'text.replace', { text: '' });
-      deps.scheduler.enqueue(() => execute(taskId, token));
+      await publish(applied.task, 'task.queued', {});
+      await publish(applied.task, 'text.replace', { text: '' });
+      if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+        return rejectUnscheduledRun(applied.task, token);
+      }
       return ok({
         taskId,
         state: 'queued',
         generation: applied.task.generation,
         outcome: 'accepted',
       });
-    },
+    }),
 
-    retryTask: async (principal, taskId, generation) => {
+    retryTask: trackAdmission<[Principal, string, number], TaskControlResult>(async (principal, taskId, generation) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
       const task = found.value;
@@ -2094,7 +2279,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       if (task.failure?.code === 'budget_exhausted') {
         return fail('budget_exhausted', 'This task was refused before admission; submit a new request.');
       }
-      const reservation = deps.budget.reserve(principal.ownerId, now);
+      const reservation = await holdBudget(deps.budget, principal.ownerId, now);
       if (!reservation.allowed) return fail('budget_exhausted', 'The daily request budget is exhausted.');
       let accepted = false;
       try {
@@ -2118,10 +2303,12 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           await releaseLease(task, token);
           return fail('conflict', 'That task cannot be retried.');
         }
+        await publish(applied.task, 'task.queued', {});
+        await publish(applied.task, 'text.replace', { text: '' });
+        if (!deps.scheduler.enqueue(() => execute(taskId, token))) {
+          return rejectUnscheduledRun(applied.task, token);
+        }
         accepted = true;
-        publish(applied.task, 'task.queued', {});
-        publish(applied.task, 'text.replace', { text: '' });
-        deps.scheduler.enqueue(() => execute(taskId, token));
         return ok({
           taskId,
           state: 'queued',
@@ -2129,20 +2316,17 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
           outcome: 'accepted',
         });
       } finally {
-        if (!accepted) reservation.release();
+        if (accepted) await reservation.commit();
+        else await reservation.release();
       }
-    },
+    }),
 
-    chat: async (principal, request) => {
-      // Attachments are validated before anything is resolved or written: an
-      // image that fails intake never reaches a model, a budget reservation or
-      // the transcript.
+    chat: trackAdmission<[Principal, ChatRequest], ChatReply>(async (principal, request) => {
+      // Validate attachments before model routing or persistence.
       const validated = intakeMedia(request.attachments);
       if (!validated.ok) return validated;
       const media = validated.value;
 
-      // An external engine has no image channel, so the refusal is decided from
-      // the requested agent rather than from whether that agent is available.
       if (media.length > 0 && engineForAgent(request.agent) !== 'native') {
         return fail(
           'unsupported_media_type',
@@ -2161,107 +2345,116 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       );
       if (!model.ok) return model;
 
-      const reservation = deps.budget.reserve(principal.ownerId, deps.clock.now());
+      const reservation = await holdBudget(deps.budget, principal.ownerId, deps.clock.now());
       if (!reservation.allowed) {
         return fail('budget_exhausted', 'The daily zero-cost request budget is exhausted.');
       }
-      // A chat turn is a run too, so it gets its own empty directory instead of
-      // the shared mode root. It is removed afterwards when it produced nothing.
-      const workspace = await createRunWorkspace({
-        mode: request.mode,
-        roots: workspaceRoots(deps.config.workspaces),
-        runId: deps.ids.runToken(),
-        generation: 0,
-      });
-      if (!workspace.ok) return workspace;
-
-      const now = deps.clock.iso();
-      const bound = await bindConversation({
-        principal,
-        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
-        mode: request.mode,
-        isWork: false,
-        agent: request.agent,
-      });
-      if (!bound.ok) {
-        await removeRunWorkspaceIfEmpty(workspace.value.root);
-        return bound;
-      }
-      const conversation = bound.value;
-      const conversationId = conversation.conversationId;
-      await deps.conversations.appendMessage({
-        messageId: deps.ids.messageId(),
-        conversationId,
-        role: 'user',
-        text: request.message,
-        createdAt: now,
-        ...(media.length > 0 ? { media: media.map((entry) => entry.reference) } : {}),
-      });
-
-      const history = await historyFor(conversation, request.message, adapter.value);
-      const controller = new AbortController();
-      let outcome: Awaited<ReturnType<AgentAdapter['run']>>;
+      let dispatched = false;
       try {
-        outcome = await adapter.value.run(
-          {
-            ownerId: principal.ownerId,
-            tenantId: conversation.tenantId,
-            conversationId,
-            workload: 'work',
-            game: null,
-            objective: request.message,
-            history,
-            model: model.value.ref,
-            mode: request.mode,
-            workspaceRoot: workspace.value.root,
-            maxSteps: 1,
-            budget: null,
-            signal: controller.signal,
-            reasoning: 'fast',
-            completedSteps: [],
-            plan: null,
-            ...(media.length > 0
-              ? {
-                  media: media.map((entry) => ({
-                    reference: entry.reference,
-                    dataUrl: mediaDataUrl(entry),
-                  })),
-                }
-              : {}),
-          },
-          () => undefined,
-        );
+        // A chat turn is a run too, so it gets its own empty directory instead of
+        // the shared mode root. It is removed afterwards when it produced nothing.
+        const workspace = await createRunWorkspace({
+          mode: request.mode,
+          roots: workspaceRoots(deps.config.workspaces),
+          runId: deps.ids.runToken(),
+          generation: 0,
+        });
+        if (!workspace.ok) return workspace;
+
+        const now = deps.clock.iso();
+        const bound = await bindConversation({
+          principal,
+          ...(request.conversationId ? { conversationId: request.conversationId } : {}),
+          mode: request.mode,
+          isWork: false,
+          agent: request.agent,
+        });
+        if (!bound.ok) {
+          await removeRunWorkspaceIfEmpty(workspace.value.root);
+          return bound;
+        }
+        const conversation = bound.value;
+        const conversationId = conversation.conversationId;
+        await deps.conversations.appendMessage({
+          messageId: deps.ids.messageId(),
+          conversationId,
+          role: 'user',
+          text: request.message,
+          createdAt: now,
+          ...(media.length > 0
+            ? { media: media.map((entry) => entry.reference) }
+            : {}),
+        });
+
+        const history = await historyFor(conversation, request.message, adapter.value);
+        const controller = new AbortController();
+        let outcome: Awaited<ReturnType<AgentAdapter['run']>>;
+        try {
+          dispatched = true;
+          outcome = await adapter.value.run(
+            {
+              ownerId: principal.ownerId,
+              tenantId: conversation.tenantId,
+              conversationId,
+              workload: 'work',
+              game: null,
+              objective: request.message,
+              history,
+              model: model.value.ref,
+              mode: request.mode,
+              workspaceRoot: workspace.value.root,
+              maxSteps: 1,
+              budget: null,
+              signal: controller.signal,
+              reasoning: 'fast',
+              completedSteps: [],
+              plan: null,
+              ...(media.length > 0
+                ? {
+                    media: media.map((entry) => ({
+                      reference: entry.reference,
+                      dataUrl: mediaDataUrl(entry),
+                    })),
+                  }
+                : {}),
+            },
+            () => undefined,
+          );
+        } finally {
+          await removeRunWorkspaceIfEmpty(workspace.value.root);
+        }
+        if (!outcome.ok) {
+          return fail(
+            outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
+            redactText(outcome.detail, [], 1000),
+            outcome.retryable,
+          );
+        }
+        await deps.budget.settle(reservation.reservationId, outcome.usage ?? {});
+        const reply = redactContent(outcome.summary);
+        const messageId = deps.ids.messageId();
+        await deps.conversations.appendMessage({
+          messageId,
+          conversationId,
+          role: 'assistant',
+          text: reply,
+          createdAt: deps.clock.iso(),
+          agent: request.agent,
+        });
+        return ok({
+          conversationId,
+          messageId,
+          text: reply,
+          agent: request.agent,
+          model: model.value.ref,
+          ...(outcome.usage ? { usage: outcome.usage } : {}),
+          createdAt: deps.clock.iso(),
+        });
       } finally {
-        await removeRunWorkspaceIfEmpty(workspace.value.root);
+        if (dispatched) await reservation.commit();
+        else await reservation.release();
       }
-      if (!outcome.ok) {
-        return fail(
-          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          outcome.detail,
-          outcome.retryable,
-        );
-      }
-      const reply = redactContent(outcome.summary);
-      deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
-      const messageId = deps.ids.messageId();
-      await deps.conversations.appendMessage({
-        messageId,
-        conversationId,
-        role: 'assistant',
-        text: reply,
-        createdAt: deps.clock.iso(),
-        agent: request.agent,
-      });
-      return ok({
-        conversationId,
-        messageId,
-        text: reply,
-        agent: request.agent,
-        model: model.value.ref,
-        ...(outcome.usage ? { usage: outcome.usage } : {}),
-        createdAt: deps.clock.iso(),
-      });
-    },
+    }),
 
     intakeMedia: async (_principal, request) => {
       const validated = intakeMedia(request.attachments);
@@ -2312,6 +2505,9 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
         unread: work.unread + schedule.unread,
       };
     },
+    artifacts: deps.artifactService,
+
+    deliver: (principal, request, options) => deps.deliverables.deliver(principal, request, options),
 
     markNotificationsRead: async (principal, includeSchedules = true) => {
       const work = await deps.notifications.list(principal.ownerId);
@@ -2324,31 +2520,22 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return service.notifications(principal, includeSchedules);
     },
 
-    artifacts: deps.artifactService,
-
-    generateArtifact: (principal, request) =>
-      deps.artifactGenerator.generate(principal, {
-        projectId: request.projectId,
-        request: request.deliverable,
-        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
-        ...(request.taskId ? { taskId: request.taskId } : {}),
-        ...(request.retentionDays !== undefined
-          ? { retentionDays: request.retentionDays }
-          : {}),
-      }),
-
     events: async (principal, taskId, after) => {
       const found = ownedTask(await deps.tasks.get(taskId), principal);
       if (!found.ok) return found;
+      const replay = await deps.events.replay(taskId, after);
+      // Tail strictly after what was replayed; a poll re-reads the log from that
+      // cursor, so an event that lands between the read and the subscription is
+      // picked up instead of falling into the gap a listener-only bus had.
+      const cursor = replay.events.at(-1)?.seq ?? after;
       return ok({
-        replay: deps.events.replay(taskId, after),
-        subscribe: (listener) => deps.events.subscribe(taskId, after, listener),
-        lastSeq: deps.events.lastSeq(taskId),
+        replay,
+        subscribe: (listener) => deps.events.subscribe(taskId, cursor, listener),
       });
     },
 
-    budget: (principal) => {
-      const used = deps.budget.snapshot(principal.ownerId, deps.clock.now());
+    budget: async (principal) => {
+      const used = await deps.budget.snapshot(principal.ownerId, deps.clock.now());
       const budget = {
         maxRequests: deps.config.models.dailyRequestBudget,
         maxInputTokens: deps.config.models.dailyTokenBudget,
@@ -2922,24 +3109,34 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       return { interrupted };
     },
 
-    shutdown: async () => {
-      await scheduleEngine.stop();
+    beginShutdown: () => {
+      shuttingDown = true;
       deps.scheduler.stop();
-      for (const controller of controllers.values()) controller.abort();
-      controllers.clear();
-      // Wait for the runner's grace bound to turn every aborted run into a
-      // settled outcome, then revoke whatever is still registered. The second
-      // step is the verified part: no capability survives shutdown.
-      await Promise.race([
-        deps.scheduler.idle(),
-        new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, deps.config.execution.cancelGraceMs + 1_000);
-          timer.unref();
-        }),
-      ]);
-      await deps.supervisor.shutdown();
-      // Release cloud browsers rather than letting them run until their TTL.
-      await deps.browser.shutdown();
+    },
+
+    shutdown: () => {
+      if (shutdownPromise) return shutdownPromise;
+      shuttingDown = true;
+      deps.scheduler.stop();
+      shutdownPromise = (async () => {
+        await scheduleEngine.stop();
+        for (const controller of controllers.values()) controller.abort();
+        controllers.clear();
+        // Wait for the runner's grace bound to turn every aborted run into a
+        // settled outcome, then revoke whatever is still registered. The second
+        // step is the verified part: no capability survives shutdown.
+        await Promise.race([
+          Promise.all([deps.scheduler.idle(), Promise.allSettled(admissions)]),
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, deps.config.execution.cancelGraceMs + 1_000);
+            timer.unref();
+          }),
+        ]);
+        await deps.supervisor.shutdown();
+        // Release cloud browsers rather than letting them run until their TTL.
+        await deps.browser.shutdown();
+      })();
+      return shutdownPromise;
     },
   };
 

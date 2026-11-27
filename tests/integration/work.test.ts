@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { ExecutionEvent } from '@coderax/contracts';
 import { test } from 'node:test';
 import { workRunKey } from '../../src/execution/lease.js';
-import { startTestApp, taskRecord, waitFor } from '../helpers.js';
+import { OWNER_TOKEN, startTestApp, taskRecord, waitFor } from '../helpers.js';
 
 const principal = { ownerId: 'owner-test', isOwner: true as const };
 
@@ -47,7 +47,7 @@ test('Work runs to completion, persists its transcript and notifies once', async
     assert.equal(notifications.unread, 1);
     assert.equal(notifications.notifications[0]?.state, 'completed');
 
-    const events = started.app.dependencies.events.replay(submitted.value.taskId, 0);
+    const events = await started.app.dependencies.events.replay(submitted.value.taskId, 0);
     const types = events.events.map((event) => event.type);
     assert.deepEqual(types.slice(0, 2), ['task.queued', 'task.started']);
     assert.equal(types.at(-1), 'task.completed');
@@ -148,7 +148,7 @@ test('reported text and nested arguments are scrubbed before replay and persiste
     });
     assert.ok(task.ok);
     await started.app.dependencies.scheduler.idle();
-    const replay = started.app.dependencies.events.replay(task.value.taskId, 0);
+    const replay = await started.app.dependencies.events.replay(task.value.taskId, 0);
     for (const event of replay.events) ExecutionEvent.parse(event);
     const frames = JSON.stringify(replay.events);
     assert.doesNotMatch(frames, /sk-example|0123456789|sample value/);
@@ -190,7 +190,7 @@ test('cancellation releases a hung adapter and ignores its late reports', { time
     assert.ok(status.ok);
     assert.equal(status.value.state, 'cancelled');
     late();
-    assert.doesNotMatch(JSON.stringify(started.app.dependencies.events.replay(task.value.taskId, 0)), /stale/);
+    assert.doesNotMatch(JSON.stringify(await started.app.dependencies.events.replay(task.value.taskId, 0)), /stale/);
     agent.run = async () => ({ ok: true, summary: 'done' });
     const next = await started.app.service.submitWork(principal, {
       objective: 'next', conversationId: task.value.conversationId, mode: 'cloud', requireApproval: true,
@@ -240,7 +240,7 @@ test('late reports and cleanup cannot touch a resumed generation', async () => {
     assert.ok(resumed.ok && resumed.value.outcome === 'accepted');
     const finish = await waitFor(async () => finishCurrent);
     assert.equal((await deps.tasks.get(taskId))?.checkpoint.text, '');
-    const replay = deps.events.replay(taskId, 0).events.filter(event => event.type === 'text.delta' || event.type === 'text.replace');
+    const replay = (await deps.events.replay(taskId, 0)).events.filter(event => event.type === 'text.delta' || event.type === 'text.replace');
     assert.deepEqual(replay.map(event => [event.type, event.payload]), [
       ['text.delta', { text: 'previous output ' }],
       ['text.replace', { text: '' }],
@@ -248,7 +248,7 @@ test('late reports and cleanup cannot touch a resumed generation', async () => {
     ]);
     finishOld();
     await waitFor(async () => deps.scheduler.active() === 1 || null);
-    assert.doesNotMatch(JSON.stringify(deps.events.replay(taskId, 0)), /stale/);
+    assert.doesNotMatch(JSON.stringify(await deps.events.replay(taskId, 0)), /stale/);
     await started.app.service.cancelTask(principal, taskId);
     assert.equal(currentSignal?.aborted, true);
     finish();
@@ -256,6 +256,49 @@ test('late reports and cleanup cannot touch a resumed generation', async () => {
     const conversation = await started.app.service.conversation(principal, conversationId);
     assert.ok(conversation.ok);
     assert.equal(conversation.value.messages.at(-1)?.text, 'current output');
+  } finally {
+    await started.close();
+  }
+});
+
+test('the event stream announces the durable log head before the events', async () => {
+  const started = await startTestApp();
+  try {
+    const submitted = await started.app.service.submitWork(principal, {
+      objective: 'stream metadata', mode: 'cloud', requireApproval: true,
+    });
+    assert.equal(submitted.ok, true);
+    if (!submitted.ok) return;
+    const taskId = submitted.value.taskId;
+    await waitFor(async () => {
+      const status = await started.app.service.task(principal, taskId);
+      return status.ok && status.value.state === 'completed' ? status.value : null;
+    });
+    const head = await started.app.dependencies.events.lastSeq(taskId);
+    assert.ok(head > 0);
+
+    // A cursor at the head has nothing to replay, so the metadata frame is the
+    // first thing on the wire. It is an SSE comment, which every client ignores.
+    const response = await fetch(`${started.url}/v1/work/${taskId}/events?after=${head}`, {
+      headers: { authorization: `Bearer ${OWNER_TOKEN}` },
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body?.getReader();
+    assert.ok(reader);
+    let text = '';
+    while (!text.includes('\n\n')) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      text += new TextDecoder().decode(chunk.value, { stream: true });
+    }
+    await reader.cancel();
+
+    const metaLine = text.split('\n').find((line) => line.startsWith(': coderax-meta '));
+    assert.ok(metaLine, `first frames were ${JSON.stringify(text)}`);
+    assert.deepEqual(JSON.parse(metaLine.slice(': coderax-meta '.length)), {
+      lastSeq: head,
+      truncated: false,
+    });
   } finally {
     await started.close();
   }
@@ -273,7 +316,7 @@ test('failed transcript and notification writes do not strand a settled run', as
     agent.run = async (_request, report) => {
       deps.conversations.appendMessage = async () => {
         const [task] = await deps.tasks.listByOwner(principal.ownerId);
-        publishedBeforeAppend = !!task && deps.events.replay(task.taskId, 0).events.at(-1)?.type === 'task.completed';
+        publishedBeforeAppend = !!task && (await deps.events.replay(task.taskId, 0)).events.at(-1)?.type === 'task.completed';
         throw new Error('write unavailable');
       };
       report({ type: 'text.delta', text: 'result' });
@@ -355,6 +398,6 @@ test('retry rejects a budget refusal and refunds a failed reissue', async () => 
     tasks.reissue = async () => ({ applied: false, reason: 'superseded' });
     const conflict = await service.retryTask(principal, failed.taskId, failed.generation);
     assert.equal(!conflict.ok && conflict.code, 'conflict');
-    assert.equal(service.budget(principal).used.requests, 0);
+    assert.equal((await service.budget(principal)).used.requests, 0);
   } finally { await started.close(); }
 });

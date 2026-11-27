@@ -72,6 +72,25 @@ test('selecting mongo persists a task, its transcript and its notification acros
         (index) => index.keys.taskId === 1 && index.options?.unique === true,
       ),
     );
+    const eventIndexes = database.collections.get('events')?.indexes ?? [];
+    assert.ok(
+      eventIndexes.some(
+        (index) =>
+          index.keys.taskId === 1 &&
+          index.keys.seq === 1 &&
+          index.options?.unique === true,
+      ),
+    );
+    assert.ok(
+      eventIndexes.some(
+        (index) => index.keys.eventId === 1 && index.options?.unique === true,
+      ),
+    );
+    assert.ok(
+      eventIndexes.some(
+        (index) => index.keys.storedAt === 1 && (index.options?.expireAfterSeconds ?? 0) > 0,
+      ),
+    );
 
     const submitted = await first.service.submitWork(principal, {
       objective: 'Persist this task',
@@ -110,6 +129,23 @@ test('selecting mongo persists a task, its transcript and its notification acros
         );
         assert.equal(conversation.value.messages[0]?.text, 'Persist this task');
       }
+
+      // The event log survives the restart with no in-process state: a client
+      // that reconnects with cursor 0 replays the whole run, terminal event last.
+      const replay = await second.dependencies.events.replay(taskId, 0);
+      assert.equal(replay.truncated, false);
+      assert.equal(replay.events[0]?.type, 'task.queued');
+      assert.equal(replay.events.at(-1)?.type, 'task.completed');
+      const sequences = replay.events.map((event) => event.seq);
+      assert.deepEqual(
+        sequences,
+        Array.from({ length: sequences.length }, (_value, position) => position + 1),
+      );
+      assert.equal(replay.lastSeq, sequences.length);
+      assert.equal(
+        database.collections.get('events')?.documents.length,
+        sequences.length,
+      );
 
       const notifications = await second.service.notifications(principal);
       assert.equal(notifications.unread, 1);

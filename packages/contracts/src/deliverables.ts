@@ -1,57 +1,37 @@
 import { z } from 'zod';
-import { DataMode, IsoDateTime } from './primitives.js';
+import { ArtifactDescriptor, ArtifactProjectManifest } from './artifacts.js';
+import { ArtifactId, DataMode, IsoDateTime, ProjectId } from './primitives.js';
 
 /**
- * Deliverables are real files, not rendered approximations.
+ * Deliverable generation.
  *
- * A document is a DOCX/PDF produced by an OOXML/PDF writer, a spreadsheet is an
- * XLSX with formulas and worksheet charts, and a presentation is a PPTX with
- * editable slides. Every deliverable is verified after it is written by reading
- * the artifact back, so a producer that emits a malformed file fails the request
- * instead of returning a path to it.
+ * A deliverable is a request to *produce* real files (a DOCX, a PDF, a workbook,
+ * a deck, a dataset export, a software project). It owns the generation request
+ * shapes and the objective verification report, and nothing else:
+ *
+ * - Persistence, metadata, versions, quotas and deletion belong to the durable
+ *   artifact service. A produced deliverable names its files with
+ *   `ArtifactDescriptor`, so there is exactly one artifact metadata authority.
+ * - Capability reporting belongs to the multimodal capability registry. This
+ *   module declares no capability list of its own.
+ *
+ * Generation writes into an isolated staging directory, verifies the bytes by
+ * reading them back, and only then persists them. A deliverable whose files were
+ * not stored durably is not reported as created.
  */
 
-export const ArtifactKind = z.enum([
-  'document',
-  'spreadsheet',
-  'presentation',
-  'dataset',
-  'software',
-  'image',
-  'other',
-]);
-export type ArtifactKind = z.infer<typeof ArtifactKind>;
+/** The editable-source artifact this deliverable can be revised from. */
+export const DeliverableSourceFormat = z.enum(['document.json']);
+export type DeliverableSourceFormat = z.infer<typeof DeliverableSourceFormat>;
 
-export const ArtifactFormat = z.enum([
-  'docx',
-  'pdf',
-  'xlsx',
-  'pptx',
-  'csv',
-  'json',
-  'markdown',
-  'html',
-  'source',
-  'text',
-]);
-export type ArtifactFormat = z.infer<typeof ArtifactFormat>;
-
-/**
- * `digest` is `sha256:<hex>`; `path` is always relative to the workspace root
- * named by the request's data mode, never an absolute host path.
- */
-export const Artifact = z
+export const DeliverableSource = z
   .object({
-    path: z.string().min(1).max(1024),
-    kind: ArtifactKind.optional(),
-    format: ArtifactFormat.optional(),
-    mediaType: z.string().min(1).max(120).optional(),
-    title: z.string().min(1).max(200).optional(),
-    bytes: z.number().int().nonnegative().optional(),
-    digest: z.string().min(1).max(128).optional(),
+    artifactId: ArtifactId,
+    version: z.number().int().positive(),
+    format: DeliverableSourceFormat,
   })
   .strict();
-export type Artifact = z.infer<typeof Artifact>;
+export type DeliverableSource = z.infer<typeof DeliverableSource>;
 
 const FileName = z
   .string()
@@ -123,16 +103,16 @@ export const ChartSpec = z
   .strict();
 export type ChartSpec = z.infer<typeof ChartSpec>;
 
-const StoredDocumentShape = {
-  version: z.literal(1),
-  title: z.string().min(1).max(200),
-  subtitle: z.string().max(300).optional(),
-  author: z.string().max(120).optional(),
-  blocks: z.array(DocumentBlock).max(2000),
-};
-
 /** The editable source of a document this engine produced. */
-export const StoredDocument = z.object(StoredDocumentShape).strict();
+export const StoredDocument = z
+  .object({
+    version: z.literal(1),
+    title: z.string().min(1).max(200),
+    subtitle: z.string().max(300).optional(),
+    author: z.string().max(120).optional(),
+    blocks: z.array(DocumentBlock).max(2000),
+  })
+  .strict();
 export type StoredDocument = z.infer<typeof StoredDocument>;
 
 export const DocumentEdit = z.discriminatedUnion('op', [
@@ -151,6 +131,32 @@ export const DocumentEdit = z.discriminatedUnion('op', [
 ]);
 export type DocumentEdit = z.infer<typeof DocumentEdit>;
 
+/**
+ * Revision is addressed by artifact id, not by a workspace path. The engine
+ * downloads that artifact version into isolated staging, applies the edits,
+ * re-verifies every produced file and appends new versions.
+ *
+ * `expectedVersion` is the version the caller read. When it is supplied the
+ * durable service appends only if the artifact is still at that version, so two
+ * concurrent edits cannot silently overwrite one another.
+ */
+export const DocumentBase = z
+  .object({
+    artifactId: ArtifactId,
+    mode: DataMode.optional(),
+    expectedVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+export type DocumentBase = z.infer<typeof DocumentBase>;
+
+/**
+ * `html` is deliberately absent: the durable artifact store refuses active
+ * content, so HTML is never persisted or served as an artifact. Markdown remains
+ * the portable text form.
+ */
+export const DocumentFormat = z.enum(['docx', 'pdf', 'markdown']);
+export type DocumentFormat = z.infer<typeof DocumentFormat>;
+
 export const DocumentRequest = z
   .object({
     kind: z.literal('document'),
@@ -160,15 +166,15 @@ export const DocumentRequest = z
     subtitle: z.string().max(300).optional(),
     author: z.string().max(120).optional(),
     blocks: z.array(DocumentBlock).max(2000).default([]),
-    formats: z.array(z.enum(['docx', 'pdf', 'markdown', 'html'])).min(1).max(4),
-    /** A `.document.json` artifact from an earlier run, edited in place. */
-    base: z.string().min(1).max(300).optional(),
+    formats: z.array(DocumentFormat).min(1).max(3),
+    base: DocumentBase.optional(),
     edits: z.array(DocumentEdit).max(200).default([]),
   })
   .strict();
 export type DocumentRequest = z.infer<typeof DocumentRequest>;
 
 export const ColumnType = z.enum(['text', 'number', 'currency', 'percent', 'date']);
+export type ColumnType = z.infer<typeof ColumnType>;
 
 export const ColumnSpec = z
   .object({
@@ -222,6 +228,7 @@ export const SpreadsheetRequest = z
 export type SpreadsheetRequest = z.infer<typeof SpreadsheetRequest>;
 
 export const SlideLayout = z.enum(['title', 'content', 'section', 'twoColumn']);
+export type SlideLayout = z.infer<typeof SlideLayout>;
 
 export const SlideRequest = z
   .object({
@@ -335,6 +342,12 @@ export const TransformStep = z.discriminatedUnion('op', [
 ]);
 export type TransformStep = z.infer<typeof TransformStep>;
 
+export const DatasetFormat = z.enum(['csv', 'tsv', 'json']);
+export type DatasetFormat = z.infer<typeof DatasetFormat>;
+
+export const DatasetExport = z.enum(['xlsx', 'csv', 'tsv', 'json', 'pdf']);
+export type DatasetExport = z.infer<typeof DatasetExport>;
+
 export const DatasetRequest = z
   .object({
     kind: z.literal('dataset'),
@@ -342,18 +355,23 @@ export const DatasetRequest = z
     filename: FileName,
     source: z
       .object({
-        format: z.enum(['csv', 'json']),
+        format: DatasetFormat,
         text: z.string().min(1).max(700_000),
       })
       .strict(),
     steps: z.array(TransformStep).max(50).default([]),
     charts: z.array(ChartSpec).max(4).default([]),
-    exports: z.array(z.enum(['xlsx', 'csv', 'json', 'pdf'])).min(1).max(4).default(['xlsx', 'json']),
+    exports: z.array(DatasetExport).min(1).max(5).default(['xlsx', 'json']),
   })
   .strict();
 export type DatasetRequest = z.infer<typeof DatasetRequest>;
 
-const SourcePath = z
+/**
+ * A project path is relative, uses forward slashes and may not contain a parent
+ * segment. It is validated again on extraction against the real staging root, so
+ * a symlink cannot turn a legal-looking path into an escape.
+ */
+export const SourcePath = z
   .string()
   .min(1)
   .max(300)
@@ -361,6 +379,7 @@ const SourcePath = z
     /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/,
     'paths are relative and may not contain a parent segment',
   );
+export type SourcePath = z.infer<typeof SourcePath>;
 
 export const SourceFile = z
   .object({
@@ -380,45 +399,24 @@ export const SoftwareRequest = z
     language: z.enum(['javascript', 'typescript']).default('javascript'),
     files: z.array(SourceFile).max(100).default([]),
     entry: z.string().max(300).optional(),
+    /**
+     * An existing project whose tree this generation extends. Each path is
+     * matched by relative path and gains a version instead of a second file;
+     * omitted, the deliverable opens a project of its own.
+     */
+    projectId: ProjectId.optional(),
   })
   .strict();
 export type SoftwareRequest = z.infer<typeof SoftwareRequest>;
 
-/**
- * A document a durable generation can actually persist. `base` names a file on
- * the engine host and HTML is not an accepted durable media type, so neither is
- * part of this request; a client cannot ask for output the operation refuses.
- */
-export const DurableDocumentRequest = DocumentRequest.omit({ base: true, formats: true }).extend({
-  formats: z.array(z.enum(['docx', 'pdf', 'markdown'])).min(1).max(3),
-});
-export type DurableDocumentRequest = z.infer<typeof DurableDocumentRequest>;
-
-/**
- * The deliverable kinds that produce a durable file tree. Dataset and media
- * operations transform or inspect bytes but produce no project, so a generation
- * request cannot name them.
- */
-export const DurableDeliverableRequest = z.discriminatedUnion('kind', [
-  DurableDocumentRequest,
-  SpreadsheetRequest,
-  PresentationRequest,
-  SoftwareRequest,
+export const DeliverableKind = z.enum([
+  'document',
+  'spreadsheet',
+  'presentation',
+  'dataset',
+  'software',
 ]);
-export type DurableDeliverableRequest = z.infer<typeof DurableDeliverableRequest>;
-export type DurableDeliverableRequestInput = z.input<typeof DurableDeliverableRequest>;
-
-export const MediaInspectRequest = z
-  .object({
-    kind: z.literal('media'),
-    mode: DataMode.default('cloud'),
-    filename: FileName,
-    action: z.literal('inspect'),
-    /** Base64 image bytes. Inspection reads headers only; it decodes no pixels. */
-    data: z.string().min(8).max(700_000),
-  })
-  .strict();
-export type MediaInspectRequest = z.infer<typeof MediaInspectRequest>;
+export type DeliverableKind = z.infer<typeof DeliverableKind>;
 
 export const DeliverableRequest = z.discriminatedUnion('kind', [
   DocumentRequest,
@@ -426,7 +424,6 @@ export const DeliverableRequest = z.discriminatedUnion('kind', [
   PresentationRequest,
   DatasetRequest,
   SoftwareRequest,
-  MediaInspectRequest,
 ]);
 export type DeliverableRequest = z.infer<typeof DeliverableRequest>;
 /** The wire shape: defaults may be omitted by a client and are applied on receipt. */
@@ -477,7 +474,7 @@ export type DatasetProfile = z.infer<typeof DatasetProfile>;
 
 export const DatasetAnalysis = z
   .object({
-    sourceFormat: z.enum(['csv', 'json']),
+    sourceFormat: DatasetFormat,
     sourceDigest: z.string().min(1).max(128),
     rowsIn: z.number().int().nonnegative(),
     rowsOut: z.number().int().nonnegative(),
@@ -488,31 +485,53 @@ export const DatasetAnalysis = z
   .strict();
 export type DatasetAnalysis = z.infer<typeof DatasetAnalysis>;
 
-export const MediaDimensions = z
+/**
+ * What verification actually proved about a generated software tree.
+ *
+ * `executed` is the literal `false`: this deployment has no sandboxed execution
+ * supervisor, so the program is parsed and its relative imports resolved but
+ * never run. The disclosure travels with the deliverable result, because the
+ * tree is derived from stored rows and has no manifest file that could carry it.
+ */
+export const ProjectVerification = z
   .object({
-    width: z.number().int().positive(),
-    height: z.number().int().positive(),
+    executed: z.literal(false),
+    method: z.string().min(1).max(120),
+    note: z.string().min(1).max(500),
   })
   .strict();
+export type ProjectVerification = z.infer<typeof ProjectVerification>;
 
-export const MediaInspection = z
+/**
+ * A generated project, as the durable store owns it.
+ *
+ * The manifest is not a stored copy: the store derives it from the rows that
+ * carry the same `projectId`, so the tree has one authority. `manifest.files`
+ * names each relative path, its artifact id, its current version and its digest.
+ * `verification` is generation's own report about the tree, including the fact
+ * that its program was never executed.
+ */
+export const DeliverableProject = z
   .object({
-    mediaType: z.string().min(1).max(60),
-    format: z.string().min(1).max(20),
-    bytes: z.number().int().positive(),
-    dimensions: MediaDimensions.optional(),
-    /** What was actually read: headers only, never pixels or model inference. */
-    method: z.literal('header'),
+    projectId: ProjectId,
+    manifest: ArtifactProjectManifest,
+    verification: ProjectVerification,
   })
   .strict();
-export type MediaInspection = z.infer<typeof MediaInspection>;
+export type DeliverableProject = z.infer<typeof DeliverableProject>;
 
-export const Deliverable = z
+/**
+ * Every file in `artifacts` is a stored, integrity-verified artifact descriptor
+ * returned by the durable service. `source` points at the artifact that can be
+ * revised by id; `receipt` is the audit receipt recorded after persistence
+ * succeeded, so a created deliverable always has both stored bytes and a receipt.
+ */
+const DeliverableFields = z
   .object({
-    kind: ArtifactKind,
+    kind: DeliverableKind,
     title: z.string().min(1).max(200),
     summary: z.string().min(1).max(4000),
-    artifacts: z.array(Artifact).min(1),
+    artifacts: z.array(ArtifactDescriptor).min(1).max(40),
     verification: VerificationReport,
     receipt: z
       .object({
@@ -520,46 +539,43 @@ export const Deliverable = z
         at: IsoDateTime,
       })
       .strict(),
+    source: DeliverableSource.optional(),
+    /**
+     * The stored tree of a generated software project, as the store lists it,
+     * plus the verification report that says the program was never executed.
+     */
+    project: DeliverableProject.optional(),
     analysis: DatasetAnalysis.optional(),
-    inspection: MediaInspection.optional(),
   })
   .strict();
+export const Deliverable = z.union([
+  DeliverableFields.extend({ kind: z.literal('software'), artifacts: z.array(ArtifactDescriptor).min(1).max(100), project: DeliverableProject }),
+  DeliverableFields.extend({ kind: DeliverableKind.exclude(['software']) }),
+]);
 export type Deliverable = z.infer<typeof Deliverable>;
 
-export const ArtifactCapability = z
+/** One produced format and the stored artifact that holds its current bytes. */
+export const DocumentSourceOutput = z
   .object({
-    kind: ArtifactKind,
-    formats: z.array(ArtifactFormat).max(10),
-    available: z.boolean(),
-    detail: z.string().min(1).max(300),
+    format: DocumentFormat,
+    artifactId: ArtifactId,
+    version: z.number().int().positive(),
+    filename: z.string().min(1).max(200),
   })
   .strict();
-export type ArtifactCapability = z.infer<typeof ArtifactCapability>;
+export type DocumentSourceOutput = z.infer<typeof DocumentSourceOutput>;
 
-export const MediaCapabilityName = z.enum([
-  'image.inspect',
-  'image.generate',
-  'image.edit',
-  'audio.transcribe',
-  'speech.synthesize',
-  'video.understand',
-]);
-export type MediaCapabilityName = z.infer<typeof MediaCapabilityName>;
-
-export const MediaCapability = z
+/**
+ * The stored editable source of a document, referenced by `DeliverableSource`.
+ * It records the artifact identity of every produced format, so a later edit by
+ * artifact id appends versions to the same artifacts instead of creating a new
+ * set and orphaning the previous one.
+ */
+export const DocumentSourceArtifact = z
   .object({
-    capability: MediaCapabilityName,
-    available: z.boolean(),
-    reason: z.enum(['ready', 'not_configured', 'unsupported']),
-    detail: z.string().min(1).max(300),
+    version: z.literal(1),
+    document: StoredDocument,
+    outputs: z.array(DocumentSourceOutput).max(3).default([]),
   })
   .strict();
-export type MediaCapability = z.infer<typeof MediaCapability>;
-
-export const CapabilityReport = z
-  .object({
-    artifacts: z.array(ArtifactCapability).max(20),
-    media: z.array(MediaCapability).max(20),
-  })
-  .strict();
-export type CapabilityReport = z.infer<typeof CapabilityReport>;
+export type DocumentSourceArtifact = z.infer<typeof DocumentSourceArtifact>;

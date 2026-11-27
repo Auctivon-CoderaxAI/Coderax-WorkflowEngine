@@ -1,15 +1,16 @@
 import type {
-  ArtifactGenerationRequest,
   ArtifactKind,
   ArtifactModeRequest,
   ArtifactUploadRequest,
   ArtifactVersionRequest,
   DataMode,
+  DeliverableRequestInput,
 } from '@coderax/contracts';
-import type { ApplicationService } from '../orchestration/service.js';
-import type { RouteRegistry } from './router.js';
+import type { ApplicationService, EventStream } from '../orchestration/service.js';
+import type { RouteRegistry, SseFrame } from './router.js';
 import { problemResult } from './router.js';
 import type { ServiceFailure } from '../support/result.js';
+import { buildHandshake, type HandshakeContext } from './handshake.js';
 
 /**
  * Route handlers are wiring, not behavior.
@@ -50,36 +51,32 @@ function isTerminalPayload(value: unknown): boolean {
   );
 }
 
-function eventId(value: unknown): string {
-  if (typeof value === 'object' && value !== null) {
-    const id = (value as { eventId?: unknown }).eventId;
-    if (typeof id === 'string') return id;
-  }
-  return '';
-}
-
 /**
- * Replays retained events, then tails the live ones. The stream closes on a
- * terminal event so a client never waits for a task that already finished; a
- * disconnected client stops consuming without stopping the run.
+ * Replays the durable log from the cursor, then tails it. The first frame is an
+ * SSE comment carrying the log's metadata: the SDK drops any line that is not
+ * `data:`, so a deployed client keeps working while a newer one can read
+ * `lastSeq` and `truncated` without a new frame type in the event contract. The
+ * stream closes on a terminal event so a client never waits for a task that
+ * already finished; a disconnected client stops consuming without stopping the
+ * run.
  */
-async function* toEventStream(stream: {
-  replay: { events: unknown[] };
-  subscribe: (listener: (event: unknown) => void) => () => void;
-}): AsyncIterable<unknown> {
-  const seen = new Set<string>();
+async function* toEventStream(stream: EventStream): AsyncIterable<SseFrame> {
+  yield {
+    kind: 'comment',
+    comment: `coderax-meta ${JSON.stringify({
+      lastSeq: stream.replay.lastSeq,
+      truncated: stream.replay.truncated,
+    })}`,
+  };
+
   for (const event of stream.replay.events) {
-    seen.add(eventId(event));
-    yield event;
+    yield { kind: 'event', event };
     if (isTerminalPayload(event)) return;
   }
 
   const pending: unknown[] = [];
   let wake: (() => void) | null = null;
   const unsubscribe = stream.subscribe((event) => {
-    const id = eventId(event);
-    if (id && seen.has(id)) return;
-    if (id) seen.add(id);
     pending.push(event);
     wake?.();
   });
@@ -88,7 +85,7 @@ async function* toEventStream(stream: {
     for (;;) {
       const next = pending.shift();
       if (next !== undefined) {
-        yield next;
+        yield { kind: 'event', event: next };
         if (isTerminalPayload(next)) return;
         continue;
       }
@@ -103,8 +100,11 @@ async function* toEventStream(stream: {
     unsubscribe();
   }
 }
-
-export function registerRoutes(registry: RouteRegistry, service: ApplicationService): void {
+export function registerRoutes(
+  registry: RouteRegistry,
+  service: ApplicationService,
+  handshake: HandshakeContext,
+): void {
   registry.register('getHealth', async () => ({
     kind: 'json',
     status: 200,
@@ -230,6 +230,135 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('listArtifacts', async (context) => {
+    const query = context.query as {
+      mode?: DataMode;
+      kind?: ArtifactKind;
+      projectId?: string;
+      conversationId?: string;
+      taskId?: string;
+      limit?: number;
+    };
+    const result = await service.artifacts.list(context.principal, query);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('artifactProjectManifest', async (context) => {
+    const query = context.query as { mode?: DataMode; projectId: string };
+    const result = await service.artifacts.manifest(context.principal, {
+      mode: modeFrom(query.mode),
+      projectId: query.projectId,
+    });
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('uploadArtifact', async (context) => {
+    const result = await service.artifacts.upload(
+      context.principal,
+      context.body as ArtifactUploadRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('pruneArtifacts', async (context) => {
+    const body = context.body as ArtifactModeRequest;
+    const result = await service.artifacts.prune(context.principal, modeFrom(body.mode));
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getArtifact', async (context) => {
+    const result = await service.artifacts.get(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(context.query.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('uploadArtifactVersion', async (context) => {
+    const result = await service.artifacts.addVersion(
+      context.principal,
+      context.params.artifactId ?? '',
+      context.body as ArtifactVersionRequest,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  registry.register('restoreArtifactVersion', async (context) => {
+    const body = context.body as { mode?: DataMode; version: number; expectedVersion: number };
+    const result = await service.artifacts.restore(
+      context.principal,
+      context.params.artifactId ?? '',
+      {
+        mode: modeFrom(body.mode),
+        version: body.version,
+        expectedVersion: body.expectedVersion,
+      },
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('listArtifactVersions', async (context) => {
+    const result = await service.artifacts.versions(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(context.query.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('downloadArtifact', async (context) => {
+    const query = context.query as { mode?: DataMode; version?: number };
+    const result = await service.artifacts.download(
+      context.principal,
+      context.params.artifactId ?? '',
+      query,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('exportArtifact', async (context) => {
+    const query = context.query as { mode?: DataMode; version?: number };
+    const result = await service.artifacts.exportBundle(
+      context.principal,
+      context.params.artifactId ?? '',
+      query,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('deleteArtifact', async (context) => {
+    const body = context.body as ArtifactModeRequest;
+    const result = await service.artifacts.remove(
+      context.principal,
+      context.params.artifactId ?? '',
+      modeFrom(body.mode),
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('generateDeliverable', async (context) => {
+    const result = await service.deliver(
+      context.principal,
+      context.body as DeliverableRequestInput,
+    );
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 201, body: result.value };
+  });
+
+  // Registration order follows the catalogue order so the served OpenAPI
+  // document is byte-identical to the published one.
   registry.register('browserCapabilities', async () => ({
     kind: 'json',
     status: 200,
@@ -338,133 +467,6 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     const result = await service.browserArtifact(
       context.principal,
       context.params.artifactId ?? '',
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('listArtifacts', async (context) => {
-    const query = context.query as {
-      mode?: DataMode;
-      kind?: ArtifactKind;
-      projectId?: string;
-      conversationId?: string;
-      taskId?: string;
-      limit?: number;
-    };
-    const result = await service.artifacts.list(context.principal, query);
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('artifactProjectManifest', async (context) => {
-    const query = context.query as { mode?: DataMode; projectId: string };
-    const result = await service.artifacts.manifest(context.principal, {
-      mode: modeFrom(query.mode),
-      projectId: query.projectId,
-    });
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('generateArtifact', async (context) => {
-    const result = await service.generateArtifact(
-      context.principal,
-      context.body as ArtifactGenerationRequest,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 201, body: result.value };
-  });
-
-  registry.register('uploadArtifact', async (context) => {
-    const result = await service.artifacts.upload(
-      context.principal,
-      context.body as ArtifactUploadRequest,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 201, body: result.value };
-  });
-
-  registry.register('pruneArtifacts', async (context) => {
-    const body = context.body as ArtifactModeRequest;
-    const result = await service.artifacts.prune(context.principal, modeFrom(body.mode));
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('getArtifact', async (context) => {
-    const result = await service.artifacts.get(
-      context.principal,
-      context.params.artifactId ?? '',
-      modeFrom(context.query.mode),
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('uploadArtifactVersion', async (context) => {
-    const result = await service.artifacts.addVersion(
-      context.principal,
-      context.params.artifactId ?? '',
-      context.body as ArtifactVersionRequest,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 201, body: result.value };
-  });
-
-  registry.register('restoreArtifactVersion', async (context) => {
-    const body = context.body as { mode?: DataMode; version: number; expectedVersion: number };
-    const result = await service.artifacts.restore(
-      context.principal,
-      context.params.artifactId ?? '',
-      {
-        mode: modeFrom(body.mode),
-        version: body.version,
-        expectedVersion: body.expectedVersion,
-      },
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('listArtifactVersions', async (context) => {
-    const result = await service.artifacts.versions(
-      context.principal,
-      context.params.artifactId ?? '',
-      modeFrom(context.query.mode),
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('downloadArtifact', async (context) => {
-    const query = context.query as { mode?: DataMode; version?: number };
-    const result = await service.artifacts.download(
-      context.principal,
-      context.params.artifactId ?? '',
-      query,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('exportArtifact', async (context) => {
-    const query = context.query as { mode?: DataMode; version?: number };
-    const result = await service.artifacts.exportBundle(
-      context.principal,
-      context.params.artifactId ?? '',
-      query,
-    );
-    if (!result.ok) return fromFailure(result, context.requestId);
-    return { kind: 'json', status: 200, body: result.value };
-  });
-
-  registry.register('deleteArtifact', async (context) => {
-    const body = context.body as ArtifactModeRequest;
-    const result = await service.artifacts.remove(
-      context.principal,
-      context.params.artifactId ?? '',
-      modeFrom(body.mode),
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
@@ -715,5 +717,19 @@ export function registerRoutes(registry: RouteRegistry, service: ApplicationServ
     );
     if (!result.ok) return fromFailure(result, context.requestId);
     return { kind: 'json', status: 200, body: result.value };
+  });
+
+  registry.register('getHandshake', async (context) => {
+    const requested = context.query.contract;
+    const fingerprint = context.query.fingerprint;
+    return {
+      kind: 'json',
+      status: 200,
+      body: buildHandshake({
+        context: handshake,
+        ...(typeof requested === 'string' ? { requested } : {}),
+        ...(typeof fingerprint === 'string' ? { fingerprint } : {}),
+      }),
+    };
   });
 }

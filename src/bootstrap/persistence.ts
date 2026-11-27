@@ -2,6 +2,8 @@ import type { EngineConfig } from '../configuration/schema.js';
 import type { Clock, IdGenerator } from '../support/clock.js';
 import type { LeaseStore } from '../execution/lease.js';
 import type { TaskRepository } from '../persistence/tasks.js';
+import type { EventStore } from '../events/store.js';
+import { createMemoryEventStore, createMongoEventStore, ensureEventIndexes } from '../events/store.js';
 import type { ConversationRepository } from '../persistence/conversations.js';
 import type { NotificationStore } from '../persistence/notifications.js';
 import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/schedules.js';
@@ -40,6 +42,8 @@ import {
   ensureCapacityIndexes,
 } from '../persistence/capacity.js';
 import type { CapacityStore } from '../persistence/capacity.js';
+import { createMongoBudgetStore, ensureBudgetIndexes } from '../persistence/budgets.js';
+import { createMemoryBudgetStore, type BudgetWindowStore } from '../models/budget.js';
 import {
   createMongoArtifactRepository,
   createMongoBlobStore,
@@ -61,6 +65,7 @@ export type PersistenceStores = {
   driver: 'memory' | 'mongo';
   lease: LeaseStore;
   tasks: TaskRepository;
+  events: EventStore;
   conversations: ConversationRepository;
   memory: MemoryStore;
   permissions: PermissionStore;
@@ -76,6 +81,7 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
+  budget: BudgetWindowStore;
   close: () => Promise<void>;
 };
 
@@ -140,15 +146,17 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       driver: 'memory',
       lease: createLeaseStore(createInMemoryWorkRunTable()),
       tasks: createTaskRepository(),
+      events: createMemoryEventStore({ maxPerTask: config.execution.eventBufferSize }),
       conversations: createConversationRepository(),
       memory: createMemoryStore({ clock, maxValueLength: MEMORY_VALUE_LIMIT }),
       permissions: createPermissionStore({ clock, ids: input.ids }),
       notifications: createNotificationStore(),
-      schedules: createScheduleRepository(),
-      scheduleNotices: createScheduleNoticeStore(),
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      budget: createMemoryBudgetStore(),
+      schedules: createScheduleRepository(),
+      scheduleNotices: createScheduleNoticeStore(),
       close: NO_CLOSE,
     };
   }
@@ -161,6 +169,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const memory = database.collection(collectionName(config, 'memory'));
   const permissions = database.collection(collectionName(config, 'permissions'));
   const notifications = database.collection(collectionName(config, 'notifications'));
+  const events = database.collection(collectionName(config, 'events'));
   const schedules = database.collection(collectionName(config, 'schedules'));
   const scheduleExecutions = database.collection(collectionName(config, 'schedule_executions'));
   const scheduleNotices = database.collection(collectionName(config, 'schedule_notices'));
@@ -172,6 +181,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
+  const budgetWindows = database.collection(collectionName(config, 'budget_windows'));
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -181,11 +191,15 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   try {
     await ensureWorkRunIndexes(workRuns);
+    await ensureBudgetIndexes(budgetWindows);
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
     await ensurePermissionIndexes(permissions);
     await ensureNotificationIndexes(notifications);
+    await ensureEventIndexes(events, {
+      retentionSeconds: Math.floor(config.execution.eventRetentionMs / 1000),
+    });
     await ensureScheduleIndexes({
       schedules,
       executions: scheduleExecutions,
@@ -207,6 +221,11 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
     driver: 'mongo',
     lease: createLeaseStore(createMongoWorkRunTable(workRuns)),
     tasks: createMongoTaskRepository(tasks),
+    events: createMongoEventStore({
+      collection: events,
+      pageSize: config.execution.eventBufferSize,
+      now: () => clock.now(),
+    }),
     conversations: createMongoConversationRepository({ conversations, messages }),
     memory: createMongoMemoryStore({
       collection: memory,
@@ -234,6 +253,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
+    budget: createMongoBudgetStore(budgetWindows),
     close: database.close,
   };
 }

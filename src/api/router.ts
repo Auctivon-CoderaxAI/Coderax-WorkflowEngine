@@ -10,12 +10,22 @@ export type RequestContext = {
   query: Record<string, unknown>;
   body: unknown;
   requestId: string;
+  signal?: AbortSignal;
 };
+
+/**
+ * One server-sent frame. A `comment` is written as a `:` line, which is valid
+ * SSE that every client must ignore; carrying metadata that way lets the stream
+ * report its own log bounds without changing the event contract.
+ */
+export type SseFrame =
+  | { kind: 'event'; event: unknown }
+  | { kind: 'comment'; comment: string };
 
 export type HandlerResult =
   | { kind: 'json'; status: number; body: unknown }
   | { kind: 'text'; status: number; contentType: string; body: string }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | { kind: 'sse'; status: number; events: AsyncIterable<SseFrame> };
 
 export type RouteHandler = (context: RequestContext) => Promise<HandlerResult>;
 
@@ -26,12 +36,13 @@ export type RawRequest = {
   path: string;
   authorization: string | undefined;
   bodyText: string;
+  signal?: AbortSignal;
 };
 
 export type RouterResult =
   | { kind: 'json'; status: number; body: unknown }
   | { kind: 'text'; status: number; contentType: string; body: string }
-  | { kind: 'sse'; status: number; events: AsyncIterable<unknown> };
+  | { kind: 'sse'; status: number; events: AsyncIterable<SseFrame> };
 
 export type RouteRegistry = {
   register: (operationId: string, handler: RouteHandler) => void;
@@ -133,7 +144,7 @@ export type Router = {
    * `undefined` for the transport default. The server reads the body before a
    * handler runs, so only the route that carries file content may raise it.
    */
-  bodyLimit: (method: string, path: string) => number | undefined;
+  bodyLimit: (method: string, path: string, authorization?: string) => number | undefined;
 };
 
 export function createRouter(input: {
@@ -149,13 +160,13 @@ export function createRouter(input: {
 
   return {
     registry: input.registry,
-    bodyLimit: (method, path) => {
+    bodyLimit: (method, path, authorization) => {
       const [pathname = ''] = path.split('?');
       const upper = method.toUpperCase();
       for (const route of routes) {
         if (route.spec.method !== upper) continue;
         if (!route.matcher.test(pathname)) continue;
-        return route.spec.maxBodyBytes;
+        return input.auth.authenticate(authorization) ? route.spec.maxBodyBytes : undefined;
       }
       return undefined;
     },
@@ -226,6 +237,7 @@ export function createRouter(input: {
             query,
             body,
             requestId,
+            signal: raw.signal,
           });
         } catch {
           return problem('internal_error', 'The request could not be completed.', requestId);

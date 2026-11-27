@@ -13,13 +13,14 @@ import {
   ArtifactDescriptor,
   ArtifactDescriptorList,
   ArtifactExport,
-  ArtifactGenerationResult,
   ArtifactProjectManifest,
   ArtifactPruneResult,
   ArtifactUploadResult,
   ArtifactVersionList,
+  CapabilityHandshake,
   ChatReply,
   Conversation,
+  Deliverable,
   ConversationList,
   ExecutionEvent,
   GameBuild,
@@ -63,11 +64,13 @@ import type {
   BrowserCloseRequest,
   BrowserSessionCreateInput,
   BrowserTakeoverRequest,
-  ArtifactGenerationRequest,
   ArtifactKind,
+  ArtifactUploadInput,
   ArtifactUploadRequest,
+  ArtifactVersionInput,
   ArtifactVersionRequest,
   ChatRequest,
+  DeliverableRequestInput,
   CreateGameRequest,
   CreateGameSessionRequest,
   DataMode,
@@ -128,6 +131,92 @@ export type CoderaxClientOptions = {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 };
+
+/**
+ * Every operation the SDK implements, keyed by the contract operation id.
+ *
+ * The route-completeness gate compares this map with the route catalogue: a new
+ * HTTP operation is not complete until a client can call it, and removing a
+ * client method without removing the route fails the same check. The map is
+ * also checked against the class at runtime so a renamed method cannot hide.
+ */
+export const SDK_OPERATIONS = Object.freeze({
+  getHealth: 'health',
+  getReadiness: 'readiness',
+  listAgents: 'agents',
+  listModels: 'models',
+  submitChat: 'chat',
+  submitWork: 'submitWork',
+  getTask: 'task',
+  cancelTask: 'cancel',
+  resumeTask: 'resume',
+  retryTask: 'retry',
+  streamTaskEvents: 'events',
+  listConversations: 'conversations',
+  getConversation: 'conversation',
+  listMemory: 'memory',
+  listPermissions: 'permissions',
+  decidePermission: 'decidePermission',
+  listNotifications: 'notifications',
+  browserCapabilities: 'browserCapabilities',
+  listBrowserSessions: 'browserSessions',
+  getBrowserSession: 'browserSession',
+  createBrowserSession: 'createBrowserSession',
+  browserAction: 'browserAction',
+  pauseBrowserSession: 'pauseBrowserSession',
+  resumeBrowserSession: 'resumeBrowserSession',
+  takeoverBrowserSession: 'takeoverBrowserSession',
+  closeBrowserSession: 'closeBrowserSession',
+  authorizeBrowserSession: 'authorizeBrowserSession',
+  decideBrowserAuthorization: 'decideBrowserAuthorization',
+  listBrowserReceipts: 'browserReceipts',
+  getBrowserArtifact: 'browserArtifact',
+  listArtifacts: 'artifacts',
+  artifactProjectManifest: 'artifactManifest',
+  generateDeliverable: 'generateDeliverable',
+  uploadArtifact: 'uploadArtifact',
+  pruneArtifacts: 'pruneArtifacts',
+  getArtifact: 'artifact',
+  uploadArtifactVersion: 'uploadArtifactVersion',
+  restoreArtifactVersion: 'restoreArtifactVersion',
+  listArtifactVersions: 'artifactVersions',
+  downloadArtifact: 'downloadArtifact',
+  exportArtifact: 'exportArtifact',
+  deleteArtifact: 'deleteArtifact',
+  createSchedule: 'createSchedule',
+  listSchedules: 'schedules',
+  getSchedule: 'schedule',
+  pauseSchedule: 'pauseSchedule',
+  resumeSchedule: 'resumeSchedule',
+  cancelSchedule: 'cancelSchedule',
+  triggerSchedule: 'triggerSchedule',
+  listScheduleExecutions: 'scheduleExecutions',
+  dispatchScheduleEvent: 'scheduleEvent',
+  updateSchedule: 'updateSchedule',
+  getScheduleUpcoming: 'scheduleUpcoming',
+  markNotificationsRead: 'markNotificationsRead',
+  getHandshake: 'handshake',
+  getGameCapabilities: 'gameCapabilities',
+  listGames: 'games',
+  createGame: 'createGame',
+  getGame: 'game',
+  saveGameSpec: 'saveGameSpec',
+  buildGame: 'buildGame',
+  listGameBuilds: 'gameBuilds',
+  restoreGameBuild: 'restoreGameBuild',
+  iterateGame: 'iterateGame',
+  previewGame: 'gamePreview',
+  exportGame: 'exportGame',
+  createGameSession: 'createGameSession',
+  listGameSessions: 'gameSessions',
+  getGameSession: 'gameSession',
+  observeGameSession: 'observeGameSession',
+  controlGameSession: 'controlGameSession',
+  gameSessionLogs: 'gameSessionLogs',
+  gameSessionVerification: 'gameSessionVerification',
+} as const);
+
+export type SdkOperationId = keyof typeof SDK_OPERATIONS;
 
 type RequestInput = {
   method: 'GET' | 'POST' | 'PATCH';
@@ -260,6 +349,18 @@ export class CoderaxClient {
 
   health(): Promise<HealthReport> {
     return this.request<HealthReport>(HealthReport, { method: 'GET', path: '/v1/health' });
+  }
+
+  /**
+   * The first call a client should make. It carries the served contract, the
+   * catalogue fingerprint and the operations this build actually publishes.
+   */
+  handshake(input: { contract?: string; fingerprint?: string } = {}): Promise<CapabilityHandshake> {
+    return this.request<CapabilityHandshake>(CapabilityHandshake, {
+      method: 'GET',
+      path: '/v1/handshake',
+      query: { contract: input.contract, fingerprint: input.fingerprint },
+    });
   }
 
   readiness(): Promise<ReadinessReport> {
@@ -624,19 +725,18 @@ export class CoderaxClient {
   }
 
   /**
-   * Renders a deliverable and persists it as a durable project tree. The
-   * response is the manifest, so every file can then be downloaded by artifact
-   * id and immutable version.
+   * Generates and durably persists a document, workbook, deck, analysis or
+   * software project. The response names stored artifacts, never workspace paths.
    */
-  generateArtifact(request: ArtifactGenerationRequest): Promise<ArtifactGenerationResult> {
-    return this.request<ArtifactGenerationResult>(ArtifactGenerationResult, {
+  generateDeliverable(request: DeliverableRequestInput): Promise<Deliverable> {
+    return this.request<Deliverable>(Deliverable, {
       method: 'POST',
-      path: '/v1/artifacts/generate',
+      path: '/v1/deliverables',
       body: request,
     });
   }
 
-  uploadArtifact(request: ArtifactUploadRequest): Promise<ArtifactUploadResult> {
+  uploadArtifact(request: ArtifactUploadInput): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
       path: '/v1/artifacts',
@@ -646,7 +746,7 @@ export class CoderaxClient {
 
   uploadArtifactVersion(
     artifactId: string,
-    request: ArtifactVersionRequest,
+    request: ArtifactVersionInput,
   ): Promise<ArtifactUploadResult> {
     return this.request<ArtifactUploadResult>(ArtifactUploadResult, {
       method: 'POST',
@@ -906,9 +1006,10 @@ export type {
   ScheduleUpdateRequest,
   ScheduleEventRequest,
   ScheduleTriggerRequest,
-  ArtifactGenerationRequest,
   ArtifactKind,
+  ArtifactUploadInput,
   ArtifactUploadRequest,
+  ArtifactVersionInput,
   ArtifactVersionRequest,
   WorkSubmitRequest,
 };

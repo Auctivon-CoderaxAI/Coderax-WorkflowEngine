@@ -17,6 +17,8 @@ import type { DataMode } from '@coderax/contracts';
  * the check-then-delete race a plain `referenced()` query leaves open.
  */
 export type BlobRef = {
+  referenceId?: string;
+  legacyReleaseId?: string;
   ownerId: string;
   mode: DataMode;
   sha256: string;
