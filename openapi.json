@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Coderax WorkflowEngine API",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "Authoritative HTTP surface for Coderax Native intelligence, agent orchestration and durable Work execution. Every operation is generated from the versioned route catalogue."
   },
   "servers": [
@@ -6621,6 +6621,9 @@
                         "command.execute",
                         "network.access",
                         "memory.read",
+                        "memory.write",
+                        "knowledge.read",
+                        "knowledge.write",
                         "conversation.read",
                         "credential.use",
                         "browser.control",
@@ -6793,6 +6796,9 @@
                               "command.execute",
                               "network.access",
                               "memory.read",
+                              "memory.write",
+                              "knowledge.read",
+                              "knowledge.write",
                               "conversation.read",
                               "credential.use",
                               "browser.control",
@@ -16258,7 +16264,7 @@
                   "type": "object",
                   "properties": {
                     "contractVersion": {
-                      "const": "1.2.0"
+                      "const": "1.3.0"
                     },
                     "contractMajor": {
                       "const": 1
@@ -16776,6 +16782,354 @@
             }
           }
         }
+      }
+    },
+    "/v1/knowledge": {
+      "get": {
+        "operationId": "listKnowledge",
+        "summary": "Documents stored for owner-scoped retrieval.",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "documents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "documentId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "title": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          },
+                          "chunks": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "private",
+                              "cloud"
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "documentId",
+                          "title",
+                          "chunks",
+                          "mode",
+                          "createdAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "documents"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "ingestKnowledge",
+        "summary": "Store one document for retrieval in a data mode.",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Stored document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "documentId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "chunks": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    "embedding": {
+                      "type": "string",
+                      "enum": [
+                        "semantic",
+                        "lexical"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "required": [
+                    "documentId",
+                    "title",
+                    "chunks",
+                    "embedding",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000000
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "private",
+                      "cloud"
+                    ],
+                    "default": "cloud"
+                  }
+                },
+                "required": [
+                  "title",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/knowledge/search": {
+      "get": {
+        "operationId": "searchKnowledge",
+        "summary": "Retrieve the most relevant stored passages for a query.",
+        "tags": [
+          "knowledge"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge hits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hits": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "documentId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "title": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          },
+                          "text": {
+                            "type": "string",
+                            "maxLength": 4000
+                          },
+                          "score": {
+                            "type": "number",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "documentId",
+                          "title",
+                          "text",
+                          "score"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "embedding": {
+                      "type": "string",
+                      "enum": [
+                        "semantic",
+                        "lexical"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "hits",
+                    "embedding"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          {
+            "name": "k",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "private",
+                "cloud"
+              ]
+            }
+          }
+        ]
       }
     },
     "/v1/memory": {
@@ -21120,6 +21474,129 @@
         ]
       }
     },
+    "/v1/tools": {
+      "get": {
+        "operationId": "listTools",
+        "summary": "Tools Coderax Native may call, with their scopes and approval policy.",
+        "tags": [
+          "discovery"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tool list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tools": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "builtin",
+                              "mcp",
+                              "plugin",
+                              "browser"
+                            ]
+                          },
+                          "scopes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "workspace.read",
+                                "workspace.write",
+                                "command.execute",
+                                "network.access",
+                                "memory.read",
+                                "memory.write",
+                                "knowledge.read",
+                                "knowledge.write",
+                                "conversation.read",
+                                "credential.use",
+                                "browser.control",
+                                "browser.transfer"
+                              ]
+                            },
+                            "minItems": 1
+                          },
+                          "approval": {
+                            "type": "string",
+                            "enum": [
+                              "never",
+                              "once",
+                              "always"
+                            ]
+                          },
+                          "parameters": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "description",
+                          "source",
+                          "scopes",
+                          "approval",
+                          "parameters"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "tools"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Problem",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/work": {
       "post": {
         "operationId": "submitWork",
@@ -21840,6 +22317,9 @@
                               "command.execute",
                               "network.access",
                               "memory.read",
+                              "memory.write",
+                              "knowledge.read",
+                              "knowledge.write",
                               "conversation.read",
                               "credential.use",
                               "browser.control",
@@ -21984,6 +22464,9 @@
                               "command.execute",
                               "network.access",
                               "memory.read",
+                              "memory.write",
+                              "knowledge.read",
+                              "knowledge.write",
                               "conversation.read",
                               "credential.use",
                               "browser.control",

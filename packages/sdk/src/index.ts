@@ -36,8 +36,13 @@ import {
   GameSessionLogs,
   GameSessionVerification,
   HealthReport,
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
   MemoryList,
   ModelList,
+  ToolList,
   NotificationList,
   PermissionList,
   PermissionRequest,
@@ -141,6 +146,10 @@ export const SDK_OPERATIONS = Object.freeze({
   getReadiness: 'readiness',
   listAgents: 'agents',
   listModels: 'models',
+  listTools: 'tools',
+  ingestKnowledge: 'ingestKnowledge',
+  listKnowledge: 'knowledge',
+  searchKnowledge: 'searchKnowledge',
   submitChat: 'chat',
   submitWork: 'submitWork',
   getTask: 'task',
@@ -369,6 +378,37 @@ export class CoderaxClient {
 
   models(): Promise<ModelList> {
     return this.request<ModelList>(ModelList, { method: 'GET', path: '/v1/models' });
+  }
+
+  tools(): Promise<ToolList> {
+    return this.request<ToolList>(ToolList, { method: 'GET', path: '/v1/tools' });
+  }
+
+  ingestKnowledge(request: KnowledgeIngestRequest): Promise<KnowledgeIngestResult> {
+    return this.request<KnowledgeIngestResult>(KnowledgeIngestResult, {
+      method: 'POST',
+      path: '/v1/knowledge',
+      body: request,
+    });
+  }
+
+  knowledge(mode?: 'private' | 'cloud'): Promise<KnowledgeList> {
+    return this.request<KnowledgeList>(KnowledgeList, {
+      method: 'GET',
+      path: '/v1/knowledge',
+      ...(mode ? { query: { mode } } : {}),
+    });
+  }
+
+  searchKnowledge(
+    query: string,
+    options: { k?: number; mode?: 'private' | 'cloud' } = {},
+  ): Promise<KnowledgeSearchResult> {
+    return this.request<KnowledgeSearchResult>(KnowledgeSearchResult, {
+      method: 'GET',
+      path: '/v1/knowledge/search',
+      query: { q: query, ...(options.k === undefined ? {} : { k: options.k }), ...(options.mode ? { mode: options.mode } : {}) },
+    });
   }
 
   browserCapabilities(): Promise<BrowserCapabilities> {

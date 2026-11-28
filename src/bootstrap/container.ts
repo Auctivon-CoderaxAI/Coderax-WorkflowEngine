@@ -15,7 +15,9 @@ import type { AuditLog } from '../observability/audit.js';
 import type { HealthService } from '../observability/health.js';
 import type { EventBus } from '../events/bus.js';
 import type { TaskRunner } from '../execution/runner.js';
-import type { RunSupervisor } from '../execution/supervisor.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
+import type { ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
 import type { TaskScheduler } from '../scheduling/scheduler.js';
 import type { ApplicationService } from '../orchestration/service.js';
 import type { BrowserService } from '../orchestration/browser.js';
@@ -60,7 +62,16 @@ export type InfrastructureDependencies = {
   sessions: GameSessionService;
   gaming: GamingAgent;
   browser: BrowserService;
-  supervisor: RunSupervisor;
+  /**
+   * Durable execution identity, generation revocation, capability grants and
+   * termination evidence. One supervisor authority, keyed by execution id and by
+   * fencing token.
+   */
+  supervisor: ExecutionSupervisor;
+  /** The tool catalogue and the single execution path for every tool call. */
+  tools: ToolRuntime;
+  /** Owner-scoped, mode-partitioned document retrieval. */
+  knowledge: KnowledgeStore;
 };
 
 export const INFRASTRUCTURE_DEPENDENCIES = [
@@ -91,6 +102,8 @@ export const INFRASTRUCTURE_DEPENDENCIES = [
   'gaming',
   'browser',
   'supervisor',
+  'tools',
+  'knowledge',
 ] as const satisfies readonly (keyof InfrastructureDependencies)[];
 
 export type ApplicationDependencies = InfrastructureDependencies & {

@@ -57,6 +57,12 @@ import {
   ensureNotificationIndexes,
   ensureTaskIndexes,
 } from '../persistence/mongo-tables.js';
+import { createExecutionRepository } from '../persistence/executions.js';
+import type { ExecutionRepository } from '../persistence/executions.js';
+import {
+  createMongoExecutionRepository,
+  ensureExecutionIndexes,
+} from '../persistence/mongo-executions.js';
 import { StartupError } from './startup-error.js';
 
 export type PersistenceStores = {
@@ -79,6 +85,8 @@ export type PersistenceStores = {
   blobs: BlobStore;
   /** Atomic quota admission and expiring reservations. */
   capacity: CapacityStore;
+  /** Durable identity of every supervised attempt, keyed by execution id. */
+  executions: ExecutionRepository;
   close: () => Promise<void>;
 };
 
@@ -153,6 +161,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       artifacts: createArtifactRepository(),
       blobs: createInMemoryBlobStore(),
       capacity: createInMemoryCapacityStore(),
+      executions: createExecutionRepository(),
       close: NO_CLOSE,
     };
   }
@@ -177,6 +186,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
   const artifactReservations = database.collection(
     collectionName(config, 'artifact_reservations'),
   );
+  const executions = database.collection(collectionName(config, 'executions'));
   const artifactCollections = {
     artifacts,
     versions: artifactVersions,
@@ -186,6 +196,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
 
   try {
     await ensureWorkRunIndexes(workRuns);
+    await ensureExecutionIndexes(executions);
     await ensureTaskIndexes(tasks);
     await ensureConversationIndexes({ conversations, messages });
     await ensureMemoryIndexes(memory);
@@ -247,6 +258,7 @@ export async function buildPersistence(input: PersistenceInput): Promise<Persist
       capacity: artifactCapacity,
       reservations: artifactReservations,
     }),
+    executions: createMongoExecutionRepository(executions),
     close: database.close,
   };
 }

@@ -1,6 +1,12 @@
 import {
+  API_PREFIX,
+  CHAT_STREAM_VERSION,
   CONTRACT_FINGERPRINT,
+  CONTRACT_MAJOR,
+  CONTRACT_VERSION,
+  EVENT_SCHEMA_VERSION,
   ROUTE_INDEX,
+  SUPPORTED_CONTRACT_VERSIONS,
   negotiateContract,
   type CapabilityFlags,
   type CapabilityHandshake,
@@ -79,13 +85,15 @@ export function buildHandshake(input: {
       : { provided: input.fingerprint, expected: CONTRACT_FINGERPRINT },
   );
   return {
-    contractVersion: '1.2.0',
-    contractMajor: 1,
-    eventSchemaVersion: 1,
-    chatStreamVersion: 1,
-    apiPrefix: '/v1',
+    // Read from the contract itself, so the served identity cannot drift from
+    // the schemas and catalogue a client actually receives.
+    contractVersion: CONTRACT_VERSION,
+    contractMajor: CONTRACT_MAJOR,
+    eventSchemaVersion: EVENT_SCHEMA_VERSION,
+    chatStreamVersion: CHAT_STREAM_VERSION,
+    apiPrefix: API_PREFIX,
     contractFingerprint: CONTRACT_FINGERPRINT,
-    supportedContractVersions: ['1.0.0', '1.1.0', '1.2.0'],
+    supportedContractVersions: [...SUPPORTED_CONTRACT_VERSIONS],
     ...(input.requested === undefined ? {} : { requestedContractVersion: input.requested }),
     compatible: negotiation.compatible,
     negotiatedContractVersion: negotiation.negotiatedContractVersion,

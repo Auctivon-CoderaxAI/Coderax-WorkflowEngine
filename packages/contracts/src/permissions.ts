@@ -20,6 +20,10 @@ export const PermissionScope = z.enum([
   'command.execute',
   'network.access',
   'memory.read',
+  'memory.write',
+  /** Retrieval over the owner's stored documents; partitioned by data mode. */
+  'knowledge.read',
+  'knowledge.write',
   'conversation.read',
   'credential.use',
   'browser.control',

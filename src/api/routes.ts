@@ -203,6 +203,35 @@ export function registerRoutes(
     return { kind: 'json', status: 200, body: result.value };
   });
 
+  registry.register('listTools', async () => ({
+    kind: 'json',
+    status: 200,
+    body: service.tools(),
+  }));
+
+  registry.register('ingestKnowledge', async (context) => {
+    const result = await service.ingestKnowledge(context.principal, context.body as never);
+    if (!result.ok) return fromFailure(result, context.requestId);
+    return { kind: 'json', status: 202, body: result.value };
+  });
+
+  registry.register('listKnowledge', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.listKnowledge(context.principal, modeFrom(context.query.mode)),
+  }));
+
+  registry.register('searchKnowledge', async (context) => ({
+    kind: 'json',
+    status: 200,
+    body: await service.searchKnowledge(
+      context.principal,
+      typeof context.query.q === 'string' ? context.query.q : '',
+      queryNumber(context.query.k) ?? 4,
+      modeFrom(context.query.mode),
+    ),
+  }));
+
   registry.register('listMemory', async (context) => {
     const mode: DataMode = context.query.mode === 'cloud' ? 'cloud' : 'private';
     return { kind: 'json', status: 200, body: await service.memory(context.principal, mode) };

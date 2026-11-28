@@ -3,8 +3,27 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { createRunSupervisor } from '../../src/execution/supervisor.js';
+import { createExecutionSupervisor } from '../../src/execution/supervisor.js';
 import { createRunWorkspace, quarantineRunWorkspace } from '../../src/execution/workspace.js';
+import { createCapabilityBroker } from '../../src/permissions/grants.js';
+import { createUnavailableIsolationProvider } from '../../src/execution/termination.js';
+import { createExecutionRepository } from '../../src/persistence/executions.js';
+import { createIdGenerator } from '../../src/support/clock.js';
+
+/** The one supervision authority, wired exactly as the composition root wires it. */
+function harness() {
+  const now = new Date('2026-11-27T00:00:00.000Z');
+  return createExecutionSupervisor({
+    clock: { now: () => now, iso: () => now.toISOString() },
+    ids: createIdGenerator(),
+    executions: createExecutionRepository(),
+    capabilities: createCapabilityBroker(),
+    isolation: createUnavailableIsolationProvider('No workload isolation is configured.'),
+    containmentHoldMs: 60_000,
+    shutdownGraceMs: 20,
+    heartbeatIntervalMs: 1_000,
+  });
+}
 
 function roots(): { root: string; privateRoot: string; cloudRoot: string; cleanup: () => void } {
   const root = mkdtempSync(path.join(tmpdir(), 'coderax-supervisor-'));
@@ -79,7 +98,7 @@ test('the supervisor revokes a finished run without touching its workspace', asy
     assert.equal(run.ok, true);
     if (!run.ok) return;
 
-    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    const supervisor = harness();
     await supervisor.begin({
       taskId: 'task_finished',
       token: 'token-1',
@@ -109,7 +128,7 @@ test('abandoning a run revokes its capability and renames its workspace', async 
     assert.equal(run.ok, true);
     if (!run.ok) return;
 
-    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    const supervisor = harness();
     await supervisor.begin({
       taskId: 'task_abandoned',
       token: 'token-2',
@@ -145,7 +164,7 @@ test('a newer generation revokes and quarantines the previous workspace', async 
     assert.ok(oldRun.ok && newRun.ok);
     if (!oldRun.ok || !newRun.ok) return;
 
-    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    const supervisor = harness();
     await supervisor.begin({
       taskId: 'task_resumed',
       token: 'generation-1',
@@ -186,7 +205,7 @@ test('shutdown revokes every registered run', async () => {
     assert.ok(first.ok && second.ok);
     if (!first.ok || !second.ok) return;
 
-    const supervisor = createRunSupervisor({ clock: { now: () => new Date(), iso: () => new Date().toISOString() } });
+    const supervisor = harness();
     await supervisor.begin({
       taskId: 'task_one',
       token: 'token-a',
@@ -201,8 +220,9 @@ test('shutdown revokes every registered run', async () => {
     });
 
     const result = await supervisor.shutdown();
-    assert.equal(result.revoked, 2);
-    assert.equal(result.quarantined, 2);
+    // Shutdown reports the attempts it aborted; the registry is what proves no
+    // capability survived it.
+    assert.equal(result.aborted, 0);
     assert.equal(supervisor.live().length, 0);
     assert.equal(existsSync(first.value.root), false);
     assert.equal(existsSync(second.value.root), false);

@@ -25,7 +25,14 @@ import { createAuditLog } from '../observability/audit.js';
 import { createHealthService } from '../observability/health.js';
 import { createEventBus } from '../events/bus.js';
 import { createTaskRunner } from '../execution/runner.js';
-import { createRunSupervisor } from '../execution/supervisor.js';
+import { createExecutionSupervisor } from '../execution/supervisor.js';
+import { createCapabilityBroker } from '../permissions/grants.js';
+import { createUnavailableIsolationProvider } from '../execution/termination.js';
+import { createBuiltinTools } from '../tools/builtin.js';
+import { createToolRuntime } from '../tools/runtime.js';
+import { createKnowledgeStore, createOpenAiEmbeddingProvider } from '../knowledge/store.js';
+import type { EmbeddingProvider } from '../knowledge/store.js';
+import { createOpenCodeHttpTransport } from '../agents/adapters/opencode.js';
 import { validateRemoteEndpoint } from '../configuration/endpoint.js';
 import { createTaskScheduler } from '../scheduling/scheduler.js';
 import { createApplicationService } from '../orchestration/service.js';
@@ -183,12 +190,33 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
 
   const gateway = buildGateway(input);
 
+  /*
+   * An OpenCode server is an external agent this engine talks to over HTTP; it is
+   * never spawned or bundled here. A caller may inject a transport, and a
+   * deployment may name one endpoint by variable. Construction is a startup gate:
+   * a credential-bearing endpoint that is not loopback must be HTTPS.
+   */
+  let opencodeTransport = input.externals?.opencode ?? null;
+  if (opencodeTransport === null && env.CODERAX_OPENCODE_URL) {
+    try {
+      opencodeTransport = createOpenCodeHttpTransport({
+        baseURL: env.CODERAX_OPENCODE_URL,
+        ...(env.CODERAX_OPENCODE_PASSWORD ? { password: env.CODERAX_OPENCODE_PASSWORD } : {}),
+        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+      });
+    } catch (error) {
+      throw new StartupError([
+        error instanceof Error ? error.message : 'CODERAX_OPENCODE_URL is not usable.',
+      ]);
+    }
+  }
+
   const opencode = createExternalAgentAdapter({
     agent: 'opencode',
     engine: 'opencode',
     label: 'OpenCode Agent',
     enabled: config.engines.opencode.enabled,
-    transport: input.externals?.opencode ?? null,
+    transport: opencodeTransport,
     missingDetail:
       'The OpenCode adapter needs an injected transport; the engine does not spawn or bundle an OpenCode server.',
     capabilities: EXTERNAL_CAPABILITIES,
@@ -246,6 +274,45 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
   const memory = persistence.memory;
   const permissions = persistence.permissions;
   const permissionsGate = createPermissionGate({ permissions, clock });
+  /*
+   * Retrieval and the tool broker are built once, here. A run receives them by
+   * name; nothing constructs its own collaborator.
+   */
+  /*
+   * Embeddings are optional and are never assumed: with no endpoint the store
+   * ranks lexically and reports `lexical`, rather than presenting term overlap as
+   * vector search. A credential-bearing endpoint is a startup gate.
+   */
+  let embeddings: EmbeddingProvider | null = null;
+  if (env.CODERAX_EMBEDDINGS_URL && env.CODERAX_EMBEDDINGS_KEY && env.CODERAX_EMBEDDINGS_MODEL) {
+    try {
+      embeddings = createOpenAiEmbeddingProvider({
+        baseURL: env.CODERAX_EMBEDDINGS_URL,
+        apiKey: env.CODERAX_EMBEDDINGS_KEY,
+        model: env.CODERAX_EMBEDDINGS_MODEL,
+        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+      });
+    } catch (error) {
+      throw new StartupError([
+        error instanceof Error ? error.message : 'CODERAX_EMBEDDINGS_URL is not usable.',
+      ]);
+    }
+  }
+  const knowledge = createKnowledgeStore({ clock, ids, embeddings });
+  const tools = createToolRuntime({
+    tools: createBuiltinTools({
+      // Host-level capabilities stay off until an owner decision enables them.
+      shellEnabled: false,
+      allowedCommands: [],
+      networkEnabled: false,
+      allowedHosts: [],
+      maxOutputBytes: 200_000,
+      commandTimeoutMs: 15_000,
+      maxSearchFiles: 200,
+      memory,
+      knowledge,
+    }),
+  });
   const native = createNativeAgent({
     enabled: config.engines.native.enabled,
     gateway,
@@ -309,7 +376,6 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     eventId: ids.eventId,
     iso: clock.iso,
   });
-  const supervisor = createRunSupervisor({ clock });
   const runner = createTaskRunner({
     lease,
     clock,
@@ -325,6 +391,27 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
         reason: 'A cancelled adapter did not stop within the grace period.',
       });
     },
+  });
+  /*
+   * Durable execution supervision wraps the runner rather than replacing it: the
+   * runner still owns the lease, the heartbeat and the fenced settlement, and the
+   * supervisor owns the attempt's durable identity, its scoped capability and the
+   * evidence that decides whether termination was actually verified.
+   */
+  const supervisor = createExecutionSupervisor({
+    clock,
+    ids,
+    executions: persistence.executions,
+    capabilities: createCapabilityBroker(),
+    // No deployment workload isolation is configured in this build, so an
+    // external workload is recorded unverified and its root is held. The engine
+    // becomes more conservative, never more permissive.
+    isolation: createUnavailableIsolationProvider(
+      'No deployment workload isolation is configured; an external workload cannot be verified from this process.',
+    ),
+    containmentHoldMs: config.execution.cancelGraceMs * 10,
+    shutdownGraceMs: config.execution.cancelGraceMs,
+    heartbeatIntervalMs: config.execution.heartbeatIntervalMs,
   });
   const scheduler = createTaskScheduler({ maxConcurrent: config.execution.maxConcurrentTasks });
 
@@ -479,6 +566,8 @@ export async function composeApplication(input: ComposeInput): Promise<Applicati
     gaming: gaming.agent,
     browser,
     supervisor,
+    tools,
+    knowledge,
   });
   if (!container.dependencies) {
     throw new StartupError(

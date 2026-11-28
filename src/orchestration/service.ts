@@ -38,6 +38,10 @@ import type {
   GameSessionLogs,
   GameSessionVerification,
   IterateGameRequest,
+  KnowledgeIngestRequest,
+  KnowledgeIngestResult,
+  KnowledgeList,
+  KnowledgeSearchResult,
   MemoryList,
   ModelList,
   ModelRef,
@@ -62,6 +66,7 @@ import type {
   TaskAccepted,
   TaskControlResult,
   TaskStatus,
+  ToolList,
   Usage,
   WorkSubmitRequest,
 } from '@coderax/contracts';
@@ -88,7 +93,9 @@ import type { ScheduleNoticeStore, ScheduleRepository } from '../persistence/sch
 import type { LeaseStore, RunScope } from '../execution/lease.js';
 import { workRunKey } from '../execution/lease.js';
 import type { TaskRunner, RunOutcome, RunResult } from '../execution/runner.js';
-import type { RunSupervisor } from '../execution/supervisor.js';
+import type { ExecutionSupervisor } from '../execution/supervisor.js';
+import type { ToolRuntime } from '../tools/types.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
 import type { AgentRegistry } from '../agents/registry.js';
 import type { AgentAdapter, AgentHistoryTurn, AgentReportEvent } from '../agents/types.js';
 import { redactContent, redactText, redactToolInput } from '../observability/redact.js';
@@ -146,7 +153,13 @@ export type ApplicationServiceDeps = {
   sessions: GameSessionService;
   gaming: GamingAgent;
   browser: BrowserService;
-  supervisor: RunSupervisor;
+  /**
+   * Durable execution identity, generation revocation, capability grants and
+   * termination evidence — one supervision authority.
+   */
+  supervisor: ExecutionSupervisor;
+  tools: ToolRuntime;
+  knowledge: KnowledgeStore;
 };
 
 export type EventStream = {
@@ -161,6 +174,19 @@ export type ApplicationService = {
   readiness: () => ReturnType<HealthService['readiness']>;
   agents: () => AgentList;
   models: () => ModelList;
+  /** Every tool the broker can execute, with its scopes and approval policy. */
+  tools: () => ToolList;
+  ingestKnowledge: (
+    principal: Principal,
+    request: KnowledgeIngestRequest,
+  ) => Promise<ServiceResult<KnowledgeIngestResult>>;
+  listKnowledge: (principal: Principal, mode: DataMode) => Promise<KnowledgeList>;
+  searchKnowledge: (
+    principal: Principal,
+    query: string,
+    k: number,
+    mode: DataMode,
+  ) => Promise<KnowledgeSearchResult>;
   browserCapabilities: () => Promise<BrowserCapabilities>;
   browserSessions: (principal: Principal) => Promise<BrowserSessionList>;
   browserSession: (
@@ -1024,7 +1050,7 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     const report = (event: AgentReportEvent): void => {
       if (controllers.get(taskId) !== controller || controller.signal.aborted) return;
 
-      // The controller is replaced by a resume; the supervisor is the durable
+      // The controller is replaced by a resume; the run supervisor is the durable
       // answer to "may this generation still act". Both must agree.
       if (!deps.supervisor.isLive(taskId, token)) return;
 
@@ -1186,56 +1212,110 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
       adapter,
     );
 
-    let result: RunResult;
-    try {
-      result = await deps.runner.run({
-        scope: scopeOf(started.task),
-        ...((task.scheduleAdmission ||
-          task.taskId.startsWith('task_sched_')) && {
-          cancellationRequested: async () =>
-            !(await canRunScheduled(task)),
-        }),
-        token,
-        adapter,
-        request: {
-          ownerId: task.ownerId,
-          tenantId: task.tenantId,
-          conversationId: task.conversationId,
-          taskId: task.taskId,
-          workload,
-          game: task.game ?? null,
-          objective: task.objective,
-          history,
-          model: modelRef,
-          mode: task.mode,
-          workspaceRoot: workspace.value.root,
-          maxSteps: deps.config.engines.native.maxSteps,
-          budget: task.budget,
-          signal: controller.signal,
-          reasoning: task.reasoning ?? 'auto',
-          completedSteps: [...started.task.checkpoint.completedSteps],
-          plan: started.task.checkpoint.plan ?? null,
-          evidence: [...(started.task.checkpoint.evidence ?? [])],
-          iterationsUsed: started.task.checkpoint.iterations ?? 0,
-        },
-        report,
-        generation: started.task.generation,
-        workspaceRoot: workspace.value.root,
-      });
-    } catch {
-      await deps.supervisor.abandon({
+    /*
+     * The supervisor wraps the runner; it does not replace it. The runner keeps
+     * the lease, the heartbeat, the cancellation grace period and the fenced
+     * settlement, and the supervisor records the durable identity of this attempt,
+     * issues its scoped capability and decides what proves it terminated.
+     */
+    const supervised = await deps.supervisor.run({
+      identity: {
+        executionId: deps.ids.executionId(),
+        kind: 'work',
         taskId,
+        conversationId: task.conversationId,
+        ownerId: task.ownerId,
+        tenantId: task.tenantId,
+        agent: task.agent,
+        mode: task.mode,
+        generation: started.task.generation,
         token,
-        reason: 'The runner failed before termination could be verified.',
-      });
+      },
+      adapter: { agent: adapter.agent },
+      workspaceRoot: workspace.value.root,
+      scopes: ['workspace.read', 'workspace.write'],
+      report,
+      launch: async (execution) => {
+        try {
+          const run = await deps.runner.run({
+            scope: scopeOf(started.task),
+            ...((task.scheduleAdmission ||
+              task.taskId.startsWith('task_sched_')) && {
+              cancellationRequested: async () =>
+                !(await canRunScheduled(task)),
+            }),
+            token,
+            adapter,
+            request: {
+              ownerId: task.ownerId,
+              tenantId: task.tenantId,
+              conversationId: task.conversationId,
+              taskId: task.taskId,
+              workload,
+              game: task.game ?? null,
+              objective: task.objective,
+              history,
+              model: modelRef,
+              mode: task.mode,
+              workspaceRoot: workspace.value.root,
+              maxSteps: deps.config.engines.native.maxSteps,
+              budget: task.budget,
+              signal: controller.signal,
+              reasoning: task.reasoning ?? 'auto',
+              completedSteps: [...started.task.checkpoint.completedSteps],
+              plan: started.task.checkpoint.plan ?? null,
+              evidence: [...(started.task.checkpoint.evidence ?? [])],
+              iterationsUsed: started.task.checkpoint.iterations ?? 0,
+            },
+            // The supervisor's sink is already gated on the execution's authority;
+            // the runner gates it again on the abort signal.
+            report: execution.report,
+            generation: started.task.generation,
+            workspaceRoot: workspace.value.root,
+          });
+          // `terminated` is the runner's verdict that the adapter's promise really
+          // settled. Anything else means it may still be executing.
+          return {
+            outcome: run.outcome,
+            ownershipLost: run.ownershipLost,
+            abandoned: !run.terminated,
+          };
+        } catch {
+          // The runner failed before it could report termination. Treat the
+          // adapter as possibly still running: revoke its workspace now and let
+          // the supervisor record the termination as unverified.
+          await deps.supervisor.abandon({
+            taskId,
+            token,
+            reason: 'The runner failed before termination could be verified.',
+          });
+          return {
+            outcome: {
+              kind: 'failed',
+              code: 'provider_error',
+              detail: 'The execution supervisor could not verify the run.',
+              retryable: true,
+            },
+            ownershipLost: false,
+            abandoned: true,
+          };
+        }
+      },
+    });
+    if (!supervised.admitted) {
       await settle(started.task, token, {
         kind: 'failed',
         code: 'provider_error',
-        detail: 'The execution supervisor could not verify the run.',
+        detail: supervised.detail,
         retryable: true,
       });
       return;
     }
+    const result: RunResult = {
+      outcome: supervised.outcome,
+      ownershipLost: supervised.ownershipLost,
+      terminated: !supervised.abandoned,
+    };
 
     const current = controllers.get(taskId);
     const superseded = current !== undefined && current !== controller;
@@ -1933,6 +2013,24 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
     agents: () => deps.agents.list(),
     models: () => deps.models.list(),
 
+    tools: () => ({ tools: deps.tools.list() }),
+
+    // Retrieval is partitioned by owner and data mode inside the store, so the
+    // principal is the only authority a caller supplies.
+    ingestKnowledge: (principal, request) =>
+      deps.knowledge.ingest({
+        ownerId: principal.ownerId,
+        mode: request.mode,
+        title: request.title,
+        text: request.text,
+      }),
+
+    listKnowledge: (principal, mode) =>
+      deps.knowledge.list({ ownerId: principal.ownerId, mode }),
+
+    searchKnowledge: (principal, query, k, mode) =>
+      deps.knowledge.search({ ownerId: principal.ownerId, mode, query, k }),
+
     browserCapabilities: () => deps.browser.capabilities(),
     browserSessions: (principal) => deps.browser.list(principal.ownerId),
     browserSession: (principal, sessionId) =>
@@ -2254,38 +2352,91 @@ export function createApplicationService(deps: ApplicationServiceDeps): Applicat
 
       const history = await historyFor(conversation, request.message, adapter.value);
       const controller = new AbortController();
-      let outcome: Awaited<ReturnType<AgentAdapter['run']>>;
-      try {
-        outcome = await adapter.value.run(
-          {
-            ownerId: principal.ownerId,
-            tenantId: conversation.tenantId,
-            conversationId,
-            workload: 'work',
-            game: null,
-            objective: request.message,
-            history,
-            model: model.value.ref,
-            mode: request.mode,
+      /*
+       * A Chat turn is a supervised execution too. It has no Work task and no
+       * lease, but it can call tools in a deployment that enables them, so it gets
+       * a durable identity and a revocable capability for exactly the same reason a
+       * Work run does. It holds read authority only, so it never reserves the root
+       * against a concurrent write.
+       */
+      const supervised = await (async () => {
+        try {
+          return await deps.supervisor.run({
+            identity: {
+              executionId: deps.ids.executionId(),
+              kind: 'chat',
+              taskId: null,
+              conversationId,
+              ownerId: principal.ownerId,
+              tenantId: conversation.tenantId,
+              agent: request.agent,
+              mode: request.mode,
+              generation: 0,
+              token: null,
+            },
+            adapter: { agent: request.agent },
             workspaceRoot: workspace.value.root,
-            maxSteps: 1,
-            budget: null,
-            signal: controller.signal,
-            reasoning: 'fast',
-            completedSteps: [],
-            plan: null,
-          },
-          () => undefined,
-        );
-      } finally {
-        await removeRunWorkspaceIfEmpty(workspace.value.root);
+            scopes: ['workspace.read'],
+            launch: async () => {
+              const run = await adapter.value.run(
+                {
+                  ownerId: principal.ownerId,
+                  tenantId: conversation.tenantId,
+                  conversationId,
+                  workload: 'work',
+                  game: null,
+                  objective: request.message,
+                  history,
+                  model: model.value.ref,
+                  mode: request.mode,
+                  workspaceRoot: workspace.value.root,
+                  maxSteps: 1,
+                  budget: null,
+                  signal: controller.signal,
+                  reasoning: 'fast',
+                  completedSteps: [],
+                  plan: null,
+                },
+                () => undefined,
+              );
+              if (run.ok) {
+                return {
+                  outcome: {
+                    kind: 'completed' as const,
+                    summary: run.summary,
+                    ...(run.usage ? { usage: run.usage } : {}),
+                  },
+                };
+              }
+              if (run.code === 'cancelled') {
+                return { outcome: { kind: 'cancelled' as const } };
+              }
+              return {
+                outcome: {
+                  kind: 'failed' as const,
+                  code: run.code,
+                  detail: run.detail,
+                  retryable: run.retryable,
+                },
+              };
+            },
+          });
+        } finally {
+          await removeRunWorkspaceIfEmpty(workspace.value.root);
+        }
+      })();
+      if (!supervised.admitted) {
+        return fail('engine_unavailable', supervised.detail, false);
       }
-      if (!outcome.ok) {
-        return fail(
-          outcome.code === 'cancelled' ? 'cancelled' : 'engine_unavailable',
-          redactText(outcome.detail, [], 1000),
-          outcome.retryable,
-        );
+      const outcome = supervised.outcome;
+      if (outcome.kind !== 'completed') {
+        if (outcome.kind === 'cancelled') {
+          return fail('cancelled', 'The chat turn was cancelled.', false);
+        }
+        if (outcome.kind === 'interrupted') {
+          return fail('engine_unavailable', redactText(outcome.detail, [], 1000), true);
+        }
+        return fail('engine_unavailable', redactText(outcome.detail, [], 1000), outcome.retryable);
       }
       deps.budget.consume(principal.ownerId, outcome.usage ?? {}, deps.clock.now());
       // Chat output is adapter text too: scrub it before storage and before it is
